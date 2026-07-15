@@ -112,3 +112,9 @@ None formally — you already have the professional baseline (C#, .NET, SQL Serv
 - ✅ **Module 2**: C# → Async/Await, Task, and Threading Internals — [`01-CSharp/02-Async-Await-Internals.md`](../01-CSharp/02-Async-Await-Internals.md)
 - ✅ **Module 3**: C# → `Span<T>`, `Memory<T>` & Low-Allocation Code Patterns — [`01-CSharp/03-Span-Memory-Low-Allocation.md`](../01-CSharp/03-Span-Memory-Low-Allocation.md)
 - ✅ **Module 4**: C# → Delegates, Events, Closures & Multicast Internals — [`01-CSharp/04-Delegates-Events-Closures.md`](../01-CSharp/04-Delegates-Events-Closures.md)
+- ✅ **Module 5**: C# → LINQ Internals (`IEnumerable` vs `IQueryable`, Deferred Execution, Iterator State Machines) — [`01-CSharp/05-LINQ-Internals.md`](../01-CSharp/05-LINQ-Internals.md)
+- ✅ **Module 6**: C# → Generics, Variance & Generic Constraints — [`01-CSharp/06-Generics-Variance.md`](../01-CSharp/06-Generics-Variance.md)
+- ✅ **Module 7**: C# → Records, Pattern Matching & Immutability — [`01-CSharp/07-Records-Pattern-Matching-Immutability.md`](../01-CSharp/07-Records-Pattern-Matching-Immutability.md)
+- ✅ **Module 8**: C# → Exception Handling, SEH Internals & Custom Exception Design — [`01-CSharp/08-Exception-Handling-Custom-Exceptions.md`](../01-CSharp/08-Exception-Handling-Custom-Exceptions.md) — **`01-CSharp` domain complete (Modules 1–8)**
+- ✅ **Module 9**: .NET/ASP.NET Core → Middleware Pipeline & Request Processing Internals — [`02-DotNet-AspNetCore/01-Middleware-Pipeline-Request-Internals.md`](../02-DotNet-AspNetCore/01-Middleware-Pipeline-Request-Internals.md)
+- ✅ **Module 10**: .NET/ASP.NET Core → Dependency Injection Container Internals — [`02-DotNet-AspNetCore/02-DI-Container-Internals.md`](../02-DotNet-AspNetCore/02-DI-Container-Internals.md)
