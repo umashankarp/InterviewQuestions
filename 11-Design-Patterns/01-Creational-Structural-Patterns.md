@@ -99,13 +99,6 @@ classDiagram
 
 ## 7. Performance Engineering
 Decorator chains add a small, per-layer indirection cost (each layer's delegated call is a virtual/interface dispatch, Module 1) — generally negligible relative to the actual work being decorated (a database call, an external API call), but worth profiling if a very deep decorator chain wraps an extremely hot, low-latency operation. Proxy's virtual-proxy variant (deferred construction) directly trades a small dispatch-check cost for avoiding expensive eager construction, exactly Module 10 §6's lazy-Singleton-construction trade-off.
-
-## 8. Security
-A protection proxy (§2.8) implementing authorization checks structurally, transparently to calling code, is a legitimate architectural pattern for enforcing Module 12's resource-based authorization consistently across every access path to a sensitive resource — worth recognizing as a named pattern when designing a systematic authorization-enforcement layer rather than scattering checks ad-hoc through business logic.
-
-## 9. Scalability
-Not a direct scaling-mechanism concern for most patterns here; Facade's subsystem-simplification benefit indirectly supports scaling a codebase's *complexity* across a growing team, by giving most consumers a simple, stable entry point insulated from a complex subsystem's internal evolution.
-
 ---
 
 ## 10. Interview Questions
