@@ -76,15 +76,6 @@ graph TB
 - Using an aggressively short, fixed failure-detection timeout without considering the false-positive risk during normal, brief network/processing variance.
 - Treating "the crash window between two operations is very small, so it's an acceptable risk" as sufficient justification — a small-probability, high-impact failure mode still eventually occurs at sufficient scale/time (Module 22 §4, Module 25 §4, and this module's §4 all demonstrate exactly this).
 
-## 7. Performance Engineering
-The Outbox pattern's relay process adds a small, bounded latency between a database commit and the corresponding event actually being published/delivered (the relay's own polling interval, or CDC's typically-sub-second propagation delay) — this latency should be explicitly measured and communicated as part of the system's overall event-delivery-latency budget (Module 37 §7), distinct from and in addition to the message broker's own delivery latency once the event is actually published. A CDC-based relay (versus polling) directly reduces both this latency and the database load a polling-based relay would otherwise impose (repeated "any new unpublished rows?" queries) — precisely why CDC is the modern, preferred Outbox-relay mechanism over a simpler-to-initially-implement polling loop.
-
-## 8. Security
-Outbox-relayed events, since they're derived from the database's own transaction log (when using CDC), inherit whatever access-control is already applied to that log — but the relay process itself, and the message broker it publishes to, need their own appropriate authentication/authorization (directly Module 40 §8's gateway-adjacent internal-trust-propagation discussion) to prevent an unauthorized party from either reading sensitive outbox-relayed event content or, worse, injecting fraudulent events directly into the broker, bypassing the legitimate outbox-and-relay path entirely. Idempotency-key-based deduplication (§2.3) also has a security dimension directly connecting to Module 15 §8: idempotency keys must be scoped per-caller/per-tenant to prevent one party from guessing/reusing another's key to interfere with or read the result of an unrelated operation.
-
-## 9. Scalability
-The Outbox relay process, since it processes every business transaction's associated events, must scale with the system's overall write throughput — directly Module 38/41's asynchronous, queue-driven worker-fleet scaling pattern applies here too, with the relay's own throughput (and its lag behind the database's actual commit rate) as a standing, monitorable metric (directly Module 26 §Advanced Q2's consumer-lag-monitoring discipline, applied to the Outbox relay specifically). At very high write-volume scale, the outbox table itself needs the same bounding/archival discipline as any other high-churn table (Module 21's vacuum/bloat discipline for PostgreSQL, or an explicit archival/deletion policy for already-relayed rows) to avoid unbounded growth — directly Module 22/23's recurring "bound and clean up derived/transient state" lesson, applied here to the outbox table specifically.
-
 ---
 
 ## 10. Interview Questions

@@ -82,15 +82,6 @@ graph TB
 - Using a monotonically-increasing shard key, concentrating all new writes on a single "hot" shard.
 - Relying on `$lookup`-heavy aggregation pipelines as a substitute for correct embedding-based data modeling.
 
-## 7. Performance Engineering
-Aggregation pipeline stage ordering (`$match` early) directly affects how many documents each subsequent stage must process — exactly the same "filter as early as possible" principle as SQL query optimization (Module 18), just expressed as explicit pipeline-stage ordering rather than left to a query optimizer's automatic reordering. Document size directly affects read/write I/O cost — an unnecessarily large embedded array inflates the cost of every read even when only a fraction of the embedded data is actually used (§4's incident).
-
-## 8. Security
-MongoDB's flexible, schema-less document model makes it easy to accidentally store more data in a document than intended (a mass-assignment-adjacent risk, Module 11 §8, if application code blindly inserts an entire client-supplied JSON payload as a document) — validate and shape documents at the application boundary exactly as any API boundary requires, never trust schema-less flexibility as a substitute for input validation.
-
-## 9. Scalability
-Shard key selection is the single highest-leverage (and hardest-to-reverse) MongoDB scalability decision — an incorrectly-chosen shard key can leave a "sharded" collection with all the operational complexity of sharding and almost none of its intended write-scaling benefit, due to hot-shard concentration.
-
 ---
 
 ## 10. Interview Questions

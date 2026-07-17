@@ -70,15 +70,6 @@ graph LR
 - Assuming physical replication supports cross-version upgrades (it doesn't) when planning a major-version migration.
 - Relying solely on asynchronous replication for a system with zero tolerance for any committed-data loss on failover, without evaluating synchronous replication's trade-offs explicitly.
 
-## 7. Performance Engineering
-Partition pruning at query time is what converts partitioning from "administrative convenience" into "genuine query performance win" — always verify via `EXPLAIN` that a partitioned table's queries show pruning (fewer partitions scanned than exist) rather than assuming it automatically. Synchronous replication's added commit latency should be measured explicitly against the specific durability requirement it buys, not adopted reflexively.
-
-## 8. Security
-Replication connections (physical and logical) should use encrypted transport (`sslmode=require` or stricter) and dedicated, narrowly-scoped replication credentials, never a shared superuser account — a compromised replication credential can expose the entire data stream.
-
-## 9. Scalability
-Read replicas (via physical streaming replication) are a standard, effective read-scaling lever for read-heavy workloads — routing reporting/analytics queries to replicas keeps them off the primary, directly avoiding the kind of reader-writer contention Module 19 §4 addressed via RCSI, here addressed instead via physical read/write separation.
-
 ---
 
 ## 10. Interview Questions

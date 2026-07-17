@@ -100,15 +100,6 @@ graph LR
 - Committing offsets before processing completes, risking silent under-processing (records skipped) rather than the generally-preferred at-least-once over-processing risk.
 - Ignoring under-replicated-partition alerts (partitions whose ISR has shrunk below the desired replication factor), which silently erodes the durability guarantee `acks=all` is meant to provide until an actual leader failure exposes the gap.
 
-## 7. Performance Engineering
-Partition count directly bounds maximum consumer-group parallelism (Module 53 §7) — but Kafka's per-partition overhead (open file handles, replication traffic, controller metadata) means an excessively high partition count across many topics can itself degrade broker performance and increase failover/rebalance time, making partition count a genuine capacity-planning trade-off, not a "more is always better" parallelism lever. Producer-side batching (`linger.ms` and `batch.size` configuration, accumulating multiple records into a single batched network request rather than sending each record individually) trades a small amount of added latency for substantially improved throughput and reduced broker load — directly analogous to Module 37's general latency-vs-throughput batching trade-off, now expressed as Kafka-specific producer tuning.
-
-## 8. Security
-Kafka supports both encryption-in-transit (TLS between clients and brokers, and between brokers themselves) and authentication (SASL mechanisms) plus fine-grained, topic-level authorization (ACLs controlling which principals may produce/consume specific topics) — a production Kafka deployment should never rely on network-level isolation alone (Module 49 §8's "never assume internal traffic is trusted" principle, applied directly to inter-broker and client-broker Kafka traffic specifically) given that a compromised host on the same network segment could otherwise freely produce/consume any topic without any additional authentication barrier.
-
-## 9. Scalability
-Consumer-group parallelism scales up to, but never beyond, the partition count (Module 53 §9's coupling restated concretely) — adding more consumer instances than partitions leaves the excess instances permanently idle, a common, avoidable capacity-planning mistake. Broker-level scalability (adding more brokers to a cluster) increases the cluster's aggregate storage and throughput capacity, but existing topics' partition-to-broker assignment must be explicitly rebalanced (via a partition-reassignment operation) to actually take advantage of newly-added brokers — simply adding brokers to a cluster does not automatically redistribute existing topics' load onto them.
-
 ---
 
 ## 10. Interview Questions

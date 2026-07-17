@@ -59,15 +59,6 @@ POST /payments (retry, same Idempotency-Key) -> 201 Created (SAME result, no dup
 - Returning 200 for everything (including errors) with an in-body "success: false" flag instead of using HTTP status codes correctly.
 - Treating PATCH as automatically idempotent without verifying the actual patch semantics used.
 
-## 7. Performance Engineering
-Conditional GET (`If-None-Match` returning 304 Not Modified) avoids re-transferring unchanged resource bodies — a direct, free bandwidth/latency win for any client polling/re-fetching a resource. Idempotency-key storage (a cache/database lookup per non-idempotent request) adds a small, deliberate cost in exchange for retry safety.
-
-## 8. Security
-Idempotency keys must be scoped per-client/per-authenticated-principal (never global) to prevent one client from guessing/reusing another's key to read their cached result. Never expose internal resource IDs sequentially (enumerable integer IDs) without authorization checks — an classic IDOR (Insecure Direct Object Reference) vector, directly connecting to Module 12's resource-based-authorization discussion.
-
-## 9. Scalability
-Stateless REST (no server-side session dependency) is precisely what makes horizontal scaling trivial — any replica can handle any request. ETag/conditional-request caching reduces backend load at scale by letting CDNs/proxies serve 304s without hitting the origin server at all.
-
 ---
 
 ## 10. Interview Questions

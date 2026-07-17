@@ -97,15 +97,6 @@ graph TB
 - Forgetting to publish tombstones for deleted entities on a compacted topic, leaving stale data for deleted keys retained indefinitely.
 - Treating a Kafka Streams application's internal state-store rebuild as a rare, ignorable edge case rather than a routine operational event (triggered by any restart) that must be tested against, exactly as §4's incident illustrates.
 
-## 7. Performance Engineering
-Enabling idempotent production and transactions (§2.1, §2.2) adds a modest throughput/latency cost (sequence-number tracking, transaction-coordinator overhead) compared to non-transactional production — a real, measurable trade-off that should be weighed against the specific correctness requirement it protects, directly Module 47 §Advanced Q6's "make consistency-vs-performance trade-offs an explicit, deliberate decision" principle applied to this specific Kafka configuration choice. Log compaction itself runs as a background process on the broker (periodically scanning and removing superseded records) — its resource cost scales with the compacted topic's total distinct-key cardinality and update frequency, a distinct capacity-planning consideration from standard, purely time/size-based retention's simpler deletion mechanics.
-
-## 8. Security
-Kafka Streams/ksqlDB applications inherit whatever authentication/authorization is configured for their underlying Kafka client connections (Module 54 §8) — no additional, separate security model is introduced by using these higher-level frameworks, but it's worth explicitly confirming that a ksqlDB server (which may expose its own REST/SQL query interface to end users or other systems) has its **own** appropriate access control layered on top of the underlying Kafka ACLs, since the ksqlDB server itself becomes a new access surface distinct from direct Kafka client access.
-
-## 9. Scalability
-Kafka Streams applications scale by adding more application instances, up to the partition count of the topics being consumed (directly Module 54 §9's consumer-group parallelism ceiling, since Kafka Streams is built on the standard consumer-group mechanism) — and its internal state stores (backed by compacted changelog topics, §2.5) are automatically re-partitioned/redistributed across instances as the application scales, without requiring manual state migration. Log-compacted topics' compaction background process itself needs adequate broker resources (I/O, CPU) to keep pace with the topic's update rate — a compacted topic receiving updates faster than compaction can process risks accumulating uncompacted "dirty" data, temporarily inflating storage beyond the ideal latest-value-per-key size until compaction catches up.
-
 ---
 
 ## 10. Interview Questions

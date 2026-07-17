@@ -72,15 +72,6 @@ graph TB
 - Reaching for multi-document transactions to compensate for a schema that should have embedded the related data instead (Module 23's central lesson, recurring here).
 - Ignoring oplog size/retention when relying on change streams for a consumer that might disconnect for an extended period.
 
-## 7. Performance Engineering
-`w: "majority"` write concern adds latency (waiting for a majority acknowledgment, potentially a network round-trip to another node) compared to `w: 1` — a genuine, deliberate durability-vs-latency trade-off to make explicitly per operation's actual requirements, not a blanket setting applied uniformly regardless of the data's actual criticality. Multi-document transactions carry real overhead (locking/snapshot coordination across documents) — reserve them for genuinely necessary cross-document atomicity, not routine single-document operations that are already atomic without one.
-
-## 8. Security
-Change streams and oplog access can expose sensitive data-change history to any consumer with appropriate permissions — scope change-stream/oplog access narrowly via MongoDB's role-based access control, exactly as any other sensitive data-access surface requires.
-
-## 9. Scalability
-Read preference (`secondaryPreferred`/`nearest`) is a direct, effective read-scaling lever, distributing read load across replica-set members — but must be combined with an appropriate read concern for any read where result staleness/rollback-safety actually matters, exactly the same nuance Module 22 §Advanced Q6 raised for PostgreSQL read-replica staleness.
-
 ---
 
 ## 10. Interview Questions

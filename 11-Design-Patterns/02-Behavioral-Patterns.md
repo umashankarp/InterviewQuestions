@@ -77,15 +77,6 @@ sequenceDiagram
 - Using Command objects for simple, immediate, non-queued/non-undoable actions, adding unnecessary indirection with no corresponding benefit.
 - Forcing an exhaustive, records-based State design (Module 7 §13) onto a domain genuinely requiring third-party-pluggable state extensibility the sealed hierarchy structurally prevents.
 
-## 7. Performance Engineering
-Chain of Responsibility's per-handler dispatch cost (checking each handler in sequence until one handles the request) is generally negligible for reasonably-short chains (a few dozen handlers at most in realistic designs) — not a performance concern at typical scale, though a very long chain evaluated on every single request could warrant profiling if genuinely proven to matter (this course's recurring measure-first discipline).
-
-## 8. Security
-An authorization-approval Chain of Responsibility (§4's fix) directly benefits from the same "centralize enforcement, don't trust a fragile conditional structure" principle recurring throughout this course (Module 29 §4, Module 30 §4, Module 31's protection proxy) — each handler's boundary condition is independently testable, directly reducing the risk of a subtle threshold bug silently bypassing required approval, exactly the demonstrated failure mode in §4.
-
-## 9. Scalability
-Not a direct scaling-mechanism concern for most behavioral patterns; Mediator (centralizing complex many-to-many object communication into one coordinating object) can indirectly support scaling a codebase's *complexity* across a growing team by preventing an unmanageable web of direct object-to-object references, similar in spirit to Facade's complexity-management benefit (Module 31 §2.7).
-
 ---
 
 ## 10. Interview Questions

@@ -72,15 +72,6 @@ graph TB
 - Treating Redis purely as "safe to lose" without evaluating whether it's actually holding functionally-important state (sessions, locks) requiring a deliberate persistence strategy.
 - Performing multi-key operations across different hash slots in Redis Cluster without hash tags, causing cross-slot operation errors.
 
-## 7. Performance Engineering
-Redis's single-threaded command processing means a single slow command (a large `KEYS *` scan, or an inefficient Lua script) blocks every other client's commands for its duration — always use `SCAN` (cursor-based, non-blocking) instead of `KEYS` in production, and keep Lua scripts short and O(1)/O(log n), never O(n) over a large dataset.
-
-## 8. Security
-Redis has historically had weak default security posture (no authentication required by default in older configurations) — always enable `requirepass`/ACLs, bind to internal network interfaces only, and never expose a Redis instance directly to the internet, a real, commonly-exploited misconfiguration class.
-
-## 9. Scalability
-Redis Cluster's hash-slot sharding provides horizontal write/read scaling beyond a single instance's memory/throughput ceiling — but multi-key operations are constrained to same-slot keys unless hash tags force co-location, a genuine architectural constraint to design around from the start for any Cluster deployment.
-
 ---
 
 ## 10. Interview Questions

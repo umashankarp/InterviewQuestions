@@ -73,15 +73,6 @@ graph TB
 - Running both Sentinel and Cluster simultaneously, or misunderstanding which HA mechanism applies to a given deployment's actual topology.
 - Ignoring consumer-group `XPENDING` monitoring, allowing crashed-consumer messages to remain unacknowledged and unprocessed indefinitely.
 
-## 7. Performance Engineering
-Streams' durability (persisted, replayable log) comes at a real cost relative to Pub/Sub's pure in-memory fan-out — appropriate given the durability requirement, not a free upgrade; stream trimming (`XTRIM`/`MAXLEN`) is necessary to bound a stream's growth, exactly as any append-only log requires a retention policy.
-
-## 8. Security
-Sentinel's client-facing topology-discovery protocol and inter-Sentinel communication should be secured/authenticated identically to the Redis data instances themselves — a common oversight is securing Redis but leaving Sentinel's own communication unauthenticated.
-
-## 9. Scalability
-Consumer groups (Streams) allow horizontally scaling message processing across multiple consumer instances cooperatively, each receiving a distinct subset of the stream's messages — directly the same horizontal-consumer-scaling pattern a dedicated message broker (a later module) provides, at Redis's smaller, single-process scale.
-
 ---
 
 ## 10. Interview Questions

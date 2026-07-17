@@ -108,15 +108,6 @@ graph LR
 - Blocking an entire partition/queue indefinitely retrying one poison message, or silently dropping failed messages with no DLQ and no visibility (§4's diagnosis delay).
 - Treating event replay as an emergency, ad hoc capability rather than a routinely-tested, idempotency-dependent operational tool.
 
-## 7. Performance Engineering
-Schema registry lookups (§2.1) on every publish/consume operation add a small latency cost, typically mitigated via aggressive local caching of schema definitions on both producer and consumer sides (fetching a given schema version once, then reusing the cached copy for all subsequent messages of that version) — a well-implemented registry client adds negligible steady-state overhead despite enforcing compatibility on every single message. Partition count (§2.3) directly determines the maximum degree of consumer parallelism (each partition can only be actively consumed by one consumer instance within a given consumer group at a time) — under-provisioning partition count creates an artificial throughput ceiling regardless of how many consumer instances are deployed, while over-provisioning adds per-partition overhead and, more importantly for ordering-sensitive systems, doesn't help since the *chosen partition key*, not partition count alone, determines whether ordering-critical events land together.
-
-## 8. Security
-Schema registries themselves need access control — an unauthorized party able to register a schema (even a technically-compatible one) could smuggle a new field designed to later carry unintended/malicious data through the pipeline, or an unauthorized party able to *read* schemas could learn sensitive information about a system's internal data model as reconnaissance. Dead Letter Queue contents (§2.5) often contain the exact, complete payload of a business event that failed processing — potentially including sensitive customer data — and must receive the same data-governance/access-control discipline as the main event stream, not be treated as a lower-security "junk drawer" simply because its contents represent failures rather than successes.
-
-## 9. Scalability
-Partition count (§7) is the primary scalability lever for consumer throughput, but it interacts directly with ordering guarantees (§2.3) — increasing partition count to scale consumer parallelism only helps if the partition key naturally distributes load across the new partition count while still keeping same-entity events together, meaning partition-count scaling decisions cannot be made independently of the partition-key design that was chosen for ordering correctness. Dead Letter Queue volume itself should be monitored as a standing metric — a sudden spike in DLQ volume is a leading indicator of a systemic processing problem (a bad deployment, a downstream dependency outage) affecting many messages simultaneously, not merely an occasional, isolated poison message, and should trigger the same alerting discipline as any other golden-signal anomaly (Module 50 §9).
-
 ---
 
 ## 10. Interview Questions

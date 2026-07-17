@@ -70,15 +70,6 @@ graph TB
 - Using plain `JSON` instead of `JSONB` for data that will actually be queried/indexed, not just stored/retrieved whole.
 - Applying SQL Server's non-sargable-predicate-avoidance discipline (Module 18 §2.3) without realizing PostgreSQL's expression indexes can directly solve the same problem differently.
 
-## 7. Performance Engineering
-Table bloat from insufficient vacuuming directly degrades both scan performance (more pages to read) and index efficiency — proactive vacuum tuning is as fundamental a PostgreSQL performance concern as index design itself, not a secondary operational afterthought.
-
-## 8. Security
-Row-Level Security (PostgreSQL's native `CREATE POLICY` mechanism) provides declarative, database-enforced per-row access control — a genuinely distinctive PostgreSQL feature directly relevant to Module 12's resource-based-authorization discussion, letting authorization be enforced at the database layer itself as defense-in-depth beneath application-layer checks.
-
-## 9. Scalability
-PostgreSQL's native MVCC (no RCSI opt-in needed) means reader-writer contention is a non-issue by default — but table bloat from inadequate vacuuming is PostgreSQL's own distinctive scaling ceiling, one SQL Server simply doesn't share in the same form, worth explicit capacity-planning attention for any high-write-volume PostgreSQL deployment.
-
 ---
 
 ## 10. Interview Questions

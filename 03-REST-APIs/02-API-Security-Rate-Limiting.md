@@ -80,15 +80,6 @@ graph LR
 - Per-replica-only (in-memory) rate limiting in a horizontally-scaled deployment, trivially bypassed by load-balanced traffic spreading.
 - Omitting `Retry-After` on 429 responses, forcing clients into guessed, potentially-synchronized backoff.
 
-## 7. Performance Engineering
-Redis-backed distributed rate limiting adds a network round-trip per request — acceptable given the alternative (unprotected downstream resource exhaustion) is far more costly; a local, short-TTL cache of "definitely within limit" decisions can reduce this round-trip frequency for the common case without compromising accuracy for the boundary case (directly Module 12's stampede-resistant-caching pattern, applied here).
-
-## 8. Security
-This entire module is security-focused; the OWASP API Security Top 10 (§2.1) is the authoritative reference framework — BOLA and mass assignment are the two highest-value vulnerability classes to systematically audit for across any API surface, given their prevalence in real-world breaches.
-
-## 9. Scalability
-Distributed rate limiting is itself a scalability-enabling mechanism — it protects downstream shared resources (databases, third-party APIs with their own limits) from being overwhelmed as the calling fleet scales, making it a prerequisite for safe horizontal scaling of the caller side, not just a caller-side concern.
-
 ---
 
 ## 10. Interview Questions

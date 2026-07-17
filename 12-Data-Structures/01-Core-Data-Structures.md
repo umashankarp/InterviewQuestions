@@ -77,15 +77,6 @@ graph TB
 - Building a naive, non-self-balancing binary search tree for data with a non-random insertion order (e.g., already-sorted input), risking O(n) degeneration.
 - Hand-rolling a custom hash table/priority queue when .NET's built-in `Dictionary`/`PriorityQueue` already meets the actual requirement.
 
-## 7. Performance Engineering
-The dominant, highest-leverage performance lesson in this entire module: **choosing the right data structure for the actual access pattern usually matters far more than any code-level micro-optimization within a poorly-chosen structure's operations** — directly Module 18's "check the index/access pattern before optimizing the query's internals" lesson, restated at the general data-structures level. Amortized-cost reasoning (List<T>'s doubling growth, Dictionary's resizing) means occasional expensive operations are a normal, expected, and acceptable part of average-O(1) performance — don't mistake a periodic O(n) resize for a performance bug in isolation.
-
-## 8. Security
-Hash-flooding attacks (§2.3) are a genuine, historically-exploited DoS vector against naive hash-table implementations — .NET's per-process-randomized string hashing is a deliberate, built-in mitigation; never disable or work around this randomization (some legacy code has historically attempted to force a fixed hash seed for reproducibility, reintroducing exactly this vulnerability class) without understanding the security trade-off being made.
-
-## 9. Scalability
-Choosing O(1)/O(log n) data structures over O(n) alternatives directly determines whether a system's performance degrades gracefully or catastrophically as data volume scales — precisely §4's incident, where an O(n) structure's cost, invisible at small scale, became the dominant bottleneck exactly as production data volume grew, a direct, concrete illustration of why algorithmic complexity (not just infrastructure capacity) is a genuine scalability concern.
-
 ---
 
 ## 10. Interview Questions

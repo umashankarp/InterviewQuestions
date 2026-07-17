@@ -85,15 +85,6 @@ classDiagram
 - Deep inheritance hierarchies (more than 2-3 levels) making it hard to reason about a derived type's actual, effective behavior.
 - Public setters with no validation, allowing an object to be mutated into an invalid domain state.
 
-## 7. Performance Engineering
-Virtual/interface dispatch has real, if usually small, indirection cost compared to a direct, non-polymorphic call (Module 1's JIT-devirtualization discussion) — composition via an interface reference incurs the same dispatch cost as inheritance-based polymorphism through a virtual method; neither is inherently faster than the other at the dispatch-mechanism level, so this is not the deciding factor in the composition-vs-inheritance choice.
-
-## 8. Security
-An LSP violation in an authorization-related class hierarchy (a subclass silently weakening a base class's security check) is a genuine, real vulnerability class — treat any override of security-relevant base-class behavior with the same scrutiny as directly Module 12's resource-based-authorization discussion, since a compiling-but-contract-violating override is exactly the kind of subtle bug that can silently bypass an intended security invariant.
-
-## 9. Scalability
-Not a direct scaling-mechanism concern; the practical connection is that composition-based designs (small, swappable, interface-bound components) are typically easier to test, mock, and evolve independently across a growing team/codebase than deep inheritance hierarchies, indirectly supporting a codebase's ability to scale in complexity/team size without becoming unmaintainable.
-
 ---
 
 ## 10. Interview Questions

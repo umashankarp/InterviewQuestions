@@ -111,15 +111,6 @@ graph TB
 - Conflating "deployed" with "released," losing the ability to control feature exposure independently of deployment timing.
 - Allowing team structure to evolve accidentally and letting architecture passively follow it (Conway's Law operating unexamined), rather than deliberately designing team boundaries alongside service boundaries.
 
-## 7. Performance Engineering
-Consumer-driven contract tests (§2.2) run dramatically faster than full end-to-end tests (no real network calls, no full-environment startup), directly enabling a fast CI feedback loop even as the number of services grows — a suite dominated by contract tests can run in seconds/low minutes regardless of fleet size, while an end-to-end-test-dominated suite's runtime grows with the size and startup cost of the full dependency graph, eventually becoming impractical to run on every commit. Canary deployments (§2.4) additionally provide real production-load performance validation (catching a performance regression under genuine traffic patterns) that synthetic staging-environment load testing often misses, at the cost of that regression briefly affecting the canary's small traffic percentage.
-
-## 8. Security
-A deprecated-but-still-live old API version (§2.1's deprecation window) must still receive security patches and monitoring for its full deprecation lifetime — "it's being phased out" is not a justification for neglecting its security posture during the (potentially months-long) window it remains live and reachable. Feature flags (§2.5) themselves need access control — an internal-only or gradually-rolled-out feature flag that can be trivially discovered/toggled by an unauthorized party (a flag check performed client-side, inspectable in browser JavaScript, rather than server-side) defeats the controlled-rollout guarantee the flag was meant to provide.
-
-## 9. Scalability
-Blue-green deployment's double-infrastructure cost (§2.3) becomes a genuine capacity-planning concern at scale — running two complete parallel environments for every deployment, across dozens of services, multiplies infrastructure cost meaningfully, a real trade-off against blue-green's instant-rollback benefit that canary deployment (single environment, gradual traffic shift, no infrastructure duplication) avoids. Team topology decisions (§2.6) also scale organizationally — the inverse Conway maneuver becomes progressively harder to execute retroactively as an organization grows and existing team/service boundaries calcify, making it significantly cheaper to get team-boundary design right early than to reorganize a large, established organization around corrected boundaries later.
-
 ---
 
 ## 10. Interview Questions

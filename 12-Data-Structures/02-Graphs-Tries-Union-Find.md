@@ -76,15 +76,6 @@ graph LR
 - Applying Dijkstra to a graph with negative edge weights, producing silently incorrect results rather than a loud error.
 - Implementing Union-Find without path compression/union by rank, leaving it vulnerable to O(n)-per-operation degradation under adversarial or unlucky input ordering.
 
-## 7. Performance Engineering
-The single highest-leverage graph-algorithm performance lesson: recognize when a problem is being solved via repeated, redundant per-node work versus a single, whole-graph-aware algorithm (§4) — this asymptotic-complexity-class difference (O(V×(V+E)) vs O(V+E)) dwarfs any code-level micro-optimization within the redundant approach, exactly Module 33's "data structure/algorithm choice is the bigger lever" theme restated for graph algorithms specifically.
-
-## 8. Security
-A dependency-resolution or permission-inheritance graph with an undetected cycle can cause infinite recursion/stack overflow if traversed naively without cycle detection — treating cycle detection (via topological sort or a visited-set-tracking DFS) as a mandatory safeguard for any graph traversal over externally-influenced or untrusted-structure data (e.g., a permission hierarchy partially configurable by lower-trust administrators) is a genuine defensive-programming requirement, not just a correctness nicety.
-
-## 9. Scalability
-Graph-algorithm complexity-class choice (§4/§7) directly determines whether a graph-based feature (dependency resolution, recommendation traversal, social-network-distance queries) scales gracefully or catastrophically as the underlying graph grows — precisely the same "invisible at small scale, dominant at production scale" pattern recurring throughout this course, now specifically in the shape of graph size rather than collection size (Module 33) or data volume (Modules 20/23/28).
-
 ---
 
 ## 10. Interview Questions

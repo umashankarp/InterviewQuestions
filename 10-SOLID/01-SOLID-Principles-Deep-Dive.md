@@ -88,15 +88,6 @@ classDiagram
 - A single large interface forcing every implementation to stub out irrelevant methods.
 - High-level business logic directly instantiating/depending on concrete low-level classes (`new SqlOrderRepository()`), rather than depending on an abstraction.
 
-## 7. Performance Engineering
-SOLID principles are primarily about maintainability/coupling, not runtime performance — interface-based dispatch (DIP, ISP) has the same small virtual-dispatch cost as any polymorphic call (Module 1's devirtualization discussion), generally negligible relative to the design-quality benefit; don't reject SOLID-compliant designs on performance grounds without measuring first, consistent with this course's recurring measure-first discipline.
-
-## 8. Security
-An OCP-violating, monolithic authorization-check class (a large switch/if-chain handling many different permission types) carries the same "modifying one case risks silently breaking another" risk as §4's incident, but with security-relevant stakes — a change adding a new permission type could inadvertently weaken an existing, unrelated permission check, directly connecting to Module 29 §8's LSP-and-security discussion.
-
-## 9. Scalability
-Not a direct scaling-mechanism concern; SOLID-compliant, loosely-coupled designs are generally easier for multiple teams to work on independently and extend without stepping on each other's code, indirectly supporting a codebase's ability to scale across a growing engineering organization.
-
 ---
 
 ## 10. Interview Questions

@@ -75,15 +75,6 @@ graph TB
 - Ignoring implicit conversions between mismatched column/parameter types, silently defeating an otherwise-correct index.
 - Applying every DMV-suggested missing index blindly without evaluating overlap with existing indexes.
 
-## 7. Performance Engineering
-Index write cost: every insert/update/delete must also update every nonclustered index on the affected columns — a table with 15 indexes pays that write-amplification cost on every single write, a genuine, common over-indexing trade-off. Covering indexes eliminate key-lookup cost, often the single highest-leverage index optimization for a read-heavy reporting query.
-
-## 8. Security
-Query plans can leak information via **timing side channels** in security-sensitive contexts (Module 8 §8's timing-attack discussion, applicable here too) — a query whose execution time varies observably based on whether a specific value exists can, in adversarial contexts, leak that existence to a sufficiently patient attacker; parameterized queries (always) prevent SQL injection, a foundational, non-negotiable baseline distinct from but related to this module's performance focus.
-
-## 9. Scalability
-Index design directly determines how a system's read performance scales with data volume — an unindexed table's query cost grows linearly with row count; a well-indexed one grows logarithmically, the difference between a system that degrades gracefully as data grows and one that falls off a cliff.
-
 ---
 
 ## 10. Interview Questions

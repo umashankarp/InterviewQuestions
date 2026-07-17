@@ -81,15 +81,6 @@ graph TB
 - Applying DP's memoization machinery to a problem without overlapping subproblems, adding unnecessary complexity/overhead for no benefit.
 - Deep, unmemoized recursive DP risking stack overflow for large inputs, where bottom-up tabulation would avoid the recursion depth entirely.
 
-## 7. Performance Engineering
-The exponential-vs-polynomial gap between naive recursion and memoized DP (Fibonacci's O(2^n) vs O(n), a small but perfectly illustrative example) is one of the starkest, most easily-demonstrated algorithmic-complexity-class improvements in this entire course — a direct, concrete illustration of why "choose the right algorithmic technique" dwarfs any code-level micro-optimization, the same theme recurring across Modules 33-36 now demonstrated at its most extreme.
-
-## 8. Security
-Not a primary security-focused module topic; the practical connection is that an unmemoized, exponential-time recursive algorithm accepting user-influenced input size is a genuine algorithmic-complexity-based denial-of-service vector (an attacker supplying an input specifically chosen to trigger the worst-case exponential blowup) — directly analogous to Module 33 §2.3's hash-flooding and Module 35 §8's sort-worst-case-triggering concerns, now in DP-specific form.
-
-## 9. Scalability
-Choosing DP over naive exponential recursion (or greedy over DP when the greedy-choice property genuinely holds, gaining a much faster, simpler algorithm) directly determines whether an optimization feature scales to realistic production input sizes or becomes computationally infeasible — precisely this course's recurring "algorithmic complexity is a scalability lever" theme, now at its most dramatic (exponential vs. polynomial, not just a constant-factor difference).
-
 ---
 
 ## 10. Interview Questions

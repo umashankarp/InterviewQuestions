@@ -76,15 +76,6 @@ graph LR
 - Assuming a deadlock indicates a bug requiring a code fix rather than an expected, retryable condition under concurrent load.
 - Running large batch updates/deletes without considering lock escalation's potential to block unrelated concurrent operations.
 
-## 7. Performance Engineering
-RCSI/Snapshot Isolation trades locking overhead for `tempdb` version-store overhead — a genuinely different resource cost, not a free lunch; monitor `tempdb` size/IO under RCSI, especially with long-running transactions that keep old row versions pinned for their duration. Lock escalation avoids per-row lock-management memory/CPU overhead for very large operations, at the cost of coarser blocking — a real trade-off, not purely a problem to eliminate.
-
-## 8. Security
-Isolation-level choice can have subtle security implications for financial/audit-sensitive operations — Read Uncommitted's dirty reads could expose a transaction's in-progress, not-yet-validated (and potentially soon-to-be-rolled-back) state to a concurrent reader, a genuine data-integrity concern beyond mere performance for any operation where "might see rolled-back data" is unacceptable.
-
-## 9. Scalability
-RCSI is frequently the single highest-leverage change for scaling a system's *concurrent read/write mix* without application-code changes, precisely because it removes reader-writer contention as a scaling bottleneck entirely — worth evaluating early for any system anticipating concurrent OLTP and reporting/analytics workloads against the same database.
-
 ---
 
 ## 10. Interview Questions

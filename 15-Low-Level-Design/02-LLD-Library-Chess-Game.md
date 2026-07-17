@@ -103,15 +103,6 @@ sequenceDiagram
 - Having each `Piece` subclass independently implement check-detection logic, duplicating board-wide validation logic across every piece type and violating SRP.
 - Implementing chess move execution without a Command-pattern-based undo mechanism, then needing to bolt on ad-hoc "remember what changed" logic reactively once undo is required.
 
-## 7. Performance Engineering
-For Library Management, finding an available copy of a given title benefits from the same Module 45 §7 discipline — grouping `BookCopy` records by `Book`/status for near-O(1) "is any copy of this title available" lookup rather than an O(n) scan over every copy. For Chess, move-generation performance (enumerating all legal moves for a position, the core operation any chess-playing/analysis engine repeatedly performs) is a genuinely rich, well-studied optimization domain (bitboards, precomputed attack tables) — while a basic LLD interview answer doesn't need engine-grade optimization, acknowledging that `GetValidMoves()`'s naive implementation (checking every square) has real complexity implications, and that a production chess engine would use specialized bit-manipulation techniques for this exact operation, demonstrates awareness beyond the immediate class-design exercise.
-
-## 8. Security
-For a real (non-interview) Library Management system: a `Loan`/hold operation should verify the requesting member's identity/authorization matches the member the operation is being performed for (Module 12 §2.4's resource-based authorization, applicable even in this modest domain — a member shouldn't be able to place a hold or view loan history for a different member's account). For a real Chess platform (an online multiplayer chess service, not just a local engine): move submission must validate that the submitting player is genuinely the player whose turn it is, and that the move is legal *given the actual current server-side board state*, never trusting a client-submitted board state directly — directly Module 16 §2.1's "never trust client-supplied state, always validate server-side against the authoritative state" discipline, applicable to any turn-based multiplayer game logic.
-
-## 9. Scalability
-Library Management and Chess are typically single-location/single-game LLD exercises — scaling either to "a library chain with millions of books" or "a multiplayer platform with millions of concurrent games" is explicitly a System Design (Module 14) concern layering on top of this LLD, directly Module 45 §9's altitude-boundary discipline recurring here: a strong candidate, when asked "how would this scale," should recognize this is now a different discipline's question (sharding book records by library branch, Module 27's partition-key reasoning; distributing game state across a horizontally-scaled game-server fleet, Module 39's connection-registry-style pattern for routing a player's moves to the correct server instance holding their active game) rather than attempting to force a System-Design-shaped answer entirely within the LLD's class-diagram framing.
-
 ---
 
 ## 10. Interview Questions

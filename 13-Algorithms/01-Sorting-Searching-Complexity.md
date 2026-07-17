@@ -66,15 +66,6 @@ graph TB
 - Implementing binary search with the overflow-prone `(low + high) / 2` midpoint calculation.
 - Assuming quicksort is "always O(n²) worst case" without recognizing .NET's introsort hybrid closes this specific vulnerability.
 
-## 7. Performance Engineering
-Introsort's hybrid design (§2.1) is a direct, concrete illustration of trading a small amount of implementation complexity for eliminating an entire worst-case-performance risk class — worth citing as a general pattern (similar in spirit to Module 1's tiered-JIT-compilation trade-off) when discussing how mature, production-grade algorithm implementations often layer multiple strategies rather than using one "pure" textbook algorithm unconditionally.
-
-## 8. Security
-Sorting/searching algorithms with input-dependent execution time (e.g., a naive quicksort without introsort's safeguard, whose O(n²) worst case can be deliberately triggered by adversarially-crafted input) are a genuine algorithmic-complexity-attack vector — directly analogous to Module 33 §2.3's hash-flooding attack, now applied to sorting specifically; a service accepting user-influenced data for sorting should be aware of (and, for .NET, benefit from) introsort's built-in worst-case protection rather than assuming a naive, unguarded quicksort implementation.
-
-## 9. Scalability
-Choosing an O(n log n) sort over an accidental O(n²) approach (or, worse, sorting when a linear-time approach like counting sort would suffice for suitably-bounded integer keys) directly determines whether a data-processing pipeline scales gracefully as data volume grows — the same "algorithmic complexity is a scalability lever, not just infrastructure capacity" theme recurring throughout Modules 33-35.
-
 ---
 
 ## 10. Interview Questions

@@ -97,8 +97,6 @@ classDiagram
 - A monolithic class combining multiple independent cross-cutting concerns inline instead of composable Decorators (§4's incident).
 - Confusing Adapter and Facade's intent — using an Adapter to "simplify" an already-compatible interface, or a Facade to bridge a genuinely incompatible one.
 
-## 7. Performance Engineering
-Decorator chains add a small, per-layer indirection cost (each layer's delegated call is a virtual/interface dispatch, Module 1) — generally negligible relative to the actual work being decorated (a database call, an external API call), but worth profiling if a very deep decorator chain wraps an extremely hot, low-latency operation. Proxy's virtual-proxy variant (deferred construction) directly trades a small dispatch-check cost for avoiding expensive eager construction, exactly Module 10 §6's lazy-Singleton-construction trade-off.
 ---
 
 ## 10. Interview Questions

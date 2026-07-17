@@ -77,15 +77,6 @@ graph TB
 - Calling `SaveChanges()` inside a loop, one entity at a time, instead of batching.
 - Loading full entity graphs (with tracking) for read-only, projection-shaped API responses.
 
-## 7. Performance Engineering
-Each additional database round-trip adds fixed network-latency overhead (often several milliseconds even for a trivial query) — this fixed-per-round-trip cost, multiplied by N in an N+1 pattern, frequently dominates total request latency far more than the actual query execution time itself, which is why N+1 fixes (collapsing round-trip count) often produce order-of-magnitude latency improvements even though each individual query was already fast.
-
-## 8. Security
-Not a primary security-focused module; the practical connection is that N+1-shaped code processing a large, attacker-influenced collection size (e.g., an unbounded "get all orders for this account" with no pagination limit) can itself become a resource-exhaustion vector — pagination limits (Module 16 §12's hard server-side caps) are as much a resource-exhaustion defense as a UX feature.
-
-## 9. Scalability
-N+1 patterns are a direct, common cause of a service's database connection pool becoming a scaling bottleneck far earlier than expected — 200 round-trips per request instead of 2 means a service can sustain roughly 1/100th the concurrent request throughput for the same connection-pool size, a scaling ceiling entirely attributable to this fixable code pattern rather than any genuine infrastructure limit.
-
 ---
 
 ## 10. Interview Questions

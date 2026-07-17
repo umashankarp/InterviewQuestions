@@ -72,15 +72,6 @@ graph TB
 - Using `Scan` with a client-side filter as a routine query mechanism instead of designing a proper Query-compatible access pattern or GSI.
 - Adding an LSI after realizing it's needed post-table-creation (impossible — LSIs must be defined upfront), instead of anticipating this need during initial design.
 
-## 7. Performance Engineering
-`Query`'s cost/latency is essentially independent of table size (a partition-key lookup), while `Scan`'s cost scales with the *entire table's* size regardless of match count — this single distinction is the highest-leverage DynamoDB performance concept, directly paralleling Module 18's seek-vs-scan distinction but with DynamoDB's pricing model making the cost difference immediately, financially visible rather than only a latency concern.
-
-## 8. Security
-DynamoDB's fine-grained IAM-based access control can restrict access down to specific partition-key values/attributes (via IAM condition keys and `LeadingKeys` policy conditions) — a genuinely distinctive, database-engine-native authorization mechanism worth knowing as an alternative/complement to application-layer authorization (Module 12) for multi-tenant DynamoDB designs specifically.
-
-## 9. Scalability
-DynamoDB's entire value proposition **is** predictable scalability — but only when partition-key design correctly distributes load; a poorly-designed key (§4) can make a DynamoDB table scale worse than a well-indexed relational table despite DynamoDB's marketing as "infinitely scalable," precisely because the scalability guarantee is conditional on correct schema design, not automatic regardless of design choices.
-
 ---
 
 ## 10. Interview Questions

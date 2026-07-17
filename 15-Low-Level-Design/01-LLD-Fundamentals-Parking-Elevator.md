@@ -109,15 +109,6 @@ stateDiagram-v2
 - Hardcoding a specific pricing/assignment/scheduling algorithm directly into the core coordinator class instead of extracting it as a Strategy, making future changes require modifying tested, working code (an OCP violation, Module 30 §4's exact incident shape, now at the LLD scale).
 - Skipping requirements clarification and designing for an assumed, unstated scope that doesn't match what the interviewer actually intended to evaluate.
 
-## 7. Performance Engineering
-LLD interviews rarely focus on performance in the sense Modules 1-13 covered (JIT internals, algorithmic complexity of a specific hot path) — but a strong answer should still reason about the **complexity of core operations**: is finding an available parking spot an O(n) linear scan over all spots, or does the design support a more efficient structure (a `Dictionary<SpotSize, Queue<ParkingSpot>>` grouping available spots by size, directly Module 33's "match the data structure to the actual access pattern" discipline, giving near-O(1) "find an available spot of size X" instead of scanning every spot) — explicitly choosing and justifying this kind of supporting-data-structure decision (not just the class relationships) is what separates a purely academic class diagram from one demonstrating genuine engineering judgment about how the design would actually perform.
-
-## 8. Security
-LLD interview problems are typically not security-focused, but a genuinely thorough answer for a real (non-interview) system should still note: `ParkingLot`'s `ProcessExit` (or similar payment-related operations) should validate the presented `Ticket` genuinely corresponds to a currently-parked vehicle (preventing a forged/reused ticket from producing an incorrect, too-low payment calculation) — a small but real example of Module 12 §2.4's "verify current authorization/validity state, don't trust a presented token/reference blindly" principle, applicable even in a seemingly non-security-relevant domain like a parking system.
-
-## 9. Scalability
-For a genuinely large parking-facility chain (many physical locations, thousands of spots each) or a genuinely large elevator-bank system (a skyscraper with dozens of elevators), the LLD's core classes (`ParkingLot`, `ElevatorController`) become the **components** a full System Design (Module 14) would then need to scale, replicate, and coordinate across locations/buildings — explicitly recognizing this altitude boundary (this is the LLD for one location/building; scaling to many locations is a System Design concern layering on top) demonstrates awareness of how these two disciplines relate, rather than either conflating them or treating LLD as entirely disconnected from real-world scale considerations.
-
 ---
 
 ## 10. Interview Questions

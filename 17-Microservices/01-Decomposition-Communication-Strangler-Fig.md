@@ -88,15 +88,6 @@ graph LR
 - Defaulting to synchronous call chains for interactions that don't genuinely require an immediate response, compounding availability risk unnecessarily across every additional hop.
 - Attempting a big-bang monolith-to-microservices rewrite instead of the Strangler Fig's incremental, capability-by-capability migration with a rollback path at every step.
 
-## 7. Performance Engineering
-Every synchronous inter-service call adds network round-trip latency (Module 37 §7's latency-budgeting discipline, now explicitly per-hop across a service call chain) — a request touching 5 synchronously-chained services pays 5 network round-trips' worth of added latency compared to an equivalent monolithic in-process call chain, directly motivating both minimizing synchronous call-chain depth and preferring asynchronous communication wherever the interaction tolerates it. gRPC's binary protocol and HTTP/2 multiplexing typically offer meaningfully lower latency/overhead than REST/JSON for internal, high-frequency service-to-service calls specifically — a legitimate reason to choose gRPC over REST for internal communication while still exposing a REST/JSON public API at the system's edge (directly Module 40's gateway potentially translating between the two).
-
-## 8. Security
-Each service's own API must independently enforce authentication/authorization (Module 12) for any caller, including other internal services — never assume "it's internal traffic, so it's trusted," directly Module 40 §8's signed-internal-trust-assertion discipline, now essential at the inter-microservice level specifically, since a compromised service (or a misconfigured network allowing unauthorized lateral access) could otherwise directly call any other service's API without any authorization check at all. Database-per-service (§2.2) is itself a security-relevant boundary — it limits the blast radius of a single service's compromise (an attacker who compromises the Inventory service cannot directly read the Payment service's database, since no shared access exists), directly extending Module 21 §Advanced Q8's Row-Level-Security-as-defense-in-depth principle to the service-boundary level.
-
-## 9. Scalability
-Microservices' core scalability benefit is **independent scaling** — a read-heavy Product Catalog service and a write-heavy Order service can each scale to their own, independently-appropriate replica count (Module 37 §9's scaling ladder, applied per-service rather than uniformly across a monolith that would otherwise scale every feature together regardless of each one's actual, independent load characteristics) — this benefit is entirely forfeited by the distributed-monolith anti-pattern (§4), where every "service" must still scale and deploy together despite the superficial appearance of separation. Asynchronous, event-driven communication (§2.4) also directly enables independent, load-absorbing scaling of consumers (Module 26/38/41's queue-driven worker-fleet pattern) decoupled from the publisher's own scaling needs.
-
 ---
 
 ## 10. Interview Questions

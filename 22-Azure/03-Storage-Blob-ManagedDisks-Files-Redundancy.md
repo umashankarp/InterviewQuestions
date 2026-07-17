@@ -91,15 +91,6 @@ graph TB
 - Discovering storage-redundancy gaps incident-by-incident rather than maintaining a systemic, proactively-applied divergence checklist across an entire migration effort.
 - Using Azure Files as a default "shared storage" choice when Blob Storage would functionally suffice, the same anti-pattern Module 59 §6 already flagged for EFS.
 
-## 7. Performance Engineering
-GRS/RA-GZRS's asynchronous secondary-Region replication lag (§2.1) means any read from the secondary Region (via RA-GRS/RA-GZRS) carries the same read-your-own-writes risk Module 60 §2.2/§4 established for RDS read replicas — a workload reading from the secondary Region immediately after a primary-Region write can observe stale data, requiring the identical per-read-path consistency categorization discipline. Archive-tier blob rehydration (§2.2) takes hours, not milliseconds — a workload with any possibility of needing ad hoc, time-sensitive access to archived data must account for this real latency floor in its design, directly Module 59 §Advanced Q4's Glacier-retrieval-latency discussion recurring identically here.
-
-## 8. Security
-Blob Storage's network-isolation capabilities (private endpoints, firewall rules restricting which VNets/IPs can reach a storage account) should be enabled by default for any storage account holding production data, directly Module 59 §8's S3-Block-Public-Access-equivalent discipline, now expressed via Azure's own storage-account-level network configuration. Blob/Disk/Files encryption at rest via Key Vault-managed keys (Module 66 §2.4) should be configured explicitly for any sensitive data, with the same object-level-scoping-plus-network-isolation defense-in-depth reasoning Module 66 §2.4 established, since Azure Storage's encryption-key access model inherits Key Vault's combined-service characteristics rather than AWS's separate KMS-plus-resource-IAM two-factor model.
-
-## 9. Scalability
-Storage account-level throughput and request-rate limits (a genuinely Azure-specific capacity dimension, since Azure storage accounts — unlike S3's effectively-unbounded, prefix-partitioned scaling, Module 59 §7 — impose a real, per-account ingress/egress and request-rate ceiling) must be proactively capacity-planned for any very-high-throughput workload, a materially more consequential capacity-planning concern than S3's near-limitless default scaling — a Principal Engineer migrating a high-throughput S3-based workload to Azure Blob Storage should explicitly verify the target storage account's throughput ceiling against the workload's actual peak demand, rather than assuming Azure Blob Storage scales as transparently as S3 by default. Managed Disks similarly have their own per-disk IOPS/throughput ceilings tied to the specific disk tier/size selected (directly Module 59 §2.6's EBS-volume-type discussion), requiring the same explicit capacity-matching discipline.
-
 ---
 
 ## 10. Interview Questions

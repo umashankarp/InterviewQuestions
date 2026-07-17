@@ -96,15 +96,6 @@ graph TB
 - Allowing a highly-elastic, connection-churning compute layer (Lambda, an aggressively-autoscaling ASG) to connect directly to a database without RDS Proxy or equivalent pooling, risking connection-limit exhaustion under a scaling event.
 - Adopting DynamoDB Global Tables without explicitly confirming the workload can tolerate last-writer-wins conflict resolution for concurrent cross-Region writes to the same item.
 
-## 7. Performance Engineering
-Read replica / Aurora Replica lag is directly driven by the primary's write volume and the replica's own compute capacity to apply replicated changes — a replica that's under-provisioned relative to the primary's write throughput will develop growing, potentially unbounded lag under sustained load, meaning replica instance sizing should be planned against the *primary's* peak write throughput, not just the replica's own expected read query load (an easy-to-overlook, non-obvious capacity-planning dimension). RDS Proxy (§2.6) itself introduces a small additional latency hop for connection multiplexing — a worthwhile, near-always-justified trade-off against the far more severe cost of connection-limit exhaustion under a genuine scaling event, but one a Principal Engineer should be aware of for a workload with genuinely extreme, single-digit-millisecond latency requirements where every hop counts.
-
-## 8. Security
-RDS/Aurora encryption at rest (via KMS, per Module 58 §2.5) must be enabled at instance creation — like Module 59 §8's EBS-encryption discussion, converting an existing unencrypted RDS instance to encrypted is not an in-place operation and requires creating a new encrypted instance from a snapshot and migrating, making "enable by default at creation" the only low-cost path. DynamoDB's fine-grained IAM policies can scope access down to the individual-item or even individual-attribute level using policy condition keys (e.g., restricting a user's access to only items where a partition key matches their own user ID) — a materially more granular access-control capability than typical relational-database row-level security, worth explicitly leveraging for any multi-tenant DynamoDB table rather than relying solely on application-level tenant-isolation logic.
-
-## 9. Scalability
-Aurora's storage layer scales automatically up to a very large per-cluster ceiling (in increments, transparently, without a manual resizing operation) — a genuine operational advantage over standard RDS, where storage scaling, while now also largely automatable via Storage Auto Scaling, is more tightly coupled to the single EBS volume's own resize characteristics. DynamoDB, per Module 28, scales via provisioned or on-demand capacity — but a Principal Engineer must still explicitly reconcile partition-key design (Module 27) with actual scale, since even DynamoDB's elastic capacity model cannot compensate for a poorly-chosen partition key concentrating traffic onto a single logical partition (the same "the platform's elasticity doesn't substitute for correct upstream design" pattern recurring from Module 57 §9's ASG/subnet-capacity discussion).
-
 ---
 
 ## 10. Interview Questions

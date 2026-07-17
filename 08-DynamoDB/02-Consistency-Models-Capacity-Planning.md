@@ -70,15 +70,6 @@ graph LR
 - Assuming DAX accelerates every read uniformly, without recognizing strongly-consistent reads bypass its cache entirely.
 - Relying on TTL for precise, time-sensitive expiration without accounting for its documented deletion-lag window.
 
-## 7. Performance Engineering
-Strongly consistent reads cost double the read-capacity units of eventually-consistent reads — a direct, quantifiable cost/consistency trade-off to apply deliberately per access pattern, not uniformly. DAX's microsecond-latency benefit is specific to cache-hit, eventually-consistent reads — measure actual cache-hit rate for a given access pattern before assuming DAX provides its full theoretical benefit.
-
-## 8. Security
-DAX cluster access and DynamoDB table access should both be governed by the same IAM-based fine-grained access-control discipline (Module 27 §8) — a DAX cluster is an additional data-access surface requiring its own explicit security review, not an implicitly-secured extension of the underlying table's own access controls.
-
-## 9. Scalability
-On-demand capacity mode is itself a scalability-simplifying choice for genuinely unpredictable workloads (removing the capacity-forecasting burden entirely) — but at sustained, predictable high volume, provisioned capacity with auto-scaling typically scales more cost-effectively, making the choice a genuine trade-off between operational simplicity and cost efficiency, not a strictly "always better" option either way.
-
 ---
 
 ## 10. Interview Questions

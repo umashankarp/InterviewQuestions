@@ -66,15 +66,6 @@ graph LR
 - Relying solely on provider-side schema validation as proof that a change is safe for consumers.
 - Treating every field as effectively required in practice while marking it optional in the spec, then being surprised when removing it breaks consumers.
 
-## 7. Performance Engineering
-Code-first OpenAPI generation (via `TypedResults`) has no runtime reflection cost at request-serving time — the spec is generated once, at startup/build time, not per-request. Consumer-driven contract tests run in CI, not production, so they add build-time cost, not runtime cost.
-
-## 8. Security
-An auto-generated OpenAPI spec can inadvertently document (and thus expose to anyone who can view it) internal-only endpoints or fields not intended for public consumption — explicitly exclude internal-only endpoints from the publicly-served spec, distinct from the internal one used for development tooling.
-
-## 9. Scalability
-Not a direct scaling-mechanism concern; the practical connection is that contract testing is what makes independent, uncoordinated deployment of many services (a scalability/velocity property of a well-decomposed microservices architecture, a later module) safe — without it, every provider change would require manual, synchronized coordination with every consumer team, defeating the independent-deployability benefit microservices decomposition is meant to provide.
-
 ---
 
 ## 10. Interview Questions

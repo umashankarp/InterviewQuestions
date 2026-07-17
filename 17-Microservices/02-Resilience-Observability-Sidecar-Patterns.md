@@ -114,15 +114,6 @@ graph LR
 - Operating a multi-service architecture without correlation IDs/distributed tracing, forcing costly, error-prone, timestamp-based manual log correlation during incidents (§4's 40-minute misdiagnosis).
 - Reimplementing resilience/observability logic inconsistently, ad hoc, in every individual service's own code (rather than centralizing via a sidecar/service mesh) once the fleet grows large enough that consistency can no longer be achieved by convention alone.
 
-## 7. Performance Engineering
-Every resilience layer (bulkhead, circuit breaker, retry, timeout) adds a small amount of overhead (pool-lookup cost, breaker-state-check cost) to every call — negligible compared to network round-trip latency, but worth being aware of when reasoning about a latency budget's finest-grained components (Module 37 §7). Distributed tracing itself has a sampling-rate cost trade-off: capturing 100% of traces gives complete visibility but at nontrivial storage/processing cost at high request volume; most production systems use a sampling strategy (capture 100% of *error* traces, a much smaller percentage of successful ones) balancing diagnostic completeness against cost — directly analogous to Module 33 §7's structured-logging volume/cost trade-off, now applied to trace data specifically.
-
-## 8. Security
-The sidecar model (§2.6) is also the standard mechanism for enforcing **mutual TLS (mTLS)** between every service-to-service call automatically, without any individual service's application code needing to implement certificate handling itself — every sidecar-to-sidecar connection is encrypted and mutually authenticated by the mesh infrastructure, directly extending Module 49 §8's "never assume internal traffic is trusted" principle into an automatically, uniformly-enforced infrastructure guarantee rather than something each service team must remember to implement correctly on their own. Correlation IDs and trace data can themselves carry sensitive information (a customer ID embedded in a trace's request metadata) — trace storage/access must follow the same data-classification and access-control discipline as any other system holding customer data (Module 28's security-domain content, in the later dedicated module).
-
-## 9. Scalability
-Bulkhead-isolated resource pools (§2.4) must be sized per-dependency based on that dependency's own expected call volume and latency characteristics — an undersized bulkhead becomes its own artificial bottleneck (calls queuing/failing due to pool exhaustion even though the downstream dependency itself is healthy and could handle more load), directly analogous to Module 37 §9's connection-pool-sizing discipline, now applied per-dependency rather than globally. Distributed tracing infrastructure itself must scale with request volume — the trace-collection pipeline (typically itself a small, dedicated pub/sub-backed system, Module 26/48's patterns applied to observability data specifically) needs its own capacity planning as the microservices fleet and its request volume grow.
-
 ---
 
 ## 10. Interview Questions
