@@ -75,7 +75,7 @@ graph LR
 ## 10. Interview Questions
 
 ### Basic (10)
-1. **Q: What is the default read consistency in DynamoDB?** **A:** Eventually consistent.
+1. **Q: What is the default read consistency in DynamoDB?** **A:** Eventually consistent — a read may be served by a replica that hasn't yet received the latest write (staleness typically well under a second), which is why read-your-own-write flows must either request `ConsistentRead: true` or be designed to tolerate a just-written item briefly not appearing.
 2. **Q: How do you request a strongly consistent read?** **A:** Set `ConsistentRead: true` on the read request.
 3. **Q: What's the cost difference between eventually and strongly consistent reads?** **A:** Strongly consistent reads cost double the read-capacity units.
 4. **Q: Can a GSI serve a strongly consistent read?** **A:** No — GSIs only support eventually consistent reads.

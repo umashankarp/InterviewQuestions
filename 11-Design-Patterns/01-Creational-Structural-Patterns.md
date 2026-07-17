@@ -104,7 +104,7 @@ classDiagram
 ### Basic (10)
 1. **Q: What's the difference between Factory Method and Abstract Factory?** **A:** Factory Method creates one type of object; Abstract Factory creates families of related objects, guaranteeing internal consistency across the family.
 2. **Q: What problem does Builder solve?** **A:** Constructing an object with many optional/conditional parameters readably and with validation, avoiding a telescoping-constructor anti-pattern.
-3. **Q: What does the Singleton pattern guarantee?** **A:** Exactly one instance of a class, globally accessible.
+3. **Q: What does the Singleton pattern guarantee?** **A:** Exactly one instance of a class, globally accessible — with the modern caveat that hand-rolled Singletons (static instance + global access) are usually inferior to DI-container-managed singleton lifetimes, which give the same guarantee without hidden global state or testability loss.
 4. **Q: Why is the classic Singleton pattern considered problematic in modern DI-based codebases?** **A:** It introduces global mutable state, hides dependencies from constructor signatures, and makes unit testing harder — largely superseded by DI-container `Singleton`-lifetime registration.
 5. **Q: What does Adapter do?** **A:** Wraps a class with an incompatible interface, translating calls to conform to the interface client code expects.
 6. **Q: What does Decorator do?** **A:** Wraps an object with the same interface, adding behavior before/after delegating, composably stackable.

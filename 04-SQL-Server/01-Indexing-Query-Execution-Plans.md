@@ -87,7 +87,7 @@ graph TB
 5. **Q: What is a covering index?** **A:** An index containing (via key columns or `INCLUDE`) every column a query needs, avoiding a key lookup into the clustered index.
 6. **Q: What is a key lookup?** **A:** An extra per-row lookup into the clustered index to retrieve columns not present in the nonclustered index used for the seek.
 7. **Q: What are statistics, in SQL Server terms?** **A:** A histogram describing a column's data distribution, used by the optimizer to estimate query cardinality.
-8. **Q: Name the three main join algorithms.** **A:** Nested loop, merge, and hash join.
+8. **Q: Name the three main join algorithms.** **A:** Nested loop (best for small outer inputs with an index on the inner side), merge (both inputs sorted on the join key), and hash join (large, unsorted inputs) — the optimizer chooses based on row-count estimates, which is why bad cardinality estimates produce the wrong join type.
 9. **Q: Why might stale statistics cause a slow query?** **A:** The optimizer misestimates row counts, potentially choosing a join algorithm/plan shape appropriate for the wrong (stale) cardinality.
 10. **Q: What does `sys.dm_db_missing_index_details` provide?** **A:** Index recommendations based on queries the engine has actually executed, requiring human judgment before applying.
 

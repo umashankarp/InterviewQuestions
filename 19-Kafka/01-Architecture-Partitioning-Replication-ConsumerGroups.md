@@ -113,7 +113,7 @@ graph LR
 6. **Q: What happens to consumption when a consumer group rebalances?** **A:** Partitions are reassigned among group members, pausing consumption for the affected partitions during reassignment.
 7. **Q: What is an offset?** **A:** A per-partition, per-consumer-group marker tracking how far that group has consumed.
 8. **Q: Does Kafka guarantee ordering across partitions of the same topic?** **A:** No — only within a single partition.
-9. **Q: What determines the maximum degree of consumer-group parallelism?** **A:** The topic's partition count.
+9. **Q: What determines the maximum degree of consumer-group parallelism?** **A:** The topic's partition count — each partition is consumed by at most one consumer within a group, so consumers beyond the partition count sit idle; this makes partition count a capacity-planning decision made at topic creation, not a knob consumers can scale past.
 10. **Q: What is the difference between committing an offset before vs after processing?** **A:** Before risks under-processing (at-most-once-like); after (standard, recommended) risks over-processing/duplicates (at-least-once), requiring idempotent consumers.
 
 ### Intermediate (10)

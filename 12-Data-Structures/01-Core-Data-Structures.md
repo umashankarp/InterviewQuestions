@@ -82,9 +82,9 @@ graph TB
 ## 10. Interview Questions
 
 ### Basic (10)
-1. **Q: What is the time complexity of index-based access on an array?** **A:** O(1).
+1. **Q: What is the time complexity of index-based access on an array?** **A:** O(1) — the element's address is computed directly as base address + index × element size, one arithmetic step regardless of array length (plus cache-friendly contiguous layout, which is why arrays beat node-based structures in practice too).
 2. **Q: What is the time complexity of `List<T>.Contains`?** **A:** O(n) — a linear scan.
-3. **Q: What is the average-case time complexity of a `Dictionary<K,V>` lookup?** **A:** O(1).
+3. **Q: What is the average-case time complexity of a `Dictionary<K,V>` lookup?** **A:** O(1) average — the key's hash code selects a bucket directly, with only same-bucket collisions to scan; it degrades toward O(n) only under pathological collision behavior (bad `GetHashCode` implementations, or hash-flooding attacks on predictable hashes).
 4. **Q: What is amortized O(1), in the context of `List<T>.Add`?** **A:** Individual `Add` calls are usually O(1), with an occasional O(n) resize, averaging out to O(1) per operation across many calls.
 5. **Q: What data structure underlies .NET's `PriorityQueue<TElement,TPriority>`?** **A:** A binary heap, implemented as a flat array.
 6. **Q: What is a hash collision?** **A:** Two different keys hashing to the same bucket in a hash table.

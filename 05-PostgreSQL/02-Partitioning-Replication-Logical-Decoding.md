@@ -81,7 +81,7 @@ graph LR
 4. **Q: What is a replication slot?** **A:** A primary-side marker tracking a specific replica/subscriber's consumption progress, retaining WAL until that position is consumed.
 5. **Q: What's the difference between synchronous and asynchronous replication?** **A:** Synchronous waits for a replica's confirmation before acknowledging commit (no data loss on failover, added latency); asynchronous acknowledges immediately (fast, but can lose recently-committed data on failover).
 6. **Q: What is logical decoding?** **A:** The mechanism extracting a structured stream of row-level changes from the WAL, underlying logical replication and CDC.
-7. **Q: What does CDC stand for?** **A:** Change Data Capture.
+7. **Q: What does CDC stand for?** **A:** Change Data Capture — streaming every committed insert/update/delete out of the database (in PostgreSQL, via logical decoding of the WAL) so downstream systems (caches, search indexes, event pipelines) can react to data changes without polling or dual writes.
 8. **Q: Can physical replication replicate between different PostgreSQL major versions?** **A:** No — physical replication requires the same major version; logical replication can cross versions.
 9. **Q: What's a risk of leaving an orphaned, unconsumed replication slot?** **A:** The primary retains WAL indefinitely waiting for it, potentially exhausting disk space.
 10. **Q: What is Debezium?** **A:** A dominant open-source CDC tool consuming PostgreSQL's logical decoding stream, commonly feeding changes into Kafka.

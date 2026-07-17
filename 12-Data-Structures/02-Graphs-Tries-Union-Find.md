@@ -85,8 +85,8 @@ graph LR
 2. **Q: What is an adjacency list?** **A:** A representation storing, per node, a list of its actual neighbors — memory-efficient for sparse graphs.
 3. **Q: What is an adjacency matrix?** **A:** A V×V grid storing whether every possible pair of nodes is connected — O(V²) space, O(1) direct-connection queries.
 4. **Q: What does BFS guarantee that DFS doesn't?** **A:** The shortest path (fewest edges) in an unweighted graph.
-5. **Q: What algorithm finds shortest paths in a weighted graph with non-negative weights?** **A:** Dijkstra's algorithm.
-6. **Q: What algorithm is needed for graphs with negative edge weights?** **A:** Bellman-Ford.
+5. **Q: What algorithm finds shortest paths in a weighted graph with non-negative weights?** **A:** Dijkstra's algorithm — a greedy expansion that always settles the currently-closest unvisited node (via a priority queue, O((V+E) log V)); its correctness depends on non-negative weights, since a settled node must never be improvable by a longer-looking route.
+6. **Q: What algorithm is needed for graphs with negative edge weights?** **A:** Bellman-Ford — it relaxes every edge V-1 times (O(V·E), slower than Dijkstra) and, crucially, can also *detect* negative cycles (a V-th relaxation pass that still improves a distance proves one exists, making "shortest path" undefined).
 7. **Q: What is a trie used for?** **A:** Efficient prefix-based string lookups (autocomplete, spell-check).
 8. **Q: What does Union-Find track?** **A:** A partition of elements into disjoint sets, supporting near-O(1) "same set" and "merge sets" queries.
 9. **Q: What is path compression, in Union-Find?** **A:** Re-pointing every visited node directly to the root during a Find operation, flattening future lookups.

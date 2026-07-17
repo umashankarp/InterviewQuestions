@@ -83,7 +83,7 @@ graph TB
 6. **Q: Is a WebSocket connection stateless or stateful?** **A:** Stateful — a specific server instance holds an open connection to a specific client.
 7. **Q: What does "exactly-once" delivery typically mean in practice for a real system?** **A:** At-least-once delivery combined with idempotent, deduplicating processing on the receiving end — a true distributed exactly-once primitive is not generally achievable.
 8. **Q: Why does group chat require stricter design than one-to-one chat?** **A:** Every group member must see messages in the same relative order, ruling out naive independent-per-recipient fan-out.
-9. **Q: What's a common shard key for a chat system's message store?** **A:** Conversation ID.
+9. **Q: What's a common shard key for a chat system's message store?** **A:** Conversation ID — it keeps each conversation's full history on one shard, so the dominant query ("load this conversation's recent messages") is single-shard and ordered, while conversations distribute evenly across shards; per-user sharding would scatter every conversation across two or more shards.
 10. **Q: Why should message-history pagination use keyset/cursor pagination rather than offset pagination?** **A:** Message history is naturally append-only and sequence-ordered, a natural fit for keyset pagination's stability and constant cost regardless of pagination depth.
 
 ### Intermediate (10)

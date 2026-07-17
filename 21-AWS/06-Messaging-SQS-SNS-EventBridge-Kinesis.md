@@ -108,9 +108,9 @@ graph TD
 5. **Q: What capability does Kinesis provide that SQS structurally cannot?** **A:** Replay — multiple independent consumers can read the same retained stream history at their own pace and position.
 6. **Q: What is EventBridge's schema registry?** **A:** A capability that automatically discovers and versions event schemas, operationalizing schema-evolution discipline as a platform feature.
 7. **Q: Which AWS messaging service is the natural home for choreography-style architectures?** **A:** EventBridge, via its content-based routing rules and lack of a central orchestrator.
-8. **Q: What delivery semantics do SQS Standard, SNS, EventBridge, and Kinesis provide by default?** **A:** At-least-once.
+8. **Q: What delivery semantics do SQS Standard, SNS, EventBridge, and Kinesis provide by default?** **A:** At-least-once — duplicates are possible under retries, redelivery after visibility-timeout expiry, and failover, so every consumer must be idempotent (dedupe by message/event ID or use naturally idempotent operations); only SQS FIFO adds broker-side deduplication, within its 5-minute window.
 9. **Q: When is Kinesis or Kafka the correct choice over SQS/SNS/EventBridge?** **A:** When a workload genuinely needs ordered, replayable stream history readable independently by multiple consumer applications.
-10. **Q: What determines Kinesis's throughput ceiling?** **A:** The number of provisioned shards.
+10. **Q: What determines Kinesis's throughput ceiling?** **A:** The number of provisioned shards — each shard supports about 1MB/s (or 1,000 records/s) ingest and 2MB/s standard read; total stream capacity is shards × those per-shard limits, so a hot partition key that concentrates traffic onto one shard hits the ceiling long before the stream's aggregate capacity does.
 
 ### Intermediate (10)
 1. **Q: Why couldn't the §4 clickstream pipeline simply add a second consumer directly to the existing SQS queue to support fraud detection?** **A:** SQS delivers each message to one consumer within a processing context — a second consumer competing for the same queue would split messages between the two consumers rather than delivering the full stream to both, since SQS has no notion of multiple independent, full-stream subscribers.

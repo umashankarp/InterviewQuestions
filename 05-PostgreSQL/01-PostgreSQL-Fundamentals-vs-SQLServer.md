@@ -75,7 +75,7 @@ graph TB
 ## 10. Interview Questions
 
 ### Basic (10)
-1. **Q: What does MVCC stand for?** **A:** Multi-Version Concurrency Control.
+1. **Q: What does MVCC stand for?** **A:** Multi-Version Concurrency Control — writers create new row versions instead of overwriting in place, so readers never block writers and writers never block readers; the cost is dead-tuple accumulation that VACUUM must reclaim.
 2. **Q: Is MVCC opt-in or always-on in PostgreSQL?** **A:** Always-on — every transaction uses it, unlike SQL Server where row-versioning (RCSI/Snapshot Isolation) is an explicit setting.
 3. **Q: What does `VACUUM` do?** **A:** Reclaims space from dead tuples (old row versions no longer needed by any active transaction).
 4. **Q: What is a partial index?** **A:** An index covering only rows matching a specified condition, smaller and faster than indexing the whole table.

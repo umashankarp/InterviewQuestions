@@ -87,8 +87,8 @@ graph LR
 ### Basic (10)
 1. **Q: What is BOLA?** **A:** Broken Object Level Authorization — an API checks authentication but not whether the caller is authorized to access the *specific* requested object.
 2. **Q: What is mass assignment?** **A:** Binding a request body directly onto a rich entity type, letting a client set unintended fields.
-3. **Q: What status code should a rate-limited request return?** **A:** 429 Too Many Requests.
-4. **Q: What header tells a client when to retry after a 429?** **A:** `Retry-After`.
+3. **Q: What status code should a rate-limited request return?** **A:** 429 Too Many Requests — a distinct, machine-recognizable signal (separate from 4xx client errors and 5xx server failures) that well-behaved clients and SDKs interpret as "back off and retry later," ideally accompanied by a `Retry-After` header.
+4. **Q: What header tells a client when to retry after a 429?** **A:** `Retry-After` — expressed as either seconds-to-wait or an HTTP date; emitting it (ideally with jittered values) shapes client behavior into coordinated backoff instead of leaving every client to guess and hammer the API in synchronized retry waves.
 5. **Q: What's the boundary-burst problem with fixed-window rate limiting?** **A:** A client can send the full limit at the very end of one window and again at the very start of the next, doubling the effective rate at the boundary.
 6. **Q: What does a token bucket allow that a leaky bucket doesn't?** **A:** Bursts up to the bucket's capacity, while still enforcing a steady-state average rate.
 7. **Q: Why doesn't a per-replica in-memory rate limiter work correctly at fleet scale?** **A:** Each replica only sees its own slice of a client's traffic, so the effective limit multiplies by replica count.

@@ -94,7 +94,7 @@ classDiagram
 
 ### Basic (10)
 1. **Q: What does SOLID stand for?** **A:** Single Responsibility, Open/Closed, Liskov Substitution, Interface Segregation, Dependency Inversion.
-2. **Q: What is the Single Responsibility Principle?** **A:** A class should have only one reason to change.
+2. **Q: What is the Single Responsibility Principle?** **A:** A class should have only one reason to change — "reason to change" meaning one *actor/stakeholder* whose requirements drive modifications; a class serving both accounting rules and report formatting has two masters and will be broken by either's evolution.
 3. **Q: What is the Open/Closed Principle?** **A:** Modules should be open for extension but closed for modification.
 4. **Q: What is the Interface Segregation Principle?** **A:** No client should be forced to depend on methods it doesn't use.
 5. **Q: What is the Dependency Inversion Principle?** **A:** High-level modules shouldn't depend on low-level modules; both should depend on abstractions.

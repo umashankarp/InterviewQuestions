@@ -91,7 +91,7 @@ graph TB
 2. **Q: What is embedding, in MongoDB terms?** **A:** Storing related data directly nested within a parent document rather than in a separate, referenced collection.
 3. **Q: What is the aggregation pipeline?** **A:** A sequence of stages (`$match`, `$group`, `$sort`, etc.) transforming a stream of documents, MongoDB's primary query/transformation mechanism.
 4. **Q: What does `$lookup` do?** **A:** Performs a left-outer-join-like operation against another collection.
-5. **Q: What is the document size limit in MongoDB?** **A:** 16MB per document.
+5. **Q: What is the document size limit in MongoDB?** **A:** 16MB per document — a hard limit that makes unbounded embedded arrays (comments, events appended forever) a data-modeling time bomb; growing collections belong in their own collection referenced by parent ID, or bucketed.
 6. **Q: What is sharding?** **A:** Horizontally partitioning a collection's documents across multiple servers based on a shard key.
 7. **Q: What is a hot shard?** **A:** A shard receiving a disproportionate share of writes/reads due to a poorly-chosen shard key, limiting horizontal scalability.
 8. **Q: Why should `$match` generally appear early in an aggregation pipeline?** **A:** To reduce the number of documents flowing into later, more expensive stages.

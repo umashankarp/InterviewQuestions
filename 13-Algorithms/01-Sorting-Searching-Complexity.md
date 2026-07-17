@@ -72,14 +72,14 @@ graph TB
 
 ### Basic (10)
 1. **Q: What is Big-O notation used for?** **A:** Describing how an algorithm's running time/space grows as input size grows, abstracting away hardware-specific constants.
-2. **Q: What is the average-case time complexity of quicksort?** **A:** O(n log n).
+2. **Q: What is the average-case time complexity of quicksort?** **A:** O(n log n) average with excellent constants (in-place, cache-friendly partitioning), but O(n²) worst case on adversarial/sorted input with poor pivot choice — which is why production sorts (introsort) switch to heapsort when recursion depth signals the degenerate case.
 3. **Q: What is a stable sort?** **A:** One that preserves the relative order of elements considered equal by the comparison.
-4. **Q: Is `Array.Sort` stable?** **A:** No.
-5. **Q: Is LINQ's `OrderBy` stable?** **A:** Yes.
+4. **Q: Is `Array.Sort` stable?** **A:** No — it uses introsort (quicksort/heapsort/insertion-sort hybrid), which does not preserve the relative order of equal elements; if stability matters, use LINQ's `OrderBy` or sort by a composite key that breaks ties explicitly.
+5. **Q: Is LINQ's `OrderBy` stable?** **A:** Yes — equal keys preserve their source order (documented behavior, implemented via original-index tiebreaking), which is what makes incremental `OrderBy(...).ThenBy(...)` composition and "sort by one column, keep prior order within ties" UI behavior correct.
 6. **Q: What is the precondition for binary search to work correctly?** **A:** The input must already be sorted with respect to the comparison used.
-7. **Q: What is the time complexity of binary search?** **A:** O(log n).
+7. **Q: What is the time complexity of binary search?** **A:** O(log n) — each comparison halves the remaining search space; the precondition is a *sorted* input with random access, which is why binary search over an unsorted or linked structure is either wrong or loses its advantage.
 8. **Q: What sorting algorithm does .NET's `Array.Sort` actually use?** **A:** Introsort — a hybrid of quicksort, heapsort, and insertion sort.
-9. **Q: What is merge sort's auxiliary space complexity?** **A:** O(n).
+9. **Q: What is merge sort's auxiliary space complexity?** **A:** O(n) — the merge step needs a temporary buffer the size of the input; that extra space is the price of merge sort's guaranteed O(n log n) worst case and natural stability, versus quicksort's in-place partitioning.
 10. **Q: What is the classic integer-overflow bug in binary search implementations?** **A:** Computing `mid = (low + high) / 2`, where `low + high` can overflow for large arrays.
 
 ### Intermediate (10)

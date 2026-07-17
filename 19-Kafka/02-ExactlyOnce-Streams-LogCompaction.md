@@ -110,7 +110,7 @@ graph TB
 6. **Q: What is log compaction?** **A:** A retention strategy that keeps only the most recent record per key, rather than deleting by time/size regardless of key.
 7. **Q: What is a tombstone in a compacted topic?** **A:** A record published with a null value for a key, signaling that key's data should be fully removed during compaction.
 8. **Q: When should you choose compacted retention over standard, time-based retention?** **A:** When the topic represents current state per key, not a full event history where every occurrence matters.
-9. **Q: What underlies Kafka Streams' internal state stores?** **A:** Compacted changelog topics.
+9. **Q: What underlies Kafka Streams' internal state stores?** **A:** Compacted changelog topics — every local (RocksDB) state-store update is also written to a per-store changelog topic in Kafka; on instance failure or rebalance, the replacement instance rebuilds its state by replaying that compacted changelog, making the "local" state durably recoverable.
 10. **Q: What configuration enables Kafka Streams' exactly-once processing guarantee?** **A:** `processing.guarantee=exactly_once_v2`.
 
 ### Intermediate (10)

@@ -99,11 +99,11 @@ graph TB
 
 ### Basic (10)
 1. **Q: What is a Resource Group, and what AWS concept is it most similar to?** **A:** A logical container for related Azure resources sharing a lifecycle — it has no precise direct AWS equivalent, though it combines aspects of tagging and IAM scoping.
-2. **Q: What is the Azure equivalent of an AWS VPC?** **A:** A VNet (Virtual Network).
+2. **Q: What is the Azure equivalent of an AWS VPC?** **A:** A VNet (Virtual Network) — the same isolated, CIDR-addressed private network boundary; the notable divergence is that VNet subnets are Region-scoped (spanning Availability Zones) whereas AWS subnets are pinned to a single AZ.
 3. **Q: What is the key structural difference between an Azure NSG and an AWS Security Group?** **A:** An NSG can associate with both a subnet and an individual NIC simultaneously; AWS Security Groups associate only with the instance's network interface.
 4. **Q: What is the difference between Azure Availability Zones and Availability Sets?** **A:** Availability Zones are physically separate datacenters within a Region (protecting against datacenter-level failure); Availability Sets spread VMs across fault/update domains within a single datacenter only.
 5. **Q: What is the Azure equivalent of an AWS ALB?** **A:** Application Gateway (Layer 7), which additionally bundles a Web Application Firewall natively.
-6. **Q: What is the Azure equivalent of an AWS Auto Scaling Group?** **A:** VM Scale Sets (VMSS).
+6. **Q: What is the Azure equivalent of an AWS Auto Scaling Group?** **A:** VM Scale Sets (VMSS) — the same declarative "maintain N instances from a template with metric-driven scaling" role; Flexible orchestration mode is the closer ASG analog (mixed sizes, spot mix, fault-domain spreading) versus the older Uniform mode's identical-instance model.
 7. **Q: Must VMSS zone-spanning be explicitly configured, or is it automatic?** **A:** It must be explicitly configured — it is not an automatic, implicit property of using VMSS.
 8. **Q: What does Azure Policy provide, and what AWS mechanism is it most analogous to?** **A:** Organization-wide, enforceable configuration constraints — analogous to AWS Service Control Policies.
 9. **Q: How many pillars does the Azure Well-Architected Framework have, and how does this compare to AWS's?** **A:** Five (Reliability, Security, Cost Optimization, Operational Excellence, Performance Efficiency) versus AWS's six — Azure folds Sustainability into general guidance rather than a standalone pillar.

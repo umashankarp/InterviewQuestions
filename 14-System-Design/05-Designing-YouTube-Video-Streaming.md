@@ -96,7 +96,7 @@ graph TB
 7. **Q: Why should transcoding be split into independent per-rendition jobs rather than one monolithic per-video job?** **A:** To avoid a video's fastest, cheapest rendition being blocked behind its slowest, most expensive rendition, allowing partial availability sooner (§4).
 8. **Q: What is a signed URL used for in this context?** **A:** Allowing a CDN to serve access-controlled content by validating a time-limited, cryptographically-signed URL without needing to understand the platform's own authorization logic.
 9. **Q: Why might older, rarely-viewed videos use different storage than recently-uploaded, popular ones?** **A:** Storage tiering by access frequency — hot content on fast/CDN-adjacent storage, cold content on cheaper archival storage.
-10. **Q: What two protocols are commonly used for adaptive bitrate streaming?** **A:** HLS and DASH.
+10. **Q: What two protocols are commonly used for adaptive bitrate streaming?** **A:** HLS (Apple's, dominant for device compatibility) and DASH (the MPEG standard) — both segment video into small chunks encoded at multiple bitrate "ladder" renditions listed in a manifest, letting the *client* switch quality per segment based on measured bandwidth, over plain HTTP that CDNs cache natively.
 
 ### Intermediate (10)
 1. **Q: Why does per-chunk retry (not whole-file retry) matter for upload reliability?** **A:** A network interruption only requires retrying the specific failed chunk, not re-uploading gigabytes of already-successfully-transferred data — directly Module 2's retry-with-backoff pattern applied at chunk granularity.

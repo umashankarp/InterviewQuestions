@@ -90,7 +90,7 @@ classDiagram
 ## 10. Interview Questions
 
 ### Basic (10)
-1. **Q: What are the four pillars of OOP?** **A:** Encapsulation, Inheritance, Polymorphism, Abstraction.
+1. **Q: What are the four pillars of OOP?** **A:** Encapsulation (hiding state behind behavior-exposing interfaces), Inheritance (deriving specialized types from general ones), Polymorphism (one interface, many runtime behaviors via dispatch), and Abstraction (modeling essential characteristics while omitting irrelevant detail).
 2. **Q: What is encapsulation?** **A:** Bundling data with the behavior operating on it, hiding internal representation behind a controlled interface.
 3. **Q: What is polymorphism?** **A:** Code operating uniformly over multiple concrete types through a shared interface/base type, with actual behavior determined at runtime by the concrete type.
 4. **Q: What does "favor composition over inheritance" mean?** **A:** Prefer a type holding and delegating to another type over inheriting from it, to minimize coupling.

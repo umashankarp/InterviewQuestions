@@ -93,7 +93,7 @@ graph TB
 5. **Q: What is a greedy algorithm?** **A:** One that makes a locally optimal choice at each step, never reconsidering it.
 6. **Q: Is greedy always correct?** **A:** No — only for problems with the greedy-choice property, which must be proven for the specific problem.
 7. **Q: What is the classic example showing greedy coin-change can fail?** **A:** Denominations {1, 3, 4} making change for 6 — greedy gives 3 coins (4+1+1), optimal is 2 (3+3).
-8. **Q: What DP problem archetype underlies diff algorithms?** **A:** Longest Common Subsequence (LCS).
+8. **Q: What DP problem archetype underlies diff algorithms?** **A:** Longest Common Subsequence (LCS) — a diff is derived by computing the LCS of the two files' lines and emitting everything *not* in the LCS as insertions/deletions; production diffs use refinements (Myers' algorithm) but the underlying archetype is LCS.
 9. **Q: What DP problem archetype underlies fuzzy string matching/spell-checkers?** **A:** Edit distance (Levenshtein distance).
 10. **Q: Is Dijkstra's algorithm greedy or DP?** **A:** Greedy — it always expands the currently-cheapest-known node next, correct specifically because shortest-path costs are simply additive with no interdependency.
 

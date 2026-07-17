@@ -77,7 +77,7 @@ graph LR
 4. **Q: What is contract testing?** **A:** Verifying that an API's actual behavior matches its documented contract (or its consumers' actual dependencies).
 5. **Q: What is consumer-driven contract testing?** **A:** Each consumer writes a contract describing what it actually depends on; the provider runs all consumer contracts in its own CI.
 6. **Q: Is adding a new optional field to a response always non-breaking?** **A:** Not necessarily — a consumer using strict, unknown-field-rejecting deserialization could still break, even though it's additive.
-7. **Q: What is Pact?** **A:** The dominant tool for consumer-driven contract testing.
+7. **Q: What is Pact?** **A:** The dominant tool for consumer-driven contract testing — consumers record their actual expectations of a provider's API as executable "pact" files, which the provider then replays in its own CI to verify it still satisfies every registered consumer before deploying.
 8. **Q: Why might a hand-maintained API documentation page become inaccurate over time?** **A:** Nothing mechanically ties it to the actual implementation, so it drifts as the code changes without corresponding doc updates.
 9. **Q: Should an internal-only endpoint appear in a publicly-served OpenAPI spec?** **A:** No — it should be excluded from the public spec even if included in an internal development-tooling version.
 10. **Q: What's the value of an API design review before implementation?** **A:** Catching design/consistency mistakes while they're still cheap to change (a spec edit), before consumers depend on the shipped behavior.

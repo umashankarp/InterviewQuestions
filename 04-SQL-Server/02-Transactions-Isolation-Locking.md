@@ -81,13 +81,13 @@ graph LR
 ## 10. Interview Questions
 
 ### Basic (10)
-1. **Q: What does ACID stand for?** **A:** Atomicity, Consistency, Isolation, Durability.
-2. **Q: What is SQL Server's default isolation level?** **A:** Read Committed.
+1. **Q: What does ACID stand for?** **A:** Atomicity (all-or-nothing commit), Consistency (constraints hold across the transaction), Isolation (concurrent transactions don't observe each other's intermediate state), Durability (a committed transaction survives crashes, via the write-ahead log).
+2. **Q: What is SQL Server's default isolation level?** **A:** Read Committed — readers see only committed data (no dirty reads), by default via shared locks released as each row is read (or via row versioning when `READ_COMMITTED_SNAPSHOT` is on); it does not prevent non-repeatable reads or phantoms.
 3. **Q: What is a dirty read?** **A:** Reading another transaction's uncommitted data, which might later be rolled back.
 4. **Q: What is a non-repeatable read?** **A:** Reading the same row twice within one transaction and getting different values because another transaction committed a change in between.
 5. **Q: What is a phantom read?** **A:** Re-running the same query and getting additional rows a concurrent insert added, even though individual previously-read rows didn't change.
 6. **Q: What is a deadlock?** **A:** A cycle where two or more transactions each hold a lock the other needs, with neither able to proceed.
-7. **Q: What error code does SQL Server return to a deadlock victim?** **A:** 1205.
+7. **Q: What error code does SQL Server return to a deadlock victim?** **A:** 1205 ("Transaction was deadlocked ... and has been chosen as the deadlock victim. Rerun the transaction.") — the victim's transaction is rolled back, and application code should treat 1205 as a retryable error class rather than a generic failure.
 8. **Q: What's the difference between blocking and a deadlock?** **A:** Blocking is one transaction waiting for another's lock to release, resolving once it does; a deadlock is a genuine cycle where nothing can resolve on its own, requiring the engine to kill one transaction.
 9. **Q: What is Snapshot Isolation's underlying mechanism?** **A:** Row versioning — readers see a consistent snapshot as of transaction start, stored via versions in tempdb, rather than acquiring locks.
 10. **Q: What should application code do when it receives a deadlock error?** **A:** Retry the transaction — a deadlock is an expected, recoverable condition under concurrency, not a fatal application bug.

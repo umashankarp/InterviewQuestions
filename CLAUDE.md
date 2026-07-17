@@ -37,7 +37,7 @@ Section numbers §7–§9 are intentionally retired (see the 2026-07-17 restruct
 4. **Production Example** — a realistic enterprise scenario: Problem / Architecture / Implementation / Trade-offs / Lessons learned (Scenario/Investigation/Root cause/Fix/Lesson framing is fine as the concrete vehicle for this).
 5. **Best Practices** — why they matter, when to use, when NOT to use.
 6. **Anti-patterns** — common mistakes, why they fail, how to fix them.
-10. **Interview Questions** — **40 standard: 10 Basic / 10 Intermediate / 10 Advanced / 10 Expert** (each with Question, Ideal Answer, Why this answer is correct, Common mistakes, Possible follow-up questions), **plus a closing `### Additional Medium → Expert (20)` subsection: at least 20 more medium-to-expert Q&A in compact `**Q: …?** **A:** …` form** (no 5-part scaffolding, but answers must stay deep and specific, 2–4 sentences).
+10. **Interview Questions** — **40 total: 10 Basic / 10 Intermediate / 10 Advanced / 10 Expert.** Each question includes: Question, Ideal Answer, Why this answer is correct, Common mistakes, Possible follow-up questions. Every question at every level must carry a proper, complete answer — no answer-less question lists.
 11. **Coding Exercises** — Easy / Medium / Hard / Expert. Each includes: Problem, Solution, Time complexity, Space complexity, Optimized solution.
 12. **System Design** (own, fully-authored section, not a pointer) — Requirements (functional/non-functional), architecture, components, database selection, caching, messaging, scaling, failure handling, monitoring, trade-offs.
 13. **Low-Level Design** (own section) — requirements, class diagram, sequence diagram, design patterns used, SOLID mapping, extensibility, concurrency/thread safety.
@@ -57,9 +57,9 @@ Later modules within a domain, and later domains that revisit a concept (e.g., K
 
 Modules 1–78 were authored against a compressed version of the template (30 Q&A instead of 40 with 5-part answers; §§12–17 collapsed into a pointer instead of fully authored). User decision: **no retrofit** of those structural gaps — Modules 1–78 stand as-is. The full section spec above applies verbatim starting at **Module 79**. If the user later asks to redo a specific past module, treat it as a one-off request, not a signal to retrofit the whole backlog.
 
-## Resolved: §7/§8/§9 removal + extra Q&A (2026-07-17)
+## Resolved: §7/§8/§9 removal (2026-07-17)
 
-Later the same day, the user decided (superseding the narrow no-retrofit scope above for exactly these two changes, applied to **all** modules): (1) the standalone **§7 Performance Engineering / §8 Security / §9 Scalability sections are removed from every module file** and retired from the template — do not author them in new modules; (2) **every module file gains a `### Additional Medium → Expert (20)` subsection at the end of §10 Interview Questions** with at least 20 compact medium-to-expert Q&A. Section numbering was deliberately NOT compacted after the removal (existing files still jump §6 → §10) to keep historical cross-references valid; new modules follow the same numbering.
+Later the same day, the user decided (superseding the narrow no-retrofit scope above for exactly this change, applied to **all** modules): the standalone **§7 Performance Engineering / §8 Security / §9 Scalability sections are removed from every module file** and retired from the template — do not author them in new modules; performance/security/scalability implications are woven into §2 Deep Dive, §5/§6, and §12 instead. Section numbering was deliberately NOT compacted after the removal (existing files still jump §6 → §10) to keep historical cross-references valid; new modules follow the same numbering. An initial follow-up plan to append a 20-question "Additional Medium → Expert" block to every file was **explicitly reversed by the user the same day** — do not add such blocks; instead, ensure every existing Basic/Intermediate/Advanced (and Expert) question carries a proper answer.
 
 ## Current progress
 
