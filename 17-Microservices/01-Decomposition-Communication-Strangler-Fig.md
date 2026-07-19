@@ -27,6 +27,10 @@ RDS       DynamoDB      Aurora       DynamoDB         DynamoDB
               Amazon EventBridge / SNS / SQS
                          |
                   Other Microservices
+
+
+
+
 ---
 
 ## 1. Fundamentals
