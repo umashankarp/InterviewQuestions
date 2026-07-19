@@ -2,35 +2,6 @@
 
 > Domain: Microservices | Level: Beginner → Expert | Prerequisite: [[../16-Distributed-Systems/02-Failure-Detection-Idempotency-Outbox]], [[../14-System-Design/07-Designing-Amazon-Ecommerce]] (the order-fulfillment Saga, a direct microservices example), [[../10-SOLID/01-SOLID-Principles-Deep-Dive]] §2.1 (SRP, the actual theoretical basis for service decomposition)
 
-
-                    Internet
-                        |
-                  Amazon CloudFront
-                        |
-                  AWS WAF (Security)
-                        |
-                 Amazon API Gateway
-                        |
-              +-----------------------+
-              |                       |
-        ECS / EKS / Lambda      Cognito
-              |
--------------------------------------------------------------
-|            |            |            |                    |
-User      Order      Payment      Inventory         Notification
-Service    Service     Service       Service             Service
-|            |            |            |                    |
-RDS       DynamoDB      Aurora       DynamoDB         DynamoDB
-|            |            |            |                    |
-+------------+------------+------------+--------------------+
-                         |
-              Amazon EventBridge / SNS / SQS
-                         |
-                  Other Microservices
-
-
-
-
 ---
 
 ## 1. Fundamentals
