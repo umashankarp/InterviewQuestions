@@ -6,6 +6,142 @@
 
 ---
 
+# Saga Pattern (Distributed Transactions)
+
+```mermaid
+flowchart LR
+
+    Client[🛒 Customer]
+
+    Client --> API[API Gateway]
+
+    API --> OrderService[Order Service]
+
+    OrderService --> Saga[Saga Orchestrator]
+
+    Saga --> PaymentService[Payment Service]
+    Saga --> InventoryService[Inventory Service]
+    Saga --> ShippingService[Shipping Service]
+    Saga --> NotificationService[Notification Service]
+
+    PaymentService --> PaymentDB[(Payment DB)]
+    InventoryService --> InventoryDB[(Inventory DB)]
+    ShippingService --> ShippingDB[(Shipping DB)]
+    OrderService --> OrderDB[(Order DB)]
+
+    Saga --> EventBus[Event Bus]
+
+    EventBus --> CloudWatch[Monitoring]
+```
+
+---
+
+# Orchestration Saga
+
+```text
+Create Order
+      │
+      ▼
+Saga Orchestrator
+      │
+      ▼
+Reserve Inventory
+      │
+      ▼
+Process Payment
+      │
+      ▼
+Create Shipment
+      │
+      ▼
+Send Notification
+      │
+      ▼
+Order Completed
+```
+
+---
+
+# Choreography Saga
+
+```text
+Order Created Event
+        │
+        ▼
+Inventory Service
+        │
+Inventory Reserved Event
+        │
+        ▼
+Payment Service
+        │
+Payment Completed Event
+        │
+        ▼
+Shipping Service
+        │
+Shipment Created Event
+        │
+        ▼
+Notification Service
+```
+
+---
+
+# Compensating Transaction
+
+```text
+Order Created
+      │
+Reserve Inventory ✔
+      │
+Payment Failed ❌
+      │
+Compensation Starts
+      │
+Release Inventory
+      │
+Cancel Order
+      │
+Notify Customer
+```
+
+---
+
+# Failure Recovery
+
+```text
+Payment Timeout
+      │
+Retry (3 Times)
+      │
+───────────────
+Success ✔
+      │
+Continue Saga
+
+OR
+
+Failure ❌
+      │
+Compensation
+      │
+Rollback Business State
+```
+
+---
+
+# Services
+
+| Service | Responsibility |
+|----------|----------------|
+| Order | Create Order |
+| Inventory | Reserve Stock |
+| Payment | Charge Customer |
+| Shipping | Arrange Delivery |
+| Notification | Email/SMS |
+| Saga | Coordinates Transaction |
+
 ## 1. Fundamentals
 
 **What:** A Saga is a sequence of **local transactions**, each confined to one service/bounded context, coordinated so that if any step fails partway through, previously-completed steps are undone via their own explicit **compensating transactions** — since no single, distributed ACID transaction can span multiple independent services.

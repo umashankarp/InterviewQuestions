@@ -4,6 +4,162 @@
 
 ---
 
+# Apache Kafka Architecture
+
+```mermaid
+flowchart LR
+
+    Producer[Producer]
+
+    Producer --> Broker1[Kafka Broker 1]
+    Producer --> Broker2[Kafka Broker 2]
+    Producer --> Broker3[Kafka Broker 3]
+
+    Broker1 <-->|Replication| Broker2
+    Broker2 <-->|Replication| Broker3
+    Broker3 <-->|Replication| Broker1
+
+    Broker1 --> ConsumerGroup[Consumer Group]
+
+    ConsumerGroup --> Consumer1[Consumer 1]
+    ConsumerGroup --> Consumer2[Consumer 2]
+    ConsumerGroup --> Consumer3[Consumer 3]
+
+    Broker1 --> Monitoring[Prometheus / Grafana]
+```
+
+---
+
+# Topic Partitioning
+
+```text
+Topic : Orders
+
++------------+
+| Partition0 |
++------------+
+| Order-101  |
+| Order-104  |
+| Order-107  |
++------------+
+
++------------+
+| Partition1 |
++------------+
+| Order-102  |
+| Order-105  |
+| Order-108  |
++------------+
+
++------------+
+| Partition2 |
++------------+
+| Order-103  |
+| Order-106  |
+| Order-109  |
++------------+
+```
+
+---
+
+# Replication
+
+```text
+Broker-1
+Partition-0 (Leader)
+
+        │
+        │ Replication
+        ▼
+
+Broker-2
+Partition-0 (Follower)
+
+        │
+        ▼
+
+Broker-3
+Partition-0 (Follower)
+```
+
+---
+
+# Consumer Group
+
+```text
+Topic
+      │
+      ▼
++----------------------+
+| Consumer Group A     |
++----------------------+
+      │
+      ├─────────────┐
+      ▼             ▼
+Consumer-1     Consumer-2
+
+Partition-0 → Consumer-1
+Partition-1 → Consumer-2
+Partition-2 → Consumer-1
+```
+
+---
+
+# Message Flow
+
+```text
+Producer
+    │
+Publish Message
+    │
+    ▼
+Kafka Topic
+    │
+Partition
+    │
+Leader Broker
+    │
+Replicate to Followers
+    │
+Consumer Group
+    │
+Business Service
+```
+
+---
+
+# Kafka Components
+
+| Component | Responsibility |
+|-----------|----------------|
+| Producer | Publishes messages |
+| Topic | Logical stream of events |
+| Partition | Parallelism and ordering unit |
+| Broker | Stores and serves data |
+| Leader | Handles reads and writes |
+| Follower | Replicates data |
+| Consumer | Reads messages |
+| Consumer Group | Enables scalable processing |
+| Offset | Tracks message position |
+
+
+                Producer
+                    │
+                    ▼
+             Kafka Cluster
+     ┌──────────┬──────────┬──────────┐
+     │ Broker1  │ Broker2  │ Broker3  │
+     └──────────┴──────────┴──────────┘
+             │
+         Topic (Orders)
+             │
+    ┌────────┼─────────┐
+    ▼        ▼         ▼
+ Partition0 Partition1 Partition2
+    │        │         │
+    ▼        ▼         ▼
+ Consumer1 Consumer2 Consumer3
+
 ## 1. Fundamentals
 
 ### What is Kafka, and why does it warrant a dedicated module beyond Module 53's broker-agnostic EDA concepts?

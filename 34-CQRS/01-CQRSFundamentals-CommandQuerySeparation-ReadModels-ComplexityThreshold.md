@@ -6,6 +6,140 @@
 
 ---
 
+# CQRS (Command Query Responsibility Segregation)
+
+```mermaid
+flowchart LR
+
+    Client[🌐 Web / Mobile]
+
+    Client --> API[API Gateway / Controller]
+
+    API --> CommandAPI[Command API]
+    API --> QueryAPI[Query API]
+
+    CommandAPI --> CommandHandler[Command Handler]
+    QueryAPI --> QueryHandler[Query Handler]
+
+    CommandHandler --> Domain[Domain Model]
+    Domain --> WriteDB[(Write Database)]
+
+    Domain --> DomainEvent[Domain Events]
+
+    DomainEvent --> EventBus[Event Bus]
+
+    EventBus --> Projection[Projection / Read Model Builder]
+
+    Projection --> ReadDB[(Read Database)]
+
+    QueryHandler --> ReadDB
+
+    CommandHandler --> CloudWatch[Monitoring]
+```
+
+---
+
+# Write Flow (Commands)
+
+```text
+Client
+   │
+CreateOrder Command
+   │
+API Controller
+   │
+Command Handler
+   │
+Aggregate Root
+   │
+Validate Business Rules
+   │
+Save to Write Database
+   │
+Publish Domain Event
+   │
+Event Bus
+```
+
+---
+
+# Read Flow (Queries)
+
+```text
+Client
+   │
+GetOrder Query
+   │
+Query Handler
+   │
+Read Database
+   │
+Return DTO
+```
+
+---
+
+# Read Model Synchronization
+
+```text
+Order Created
+      │
+      ▼
+Domain Event
+      │
+      ▼
+Event Bus
+      │
+      ▼
+Projection Service
+      │
+      ▼
+Read Database
+      │
+Optimized View
+```
+
+---
+
+# Typical Folder Structure
+
+```
+Application
+│
+├── Commands
+│   ├── CreateOrderCommand
+│   ├── CancelOrderCommand
+│   └── Handlers
+│
+├── Queries
+│   ├── GetOrderQuery
+│   ├── SearchProductsQuery
+│   └── Handlers
+│
+├── DTOs
+└── Interfaces
+
+Domain
+Infrastructure
+API
+```
+
+---
+
+# Components
+
+| Component | Responsibility |
+|-----------|----------------|
+| Command | Changes system state |
+| Query | Reads data only |
+| Command Handler | Executes business logic |
+| Query Handler | Retrieves optimized data |
+| Aggregate | Enforces business rules |
+| Write Database | Source of truth |
+| Read Database | Optimized for fast queries |
+| Projection | Builds read models |
+| Event Bus | Synchronizes read models |
+
 ## 1. Fundamentals
 
 **What:** CQRS (Command Query Responsibility Segregation) is the architectural pattern of using **separate models** for writing data (Commands — state-changing operations enforcing business invariants) and reading data (Queries — read-only operations optimized for the consumer's display/reporting needs), rather than one unified model serving both.

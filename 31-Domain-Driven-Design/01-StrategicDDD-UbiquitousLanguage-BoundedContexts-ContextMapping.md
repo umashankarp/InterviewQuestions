@@ -8,6 +8,131 @@
 
 ---
 
+# Domain-Driven Design (DDD)
+
+```mermaid
+flowchart TB
+
+    Client[Web / Mobile]
+
+    Client --> API[API / Controller]
+
+    API --> Application[Application Layer]
+
+    Application --> Domain[Domain Layer]
+
+    Domain --> Entity[Entities]
+    Domain --> VO[Value Objects]
+    Domain --> Aggregate[Aggregates]
+    Domain --> DomainService[Domain Services]
+    Domain --> Events[Domain Events]
+    Domain --> Repository[Repository Interface]
+
+    Repository --> Infrastructure[Infrastructure Layer]
+
+    Infrastructure --> DB[(Database)]
+
+    Infrastructure --> External[External Services]
+```
+
+---
+
+# DDD Building Blocks
+
+```text
+                 Domain
+                    │
+    ┌───────────────┼────────────────┐
+    │               │                │
+ Entities      Value Objects    Aggregates
+    │               │                │
+    └───────────────┼────────────────┘
+                    │
+             Domain Services
+                    │
+             Domain Events
+                    │
+         Repository Interfaces
+                    │
+             Infrastructure
+```
+
+---
+
+# Request Flow
+
+```text
+Client
+   │
+   ▼
+Controller
+   │
+   ▼
+Application Service
+   │
+   ▼
+Aggregate Root
+   │
+   ▼
+Entity + Value Objects
+   │
+   ▼
+Repository
+   │
+   ▼
+Database
+```
+
+---
+
+# Typical DDD Project Structure
+
+```
+Solution
+│
+├── API
+│
+├── Application
+│   ├── Commands
+│   ├── Queries
+│   ├── DTOs
+│   ├── Interfaces
+│   └── Handlers
+│
+├── Domain
+│   ├── Aggregates
+│   ├── Entities
+│   ├── ValueObjects
+│   ├── DomainEvents
+│   ├── DomainServices
+│   ├── Repositories
+│   └── Exceptions
+│
+├── Infrastructure
+│   ├── Persistence
+│   ├── EF Core
+│   ├── Repository Implementations
+│   └── External Services
+│
+└── Tests
+```
+
+---
+
+# DDD Concepts
+
+| Concept | Purpose |
+|---------|---------|
+| Entity | Has identity (e.g., Customer, Order) |
+| Value Object | Immutable object with no identity (e.g., Address, Money) |
+| Aggregate | Consistency boundary that groups related entities |
+| Aggregate Root | Entry point to an aggregate (e.g., Order) |
+| Repository | Loads and saves aggregates |
+| Domain Service | Business logic that doesn't belong to a single entity |
+| Domain Event | Represents something important that happened in the domain |
+| Application Service | Coordinates use cases and transactions |
+| Infrastructure | Database, messaging, external APIs |
+
 ## Interview Questions
 
 ### Basic (10)

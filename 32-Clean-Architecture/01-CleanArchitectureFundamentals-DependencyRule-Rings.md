@@ -8,6 +8,102 @@
 
 ---
 
+# Clean Architecture
+
+```mermaid
+flowchart TB
+
+    UI[Presentation Layer<br/>React / Angular / MVC]
+
+    Controller[Controllers / API]
+
+    App[Application Layer<br/>Use Cases]
+
+    Domain[Domain Layer<br/>Entities & Business Rules]
+
+    Infra[Infrastructure Layer]
+
+    DB[(SQL / NoSQL Database)]
+    External[External APIs]
+
+    UI --> Controller
+    Controller --> App
+    App --> Domain
+
+    App --> Infra
+
+    Infra --> DB
+    Infra --> External
+```
+
+---
+
+## Layer Responsibilities
+
+| Layer | Responsibility |
+|--------|----------------|
+| Presentation | UI, Controllers, API Endpoints |
+| Application | Business Use Cases, Commands, Queries |
+| Domain | Entities, Value Objects, Domain Services, Business Rules |
+| Infrastructure | Database, EF Core, External APIs, Email, File Storage |
+
+---
+
+## Dependency Rule
+
+```
+Presentation
+      ↓
+Application
+      ↓
+Domain
+
+Infrastructure
+      ↑
+Application
+```
+
+- **Domain** has **no dependencies**.
+- **Application** depends only on **Domain**.
+- **Infrastructure** implements interfaces defined in **Application**.
+- **Presentation** calls the **Application** layer.
+
+---
+
+## Typical .NET Folder Structure
+
+```
+Solution
+│
+├── API
+│   ├── Controllers
+│   ├── Middleware
+│   └── Program.cs
+│
+├── Application
+│   ├── Commands
+│   ├── Queries
+│   ├── DTOs
+│   ├── Interfaces
+│   └── Validators
+│
+├── Domain
+│   ├── Entities
+│   ├── Enums
+│   ├── ValueObjects
+│   ├── Events
+│   └── Exceptions
+│
+├── Infrastructure
+│   ├── Persistence
+│   ├── Repositories
+│   ├── Services
+│   ├── Identity
+│   └── External APIs
+│
+└── Tests
+```
+
 ## Interview Questions
 
 ### Basic (8)
