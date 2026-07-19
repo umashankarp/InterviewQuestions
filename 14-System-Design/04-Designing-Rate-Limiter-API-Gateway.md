@@ -3,6 +3,100 @@
 > Domain: System Design | Level: Beginner → Expert | Prerequisite: [[01-System-Design-Fundamentals]], [[../03-REST-APIs/02-API-Security-Rate-Limiting]] (rate-limiting algorithms), [[../01-CSharp/02-Async-Await-Internals]] §Expert Q6 (the original distributed rate limiter introduced early in this course)
 
 ---
+# Distributed Rate Limiter & API Gateway (AWS)
+
+```mermaid
+flowchart LR
+
+    Client[Client]
+
+    Client --> CloudFront[CloudFront]
+
+    CloudFront --> WAF[AWS WAF]
+
+    WAF --> APIGateway[API Gateway]
+
+    APIGateway --> Auth[Cognito / JWT]
+
+    Auth --> RateLimiter[Rate Limiter]
+
+    RateLimiter --> Redis[(ElastiCache Redis)]
+
+    RateLimiter -->|Allowed| ALB[Application Load Balancer]
+
+    RateLimiter -->|429 Too Many Requests| Reject[Reject Request]
+
+    ALB --> ECS[ECS / EKS Microservices]
+
+    ECS --> Aurora[(Aurora)]
+
+    ECS --> DynamoDB[(DynamoDB)]
+
+    ECS --> EventBridge[EventBridge]
+
+    EventBridge --> SNS[SNS]
+
+    SNS --> SQS[SQS]
+
+    ECS --> CloudWatch[CloudWatch]
+```
+
+## Request Flow
+
+```
+Client
+   │
+   ▼
+CloudFront
+   │
+AWS WAF
+   │
+API Gateway
+   │
+Authentication
+   │
+Rate Limiter (Redis)
+   │
+ ┌──────────────┐
+ │ Allowed?     │
+ └──────┬───────┘
+        │Yes
+        ▼
+ Load Balancer
+        │
+  ECS / EKS Services
+        │
+Aurora / DynamoDB
+        │
+ EventBridge
+        │
+   SNS → SQS
+```
+
+### AWS Services Used
+
+- CloudFront
+- AWS WAF
+- API Gateway
+- Amazon Cognito
+- ElastiCache (Redis)
+- Application Load Balancer
+- ECS / EKS
+- Aurora
+- DynamoDB
+- EventBridge
+- SNS
+- SQS
+- CloudWatch
+
+**Interview explanation (30 seconds):**
+1. Client requests go through **CloudFront** and **AWS WAF** for caching and protection.
+2. **API Gateway** authenticates the request using **Cognito/JWT**.
+3. A **distributed rate limiter** checks request counts in **Redis**.
+4. If the limit is exceeded, the client receives **HTTP 429**.
+5. Valid requests are routed through the **ALB** to **ECS/EKS microservices**.
+6. Services store data in **Aurora/DynamoDB**, publish events to **EventBridge**, and send asynchronous notifications using **SNS + SQS**.
+7. **CloudWatch** monitors logs, metrics, and alarms.
 
 ## 1. Fundamentals
 

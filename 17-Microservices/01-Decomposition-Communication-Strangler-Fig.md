@@ -47,6 +47,49 @@ Named after a fig species that gradually envelops and eventually replaces a host
 
 ## 3. Visual Architecture
 
+# AWS Microservices Reference Architecture
+
+```text
+                           Internet
+                               |
+                        Amazon CloudFront
+                               |
+                         AWS WAF (Security)
+                               |
+                      Amazon API Gateway
+                               |
+                   +-------------------------+
+                   |                         |
+           ECS / EKS / Lambda         Amazon Cognito
+                   |
+--------------------------------------------------------------------------------
+|               |               |                |                           |
+User Service   Order Service   Payment Service  Inventory Service   Notification Service
+|               |               |                |                           |
+Amazon RDS    DynamoDB      Amazon Aurora      DynamoDB                 DynamoDB
+|               |               |                |                           |
++---------------+---------------+----------------+---------------------------+
+                                |
+               Amazon EventBridge / SNS / SQS
+                                |
+                      Other Microservices
+```
+
+---
+# Architecture Principles Followed
+
+- API Gateway Pattern
+- Database per Service
+- Event-Driven Architecture
+- Loose Coupling
+- High Cohesion
+- Independent Deployment
+- Independent Scaling
+- Security by Design
+- Asynchronous Communication
+- Domain-Driven Design (DDD)
+- Microservice Autonomy
+
 ### Business-Capability vs Technical-Layer Decomposition
 ```mermaid
 graph TB

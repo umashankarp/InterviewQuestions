@@ -4,6 +4,125 @@
 
 ---
 
+# Amazon / E-Commerce Platform (AWS)
+
+```mermaid
+flowchart LR
+
+    Customer[🛒 Web / Mobile App]
+
+    Customer --> CloudFront[CloudFront]
+    CloudFront --> WAF[AWS WAF]
+    WAF --> APIGateway[API Gateway]
+    APIGateway --> Cognito[Cognito]
+
+    Cognito --> ALB[Application Load Balancer]
+
+    ALB --> UserService[User Service]
+    ALB --> ProductService[Product Catalog]
+    ALB --> SearchService[Search Service]
+    ALB --> CartService[Cart Service]
+    ALB --> OrderService[Order Service]
+    ALB --> PaymentService[Payment Service]
+    ALB --> InventoryService[Inventory Service]
+    ALB --> NotificationService[Notification Service]
+
+    ProductService --> Aurora[(Aurora)]
+    UserService --> Aurora
+    OrderService --> Aurora
+
+    CartService --> Redis[(ElastiCache Redis)]
+
+    ProductService --> OpenSearch[(OpenSearch)]
+
+    InventoryService --> DynamoDB[(DynamoDB)]
+
+    ProductService --> S3[(S3 Product Images)]
+
+    OrderService --> EventBridge[EventBridge]
+
+    EventBridge --> InventoryWorker[Inventory Worker]
+    EventBridge --> NotificationWorker[Notification Worker]
+
+    NotificationWorker --> SNS[SNS]
+    SNS --> SQS[SQS]
+
+    ALB --> CloudWatch[CloudWatch]
+```
+
+---
+
+# User Purchase Flow
+
+```text
+Customer
+    │
+    ▼
+CloudFront
+    │
+AWS WAF
+    │
+API Gateway
+    │
+Cognito Authentication
+    │
+Application Load Balancer
+    │
+────────────────────────────────────────────
+│ Product Service      → Product Catalog
+│ Search Service       → Search Products
+│ Cart Service         → Shopping Cart
+│ Order Service        → Place Order
+│ Payment Service      → Process Payment
+│ Inventory Service    → Update Stock
+│ Notification Service → Email/SMS
+────────────────────────────────────────────
+             │
+        EventBridge
+             │
+      Inventory & Notification Workers
+             │
+          SNS → SQS
+```
+
+---
+
+# AWS Services Used
+
+| Component | AWS Service |
+|-----------|-------------|
+| CDN | CloudFront |
+| Security | AWS WAF |
+| Authentication | Cognito |
+| API | API Gateway |
+| Load Balancer | ALB |
+| Compute | ECS / EKS |
+| Relational Database | Aurora |
+| Inventory | DynamoDB |
+| Shopping Cart Cache | ElastiCache Redis |
+| Search | OpenSearch |
+| Product Images | Amazon S3 |
+| Event Bus | EventBridge |
+| Notifications | SNS + SQS |
+| Monitoring | CloudWatch |
+
+---
+
+## Core Design Patterns
+
+- API Gateway Pattern
+- Microservices Architecture
+- Database per Service
+- Cache-Aside Pattern
+- CQRS (optional for Orders)
+- Event-Driven Architecture
+- Saga Pattern (Order + Payment + Inventory)
+- Publish–Subscribe
+- Idempotent Payment Processing
+- Retry with Dead Letter Queue (DLQ)
+- Horizontal Auto Scaling
+- CDN for Product Images
+
 ## 1. Fundamentals
 
 ### What makes an e-commerce platform a distinct system-design problem from the content-distribution systems covered so far?

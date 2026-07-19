@@ -3,6 +3,125 @@
 > Domain: System Design | Level: Beginner → Expert | Prerequisite: [[02-Designing-News-Feed-System]] (fan-out/ranking directly reused), [[05-Designing-YouTube-Video-Streaming]] (media storage/CDN directly reused), [[../07-Redis/01-Data-Structures-Caching-Patterns]] (TTL for Stories)
 
 ---
+# Instagram Architecture (AWS)
+
+```mermaid
+flowchart LR
+
+    User[📱 Mobile/Web App]
+
+    User --> CloudFront[CloudFront]
+    CloudFront --> WAF[AWS WAF]
+    WAF --> APIGateway[API Gateway]
+
+    APIGateway --> Auth[Cognito]
+
+    Auth --> ALB[Application Load Balancer]
+
+    ALB --> UserService[User Service]
+    ALB --> FeedService[Feed Service]
+    ALB --> PostService[Post Service]
+    ALB --> StoryService[Story Service]
+    ALB --> MediaService[Media Service]
+    ALB --> NotificationService[Notification Service]
+
+    MediaService --> S3[(Amazon S3)]
+
+    PostService --> Aurora[(Aurora)]
+    UserService --> Aurora
+
+    FeedService --> Redis[(ElastiCache Redis)]
+    FeedService --> DynamoDB[(DynamoDB Feed)]
+
+    PostService --> EventBridge[EventBridge]
+
+    EventBridge --> FeedWorker[Feed Fan-out]
+    EventBridge --> StoryWorker[Story Processor]
+    EventBridge --> NotificationWorker[Notification Worker]
+
+    NotificationWorker --> SNS[SNS]
+    SNS --> SQS[SQS]
+
+    FeedWorker --> FeedService
+
+    MediaService --> CloudFront
+
+    ALB --> CloudWatch[CloudWatch]
+```
+
+---
+
+# Request Flow
+
+```
+                +------------------+
+                | Mobile / Web App |
+                +---------+--------+
+                          |
+                          v
+                  Amazon CloudFront
+                          |
+                      AWS WAF
+                          |
+                    API Gateway
+                          |
+                      Cognito Auth
+                          |
+              Application Load Balancer
+                          |
+     +----------+----------+-----------+-----------+
+     |          |          |           |           |
+     v          v          v           v           v
+ UserSvc   FeedSvc    PostSvc    StorySvc   MediaSvc
+     |          |          |           |           |
+     |      Redis      Aurora      Aurora       S3
+     |          |          |           |           |
+     +----------+----------+-----------+-----------+
+                          |
+                    Amazon EventBridge
+                          |
+          +---------------+----------------+
+          |               |                |
+          v               v                v
+    Feed Worker    Notification      Story Worker
+                          |
+                         SNS
+                          |
+                         SQS
+                          |
+                    Push / Email
+```
+
+## AWS Services Used
+
+| Component | AWS Service |
+|-----------|-------------|
+| CDN | CloudFront |
+| Security | AWS WAF |
+| Authentication | Cognito |
+| API | API Gateway |
+| Load Balancer | ALB |
+| Compute | ECS / EKS |
+| User Database | Aurora |
+| Feed Store | DynamoDB |
+| Cache | ElastiCache Redis |
+| Photo/Video Storage | Amazon S3 |
+| Event Bus | EventBridge |
+| Notifications | SNS + SQS |
+| Monitoring | CloudWatch |
+
+## Core Design Patterns
+
+- API Gateway Pattern
+- Microservices Architecture
+- Feed Fan-out (Write or Read)
+- Event-Driven Architecture
+- Cache-Aside Pattern
+- CQRS (optional for feeds)
+- Publish–Subscribe
+- Database per Service
+- CDN for media delivery
+- Asynchronous processing using EventBridge + SNS + SQS
 
 ## 1. Fundamentals
 

@@ -55,6 +55,56 @@ A **topic** (or exchange, in AMQP terminology) delivers a copy of each published
 
 ## 3. Visual Architecture
 
+# Event-Driven Architecture
+
+Instead of calling services directly, the **Order Service** publishes an event to an event bus. Any interested services subscribe to that event and react independently.
+
+```text
+                     Order Service
+                           |
+                   OrderCreated Event
+                           |
+                    Amazon EventBridge
+      ------------------------------------------------
+      |               |              |               |
+Payment Service  Inventory Service  Email Service  Analytics Service
+```
+
+# Event-Driven Architecture Using AWS
+
+In an **AWS Event-Driven Architecture (EDA)**, microservices do **not** communicate by calling each other directly. Instead, they communicate through **events** using services such as **Amazon EventBridge**, **Amazon SNS**, and **Amazon SQS**.
+
+The service that produces the event is called the **Producer**, and the services that react to the event are called **Consumers**.
+
+---
+
+# AWS Architecture
+
+```text
+                          Customer
+                              |
+                              |
+                     Amazon API Gateway
+                              |
+                    Amazon ECS / EKS / Lambda
+                              |
+                        Order Service
+                              |
+                   Save Order in Database
+                              |
+                Publish OrderCreated Event
+                              |
+                      Amazon EventBridge
+                              |
+   ------------------------------------------------------------------
+   |                 |                 |                |             |
+Payment Service  Inventory Service  Email Service  Analytics Service  Loyalty Service
+   |                 |                 |                |             |
+Aurora          DynamoDB          Amazon SES       Redshift        DynamoDB
+```
+
+---
+
 ### Event Notification vs Event-Carried State Transfer
 ```mermaid
 graph LR

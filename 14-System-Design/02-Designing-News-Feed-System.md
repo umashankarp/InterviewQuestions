@@ -3,6 +3,163 @@
 > Domain: System Design | Level: Beginner → Expert | Prerequisite: [[01-System-Design-Fundamentals]] — this module applies that module's framework to one canonical, deeply-worked system design problem end-to-end.
 
 ---
+# Designing a News Feed / Timeline System (AWS Architecture)
+
+```mermaid
+flowchart TB
+
+    User[👤 Web / Mobile User]
+
+    User --> CF[Amazon CloudFront]
+    CF --> WAF[AWS WAF]
+    WAF --> APIGW[Amazon API Gateway]
+    APIGW --> Cognito[Amazon Cognito]
+
+    Cognito --> ALB[Application Load Balancer]
+
+    ALB --> PostService[Post Service - ECS/EKS]
+    ALB --> FeedService[Feed Service - ECS/EKS]
+    ALB --> UserService[User Service - ECS/EKS]
+    ALB --> FollowService[Follow Service - ECS/EKS]
+    ALB --> MediaService[Media Service - ECS/EKS]
+    ALB --> NotificationService[Notification Service - ECS/EKS]
+
+    %% Storage
+    PostService --> Aurora[(Amazon Aurora)]
+    UserService --> Aurora
+    FollowService --> DynamoDB[(Amazon DynamoDB)]
+
+    MediaService --> S3[(Amazon S3)]
+
+    FeedService --> Redis[(Amazon ElastiCache Redis)]
+
+    %% Event Driven
+    PostService --> EventBridge[Amazon EventBridge]
+
+    EventBridge --> FanoutWorker[Feed Fan-out Worker]
+    EventBridge --> SearchIndexer[Search Indexer]
+    EventBridge --> NotificationWorker[Notification Worker]
+    EventBridge --> AnalyticsWorker[Analytics Worker]
+
+    %% Feed Store
+    FanoutWorker --> FeedDB[(Feed Store - DynamoDB)]
+
+    %% Search
+    SearchIndexer --> OpenSearch[(Amazon OpenSearch)]
+
+    %% Notification
+    NotificationWorker --> SNS[Amazon SNS]
+
+    SNS --> EmailQueue[SQS Email Queue]
+    SNS --> PushQueue[SQS Push Queue]
+
+    EmailQueue --> EmailWorker[Lambda / ECS]
+    PushQueue --> PushWorker[Lambda / ECS]
+
+    %% Feed Read
+    FeedService --> FeedDB
+    FeedService --> Redis
+
+    %% Monitoring
+    PostService --> CloudWatch[Amazon CloudWatch]
+    FeedService --> CloudWatch
+
+    PostService --> XRay[AWS X-Ray]
+    FeedService --> XRay
+
+    %% Security
+    PostService --> Secrets[AWS Secrets Manager]
+```
+
+---
+
+# Feed Read Flow
+
+```mermaid
+sequenceDiagram
+
+    participant User
+    participant API as API Gateway
+    participant Feed
+    participant Redis
+    participant FeedDB
+
+    User->>API: GET /timeline
+
+    API->>Feed: Get Timeline
+
+    Feed->>Redis: Check Cache
+
+    alt Cache Hit
+
+        Redis-->>Feed: Timeline
+
+    else Cache Miss
+
+        Feed->>FeedDB: Load Timeline
+
+        FeedDB-->>Feed: Timeline
+
+        Feed->>Redis: Cache Timeline
+
+    end
+
+    Feed-->>User: News Feed
+```
+
+---
+
+# Feed Write Flow (Fan-out on Write)
+
+```mermaid
+sequenceDiagram
+
+    participant User
+    participant Post
+    participant EventBridge
+    participant Fanout
+    participant FeedDB
+
+    User->>Post: Create Post
+
+    Post->>Aurora: Save Post
+
+    Post->>EventBridge: Publish PostCreated
+
+    EventBridge->>Fanout: PostCreated
+
+    Fanout->>FeedDB: Update Followers Timeline
+
+    EventBridge->>NotificationWorker: Notify Followers
+
+    EventBridge->>SearchIndexer: Index Post
+```
+
+---
+
+# AWS Services Used
+
+| Layer | AWS Service |
+|---------|-------------|
+| CDN | Amazon CloudFront |
+| Security | AWS WAF |
+| Authentication | Amazon Cognito |
+| API | Amazon API Gateway |
+| Load Balancer | Application Load Balancer |
+| Compute | Amazon ECS / Amazon EKS |
+| Database | Amazon Aurora |
+| Feed Store | Amazon DynamoDB |
+| Cache | Amazon ElastiCache (Redis) |
+| Media Storage | Amazon S3 |
+| Event Bus | Amazon EventBridge |
+| Notifications | Amazon SNS |
+| Queue | Amazon SQS |
+| Search | Amazon OpenSearch |
+| Email | Amazon SES |
+| Monitoring | Amazon CloudWatch |
+| Distributed Tracing | AWS X-Ray |
+| Secrets | AWS Secrets Manager |
+
 
 ## 1. Fundamentals
 
