@@ -211,12 +211,6 @@ graph TB
 
 ---
 
----
-
----
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -585,7 +579,7 @@ sequenceDiagram
 ### Incident: `HttpClient` socket exhaustion from bypassing `IHttpClientFactory`
 - **Symptoms**: A service making frequent outbound calls to a partner API began failing with `SocketException`s under moderate load, specifically correlated with sustained traffic rather than traffic spikes.
 - **Investigation**: Code review found a `Transient`-lifetime service directly instantiating `new HttpClient()` in its constructor — since the service itself was `Transient` (a new instance per resolution, potentially many times per request across different call sites), a fresh `HttpClient` (and its underlying socket/connection-pool resources) was being created and subsequently garbage-collected at a high rate, exhausting available ephemeral ports faster than the OS could reclaim them from the `TIME_WAIT` state.
-- **Root cause**: Bypassing `IHttpClientFactory`'s connection-pool management (§5/§7) by directly constructing `HttpClient` inside a frequently-resolved `Transient` service.
+- **Root cause**: Bypassing `IHttpClientFactory`'s connection-pool management (§5) by directly constructing `HttpClient` inside a frequently-resolved `Transient` service.
 - **Fix**: Switched to `services.AddHttpClient<IMyApiClient, MyApiClient>()`, letting `IHttpClientFactory` manage the underlying handler/connection-pool lifetime correctly regardless of how frequently `MyApiClient` itself is resolved.
 - **Prevention**: Static-analysis/code-review rule banning direct `new HttpClient()` construction anywhere in application code, requiring `IHttpClientFactory`-based registration exclusively.
 
