@@ -21,8 +21,8 @@ Nearly universally — several of these patterns (Strategy, Observer, Iterator) 
 public interface IShippingCostStrategy { decimal Calculate(Order order); }
 public class OrderService
 {
- private readonly IShippingCostStrategy _shippingStrategy; // swappable algorithm
- public OrderService(IShippingCostStrategy shippingStrategy) => _shippingStrategy = shippingStrategy;
+    private readonly IShippingCostStrategy _shippingStrategy; // swappable algorithm
+    public OrderService(IShippingCostStrategy shippingStrategy) => _shippingStrategy = shippingStrategy;
 }
 ```
 
@@ -112,19 +112,19 @@ sequenceDiagram
 2. **Q: Design a Command-based implementation of an undo/redo stack for a document-editing application, explaining what state each Command must capture.**
  **A:**
  ```csharp
- public interface ICommand { void Execute; void Undo; }
- public class InsertTextCommand: ICommand
- {
- private readonly Document _document;
- private readonly int _position;
- private readonly string _text;
- public InsertTextCommand(Document document, int position, string text)
- {
- _document = document; _position = position; _text = text;
- }
- public void Execute => _document.InsertAt(_position, _text);
- public void Undo => _document.RemoveAt(_position, _text.Length); // reverses using the SAME captured state
- }
+public interface ICommand { void Execute; void Undo; }
+public class InsertTextCommand: ICommand
+{
+    private readonly Document _document;
+    private readonly int _position;
+    private readonly string _text;
+    public InsertTextCommand(Document document, int position, string text)
+    {
+        _document = document; _position = position; _text = text;
+    }
+    public void Execute => _document.InsertAt(_position, _text);
+    public void Undo => _document.RemoveAt(_position, _text.Length); // reverses using the SAME captured state
+}
  ```
  Each Command must capture **exactly the state needed to both perform and reverse its specific action** (the insertion position and text, sufficient to compute the exact removal needed to undo it) — a `Stack<ICommand>` of executed commands supports undo (pop and call `Undo`); a parallel redo stack supports redo (push undone commands there, allowing `Execute` to be replayed) — directly demonstrating Command's defining "encapsulate enough state to make the action reversible/replayable as data" property.
 3. **Q: Explain a scenario where combining Chain of Responsibility with Strategy produces a more flexible design than either pattern alone.**
@@ -136,20 +136,20 @@ sequenceDiagram
 6. **Q: Design a State-pattern-based (not records-based) implementation for a scenario genuinely requiring third-party pluggable states, and explain the key structural difference from the approach.**
  **A:**
  ```csharp
- public interface IOrderState
- {
- IOrderState Pay(Order order, string transactionId);
- IOrderState Ship(Order order, string trackingNumber);
- }
- public class PendingState: IOrderState
- {
- public IOrderState Pay(Order order, string transactionId) => new PaidState(transactionId);
- public IOrderState Ship(Order order, string trackingNumber) =>
- throw new InvalidOperationException("Cannot ship an unpaid order.");
- }
- // A third-party plugin can implement IOrderState with an entirely NEW state (e.g., PartiallyRefundedState)
- // WITHOUT modifying OrderService or any existing state class -- true OCP-compliant extensibility
- // the exact property the SEALED record hierarchy deliberately forecloses.
+public interface IOrderState
+{
+    IOrderState Pay(Order order, string transactionId);
+    IOrderState Ship(Order order, string trackingNumber);
+}
+public class PendingState: IOrderState
+{
+    public IOrderState Pay(Order order, string transactionId) => new PaidState(transactionId);
+    public IOrderState Ship(Order order, string trackingNumber) =>
+        throw new InvalidOperationException("Cannot ship an unpaid order.");
+}
+// A third-party plugin can implement IOrderState with an entirely NEW state (e.g., PartiallyRefundedState)
+// WITHOUT modifying OrderService or any existing state class -- true OCP-compliant extensibility
+// the exact property the SEALED record hierarchy deliberately forecloses.
  ```
  The key structural difference: `IOrderState` is a **non-sealed, open interface** any external assembly can implement, genuinely satisfying OCP for the "add a new state" case — the sealed-record approach deliberately trades this openness for compile-time exhaustiveness checking, and this classic State-pattern version is precisely the right tool when that trade must go the other way.
 7. **Q: Explain how you would refactor the incident's fix (Chain of Responsibility) to also support Advanced Q3's Strategy-based configurable-policy composition, incrementally, without a risky rewrite.**
@@ -173,9 +173,9 @@ public class ExpressShipping: IShippingCostStrategy { public decimal Calculate(O
 
 public class CheckoutService
 {
- private readonly IShippingCostStrategy _shippingStrategy;
- public CheckoutService(IShippingCostStrategy shippingStrategy) => _shippingStrategy = shippingStrategy;
- public decimal ComputeTotal(Order order) => order.Subtotal + _shippingStrategy.Calculate(order);
+    private readonly IShippingCostStrategy _shippingStrategy;
+    public CheckoutService(IShippingCostStrategy shippingStrategy) => _shippingStrategy = shippingStrategy;
+    public decimal ComputeTotal(Order order) => order.Subtotal + _shippingStrategy.Calculate(order);
 }
 ```
 
@@ -183,27 +183,27 @@ public class CheckoutService
 ```csharp
 public interface IApprovalHandler
 {
- IApprovalHandler? Next { get; set; }
- ApprovalResult Handle(decimal amount);
+    IApprovalHandler? Next { get; set; }
+    ApprovalResult Handle(decimal amount);
 }
 
 public abstract class ApprovalHandlerBase: IApprovalHandler
 {
- public IApprovalHandler? Next { get; set; }
- public abstract ApprovalResult Handle(decimal amount);
- protected ApprovalResult PassToNext(decimal amount) =>
- Next?.Handle(amount)?? throw new InvalidOperationException("No handler found for this amount.");
+    public IApprovalHandler? Next { get; set; }
+    public abstract ApprovalResult Handle(decimal amount);
+    protected ApprovalResult PassToNext(decimal amount) =>
+        Next?.Handle(amount)?? throw new InvalidOperationException("No handler found for this amount.");
 }
 
 public class AutoApproveHandler: ApprovalHandlerBase
 {
- public override ApprovalResult Handle(decimal amount) =>
- amount < 1000? ApprovalResult.AutoApproved: PassToNext(amount);
+    public override ApprovalResult Handle(decimal amount) =>
+        amount < 1000? ApprovalResult.AutoApproved: PassToNext(amount);
 }
 public class ManagerApprovalHandler: ApprovalHandlerBase
 {
- public override ApprovalResult Handle(decimal amount) =>
- amount < 10000? ApprovalResult.RequiresApproval("Manager"): PassToNext(amount);
+    public override ApprovalResult Handle(decimal amount) =>
+        amount < 10000? ApprovalResult.RequiresApproval("Manager"): PassToNext(amount);
 }
 // Adding a new tier: insert ONE new handler class into the chain construction list --
 // no modification to AutoApproveHandler or ManagerApprovalHandler's existing, tested code.
@@ -213,20 +213,20 @@ public class ManagerApprovalHandler: ApprovalHandlerBase
 ```csharp
 public class ApprovalChainBoundaryTests
 {
- private readonly IApprovalHandler _chain = BuildChain; // AutoApprove -> Manager -> Director -> VP
+    private readonly IApprovalHandler _chain = BuildChain; // AutoApprove -> Manager -> Director -> VP
 
- [Theory]
- [InlineData(999, "AutoApproved")]
- [InlineData(1000, "Manager")]
- [InlineData(9999, "Manager")]
- [InlineData(10000, "Director")]
- [InlineData(99999, "Director")]
- [InlineData(100000, "VP")]
- public void Chain_Should_Route_To_Correct_Tier_At_Every_Boundary(decimal amount, string expectedTier)
- {
- var result = _chain.Handle(amount);
- Assert.Equal(expectedTier, result.RequiredApprover?? "AutoApproved");
- }
+    [Theory]
+    [InlineData(999, "AutoApproved")]
+    [InlineData(1000, "Manager")]
+    [InlineData(9999, "Manager")]
+    [InlineData(10000, "Director")]
+    [InlineData(99999, "Director")]
+    [InlineData(100000, "VP")]
+    public void Chain_Should_Route_To_Correct_Tier_At_Every_Boundary(decimal amount, string expectedTier)
+    {
+        var result = _chain.Handle(amount);
+        Assert.Equal(expectedTier, result.RequiredApprover?? "AutoApproved");
+    }
 }
 // This SINGLE test suite, re-run whenever a new handler is inserted, mechanically catches
 // exactly the off-by-one boundary error that caused the original production incident.
@@ -236,31 +236,31 @@ public class ApprovalChainBoundaryTests
 ```csharp
 public class CommandManager
 {
- private readonly Stack<ICommand> _undoStack = new;
- private readonly Stack<ICommand> _redoStack = new;
+    private readonly Stack<ICommand> _undoStack = new;
+    private readonly Stack<ICommand> _redoStack = new;
 
- public void ExecuteAndTrack(ICommand command)
- {
- command.Execute;
- _undoStack.Push(command);
- _redoStack.Clear; // a new action invalidates any previously-available redo history
- }
+    public void ExecuteAndTrack(ICommand command)
+    {
+        command.Execute;
+        _undoStack.Push(command);
+        _redoStack.Clear; // a new action invalidates any previously-available redo history
+    }
 
- public void Undo
- {
- if (_undoStack.Count == 0) return;
- var command = _undoStack.Pop;
- command.Undo;
- _redoStack.Push(command);
- }
+    public void Undo
+    {
+        if (_undoStack.Count == 0) return;
+        var command = _undoStack.Pop;
+        command.Undo;
+        _redoStack.Push(command);
+    }
 
- public void Redo
- {
- if (_redoStack.Count == 0) return;
- var command = _redoStack.Pop;
- command.Execute;
- _undoStack.Push(command);
- }
+    public void Redo
+    {
+        if (_redoStack.Count == 0) return;
+        var command = _redoStack.Pop;
+        command.Execute;
+        _undoStack.Push(command);
+    }
 }
 ```
 

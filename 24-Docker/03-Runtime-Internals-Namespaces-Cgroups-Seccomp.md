@@ -328,15 +328,15 @@ docker run \
 **Solution:**
 ```json
 {
- "defaultAction": "SCMP_ACT_ERRNO",
- "syscalls": [
- {
- "names": ["read", "write", "close", "accept4", "bind", "listen",
- "socket", "epoll_wait", "epoll_ctl", "mmap", "munmap",
- "exit_group", "futex", "clone", "openat", "fstat"],
- "action": "SCMP_ACT_ALLOW"
- }
- ]
+  "defaultAction": "SCMP_ACT_ERRNO",
+    "syscalls": [
+    {
+      "names": ["read", "write", "close", "accept4", "bind", "listen",
+        "socket", "epoll_wait", "epoll_ctl", "mmap", "munmap",
+          "exit_group", "futex", "clone", "openat", "fstat"],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
 }
 ```
 ```bash
@@ -352,33 +352,33 @@ docker run --security-opt seccomp=./minimal-http-profile.json myapp:latest
 ```csharp
 public class CgroupThrottlingDiagnostic
 {
- // Reads the EXACT kernel-level statistics underlying the incident --
- // moving beyond the Kubernetes-level "resources.limits.cpu" abstraction to the
- // actual cgroup v2 cpu.stat file the kernel maintains.
- public async Task<ThrottlingReport> DiagnoseAsync(string containerCgroupPath)
- {
- var cpuStatContent = await File.ReadAllTextAsync(Path.Combine(containerCgroupPath, "cpu.stat"));
- var stats = ParseCgroupStat(cpuStatContent);
+    // Reads the EXACT kernel-level statistics underlying the incident --
+    // moving beyond the Kubernetes-level "resources.limits.cpu" abstraction to the
+    // actual cgroup v2 cpu.stat file the kernel maintains.
+    public async Task<ThrottlingReport> DiagnoseAsync(string containerCgroupPath)
+    {
+        var cpuStatContent = await File.ReadAllTextAsync(Path.Combine(containerCgroupPath, "cpu.stat"));
+        var stats = ParseCgroupStat(cpuStatContent);
 
- var throttledPercentage = stats.NrThrottled > 0
-? (double)stats.ThrottledUsec / stats.UsageUsec * 100
-: 0;
+        var throttledPercentage = stats.NrThrottled > 0
+        ? (double)stats.ThrottledUsec / stats.UsageUsec * 100
+        : 0;
 
- return new ThrottlingReport
- {
- NrPeriods = stats.NrPeriods,
- NrThrottled = stats.NrThrottled,
- ThrottledPercentage = throttledPercentage,
- // Directly explains the finding: throttling occurs during
- // BURST periods, not uniformly -- a high NrThrottled relative to NrPeriods
- // indicates the CFS bandwidth quota (cpu.max) is being hit repeatedly.
- Diagnosis = throttledPercentage > 5
-? "Significant CPU throttling detected -- cpu.max quota is being exceeded " +
- "during burst periods (the exact mechanism). Consider raising " +
- "the CPU limit or investigating burst-traffic patterns causing repeated quota exhaustion."
-: "CPU throttling within normal bounds."
- };
- }
+        return new ThrottlingReport
+        {
+            NrPeriods = stats.NrPeriods,
+                NrThrottled = stats.NrThrottled,
+                ThrottledPercentage = throttledPercentage,
+                // Directly explains the finding: throttling occurs during
+            // BURST periods, not uniformly -- a high NrThrottled relative to NrPeriods
+            // indicates the CFS bandwidth quota (cpu.max) is being hit repeatedly.
+            Diagnosis = throttledPercentage > 5
+            ? "Significant CPU throttling detected -- cpu.max quota is being exceeded " +
+                "during burst periods (the exact mechanism). Consider raising " +
+                "the CPU limit or investigating burst-traffic patterns causing repeated quota exhaustion."
+            : "CPU throttling within normal bounds."
+        };
+    }
 }
 ```
 **Time complexity:** O(1) — a single file read and constant-time statistical computation per diagnostic invocation.
@@ -391,39 +391,39 @@ public class CgroupThrottlingDiagnostic
 ```csharp
 public class CapabilityUsageMonitor
 {
- private readonly HashSet<string> _approvedCapabilities;
- private readonly IAlertDispatcher _alerts;
+    private readonly HashSet<string> _approvedCapabilities;
+    private readonly IAlertDispatcher _alerts;
 
- public CapabilityUsageMonitor(IEnumerable<string> approvedCapabilities, IAlertDispatcher alerts)
- {
- _approvedCapabilities = new HashSet<string>(approvedCapabilities);
- _alerts = alerts;
- }
+    public CapabilityUsageMonitor(IEnumerable<string> approvedCapabilities, IAlertDispatcher alerts)
+    {
+        _approvedCapabilities = new HashSet<string>(approvedCapabilities);
+        _alerts = alerts;
+    }
 
- // Consumes a stream of observed privileged-operation events (e.g., from an
- // eBPF-based observability tool like Falco) and flags any operation requiring
- // a capability OUTSIDE this workload's documented, APPROVED set (§Advanced Q1's
- // justification record) -- directly this course's "verify actual runtime
- // behavior against the declared/approved state" discipline, now applied to
- // capability usage specifically.
- public async Task MonitorAsync(IAsyncEnumerable<PrivilegedOperationEvent> eventStream, CancellationToken ct)
- {
- await foreach (var evt in eventStream.WithCancellation(ct))
- {
- if (!_approvedCapabilities.Contains(evt.RequiredCapability))
- {
- await _alerts.RaiseAsync(new SecurityAlert
- {
- Severity = "High",
- Message = $"Container '{evt.ContainerId}' invoked an operation requiring " +
- $"capability '{evt.RequiredCapability}', which is NOT in its " +
- $"approved capability set {{{string.Join(", ", _approvedCapabilities)}}} " +
- $"(§Advanced Q1/Q8). Possible misuse of an approved grant, or " +
- $"unexpected escalation attempt -- investigate immediately."
- });
- }
- }
- }
+    // Consumes a stream of observed privileged-operation events (e.g., from an
+    // eBPF-based observability tool like Falco) and flags any operation requiring
+    // a capability OUTSIDE this workload's documented, APPROVED set (§Advanced Q1's
+    // justification record) -- directly this course's "verify actual runtime
+    // behavior against the declared/approved state" discipline, now applied to
+    // capability usage specifically.
+    public async Task MonitorAsync(IAsyncEnumerable<PrivilegedOperationEvent> eventStream, CancellationToken ct)
+    {
+        await foreach (var evt in eventStream.WithCancellation(ct))
+        {
+            if (!_approvedCapabilities.Contains(evt.RequiredCapability))
+            {
+                await _alerts.RaiseAsync(new SecurityAlert
+                    {
+                        Severity = "High",
+                            Message = $"Container '{evt.ContainerId}' invoked an operation requiring " +
+                            $"capability '{evt.RequiredCapability}', which is NOT in its " +
+                            $"approved capability set {{{string.Join(", ", _approvedCapabilities)}}} " +
+                            $"(§Advanced Q1/Q8). Possible misuse of an approved grant, or " +
+                            $"unexpected escalation attempt -- investigate immediately."
+                });
+            }
+        }
+    }
 }
 ```
 **Time complexity:** O(1) per observed event — a constant-time set-membership check per privileged-operation invocation.

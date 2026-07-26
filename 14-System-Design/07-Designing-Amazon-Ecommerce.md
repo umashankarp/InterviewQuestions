@@ -262,12 +262,12 @@ graph TB
 ```csharp
 public async Task<bool> TryDecrementStockAsync(string sku, int quantity)
 {
- // Conditional UPDATE: succeeds ONLY if sufficient stock exists AT THE MOMENT of the atomic operation --
- // no separate "check then decrement" race window (directly avoiding the classic overselling bug).
- int rowsAffected = await _db.ExecuteAsync(
- "UPDATE Inventory SET Stock = Stock - @Quantity WHERE Sku = @Sku AND Stock >= @Quantity",
- new { Sku = sku, Quantity = quantity });
- return rowsAffected > 0; // false means insufficient stock -- reject the checkout attempt
+    // Conditional UPDATE: succeeds ONLY if sufficient stock exists AT THE MOMENT of the atomic operation --
+    // no separate "check then decrement" race window (directly avoiding the classic overselling bug).
+    int rowsAffected = await _db.ExecuteAsync(
+        "UPDATE Inventory SET Stock = Stock - @Quantity WHERE Sku = @Sku AND Stock >= @Quantity",
+            new { Sku = sku, Quantity = quantity });
+    return rowsAffected > 0; // false means insufficient stock -- reject the checkout attempt
 }
 ```
 
@@ -275,28 +275,28 @@ public async Task<bool> TryDecrementStockAsync(string sku, int quantity)
 ```csharp
 public class ShardedInventoryCounter
 {
- private readonly int _shardCount;
- public ShardedInventoryCounter(int totalStock, int shardCount)
- {
- _shardCount = shardCount;
- int perShard = totalStock / shardCount;
- for (int i = 0; i < shardCount; i++)
- _db.Execute("INSERT INTO InventoryShards (ShardId, Stock) VALUES (@Id, @Stock)", new { Id = i, Stock = perShard });
- }
+    private readonly int _shardCount;
+    public ShardedInventoryCounter(int totalStock, int shardCount)
+    {
+        _shardCount = shardCount;
+        int perShard = totalStock / shardCount;
+        for (int i = 0; i < shardCount; i++)
+            _db.Execute("INSERT INTO InventoryShards (ShardId, Stock) VALUES (@Id, @Stock)", new { Id = i, Stock = perShard });
+    }
 
- public async Task<bool> TryPurchaseAsync(string userId)
- {
- int shardId = Math.Abs(userId.GetHashCode) % _shardCount; // route to a specific shard, distributing contention
- int rowsAffected = await _db.ExecuteAsync(
- "UPDATE InventoryShards SET Stock = Stock - 1 WHERE ShardId = @ShardId AND Stock > 0",
- new { ShardId = shardId });
+    public async Task<bool> TryPurchaseAsync(string userId)
+    {
+        int shardId = Math.Abs(userId.GetHashCode) % _shardCount; // route to a specific shard, distributing contention
+        int rowsAffected = await _db.ExecuteAsync(
+            "UPDATE InventoryShards SET Stock = Stock - 1 WHERE ShardId = @ShardId AND Stock > 0",
+                new { ShardId = shardId });
 
- if (rowsAffected > 0) return true;
+        if (rowsAffected > 0) return true;
 
- // This shard is depleted -- Advanced Q3's tail-end consolidation would trigger a fallback
- // check across other shards here in a production implementation; omitted for brevity.
- return false;
- }
+        // This shard is depleted -- Advanced Q3's tail-end consolidation would trigger a fallback
+        // check across other shards here in a production implementation; omitted for brevity.
+        return false;
+    }
 }
 ```
 
@@ -304,24 +304,24 @@ public class ShardedInventoryCounter
 ```csharp
 public async Task<CheckoutResult> CheckoutAsync(string idempotencyKey, CartSnapshot cart)
 {
- var existing = await _idempotencyStore.TryGetAsync(idempotencyKey);
- if (existing is { Status: IdempotencyStatus.Completed }) return existing.CachedResult; // the pattern
+    var existing = await _idempotencyStore.TryGetAsync(idempotencyKey);
+    if (existing is { Status: IdempotencyStatus.Completed }) return existing.CachedResult; // the pattern
 
- if (!await _inventory.TryDecrementStockAsync(cart.Sku, cart.Quantity))
- return CheckoutResult.Failed("Insufficient stock.");
+    if (!await _inventory.TryDecrementStockAsync(cart.Sku, cart.Quantity))
+        return CheckoutResult.Failed("Insufficient stock.");
 
- try
- {
- var chargeResult = await _paymentGateway.ChargeAsync(cart.Total); // FAIL CLOSED if this throws (Advanced Q5)
- var order = await _orderStore.CreateOrderAsync(cart, chargeResult.TransactionId);
- await _idempotencyStore.MarkCompletedAsync(idempotencyKey, order);
- return CheckoutResult.Success(order);
- }
- catch (PaymentGatewayException)
- {
- await _inventory.RestoreStockAsync(cart.Sku, cart.Quantity); // compensate the already-decremented stock
- return CheckoutResult.Failed("Payment processing is temporarily unavailable. Please try again."); // FAIL CLOSED
- }
+    try
+    {
+        var chargeResult = await _paymentGateway.ChargeAsync(cart.Total); // FAIL CLOSED if this throws (Advanced Q5)
+        var order = await _orderStore.CreateOrderAsync(cart, chargeResult.TransactionId);
+        await _idempotencyStore.MarkCompletedAsync(idempotencyKey, order);
+        return CheckoutResult.Success(order);
+    }
+    catch (PaymentGatewayException)
+    {
+        await _inventory.RestoreStockAsync(cart.Sku, cart.Quantity); // compensate the already-decremented stock
+        return CheckoutResult.Failed("Payment processing is temporarily unavailable. Please try again."); // FAIL CLOSED
+    }
 }
 ```
 
@@ -329,36 +329,36 @@ public async Task<CheckoutResult> CheckoutAsync(string idempotencyKey, CartSnaps
 ```csharp
 public class OrderFulfillmentSaga
 {
- public async Task ExecuteAsync(Order order)
- {
- var completedSteps = new Stack<Func<Task>>; // tracks compensations for steps ALREADY completed
+    public async Task ExecuteAsync(Order order)
+    {
+        var completedSteps = new Stack<Func<Task>>; // tracks compensations for steps ALREADY completed
 
- try
- {
- await _paymentService.ChargeAsync(order.PaymentDetails);
- completedSteps.Push(=> _paymentService.RefundAsync(order.PaymentDetails));
+        try
+        {
+            await _paymentService.ChargeAsync(order.PaymentDetails);
+            completedSteps.Push(=> _paymentService.RefundAsync(order.PaymentDetails));
 
- await _inventoryService.ReserveAsync(order.Sku, order.Quantity);
- completedSteps.Push(=> _inventoryService.ReleaseReservationAsync(order.Sku, order.Quantity));
+            await _inventoryService.ReserveAsync(order.Sku, order.Quantity);
+            completedSteps.Push(=> _inventoryService.ReleaseReservationAsync(order.Sku, order.Quantity));
 
- await _warehouseService.RequestFulfillmentAsync(order); // the step that CAN fail (Advanced Q2's scenario)
- completedSteps.Push(=> _warehouseService.CancelFulfillmentAsync(order));
+            await _warehouseService.RequestFulfillmentAsync(order); // the step that CAN fail (Advanced Q2's scenario)
+            completedSteps.Push(=> _warehouseService.CancelFulfillmentAsync(order));
 
- await _orderStore.MarkFulfilledAsync(order.Id);
- }
- catch (Exception ex)
- {
- _logger.LogError(ex, "Saga failed for order {OrderId}, compensating {Count} completed steps.",
- order.Id, completedSteps.Count);
+            await _orderStore.MarkFulfilledAsync(order.Id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Saga failed for order {OrderId}, compensating {Count} completed steps.",
+                order.Id, completedSteps.Count);
 
- while (completedSteps.Count > 0) // REVERSE order compensation, per Advanced Q2
- {
- var compensate = completedSteps.Pop;
- await ExecuteWithRetryAsync(compensate); // compensations are ALSO idempotent/retryable (Advanced Q2)
- }
- await _orderStore.MarkCancelledAsync(order.Id, reason: ex.Message);
- }
- }
+            while (completedSteps.Count > 0) // REVERSE order compensation, per Advanced Q2
+            {
+                var compensate = completedSteps.Pop;
+                await ExecuteWithRetryAsync(compensate); // compensations are ALSO idempotent/retryable (Advanced Q2)
+            }
+            await _orderStore.MarkCancelledAsync(order.Id, reason: ex.Message);
+        }
+    }
 }
 ```
 **Discussion**: The `Stack<Func<Task>>` tracking exactly which steps completed (and thus need compensation) is the key structural detail — compensations run in **reverse** order of the original forward steps (release inventory before refunding payment, matching the natural "undo the most recent thing first" logic), and each compensation itself goes through retry logic (`ExecuteWithRetryAsync`), directly Advanced Q2's requirement that compensating actions carry the same correctness rigor (idempotency, retry-on-transient-failure) as the original forward-path operations.

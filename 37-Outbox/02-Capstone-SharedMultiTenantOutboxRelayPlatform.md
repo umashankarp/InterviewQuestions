@@ -385,10 +385,10 @@ graph LR
 ```csharp
 public class TenantOutboxConfig
 {
- public string TenantId { get; init; }
- public TimeSpan RetentionWindow { get; init; }
- public string DeadLetterAlertDestination { get; init; }
- public RelayMechanism Mechanism { get; init; } // Polling or CDC, per-tenant choice
+    public string TenantId { get; init; }
+    public TimeSpan RetentionWindow { get; init; }
+    public string DeadLetterAlertDestination { get; init; }
+    public RelayMechanism Mechanism { get; init; } // Polling or CDC, per-tenant choice
 }
 ```
 **Time complexity:** O(1) configuration lookup per tenant.
@@ -401,15 +401,15 @@ public class TenantOutboxConfig
 ```csharp
 public class TenantIsolatedRelayHost
 {
- private readonly Dictionary<string, SemaphoreSlim> _tenantWorkerPools = new;
+    private readonly Dictionary<string, SemaphoreSlim> _tenantWorkerPools = new;
 
- public async Task ProcessTenantAsync(string tenantId, CancellationToken ct)
- {
- var pool = _tenantWorkerPools.GetOrAdd(tenantId, _ => new SemaphoreSlim(maxWorkers: 4));
- await pool.WaitAsync(ct);
- try { await RunRelayForTenantAsync(tenantId, ct); }
- finally { pool.Release; }
- }
+    public async Task ProcessTenantAsync(string tenantId, CancellationToken ct)
+    {
+        var pool = _tenantWorkerPools.GetOrAdd(tenantId, _ => new SemaphoreSlim(maxWorkers: 4));
+        await pool.WaitAsync(ct);
+        try { await RunRelayForTenantAsync(tenantId, ct); }
+        finally { pool.Release; }
+    }
 }
 ```
 **Time complexity:** O(1) semaphore acquisition per tenant's own dedicated pool.
@@ -423,14 +423,14 @@ public class TenantIsolatedRelayHost
 [Fact]
 public async Task StressedTenant_DoesNotAffect_HealthyTenant_Latency
 {
- await _testHarness.InjectSustainedBacklogAsync(tenantId: "regulatory", durationSeconds: 300);
+    await _testHarness.InjectSustainedBacklogAsync(tenantId: "regulatory", durationSeconds: 300);
 
- var settlementLatency = await _testHarness.MeasureP99LatencyAsync(tenantId: "settlement");
- var baselineLatency = await _testHarness.GetHistoricalBaselineP99Async(tenantId: "settlement");
+    var settlementLatency = await _testHarness.MeasureP99LatencyAsync(tenantId: "settlement");
+    var baselineLatency = await _testHarness.GetHistoricalBaselineP99Async(tenantId: "settlement");
 
- Assert.True(settlementLatency <= baselineLatency * 1.05, // allow 5% noise margin
- $"Settlement latency ({settlementLatency}ms) degraded beyond baseline ({baselineLatency}ms) " +
- "during Regulatory's induced backlog — cross-tenant isolation violated.");
+    Assert.True(settlementLatency <= baselineLatency * 1.05, // allow 5% noise margin
+        $"Settlement latency ({settlementLatency}ms) degraded beyond baseline ({baselineLatency}ms) " +
+            "during Regulatory's induced backlog — cross-tenant isolation violated.");
 }
 ```
 **Time complexity:** O(1) test-orchestration overhead; wall-clock bounded by the injected backlog's own configured duration.
@@ -443,15 +443,15 @@ public async Task StressedTenant_DoesNotAffect_HealthyTenant_Latency
 ```csharp
 public class PlatformFeatureRequestTriage
 {
- public TriageDecision Evaluate(FeatureRequest request, IReadOnlyList<TenantId> currentTenants)
- {
- var similarRequestsFromOtherTenants = _requestHistory
-.Count(r => r.Category == request.Category && r.TenantId!= request.TenantId);
+    public TriageDecision Evaluate(FeatureRequest request, IReadOnlyList<TenantId> currentTenants)
+    {
+        var similarRequestsFromOtherTenants = _requestHistory
+        .Count(r => r.Category == request.Category && r.TenantId!= request.TenantId);
 
- return similarRequestsFromOtherTenants >= _commonalityThreshold
-? TriageDecision.AddToSharedCore(justification: $"{similarRequestsFromOtherTenants} other tenants requested similar capability")
-: TriageDecision.RecommendExtensionPoint(justification: "No demonstrated cross-tenant commonality yet — revisit if this recurs");
- }
+        return similarRequestsFromOtherTenants >= _commonalityThreshold
+        ? TriageDecision.AddToSharedCore(justification: $"{similarRequestsFromOtherTenants} other tenants requested similar capability")
+        : TriageDecision.RecommendExtensionPoint(justification: "No demonstrated cross-tenant commonality yet — revisit if this recurs");
+    }
 }
 ```
 **Time complexity:** O(r) for r historical requests in the same category.

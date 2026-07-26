@@ -119,18 +119,18 @@ classDiagram
 2. **Q: Design a template-method-pattern base class where inheritance is genuinely the correct tool, and explain why composition wouldn't serve as well here.**
  **A:**
  ```csharp
- public abstract class ReportGenerator
- {
- public string Generate // fixed algorithm skeleton -- the "template"
- {
- var data = FetchData;
- var formatted = FormatData(data);
- return WrapWithHeaderFooter(formatted); // shared, stable, non-overridable behavior
- }
- protected abstract IEnumerable<object> FetchData;
- protected abstract string FormatData(IEnumerable<object> data);
- private string WrapWithHeaderFooter(string body) => $"--- REPORT ---\n{body}\n--- END ---";
- }
+public abstract class ReportGenerator
+{
+    public string Generate // fixed algorithm skeleton -- the "template"
+    {
+        var data = FetchData;
+        var formatted = FormatData(data);
+        return WrapWithHeaderFooter(formatted); // shared, stable, non-overridable behavior
+    }
+    protected abstract IEnumerable<object> FetchData;
+    protected abstract string FormatData(IEnumerable<object> data);
+    private string WrapWithHeaderFooter(string body) => $"--- REPORT ---\n{body}\n--- END ---";
+}
  ```
  Composition would require every concrete report type to separately implement (or remember to call) the shared header/footer-wrapping logic and the fixed fetch-then-format sequencing — the entire point of this pattern is that the **algorithm's structure itself** (fetch, then format, then wrap) is the shared, stable, is-a-"a kind of report generation process" behavior, which inheritance's "share behavior automatically, override only specific steps" mechanism expresses more directly and safely (a subclass literally cannot skip the header/footer wrapping, since it's `private` in the base class) than composition, which would require every composed caller to remember to invoke the shared logic correctly and in the right order.
 3. **Q: Explain how you would refactor a deep (4+ level) inheritance hierarchy exhibiting fragile-base-class symptoms, without a risky, all-at-once rewrite.**
@@ -180,19 +180,19 @@ classDiagram
 // that assume Add actually adds an item (the base List<T> contract).
 public class ReadOnlyList<T>: List<T>
 {
- public new void Add(T item) { /* no-op, silently ignores */ }
+    public new void Add(T item) { /* no-op, silently ignores */ }
 }
 
 // AFTER: don't inherit from List<T> at all -- compose it, expose only read operations
 // making the type's actual (narrower) contract honest and impossible to misuse.
 public class ReadOnlyList<T>: IReadOnlyList<T>
 {
- private readonly List<T> _items;
- public ReadOnlyList(IEnumerable<T> items) => _items = items.ToList;
- public T this[int index] => _items[index];
- public int Count => _items.Count;
- public IEnumerator<T> GetEnumerator => _items.GetEnumerator;
- IEnumerator IEnumerable.GetEnumerator => GetEnumerator;
+    private readonly List<T> _items;
+    public ReadOnlyList(IEnumerable<T> items) => _items = items.ToList;
+    public T this[int index] => _items[index];
+    public int Count => _items.Count;
+    public IEnumerator<T> GetEnumerator => _items.GetEnumerator;
+    IEnumerator IEnumerable.GetEnumerator => GetEnumerator;
 }
 ```
 
@@ -201,23 +201,23 @@ public class ReadOnlyList<T>: IReadOnlyList<T>
 public interface IDiscountStrategy { decimal ComputeDiscount(Order order); }
 public class StandardDiscountStrategy: IDiscountStrategy
 {
- public decimal ComputeDiscount(Order order) => order.Total * 0.05m;
+    public decimal ComputeDiscount(Order order) => order.Total * 0.05m;
 }
 public class PriorityDiscountStrategy: IDiscountStrategy
 {
- public decimal ComputeDiscount(Order order) => Math.Max(order.Total * 0.10m, 5.00m);
+    public decimal ComputeDiscount(Order order) => Math.Max(order.Total * 0.10m, 5.00m);
 }
 
 public class Customer
 {
- private readonly IDiscountStrategy _discountStrategy;
- public Customer(IDiscountStrategy discountStrategy) => _discountStrategy = discountStrategy;
+    private readonly IDiscountStrategy _discountStrategy;
+    public Customer(IDiscountStrategy discountStrategy) => _discountStrategy = discountStrategy;
 
- public decimal ApplyDiscount(Order order)
- {
- var raw = _discountStrategy.ComputeDiscount(order);
- return Math.Min(raw, order.Total); // invariant enforced ONCE, centrally, regardless of strategy
- }
+    public decimal ApplyDiscount(Order order)
+    {
+        var raw = _discountStrategy.ComputeDiscount(order);
+        return Math.Min(raw, order.Total); // invariant enforced ONCE, centrally, regardless of strategy
+    }
 }
 ```
 
@@ -225,23 +225,23 @@ public class Customer
 ```csharp
 public abstract class ShapeContractTests<TShape> where TShape: Shape
 {
- protected abstract TShape CreateShapeWithArea(double expectedArea);
+    protected abstract TShape CreateShapeWithArea(double expectedArea);
 
- [Fact]
- public void Area_Should_Never_Be_Negative
- {
- var shape = CreateShapeWithArea(10.0);
- Assert.True(shape.Area >= 0, "Area contract violated: Area returned a negative value.");
- }
+    [Fact]
+    public void Area_Should_Never_Be_Negative
+    {
+        var shape = CreateShapeWithArea(10.0);
+        Assert.True(shape.Area >= 0, "Area contract violated: Area returned a negative value.");
+    }
 }
 
 public class CircleContractTests: ShapeContractTests<Circle>
 {
- protected override Circle CreateShapeWithArea(double expectedArea) => new Circle { Radius = Math.Sqrt(expectedArea / Math.PI) };
+    protected override Circle CreateShapeWithArea(double expectedArea) => new Circle { Radius = Math.Sqrt(expectedArea / Math.PI) };
 }
 public class SquareContractTests: ShapeContractTests<Square>
 {
- protected override Square CreateShapeWithArea(double expectedArea) => new Square { Side = Math.Sqrt(expectedArea) };
+    protected override Square CreateShapeWithArea(double expectedArea) => new Square { Side = Math.Sqrt(expectedArea) };
 }
 // Both CircleContractTests and SquareContractTests automatically inherit and run the SAME
 // base-contract test -- any future Shape subclass violating the "Area is never negative"
@@ -252,15 +252,15 @@ public class SquareContractTests: ShapeContractTests<Square>
 ```csharp
 public abstract class ReportGenerator
 {
- private readonly IReportFormatter _formatter; // composition for the genuinely variable part
- protected ReportGenerator(IReportFormatter formatter) => _formatter = formatter;
+    private readonly IReportFormatter _formatter; // composition for the genuinely variable part
+    protected ReportGenerator(IReportFormatter formatter) => _formatter = formatter;
 
- public string Generate // fixed algorithm skeleton -- inheritance's strength
- {
- var data = FetchData; // subclass-specific, is-a-variation (inheritance appropriate)
- return _formatter.Format(data); // swappable at runtime (composition appropriate)
- }
- protected abstract IEnumerable<object> FetchData;
+    public string Generate // fixed algorithm skeleton -- inheritance's strength
+    {
+        var data = FetchData; // subclass-specific, is-a-variation (inheritance appropriate)
+        return _formatter.Format(data); // swappable at runtime (composition appropriate)
+    }
+    protected abstract IEnumerable<object> FetchData;
 }
 ```
 **Discussion**: This deliberately combines both tools where each is actually the better fit — `FetchData` varies by genuine report-type specialization (an is-a relationship, appropriately expressed via inheritance's override mechanism), while the formatting strategy is swappable independent of report type (appropriately expressed via composition) — a concrete demonstration that "composition over inheritance" and "inheritance is sometimes right" aren't in tension when applied to the specific part of a design each is actually suited for, directly synthesizing Advanced Q2 and Advanced Q9's nuanced guidance into one cohesive example.

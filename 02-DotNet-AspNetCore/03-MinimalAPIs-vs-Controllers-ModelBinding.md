@@ -22,9 +22,9 @@ Controllers (and the full MVC framework) predate Minimal APIs by many years and 
 ```csharp
 // Minimal API:
 app.MapPost("/orders", (CreateOrderRequest request, IOrderService service) =>
-{
- var order = service.CreateOrder(request);
- return Results.Created($"/orders/{order.Id}", order);
+    {
+        var order = service.CreateOrder(request);
+        return Results.Created($"/orders/{order.Id}", order);
 });
 
 // Controller equivalent:
@@ -32,15 +32,15 @@ app.MapPost("/orders", (CreateOrderRequest request, IOrderService service) =>
 [Route("orders")]
 public class OrdersController: ControllerBase
 {
- private readonly IOrderService _service;
- public OrdersController(IOrderService service) => _service = service;
+    private readonly IOrderService _service;
+    public OrdersController(IOrderService service) => _service = service;
 
- [HttpPost]
- public IActionResult Create(CreateOrderRequest request)
- {
- var order = _service.CreateOrder(request);
- return CreatedAtAction(nameof(GetById), new { id = order.Id }, order);
- }
+    [HttpPost]
+    public IActionResult Create(CreateOrderRequest request)
+    {
+        var order = _service.CreateOrder(request);
+        return CreatedAtAction(nameof(GetById), new { id = order.Id }, order);
+    }
 }
 ```
 
@@ -84,12 +84,12 @@ Minimal APIs have a deliberately **simpler, single filter type**: `IEndpointFilt
 ```csharp
 app.MapPost("/orders", CreateOrder)
 .AddEndpointFilter(async (context, next) =>
- {
- // before
- var result = await next(context);
- // after
- return result;
- });
+    {
+        // before
+        var result = await next(context);
+        // after
+        return result;
+});
 ```
 `IEndpointFilter`'s `InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)` is structurally almost identical to ordinary middleware (the delegate-chain pattern) — the same "onion," the same short-circuit-by-not-calling-`next` mechanic — but scoped specifically to **one endpoint's** filter chain rather than the entire application's middleware pipeline, and with access to strongly-typed argument binding via `context.GetArgument<T>(index)`. This is a deliberate design simplification relative to the MVC filter pipeline's six distinct filter-type stages — Minimal APIs trade fine-grained filter-stage distinctions for a single, simpler, uniformly-composable filter concept.
 
@@ -270,24 +270,24 @@ flowchart TD
 3. **Q: Design a validation-enforcement `IEndpointFilter` that replicates `[ApiController]`'s automatic-400 behavior for a Minimal API, and explain precisely where in the endpoint filter chain it should be registered relative to other filters.**
  **A:**
  ```csharp
- public class ValidationFilter<T>: IEndpointFilter
- {
- public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
- {
- var arg = context.GetArgument<T>(0); // assumes the validated type is the first parameter -- a real
- // implementation would need a more robust argument-locating strategy
- var validationContext = new ValidationContext(arg!);
- var results = new List<ValidationResult>;
- if (!Validator.TryValidateObject(arg!, validationContext, results, validateAllProperties: true))
- {
- return Results.ValidationProblem(results.ToDictionary(
- r => r.MemberNames.FirstOrDefault?? "",
- r => new[] { r.ErrorMessage?? "" }));
- }
- return await next(context);
- }
- }
- // Usage: app.MapPost("/orders", CreateOrder).AddEndpointFilter<ValidationFilter<CreateOrderRequest>>
+public class ValidationFilter<T>: IEndpointFilter
+{
+    public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+    {
+        var arg = context.GetArgument<T>(0); // assumes the validated type is the first parameter -- a real
+        // implementation would need a more robust argument-locating strategy
+        var validationContext = new ValidationContext(arg!);
+        var results = new List<ValidationResult>;
+        if (!Validator.TryValidateObject(arg!, validationContext, results, validateAllProperties: true))
+        {
+            return Results.ValidationProblem(results.ToDictionary(
+                    r => r.MemberNames.FirstOrDefault?? "",
+                        r => new[] { r.ErrorMessage?? "" }));
+        }
+        return await next(context);
+    }
+}
+// Usage: app.MapPost("/orders", CreateOrder).AddEndpointFilter<ValidationFilter<CreateOrderRequest>>
  ```
  This should be registered as the **first** filter in the chain for a given endpoint (or, if using `MapGroup`, applied at the group level before any other business-logic-oriented filters) — mirroring `IResourceFilter`'s "runs before the actual work" positioning from Advanced Q1, ensuring invalid input is rejected before any subsequent filter or the handler itself does any real work, exactly replicating the *timing* semantics of `[ApiController]`'s convention, not just its validation logic.
 
@@ -344,10 +344,10 @@ public IActionResult Search([FromQuery] string term, [FromQuery] int page = 1) =
 ```
 **Solution**:
 ```csharp
-app.MapGet("/search", ([FromQuery] string term, [FromQuery] int page = 1, IOrderService service) =>
-{
- var results = service.Search(term, page);
- return TypedResults.Ok(results);
+    app.MapGet("/search", ([FromQuery] string term, [FromQuery] int page = 1, IOrderService service) =>
+    {
+        var results = service.Search(term, page);
+        return TypedResults.Ok(results);
 });
 ```
 **Discussion**: For simple types (`string`, `int`) bound from the query string, Minimal APIs' convention-based inference would actually have inferred the same binding source correctly even without the explicit `[FromQuery]` attributes — this exercise demonstrates that explicit attribution, while a good defensive habit especially valuable during migrations, is not strictly *required* for simple-type parameters the way it effectively is for complex-type parameters (the actual failure mode) — an important, precise distinction to draw rather than over-generalizing "always use explicit attributes everywhere" without understanding exactly which binding scenarios are actually inference-risky.
@@ -357,26 +357,26 @@ app.MapGet("/search", ([FromQuery] string term, [FromQuery] int page = 1, IOrder
 ```csharp
 var orders = app.MapGroup("/orders")
 .AddEndpointFilterFactory((factoryContext, next) =>
- {
- // Inspect the endpoint's parameter types ONCE, at startup, to build an efficient
- // reusable validation delegate specific to THIS endpoint's actual parameter shape --
- // avoiding repeated reflection on every single request.
- var validatableParamIndex = Array.FindIndex(
- factoryContext.MethodInfo.GetParameters,
- p => typeof(IValidatableObject).IsAssignableFrom(p.ParameterType) || HasValidationAttributes(p.ParameterType));
+    {
+        // Inspect the endpoint's parameter types ONCE, at startup, to build an efficient
+        // reusable validation delegate specific to THIS endpoint's actual parameter shape --
+        // avoiding repeated reflection on every single request.
+        var validatableParamIndex = Array.FindIndex(
+            factoryContext.MethodInfo.GetParameters,
+                p => typeof(IValidatableObject).IsAssignableFrom(p.ParameterType) || HasValidationAttributes(p.ParameterType));
 
- if (validatableParamIndex < 0)
- return next; // no validatable parameter on this endpoint -- skip the filter entirely, zero overhead
+        if (validatableParamIndex < 0)
+            return next; // no validatable parameter on this endpoint -- skip the filter entirely, zero overhead
 
- return async context =>
- {
- var arg = context.GetArgument<object>(validatableParamIndex);
- var results = new List<ValidationResult>;
- if (arg is not null &&!Validator.TryValidateObject(arg, new ValidationContext(arg), results, true))
- return Results.ValidationProblem(results.ToDictionary(r => r.MemberNames.FirstOrDefault?? "", r => new[] { r.ErrorMessage?? "" }));
- return await next(context);
- };
- });
+        return async context =>
+        {
+            var arg = context.GetArgument<object>(validatableParamIndex);
+            var results = new List<ValidationResult>;
+            if (arg is not null &&!Validator.TryValidateObject(arg, new ValidationContext(arg), results, true))
+                return Results.ValidationProblem(results.ToDictionary(r => r.MemberNames.FirstOrDefault?? "", r => new[] { r.ErrorMessage?? "" }));
+            return await next(context);
+        };
+});
 
 orders.MapPost("/", CreateOrder);
 orders.MapPut("/{id}", UpdateOrder);
@@ -389,18 +389,18 @@ orders.MapGet("/{id}", GetOrder); // has no validatable body parameter -- filter
 ```csharp
 // VULNERABLE: binds the request body directly onto the persistence entity
 app.MapPost("/users/register", async (User user, AppDbContext db) =>
-{
- db.Users.Add(user); // a malicious client could include "isAdmin": true in the JSON body!
- await db.SaveChangesAsync;
- return TypedResults.Created($"/users/{user.Id}", user);
+    {
+        db.Users.Add(user); // a malicious client could include "isAdmin": true in the JSON body!
+        await db.SaveChangesAsync;
+        return TypedResults.Created($"/users/{user.Id}", user);
 });
 
 public class User // EF Core entity
 {
- public int Id { get; set; }
- public string Email { get; set; } = "";
- public string PasswordHash { get; set; } = "";
- public bool IsAdmin { get; set; } // NEVER should be client-settable
+    public int Id { get; set; }
+    public string Email { get; set; } = "";
+    public string PasswordHash { get; set; } = "";
+    public bool IsAdmin { get; set; } // NEVER should be client-settable
 }
 ```
 **Solution**:
@@ -408,16 +408,16 @@ public class User // EF Core entity
 public record RegisterUserRequest(string Email, string Password); // DTO: ONLY the fields a client should ever supply
 
 app.MapPost("/users/register", async (RegisterUserRequest request, IPasswordHasher hasher, AppDbContext db) =>
-{
- var user = new User
- {
- Email = request.Email,
- PasswordHash = hasher.Hash(request.Password),
- IsAdmin = false // explicitly, deliberately set server-side -- NEVER derived from client input
- };
- db.Users.Add(user);
- await db.SaveChangesAsync;
- return TypedResults.Created($"/users/{user.Id}", new { user.Id, user.Email }); // response DTO too -- never leak PasswordHash
+    {
+        var user = new User
+        {
+            Email = request.Email,
+                PasswordHash = hasher.Hash(request.Password),
+                IsAdmin = false // explicitly, deliberately set server-side -- NEVER derived from client input
+        };
+        db.Users.Add(user);
+        await db.SaveChangesAsync;
+        return TypedResults.Created($"/users/{user.Id}", new { user.Id, user.Email }); // response DTO too -- never leak PasswordHash
 });
 ```
 **Discussion**: Note the fix addresses **two** related, but distinct, concerns: (1) the mass-assignment vulnerability itself (input DTO, not entity, as the bound type), and (2) an equally important but easy-to-overlook **output**-side data-exposure risk (returning the raw `user` entity directly would leak `PasswordHash` in the response body) — a dedicated, narrow response projection (`new { user.Id, user.Email }`, or a proper response DTO/record) is needed on the way *out* for exactly the same "don't expose internal entity shape directly to clients" reasoning applied on the way *in*.
@@ -427,36 +427,36 @@ app.MapPost("/users/register", async (RegisterUserRequest request, IPasswordHash
 ```csharp
 public class BindingConsistencyTests: IClassFixture<WebApplicationFactory<ControllerStartup>>, IClassFixture<WebApplicationFactory<MinimalApiStartup>>
 {
- private readonly HttpClient _controllerClient;
- private readonly HttpClient _minimalApiClient;
+    private readonly HttpClient _controllerClient;
+    private readonly HttpClient _minimalApiClient;
 
- public BindingConsistencyTests(WebApplicationFactory<ControllerStartup> controllerFactory, WebApplicationFactory<MinimalApiStartup> minimalFactory)
- {
- _controllerClient = controllerFactory.CreateClient;
- _minimalApiClient = minimalFactory.CreateClient;
- }
+    public BindingConsistencyTests(WebApplicationFactory<ControllerStartup> controllerFactory, WebApplicationFactory<MinimalApiStartup> minimalFactory)
+    {
+        _controllerClient = controllerFactory.CreateClient;
+        _minimalApiClient = minimalFactory.CreateClient;
+    }
 
- public static IEnumerable<object[]> RequestMatrix
- {
- // A representative matrix: every field present; each optional field individually omitted
- // boundary values; unexpected extra fields -- exactly the scenarios most likely to expose
- // an inference discrepancy, per this module's production incident.
- yield return new object[] { "?startDate=2024-01-01&customerId=123&includeArchived=true" };
- yield return new object[] { "?startDate=2024-01-01&customerId=123" }; // includeArchived OMITTED
- yield return new object[] { "?customerId=123&includeArchived=true" }; // startDate OMITTED
- yield return new object[] { "?startDate=2024-01-01&customerId=123&includeArchived=true&unexpectedField=x" };
- }
+    public static IEnumerable<object[]> RequestMatrix
+    {
+        // A representative matrix: every field present; each optional field individually omitted
+        // boundary values; unexpected extra fields -- exactly the scenarios most likely to expose
+        // an inference discrepancy, per this module's production incident.
+        yield return new object[] { "?startDate=2024-01-01&customerId=123&includeArchived=true" };
+        yield return new object[] { "?startDate=2024-01-01&customerId=123" }; // includeArchived OMITTED
+        yield return new object[] { "?customerId=123&includeArchived=true" }; // startDate OMITTED
+        yield return new object[] { "?startDate=2024-01-01&customerId=123&includeArchived=true&unexpectedField=x" };
+    }
 
- [Theory]
- [MemberData(nameof(RequestMatrix))]
- public async Task Both_Implementations_Should_Bind_Identically(string queryString)
- {
- var controllerResponse = await _controllerClient.GetFromJsonAsync<ReportFilterDto>($"/reports/debug-binding{queryString}");
- var minimalApiResponse = await _minimalApiClient.GetFromJsonAsync<ReportFilterDto>($"/reports/debug-binding{queryString}");
+    [Theory]
+    [MemberData(nameof(RequestMatrix))]
+    public async Task Both_Implementations_Should_Bind_Identically(string queryString)
+    {
+        var controllerResponse = await _controllerClient.GetFromJsonAsync<ReportFilterDto>($"/reports/debug-binding{queryString}");
+        var minimalApiResponse = await _minimalApiClient.GetFromJsonAsync<ReportFilterDto>($"/reports/debug-binding{queryString}");
 
- Assert.Equal(controllerResponse, minimalApiResponse); // ReportFilterDto is a record --
- // value equality makes this assertion meaningful and simple
- }
+        Assert.Equal(controllerResponse, minimalApiResponse); // ReportFilterDto is a record --
+        // value equality makes this assertion meaningful and simple
+    }
 }
 // A "/reports/debug-binding" endpoint exists on BOTH implementations specifically for this test
 // simply echoing back the bound parameter values as JSON -- a test-only diagnostic endpoint.
@@ -512,38 +512,38 @@ classDiagram
 ```csharp
 public interface IApiErrorResponseBuilder
 {
- ProblemDetails BuildValidationError(IEnumerable<ValidationResult> errors);
- ProblemDetails BuildNotFoundError(string resourceType, string id);
+    ProblemDetails BuildValidationError(IEnumerable<ValidationResult> errors);
+    ProblemDetails BuildNotFoundError(string resourceType, string id);
 }
 
 public sealed class StandardApiErrorResponseBuilder: IApiErrorResponseBuilder
 {
- public ProblemDetails BuildValidationError(IEnumerable<ValidationResult> errors) => new
- {
- Status = 400,
- Title = "One or more validation errors occurred.",
- Extensions = { ["errors"] = errors.GroupBy(e => e.MemberNames.FirstOrDefault?? "")
-.ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray) }
- };
+    public ProblemDetails BuildValidationError(IEnumerable<ValidationResult> errors) => new
+    {
+        Status = 400,
+            Title = "One or more validation errors occurred.",
+            Extensions = { ["errors"] = errors.GroupBy(e => e.MemberNames.FirstOrDefault?? "")
+            .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray) }
+    };
 
- public ProblemDetails BuildNotFoundError(string resourceType, string id) => new
- {
- Status = 404,
- Title = $"{resourceType} not found.",
- Extensions = { ["resourceId"] = id }
- };
+    public ProblemDetails BuildNotFoundError(string resourceType, string id) => new
+    {
+        Status = 404,
+            Title = $"{resourceType} not found.",
+            Extensions = { ["resourceId"] = id }
+    };
 }
 
 // Controller-side wiring (in Program.cs):
 builder.Services.Configure<ApiBehaviorOptions>(options =>
-{
- var errorBuilder = new StandardApiErrorResponseBuilder; // or resolved via DI in a real implementation
- options.InvalidModelStateResponseFactory = context =>
- {
- var errors = context.ModelState.SelectMany(kvp => kvp.Value!.Errors.Select(e =>
- new ValidationResult(e.ErrorMessage, new[] { kvp.Key })));
- return new BadRequestObjectResult(errorBuilder.BuildValidationError(errors));
- };
+    {
+        var errorBuilder = new StandardApiErrorResponseBuilder; // or resolved via DI in a real implementation
+        options.InvalidModelStateResponseFactory = context =>
+        {
+            var errors = context.ModelState.SelectMany(kvp => kvp.Value!.Errors.Select(e =>
+                    new ValidationResult(e.ErrorMessage, new[] { kvp.Key })));
+            return new BadRequestObjectResult(errorBuilder.BuildValidationError(errors));
+        };
 });
 
 // Minimal API-side wiring: ValidationFilter<T> (Expert coding exercise) constructed with the

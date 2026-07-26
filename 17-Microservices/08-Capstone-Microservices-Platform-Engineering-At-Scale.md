@@ -464,18 +464,18 @@ The generalizable lesson: **adoption measures whether teams started using the pl
 ```csharp
 public CurrencyReport Report(IReadOnlyList<ServiceRecord> services, Version current)
 {
- var buckets = services
-.GroupBy(s => s.Criticality)
-.ToDictionary(
- g => g.Key,
- g => new CurrencyBucket(
- Total: g.Count,
- Current: g.Count(s => s.PlatformVersion >= current),
- MostStale: g.Min(s => s.PlatformVersion),
- StaleCriticalServices: g.Where(s => s.PlatformVersion < current)
-.Select(s => s.Name).ToList));
+    var buckets = services
+    .GroupBy(s => s.Criticality)
+    .ToDictionary(
+        g => g.Key,
+            g => new CurrencyBucket(
+            Total: g.Count,
+                Current: g.Count(s => s.PlatformVersion >= current),
+                MostStale: g.Min(s => s.PlatformVersion),
+                StaleCriticalServices: g.Where(s => s.PlatformVersion < current)
+            .Select(s => s.Name).ToList));
 
- return new CurrencyReport(buckets); // distribution, never an average
+    return new CurrencyReport(buckets); // distribution, never an average
 }
 ```
 **Time complexity:** O(n) for n services.
@@ -488,18 +488,18 @@ public CurrencyReport Report(IReadOnlyList<ServiceRecord> services, Version curr
 ```csharp
 public IReadOnlyList<OffPathFinding> Detect(IReadOnlyList<ServiceRecord> services)
 {
- return services
-.SelectMany(s => _capabilities
-.Where(c =>!s.ConsumedCapabilities.Contains(c.Id))
-.Select(c => new OffPathFinding(
- Service: s.Name,
- Capability: c.Id,
- Criticality: s.Criticality,
- Interpretation: c.IsSecurityRelevant
-? "Gap requiring remediation"
-: "Potential platform gap — investigate need"))) // feedback, not violation
-.OrderByDescending(f => f.Criticality)
-.ToList;
+    return services
+    .SelectMany(s => _capabilities
+        .Where(c =>!s.ConsumedCapabilities.Contains(c.Id))
+        .Select(c => new OffPathFinding(
+                Service: s.Name,
+                    Capability: c.Id,
+                    Criticality: s.Criticality,
+                    Interpretation: c.IsSecurityRelevant
+                ? "Gap requiring remediation"
+                : "Potential platform gap — investigate need"))) // feedback, not violation
+    .OrderByDescending(f => f.Criticality)
+    .ToList;
 }
 ```
 **Time complexity:** O(n × c) for n services and c capabilities.
@@ -512,17 +512,17 @@ public IReadOnlyList<OffPathFinding> Detect(IReadOnlyList<ServiceRecord> service
 ```csharp
 public async Task<UpgradeResult> ProposeUpgradeAsync(ServiceRecord service, Version target)
 {
- var branch = await _vcs.CreateBranchAsync(service.Repository, $"platform-upgrade-{target}");
- await _vcs.UpdateDependencyAsync(branch, PlatformPackage, target);
+    var branch = await _vcs.CreateBranchAsync(service.Repository, $"platform-upgrade-{target}");
+    await _vcs.UpdateDependencyAsync(branch, PlatformPackage, target);
 
- var build = await _ci.RunAsync(branch); // pre-test before asking
- if (!build.Succeeded)
- return UpgradeResult.RequiresAttention(service, build.Failures); // platform investigates
+    var build = await _ci.RunAsync(branch); // pre-test before asking
+    if (!build.Succeeded)
+        return UpgradeResult.RequiresAttention(service, build.Failures); // platform investigates
 
- return await _vcs.OpenPullRequestAsync(branch, new PullRequestDetails(
- Title: $"Upgrade platform to {target}",
- Body: _changelog.Between(service.PlatformVersion, target),
- AutoMergeEligible: build.Succeeded &&!_changelog.HasBreakingChanges(service.PlatformVersion, target)));
+    return await _vcs.OpenPullRequestAsync(branch, new PullRequestDetails(
+            Title: $"Upgrade platform to {target}",
+                Body: _changelog.Between(service.PlatformVersion, target),
+                AutoMergeEligible: build.Succeeded &&!_changelog.HasBreakingChanges(service.PlatformVersion, target)));
 }
 ```
 **Time complexity:** O(1) per service; the CI run dominates wall-clock.
@@ -535,20 +535,20 @@ public async Task<UpgradeResult> ProposeUpgradeAsync(ServiceRecord service, Vers
 ```csharp
 public IReadOnlyList<PlatformGap> AnalyzePatterns(IReadOnlyList<Incident> incidents, TimeSpan window)
 {
- return incidents
-.Where(i => i.OccurredAt > DateTimeOffset.UtcNow - window)
-.GroupBy(i => i.RootCauseCategory)
-.Where(g => g.Select(i => i.OwningTeam).Distinct.Count >= _teamThreshold)
-.Select(g => new PlatformGap(
- Category: g.Key,
- AffectedTeams: g.Select(i => i.OwningTeam).Distinct.ToList,
- Occurrences: g.Count,
- TotalImpactMinutes: g.Sum(i => i.DurationMinutes),
- Recommendation: _catalog.CapabilityAddressing(g.Key) is { } existing
-? $"Capability {existing} exists — adoption gap, not a platform gap"
-: "No capability addresses this — platform gap")) // the discriminating question
-.OrderByDescending(gap => gap.TotalImpactMinutes)
-.ToList;
+    return incidents
+    .Where(i => i.OccurredAt > DateTimeOffset.UtcNow - window)
+    .GroupBy(i => i.RootCauseCategory)
+    .Where(g => g.Select(i => i.OwningTeam).Distinct.Count >= _teamThreshold)
+    .Select(g => new PlatformGap(
+            Category: g.Key,
+                AffectedTeams: g.Select(i => i.OwningTeam).Distinct.ToList,
+                Occurrences: g.Count,
+                TotalImpactMinutes: g.Sum(i => i.DurationMinutes),
+                Recommendation: _catalog.CapabilityAddressing(g.Key) is { } existing
+            ? $"Capability {existing} exists — adoption gap, not a platform gap"
+            : "No capability addresses this — platform gap")) // the discriminating question
+    .OrderByDescending(gap => gap.TotalImpactMinutes)
+    .ToList;
 }
 ```
 **Time complexity:** O(n log n) for n incidents.

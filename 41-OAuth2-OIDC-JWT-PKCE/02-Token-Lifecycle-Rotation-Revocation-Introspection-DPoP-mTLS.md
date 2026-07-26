@@ -357,13 +357,13 @@ public enum RefreshOutcome { Accepted, ReuseDetected, FamilyAlreadyRevoked }
 
 public static class RefreshValidator
 {
- public static RefreshOutcome Check(TokenFamily family, string presentedTokenHash)
- {
- if (family.Revoked) return RefreshOutcome.FamilyAlreadyRevoked;
- return presentedTokenHash == family.CurrentValidTokenHash
-? RefreshOutcome.Accepted
-: RefreshOutcome.ReuseDetected; //: trigger full-family revocation on this outcome
- }
+    public static RefreshOutcome Check(TokenFamily family, string presentedTokenHash)
+    {
+        if (family.Revoked) return RefreshOutcome.FamilyAlreadyRevoked;
+        return presentedTokenHash == family.CurrentValidTokenHash
+        ? RefreshOutcome.Accepted
+        : RefreshOutcome.ReuseDetected; //: trigger full-family revocation on this outcome
+    }
 }
 ```
 **Time complexity:** O(1). **Space complexity:** O(1).
@@ -380,26 +380,26 @@ public sealed record DPoPProof(string Method, string Url, DateTimeOffset IssuedA
 
 public static class DPoPValidator
 {
- private static readonly TimeSpan MaxProofAge = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan MaxProofAge = TimeSpan.FromSeconds(60);
 
- public static (bool Valid, string? Reason) Verify(
- DPoPProof proof, string tokenCnfThumbprint, string expectedMethod, string expectedUrl, DateTimeOffset now)
- {
- if (!proof.SignatureValid)
- return (false, "DPoP proof signature invalid");
+    public static (bool Valid, string? Reason) Verify(
+        DPoPProof proof, string tokenCnfThumbprint, string expectedMethod, string expectedUrl, DateTimeOffset now)
+    {
+        if (!proof.SignatureValid)
+            return (false, "DPoP proof signature invalid");
 
- // The check that actually enforces sender-constraining (Advanced Q3):
- if (proof.SigningKeyThumbprint!= tokenCnfThumbprint)
- return (false, "DPoP proof key does not match token's cnf binding");
+        // The check that actually enforces sender-constraining (Advanced Q3):
+        if (proof.SigningKeyThumbprint!= tokenCnfThumbprint)
+            return (false, "DPoP proof key does not match token's cnf binding");
 
- if (proof.Method!= expectedMethod || proof.Url!= expectedUrl)
- return (false, "DPoP proof does not match this request's method/URL"); // Intermediate Q9
+        if (proof.Method!= expectedMethod || proof.Url!= expectedUrl)
+            return (false, "DPoP proof does not match this request's method/URL"); // Intermediate Q9
 
- if (now - proof.IssuedAt > MaxProofAge)
- return (false, "DPoP proof expired — possible replay");
+        if (now - proof.IssuedAt > MaxProofAge)
+            return (false, "DPoP proof expired — possible replay");
 
- return (true, null);
- }
+        return (true, null);
+    }
 }
 ```
 **Time complexity:** O(1). **Space complexity:** O(1).
@@ -416,38 +416,38 @@ public enum RiskTier { Low, High } // High = requires near-real-time revocation 
 
 public sealed class RiskTieredTokenValidator
 {
- private readonly Func<string, JwtValidationResultLite> _validateJwtLocally;
- private readonly Func<string, Task<IntrospectionResult>> _introspect;
- private readonly Dictionary<string, (IntrospectionResult Result, DateTimeOffset CachedAt)> _introspectionCache = new;
- private readonly TimeSpan _introspectionCacheTtl;
+    private readonly Func<string, JwtValidationResultLite> _validateJwtLocally;
+    private readonly Func<string, Task<IntrospectionResult>> _introspect;
+    private readonly Dictionary<string, (IntrospectionResult Result, DateTimeOffset CachedAt)> _introspectionCache = new;
+    private readonly TimeSpan _introspectionCacheTtl;
 
- public RiskTieredTokenValidator(
- Func<string, JwtValidationResultLite> validateJwtLocally,
- Func<string, Task<IntrospectionResult>> introspect,
- TimeSpan introspectionCacheTtl)
- {
- _validateJwtLocally = validateJwtLocally;
- _introspect = introspect;
- _introspectionCacheTtl = introspectionCacheTtl;
- }
+    public RiskTieredTokenValidator(
+        Func<string, JwtValidationResultLite> validateJwtLocally,
+            Func<string, Task<IntrospectionResult>> introspect,
+            TimeSpan introspectionCacheTtl)
+    {
+        _validateJwtLocally = validateJwtLocally;
+        _introspect = introspect;
+        _introspectionCacheTtl = introspectionCacheTtl;
+    }
 
- public async Task<bool> IsValidAsync(string token, RiskTier tier, DateTimeOffset now)
- {
- if (tier == RiskTier.Low)
- return _validateJwtLocally(token).IsValid; ///: zero authorization-server load
+    public async Task<bool> IsValidAsync(string token, RiskTier tier, DateTimeOffset now)
+    {
+        if (tier == RiskTier.Low)
+            return _validateJwtLocally(token).IsValid; ///: zero authorization-server load
 
- // High risk: prefer a fresh introspection call, but use a short-TTL cache
- // to blunt request-path load without meaningfully reopening the revocation gap (I8, A4).
- if (_introspectionCache.TryGetValue(token, out var cached) &&
- now - cached.CachedAt < _introspectionCacheTtl)
- {
- return cached.Result.Active;
- }
+        // High risk: prefer a fresh introspection call, but use a short-TTL cache
+        // to blunt request-path load without meaningfully reopening the revocation gap (I8, A4).
+        if (_introspectionCache.TryGetValue(token, out var cached) &&
+            now - cached.CachedAt < _introspectionCacheTtl)
+        {
+            return cached.Result.Active;
+        }
 
- var result = await _introspect(token);
- _introspectionCache[token] = (result, now);
- return result.Active;
- }
+        var result = await _introspect(token);
+        _introspectionCache[token] = (result, now);
+        return result.Active;
+    }
 }
 
 public sealed record JwtValidationResultLite(bool IsValid);
@@ -467,48 +467,48 @@ public enum RotationOutcome { Accepted, ReuseDetected, KeyMismatch, FamilyAlread
 
 public sealed class DPoPBoundRotationService
 {
- private readonly Dictionary<string, TokenFamily> _families = new;
- private readonly Action<string, RotationOutcome> _alertOnAnomaly;
+    private readonly Dictionary<string, TokenFamily> _families = new;
+    private readonly Action<string, RotationOutcome> _alertOnAnomaly;
 
- public DPoPBoundRotationService(Action<string, RotationOutcome> alertOnAnomaly) =>
- _alertOnAnomaly = alertOnAnomaly;
+    public DPoPBoundRotationService(Action<string, RotationOutcome> alertOnAnomaly) =>
+        _alertOnAnomaly = alertOnAnomaly;
 
- public RotationOutcome Rotate(
- string familyId, string presentedTokenHash, string presentedDPoPKeyThumbprint, out string? newTokenHash)
- {
- newTokenHash = null;
+    public RotationOutcome Rotate(
+        string familyId, string presentedTokenHash, string presentedDPoPKeyThumbprint, out string? newTokenHash)
+    {
+        newTokenHash = null;
 
- if (!_families.TryGetValue(familyId, out var family))
- return RotationOutcome.FamilyAlreadyRevoked; // unknown family treated as revoked, fail closed
+        if (!_families.TryGetValue(familyId, out var family))
+            return RotationOutcome.FamilyAlreadyRevoked; // unknown family treated as revoked, fail closed
 
- if (family.Revoked)
- return RotationOutcome.FamilyAlreadyRevoked;
+        if (family.Revoked)
+            return RotationOutcome.FamilyAlreadyRevoked;
 
- // Reuse check — must pass BEFORE the key-binding check, since a reused
- // token is grounds for full revocation regardless of which key presented it.
- if (presentedTokenHash!= family.CurrentValidTokenHash)
- {
- _families[familyId] = family with { Revoked = true };
- _alertOnAnomaly(familyId, RotationOutcome.ReuseDetected);
- return RotationOutcome.ReuseDetected;
- }
+        // Reuse check — must pass BEFORE the key-binding check, since a reused
+        // token is grounds for full revocation regardless of which key presented it.
+        if (presentedTokenHash!= family.CurrentValidTokenHash)
+        {
+            _families[familyId] = family with { Revoked = true };
+            _alertOnAnomaly(familyId, RotationOutcome.ReuseDetected);
+            return RotationOutcome.ReuseDetected;
+        }
 
- // Sender-constraining check — an attacker who somehow obtained the CURRENT
- // valid refresh token but not the bound private key still cannot rotate it.
- if (presentedDPoPKeyThumbprint!= family.BoundKeyThumbprint)
- {
- _families[familyId] = family with { Revoked = true }; // treat as compromise too — A6
- _alertOnAnomaly(familyId, RotationOutcome.KeyMismatch);
- return RotationOutcome.KeyMismatch;
- }
+        // Sender-constraining check — an attacker who somehow obtained the CURRENT
+        // valid refresh token but not the bound private key still cannot rotate it.
+        if (presentedDPoPKeyThumbprint!= family.BoundKeyThumbprint)
+        {
+            _families[familyId] = family with { Revoked = true }; // treat as compromise too — A6
+            _alertOnAnomaly(familyId, RotationOutcome.KeyMismatch);
+            return RotationOutcome.KeyMismatch;
+        }
 
- newTokenHash = GenerateNewTokenHash;
- _families[familyId] = family with { CurrentValidTokenHash = newTokenHash };
- return RotationOutcome.Accepted;
- }
+        newTokenHash = GenerateNewTokenHash;
+        _families[familyId] = family with { CurrentValidTokenHash = newTokenHash };
+        return RotationOutcome.Accepted;
+    }
 
- private static string GenerateNewTokenHash =>
- Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+    private static string GenerateNewTokenHash =>
+        Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
 }
 
 public sealed record TokenFamily(string FamilyId, string CurrentValidTokenHash, string BoundKeyThumbprint, bool Revoked);

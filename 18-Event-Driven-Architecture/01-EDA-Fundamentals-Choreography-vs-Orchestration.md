@@ -224,17 +224,17 @@ graph LR
 ```csharp
 public class ThinOrderPlacedEvent
 {
- public string OrderId { get; set; } = default!; // minimal payload -- just enough to identify the event
+    public string OrderId { get; set; } = default!; // minimal payload -- just enough to identify the event
 }
 
 public class InventoryEventHandler
 {
- private readonly IOrderServiceClient _orderClient; // synchronous fetch-back REQUIRED
- public async Task HandleAsync(ThinOrderPlacedEvent evt)
- {
- var order = await _orderClient.GetOrderAsync(evt.OrderId); // reintroduces availability dependency
- await _inventoryReservation.ReserveAsync(order.Items);
- }
+    private readonly IOrderServiceClient _orderClient; // synchronous fetch-back REQUIRED
+    public async Task HandleAsync(ThinOrderPlacedEvent evt)
+    {
+        var order = await _orderClient.GetOrderAsync(evt.OrderId); // reintroduces availability dependency
+        await _inventoryReservation.ReserveAsync(order.Items);
+    }
 }
 ```
 
@@ -242,21 +242,21 @@ public class InventoryEventHandler
 ```csharp
 public class FatOrderPlacedEvent
 {
- public string OrderId { get; set; } = default!;
- public string CustomerId { get; set; } = default!;
- public List<OrderItem> Items { get; set; } = new; // full data embedded -- immutable fact about placement
- public decimal TotalAmount { get; set; }
- // Deliberately OMITS current customer risk-score -- that's mutable, time-sensitive context
- // fetched fresh by Fraud-Check if/when it needs it, NOT embedded here.
+    public string OrderId { get; set; } = default!;
+    public string CustomerId { get; set; } = default!;
+    public List<OrderItem> Items { get; set; } = new; // full data embedded -- immutable fact about placement
+    public decimal TotalAmount { get; set; }
+    // Deliberately OMITS current customer risk-score -- that's mutable, time-sensitive context
+    // fetched fresh by Fraud-Check if/when it needs it, NOT embedded here.
 }
 
 public class ShippingEventHandler
 {
- public Task HandleAsync(FatOrderPlacedEvent evt)
- {
- // NO call back to Order Service needed -- fully self-sufficient, even if Order Service is down.
- return _shippingScheduler.ScheduleAsync(evt.OrderId, evt.Items);
- }
+    public Task HandleAsync(FatOrderPlacedEvent evt)
+    {
+        // NO call back to Order Service needed -- fully self-sufficient, even if Order Service is down.
+        return _shippingScheduler.ScheduleAsync(evt.OrderId, evt.Items);
+    }
 }
 ```
 
@@ -264,24 +264,24 @@ public class ShippingEventHandler
 ```csharp
 public class WorkflowCompletionMonitor: BackgroundService
 {
- protected override async Task ExecuteAsync(CancellationToken ct)
- {
- while (!ct.IsCancellationRequested)
- {
- var stalledOrders = await _repository.FindOrdersWithoutTerminalEventAsync(
- triggeringEvent: "OrderPlaced",
- terminalEvent: "OrderShipped",
- maxAge: TimeSpan.FromHours(2)); // expected completion window for this workflow
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            var stalledOrders = await _repository.FindOrdersWithoutTerminalEventAsync(
+                triggeringEvent: "OrderPlaced",
+                    terminalEvent: "OrderShipped",
+                    maxAge: TimeSpan.FromHours(2)); // expected completion window for this workflow
 
- foreach (var stalled in stalledOrders)
- await _alerting.RaiseAsync($"Order {stalled.OrderId} stalled: OrderPlaced at " +
- $"{stalled.PlacedAt}, no OrderShipped after 2h -- workflow likely stuck mid-chain");
+            foreach (var stalled in stalledOrders)
+                await _alerting.RaiseAsync($"Order {stalled.OrderId} stalled: OrderPlaced at " +
+                $"{stalled.PlacedAt}, no OrderShipped after 2h -- workflow likely stuck mid-chain");
 
- await Task.Delay(TimeSpan.FromMinutes(5), ct);
- }
- // Converts the "customer complains, 3-hour manual investigation" into a proactive alert
- // WITHOUT requiring a full migration to orchestration for workflows staying choreographed.
- }
+            await Task.Delay(TimeSpan.FromMinutes(5), ct);
+        }
+        // Converts the "customer complains, 3-hour manual investigation" into a proactive alert
+        // WITHOUT requiring a full migration to orchestration for workflows staying choreographed.
+    }
 }
 ```
 
@@ -289,28 +289,28 @@ public class WorkflowCompletionMonitor: BackgroundService
 ```csharp
 public class OrderFulfillmentOrchestrator
 {
- public async Task<WorkflowResult> ExecuteAsync(OrderPlacedEvent trigger)
- {
- var instance = new WorkflowInstance(trigger.OrderId, workflowDefinitionVersion: "v2"); // PINNED at start
+    public async Task<WorkflowResult> ExecuteAsync(OrderPlacedEvent trigger)
+    {
+        var instance = new WorkflowInstance(trigger.OrderId, workflowDefinitionVersion: "v2"); // PINNED at start
 
- try
- {
- await _inventoryClient.ReserveAsync(trigger.OrderId, instance.DefinitionVersion);
- await _paymentClient.ChargeAsync(trigger.OrderId, instance.DefinitionVersion);
- await _fraudCheckClient.VerifyAsync(trigger.OrderId, instance.DefinitionVersion); // explicit GATE
- await _shippingClient.ScheduleAsync(trigger.OrderId, instance.DefinitionVersion);
- return WorkflowResult.Success(instance);
- }
- catch (FraudCheckFailedException)
- {
- // Explicit compensation -- visible HERE, not scattered across independently-reacting services.
- await _paymentClient.RefundAsync(trigger.OrderId);
- await _inventoryClient.ReleaseReservationAsync(trigger.OrderId);
- return WorkflowResult.Compensated(instance, reason: "Fraud check failed");
- }
- // A NEW workflow definition (e.g., "v3", adding a loyalty-points step) only applies to
- // NEWLY-STARTED instances -- this in-flight instance stays on "v2" for its entire lifecycle.
- }
+        try
+        {
+            await _inventoryClient.ReserveAsync(trigger.OrderId, instance.DefinitionVersion);
+            await _paymentClient.ChargeAsync(trigger.OrderId, instance.DefinitionVersion);
+            await _fraudCheckClient.VerifyAsync(trigger.OrderId, instance.DefinitionVersion); // explicit GATE
+            await _shippingClient.ScheduleAsync(trigger.OrderId, instance.DefinitionVersion);
+            return WorkflowResult.Success(instance);
+        }
+        catch (FraudCheckFailedException)
+        {
+            // Explicit compensation -- visible HERE, not scattered across independently-reacting services.
+            await _paymentClient.RefundAsync(trigger.OrderId);
+            await _inventoryClient.ReleaseReservationAsync(trigger.OrderId);
+            return WorkflowResult.Compensated(instance, reason: "Fraud check failed");
+        }
+        // A NEW workflow definition (e.g., "v3", adding a loyalty-points step) only applies to
+        // NEWLY-STARTED instances -- this in-flight instance stays on "v2" for its entire lifecycle.
+    }
 }
 ```
 **Discussion**: this orchestrator makes Fraud-Check an explicit **gate** with explicit compensation (directly resolving Advanced Q6's gating-vs-non-gating ambiguity that caused the incident) — had the original system used this pattern instead of choreography for the sequential core workflow, Shipping's dependency on Fraud-Check's outcome would have been visible in one place, and the on-call engineer would have found the stuck workflow in minutes by reading this one method, not three hours reconstructing implicit subscription relationships across twelve independently-deployed services.

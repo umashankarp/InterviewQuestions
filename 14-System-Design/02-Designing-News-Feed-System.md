@@ -319,17 +319,17 @@ ZREMRANGEBYRANK feed:12345 0 -1001 -- trim: bound the feed to the most recent 10
 ```csharp
 public async Task<List<FeedItem>> GetFeedAsync(string userId, int count)
 {
- var precomputedTask = _redis.SortedSetRangeByScoreAsync($"feed:{userId}", order: Order.Descending, take: count);
- var celebrityAccounts = await _followGraph.GetCelebrityFollowsAsync(userId); // accounts over the pull-threshold
- var celebrityPostsTask = Task.WhenAll(celebrityAccounts.Select(c => _postStore.GetRecentPostsAsync(c, count)));
+    var precomputedTask = _redis.SortedSetRangeByScoreAsync($"feed:{userId}", order: Order.Descending, take: count);
+    var celebrityAccounts = await _followGraph.GetCelebrityFollowsAsync(userId); // accounts over the pull-threshold
+    var celebrityPostsTask = Task.WhenAll(celebrityAccounts.Select(c => _postStore.GetRecentPostsAsync(c, count)));
 
- await Task.WhenAll(precomputedTask, celebrityPostsTask); // fetch BOTH sources concurrently
+    await Task.WhenAll(precomputedTask, celebrityPostsTask); // fetch BOTH sources concurrently
 
- var precomputed = (await precomputedTask).Select(ParseFeedItem);
- var live = (await celebrityPostsTask).SelectMany(posts => posts);
+    var precomputed = (await precomputedTask).Select(ParseFeedItem);
+    var live = (await celebrityPostsTask).SelectMany(posts => posts);
 
- // k-way merge (Advanced Q2) -- both inputs already individually sorted by timestamp descending
- return MergeSortedByTimestamp(precomputed, live).Take(count).ToList;
+    // k-way merge (Advanced Q2) -- both inputs already individually sorted by timestamp descending
+    return MergeSortedByTimestamp(precomputed, live).Take(count).ToList;
 }
 ```
 **Discussion**: `Task.WhenAll` fetching both sources **concurrently** (the async-concurrency discipline) rather than sequentially is essential here — sequentially awaiting the precomputed feed, then the celebrity posts, would needlessly add the two operations' latencies together instead of overlapping them, directly the "use `Task.WhenAll` for independent concurrent operations" best practice applied at this system's most latency-sensitive read path.
@@ -338,30 +338,30 @@ public async Task<List<FeedItem>> GetFeedAsync(string userId, int count)
 ```csharp
 public async Task HandlePostCreatedAsync(Post post)
 {
- // Post creation itself returns IMMEDIATELY -- fan-out is NOT synchronous with the user-facing request.
- await _messageQueue.PublishAsync(new FanOutJob(post.Id, post.AuthorId));
+    // Post creation itself returns IMMEDIATELY -- fan-out is NOT synchronous with the user-facing request.
+    await _messageQueue.PublishAsync(new FanOutJob(post.Id, post.AuthorId));
 }
 
 // Separate, independently-scaled worker fleet consumes the queue:
 public async Task ProcessFanOutJobAsync(FanOutJob job)
 {
- var followerCount = await _followGraph.GetFollowerCountAsync(job.AuthorId);
+    var followerCount = await _followGraph.GetFollowerCountAsync(job.AuthorId);
 
- if (followerCount > CelebrityThreshold)
- {
- // Celebrity account: skip push fan-out entirely -- relies on the pull path at read time
- return;
- }
+    if (followerCount > CelebrityThreshold)
+    {
+        // Celebrity account: skip push fan-out entirely -- relies on the pull path at read time
+        return;
+    }
 
- var followers = await _followGraph.GetFollowersAsync(job.AuthorId);
- var batches = followers.Chunk(1000); // batch writes, directly's
- // lock-escalation-avoidance batching discipline, applied here
- // to Redis write-batching instead of SQL Server transactions
- foreach (var batch in batches)
- {
- await _redis.BatchAsync(batch.Select(followerId =>
- new RedisCommand("ZADD", $"feed:{followerId}", post.Timestamp, post.Id)));
- }
+    var followers = await _followGraph.GetFollowersAsync(job.AuthorId);
+    var batches = followers.Chunk(1000); // batch writes, directly's
+    // lock-escalation-avoidance batching discipline, applied here
+    // to Redis write-batching instead of SQL Server transactions
+    foreach (var batch in batches)
+    {
+        await _redis.BatchAsync(batch.Select(followerId =>
+                new RedisCommand("ZADD", $"feed:{followerId}", post.Timestamp, post.Id)));
+    }
 }
 ```
 **Discussion**: Decoupling post-creation (synchronous, fast, user-facing) from fan-out processing (asynchronous, queue-driven, independently-scalable) is precisely Advanced Q4's burst-absorption strategy — a sudden spike in post creation grows the queue's depth (a monitorable, recoverable backpressure signal, directly the Streams consumer-group backlog-monitoring pattern) rather than directly overwhelming the fan-out write path itself, and the celebrity-threshold check inside the worker (not at post-creation time) keeps the "which accounts skip push fan-out" decision centralized and easily adjustable (Advanced Q1's monitored, adjustable threshold) without touching the post-creation code path at all.

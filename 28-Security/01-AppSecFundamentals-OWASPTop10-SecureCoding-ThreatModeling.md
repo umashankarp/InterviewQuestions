@@ -330,14 +330,14 @@ public enum RenderContext { HtmlBody, HtmlAttribute, JavaScriptString, UrlCompon
 
 public static class ContextAwareEncoder
 {
- public static string Encode(string untrustedInput, RenderContext context) => context switch
- {
- RenderContext.HtmlBody => System.Net.WebUtility.HtmlEncode(untrustedInput),
- RenderContext.HtmlAttribute => System.Net.WebUtility.HtmlEncode(untrustedInput), // + attribute-specific quoting rules in a full implementation
- RenderContext.JavaScriptString => System.Text.Json.JsonEncodedText.Encode(untrustedInput).ToString,
- RenderContext.UrlComponent => Uri.EscapeDataString(untrustedInput),
- _ => throw new ArgumentOutOfRangeException(nameof(context))
- };
+    public static string Encode(string untrustedInput, RenderContext context) => context switch
+    {
+        RenderContext.HtmlBody => System.Net.WebUtility.HtmlEncode(untrustedInput),
+            RenderContext.HtmlAttribute => System.Net.WebUtility.HtmlEncode(untrustedInput), // + attribute-specific quoting rules in a full implementation
+            RenderContext.JavaScriptString => System.Text.Json.JsonEncodedText.Encode(untrustedInput).ToString,
+            RenderContext.UrlComponent => Uri.EscapeDataString(untrustedInput),
+            _ => throw new ArgumentOutOfRangeException(nameof(context))
+    };
 }
 ```
 **Time complexity:** O(n) in input length for any of the encoding functions.
@@ -352,33 +352,33 @@ public sealed record FilterCriterion(string FieldName, string Value);
 
 public static class SafeQueryBuilder
 {
- private static readonly HashSet<string> AllowedFields = new { "Status", "CustomerId", "CreatedDate" };
+    private static readonly HashSet<string> AllowedFields = new { "Status", "CustomerId", "CreatedDate" };
 
- public static (string Sql, Dictionary<string, object> Parameters) BuildQuery(
- IReadOnlyList<FilterCriterion> criteria)
- {
- var conditions = new List<string>;
- var parameters = new Dictionary<string, object>;
+    public static (string Sql, Dictionary<string, object> Parameters) BuildQuery(
+        IReadOnlyList<FilterCriterion> criteria)
+    {
+        var conditions = new List<string>;
+        var parameters = new Dictionary<string, object>;
 
- foreach (var (criterion, index) in criteria.Select((c, i) => (c, i)))
- {
- // Field NAMES cannot be parameterized in standard SQL -- so they
- // MUST be validated against an allow-list, never sanitized or
- // passed through unchecked (Sec2.1's "parameterize, don't sanitize"
- // applies to VALUES; field names require allow-listing instead).
- if (!AllowedFields.Contains(criterion.FieldName))
- throw new ArgumentException($"Field '{criterion.FieldName}' is not permitted for filtering.");
+        foreach (var (criterion, index) in criteria.Select((c, i) => (c, i)))
+        {
+            // Field NAMES cannot be parameterized in standard SQL -- so they
+            // MUST be validated against an allow-list, never sanitized or
+            // passed through unchecked (Sec2.1's "parameterize, don't sanitize"
+            // applies to VALUES; field names require allow-listing instead).
+            if (!AllowedFields.Contains(criterion.FieldName))
+                throw new ArgumentException($"Field '{criterion.FieldName}' is not permitted for filtering.");
 
- string paramName = $"@p{index}";
- conditions.Add($"{criterion.FieldName} = {paramName}");
- parameters[paramName] = criterion.Value; // VALUE is always parameterized, never concatenated
- }
+            string paramName = $"@p{index}";
+            conditions.Add($"{criterion.FieldName} = {paramName}");
+            parameters[paramName] = criterion.Value; // VALUE is always parameterized, never concatenated
+        }
 
- string sql = "SELECT * FROM Invoices" +
- (conditions.Count > 0? " WHERE " + string.Join(" AND ", conditions): "");
+        string sql = "SELECT * FROM Invoices" +
+            (conditions.Count > 0? " WHERE " + string.Join(" AND ", conditions): "");
 
- return (sql, parameters);
- }
+        return (sql, parameters);
+    }
 }
 ```
 **Time complexity:** O(n) in the number of filter criteria.
@@ -395,33 +395,33 @@ public sealed record AuthorizationResult(bool IsAuthorized, string? DenialReason
 
 public interface IObjectLevelAuthorizer<TResource> where TResource: IOwnedResource
 {
- AuthorizationResult Authorize(TResource resource, string authenticatedPrincipalId);
+    AuthorizationResult Authorize(TResource resource, string authenticatedPrincipalId);
 }
 
 public sealed class OwnershipAuthorizer<TResource>: IObjectLevelAuthorizer<TResource>
- where TResource: IOwnedResource
+where TResource: IOwnedResource
 {
- public AuthorizationResult Authorize(TResource resource, string authenticatedPrincipalId)
- {
- // THE central check this module's incident's fix depends on -- verifying
- // the SPECIFIC resource's owner matches the SPECIFIC authenticated
- // principal, not merely that SOME principal is authenticated.
- if (resource.OwnerId!= authenticatedPrincipalId)
- return new AuthorizationResult(false,
- $"Principal '{authenticatedPrincipalId}' does not own this resource.");
+    public AuthorizationResult Authorize(TResource resource, string authenticatedPrincipalId)
+    {
+        // THE central check this module's incident's fix depends on -- verifying
+        // the SPECIFIC resource's owner matches the SPECIFIC authenticated
+        // principal, not merely that SOME principal is authenticated.
+        if (resource.OwnerId!= authenticatedPrincipalId)
+            return new AuthorizationResult(false,
+            $"Principal '{authenticatedPrincipalId}' does not own this resource.");
 
- return new AuthorizationResult(true, null);
- }
+        return new AuthorizationResult(true, null);
+    }
 }
 
 // Applied uniformly at the endpoint layer, e.g. as ASP.NET Core middleware/filter:
 public sealed class ResourceOwnershipFilter<TResource> where TResource: IOwnedResource
 {
- private readonly IObjectLevelAuthorizer<TResource> _authorizer;
- public ResourceOwnershipFilter(IObjectLevelAuthorizer<TResource> authorizer) => _authorizer = authorizer;
+    private readonly IObjectLevelAuthorizer<TResource> _authorizer;
+    public ResourceOwnershipFilter(IObjectLevelAuthorizer<TResource> authorizer) => _authorizer = authorizer;
 
- public AuthorizationResult CheckAccess(TResource resource, string authenticatedPrincipalId) =>
- _authorizer.Authorize(resource, authenticatedPrincipalId);
+    public AuthorizationResult CheckAccess(TResource resource, string authenticatedPrincipalId) =>
+        _authorizer.Authorize(resource, authenticatedPrincipalId);
 }
 ```
 **Time complexity:** O(1) per authorization check.
@@ -433,51 +433,51 @@ public sealed class ResourceOwnershipFilter<TResource> where TResource: IOwnedRe
 
 ```csharp
 public sealed record ResourceEndpointMetadata(
- string RoutePattern, string ResourceIdParamName, string OwnerLookupFunctionName);
+    string RoutePattern, string ResourceIdParamName, string OwnerLookupFunctionName);
 
 public sealed record GeneratedNegativeTest(string TestName, string Description, Func<Task<bool>> Execute);
 
 public sealed class NegativeAuthorizationTestGenerator
 {
- private readonly Func<string, string, Task<object?>> _fetchResourceAsync; // (resourceId, ownerLookupFn) -> resource or null
- private readonly Func<object, string> _getOwnerId;
+    private readonly Func<string, string, Task<object?>> _fetchResourceAsync; // (resourceId, ownerLookupFn) -> resource or null
+    private readonly Func<object, string> _getOwnerId;
 
- public NegativeAuthorizationTestGenerator(
- Func<string, string, Task<object?>> fetchResourceAsync, Func<object, string> getOwnerId)
- {
- _fetchResourceAsync = fetchResourceAsync;
- _getOwnerId = getOwnerId;
- }
+    public NegativeAuthorizationTestGenerator(
+        Func<string, string, Task<object?>> fetchResourceAsync, Func<object, string> getOwnerId)
+    {
+        _fetchResourceAsync = fetchResourceAsync;
+        _getOwnerId = getOwnerId;
+    }
 
- public GeneratedNegativeTest GenerateFor(
- ResourceEndpointMetadata endpoint, string existingResourceId, string attackerPrincipalId)
- {
- return new GeneratedNegativeTest(
- TestName: $"IDOR_CrossPrincipal_{endpoint.RoutePattern}",
- Description: $"Principal '{attackerPrincipalId}' must be REJECTED when requesting " +
- $"resource '{existingResourceId}' via {endpoint.RoutePattern}, unless they own it.",
- Execute: async =>
- {
- var resource = await _fetchResourceAsync(existingResourceId, endpoint.OwnerLookupFunctionName);
- if (resource is null)
- return true; // resource doesn't exist -- not this test's concern
+    public GeneratedNegativeTest GenerateFor(
+        ResourceEndpointMetadata endpoint, string existingResourceId, string attackerPrincipalId)
+    {
+        return new GeneratedNegativeTest(
+            TestName: $"IDOR_CrossPrincipal_{endpoint.RoutePattern}",
+                Description: $"Principal '{attackerPrincipalId}' must be REJECTED when requesting " +
+                $"resource '{existingResourceId}' via {endpoint.RoutePattern}, unless they own it.",
+                Execute: async =>
+            {
+                var resource = await _fetchResourceAsync(existingResourceId, endpoint.OwnerLookupFunctionName);
+                if (resource is null)
+                    return true; // resource doesn't exist -- not this test's concern
 
- string actualOwnerId = _getOwnerId(resource);
- if (actualOwnerId == attackerPrincipalId)
- return true; // attacker happens to genuinely own it -- not a valid negative-test scenario
+                string actualOwnerId = _getOwnerId(resource);
+                if (actualOwnerId == attackerPrincipalId)
+                    return true; // attacker happens to genuinely own it -- not a valid negative-test scenario
 
- // The actual assertion: an endpoint call as 'attackerPrincipalId' for a
- // resource it does NOT own must be rejected -- returning FALSE here
- // (test execution would call the real endpoint and check for a 403/404)
- // represents a DISCOVERED VULNERABILITY if the real call succeeds.
- bool endpointRejectedAccess = await SimulateEndpointCallAndCheckRejection(
- endpoint.RoutePattern, existingResourceId, attackerPrincipalId);
- return endpointRejectedAccess;
- });
- }
+                // The actual assertion: an endpoint call as 'attackerPrincipalId' for a
+                // resource it does NOT own must be rejected -- returning FALSE here
+                // (test execution would call the real endpoint and check for a 403/404)
+                // represents a DISCOVERED VULNERABILITY if the real call succeeds.
+                bool endpointRejectedAccess = await SimulateEndpointCallAndCheckRejection(
+                    endpoint.RoutePattern, existingResourceId, attackerPrincipalId);
+                return endpointRejectedAccess;
+        });
+    }
 
- private Task<bool> SimulateEndpointCallAndCheckRejection(string route, string resourceId, string principalId)
- => Task.FromResult(true); // actual HTTP call + assertion omitted for brevity
+    private Task<bool> SimulateEndpointCallAndCheckRejection(string route, string resourceId, string principalId)
+    => Task.FromResult(true); // actual HTTP call + assertion omitted for brevity
 }
 ```
 **Time complexity:** O(1) per generated test's setup (excluding the actual HTTP call/assertion it performs at execution time).
@@ -544,58 +544,58 @@ public sealed class ResourceOwnershipRequirement: IAuthorizationRequirement { }
 
 public sealed class ResourceOwnershipHandler: AuthorizationHandler<ResourceOwnershipRequirement, IOwnedResource>
 {
- protected override Task HandleRequirementAsync(
- AuthorizationHandlerContext context, ResourceOwnershipRequirement requirement, IOwnedResource resource)
- {
- string? authenticatedPrincipalId = context.User.FindFirst("sub")?.Value;
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext context, ResourceOwnershipRequirement requirement, IOwnedResource resource)
+    {
+        string? authenticatedPrincipalId = context.User.FindFirst("sub")?.Value;
 
- // Fail CLOSED on ambiguity -- an unauthenticated or unidentifiable
- // principal is NEVER treated as authorized, regardless of resource state.
- if (authenticatedPrincipalId is null)
- {
- context.Fail;
- return Task.CompletedTask;
- }
+        // Fail CLOSED on ambiguity -- an unauthenticated or unidentifiable
+        // principal is NEVER treated as authorized, regardless of resource state.
+        if (authenticatedPrincipalId is null)
+        {
+            context.Fail;
+            return Task.CompletedTask;
+        }
 
- // THE central check -- object-level ownership, not merely "is authenticated."
- if (resource.OwnerId == authenticatedPrincipalId)
- context.Succeed(requirement);
- else
- context.Fail;
+        // THE central check -- object-level ownership, not merely "is authenticated."
+        if (resource.OwnerId == authenticatedPrincipalId)
+            context.Succeed(requirement);
+        else
+            context.Fail;
 
- return Task.CompletedTask;
- }
+        return Task.CompletedTask;
+    }
 }
 
 // Endpoint usage -- applied DECLARATIVELY, not hand-rolled per handler:
 public sealed class InvoiceEndpoint
 {
- private readonly IAuthorizationService _authorizationService;
- private readonly IInvoiceRepository _invoiceRepository;
+    private readonly IAuthorizationService _authorizationService;
+    private readonly IInvoiceRepository _invoiceRepository;
 
- public InvoiceEndpoint(IAuthorizationService authorizationService, IInvoiceRepository invoiceRepository)
- {
- _authorizationService = authorizationService;
- _invoiceRepository = invoiceRepository;
- }
+    public InvoiceEndpoint(IAuthorizationService authorizationService, IInvoiceRepository invoiceRepository)
+    {
+        _authorizationService = authorizationService;
+        _invoiceRepository = invoiceRepository;
+    }
 
- public async Task<IActionResult> GetInvoice(string invoiceId, ClaimsPrincipal user)
- {
- var invoice = await _invoiceRepository.GetByIdAsync(invoiceId);
- if (invoice is null)
- return new NotFoundResult;
+    public async Task<IActionResult> GetInvoice(string invoiceId, ClaimsPrincipal user)
+    {
+        var invoice = await _invoiceRepository.GetByIdAsync(invoiceId);
+        if (invoice is null)
+            return new NotFoundResult;
 
- // THIS is the line Sec4's vulnerable endpoint never had -- the object-level
- // authorization check, applied via the SAME reusable policy every
- // resource-scoped endpoint in the codebase uses.
- var authResult = await _authorizationService.AuthorizeAsync(
- user, invoice, new ResourceOwnershipRequirement);
+        // THIS is the line Sec4's vulnerable endpoint never had -- the object-level
+        // authorization check, applied via the SAME reusable policy every
+        // resource-scoped endpoint in the codebase uses.
+        var authResult = await _authorizationService.AuthorizeAsync(
+            user, invoice, new ResourceOwnershipRequirement);
 
- if (!authResult.Succeeded)
- return new ForbidResult;
+        if (!authResult.Succeeded)
+            return new ForbidResult;
 
- return new OkObjectResult(invoice);
- }
+        return new OkObjectResult(invoice);
+    }
 }
 ```
 

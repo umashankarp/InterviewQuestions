@@ -30,9 +30,9 @@ A **closure** is what the compiler generates when a lambda or anonymous method r
 ```csharp
 public class Button
 {
- public event EventHandler? Click; // compiler generates a private backing delegate field + add/remove accessors
+    public event EventHandler? Click; // compiler generates a private backing delegate field + add/remove accessors
 
- public void SimulateClick => Click?.Invoke(this, EventArgs.Empty); // only the declaring class can invoke
+    public void SimulateClick => Click?.Invoke(this, EventArgs.Empty); // only the declaring class can invoke
 }
 
 var button = new Button;
@@ -92,8 +92,8 @@ Func<int, bool> isAboveThreshold = x => x > threshold;
 // Compiler generates (simplified):
 private sealed class DisplayClass0
 {
- public int threshold;
- public bool Lambda(int x) => x > threshold;
+    public int threshold;
+    public bool Lambda(int x) => x > threshold;
 }
 var displayClass = new DisplayClass0 { threshold = 10 };
 Func<int, bool> isAboveThreshold = displayClass.Lambda; // delegate targets the DisplayClass0 instance
@@ -116,15 +116,15 @@ Key facts:
 ```csharp
 public class Publisher
 {
- public event EventHandler? SomethingHappened; // compiler-enforced: external code can ONLY += / -=
+    public event EventHandler? SomethingHappened; // compiler-enforced: external code can ONLY += / -=
 
- // Internally (what the field-like event actually compiles to, roughly):
- // private EventHandler? _somethingHappened
- // public event EventHandler SomethingHappened
- // {
- // add { _somethingHappened += value; } // synchronized in older compilers via Delegate.Combine + lock
- // remove { _somethingHappened -= value; }
- // }
+    // Internally (what the field-like event actually compiles to, roughly):
+    // private EventHandler? _somethingHappened
+    // public event EventHandler SomethingHappened
+    // {
+    // add { _somethingHappened += value; } // synchronized in older compilers via Delegate.Combine + lock
+    // remove { _somethingHappened -= value; }
+    // }
 }
 ```
 Without `event` (a plain `public EventHandler? SomethingHappened;` field), any external caller could do `publisher.SomethingHappened = null;` (silently wiping every other subscriber) or `publisher.SomethingHappened?.Invoke(...)` (raising the event on someone else's object) — both are real encapsulation violations `event` exists specifically to prevent. **A subtle but real interview point**: the auto-generated `add`/`remove` accessors on a plain field-like `event` are **not thread-safe against each other before.NET-version-specific compiler changes** (older compilers used `lock(this)`-free `Delegate.Combine`/`CompareExchange`-based patterns that could lose a concurrent subscription under a race) — modern C# compilers generate a lock-free `Interlocked.CompareExchange`-based loop for field-like events specifically to close this race safely.
@@ -134,18 +134,18 @@ Without `event` (a plain `public EventHandler? SomethingHappened;` field), any e
 ```csharp
 public class Logger // long-lived singleton
 {
- public event Action<string>? MessageLogged;
- public void Log(string msg) => MessageLogged?.Invoke(msg);
+    public event Action<string>? MessageLogged;
+    public void Log(string msg) => MessageLogged?.Invoke(msg);
 }
 
 public class ShortLivedWidget
 {
- public ShortLivedWidget(Logger logger)
- {
- logger.MessageLogged += OnMessageLogged; // subscribes -- Logger's invocation list now references this widget
- }
- private void OnMessageLogged(string msg) { /*... */ }
- // No unsubscribe anywhere!
+    public ShortLivedWidget(Logger logger)
+    {
+        logger.MessageLogged += OnMessageLogged; // subscribes -- Logger's invocation list now references this widget
+    }
+    private void OnMessageLogged(string msg) { /*... */ }
+    // No unsubscribe anywhere!
 }
 ```
 `Logger.MessageLogged`'s invocation list holds a reference to `ShortLivedWidget.OnMessageLogged`'s **target** — i.e., the `ShortLivedWidget` instance itself. As long as `Logger` (long-lived) is reachable, its `MessageLogged` field is a **GC root path** keeping every subscribed `ShortLivedWidget` alive forever, even after all other references to it are gone and the application logically considers it "disposed of." This is invisible in ordinary code review (no obviously-wrong line) and shows up specifically as a steadily-growing object count for the *subscriber* type in a heap dump — not the publisher — which is the classic diagnostic confusion this bug causes.
@@ -157,18 +157,18 @@ To let a long-lived publisher hold subscribers **without** keeping them alive, u
 ```csharp
 public class WeakEventSubscription<TArgs>
 {
- private readonly List<WeakReference<Action<TArgs>>> _handlers = new;
+    private readonly List<WeakReference<Action<TArgs>>> _handlers = new;
 
- public void Subscribe(Action<TArgs> handler) => _handlers.Add(new WeakReference<Action<TArgs>>(handler));
+    public void Subscribe(Action<TArgs> handler) => _handlers.Add(new WeakReference<Action<TArgs>>(handler));
 
- public void Raise(TArgs args)
- {
- for (int i = _handlers.Count - 1; i >= 0; i--)
- {
- if (_handlers[i].TryGetTarget(out var handler)) handler(args);
- else _handlers.RemoveAt(i); // prune dead subscribers as we go
- }
- }
+    public void Raise(TArgs args)
+    {
+        for (int i = _handlers.Count - 1; i >= 0; i--)
+        {
+            if (_handlers[i].TryGetTarget(out var handler)) handler(args);
+            else _handlers.RemoveAt(i); // prune dead subscribers as we go
+        }
+    }
 }
 ```
 **Trade-off**: The subscriber's *delegate object itself* must not be the only reference keeping the subscriber's target alive elsewhere either (a common subtlety — if the delegate wraps a lambda whose only strong reference is the list, the `WeakReference<Action<TArgs>>` doesn't help unless the *subscriber object* is independently rooted by something else the caller controls) — this pattern is correct but easy to apply incompletely; genuinely understanding it is an Advanced/Expert-tier signal.
@@ -447,7 +447,7 @@ Method scope:
 var actions = new List<Action>;
 for (int i = 0; i < 3; i++)
 {
- actions.Add(=> Console.WriteLine(i));
+    actions.Add(=> Console.WriteLine(i));
 }
 foreach (var a in actions) a; // prints "3" three times
 ```
@@ -456,8 +456,8 @@ foreach (var a in actions) a; // prints "3" three times
 var actions = new List<Action>;
 for (int i = 0; i < 3; i++)
 {
- int local = i; // fresh variable captured per iteration
- actions.Add(=> Console.WriteLine(local));
+    int local = i; // fresh variable captured per iteration
+    actions.Add(=> Console.WriteLine(local));
 }
 foreach (var a in actions) a; // prints 0, 1, 2
 ```
@@ -469,28 +469,28 @@ foreach (var a in actions) a; // prints 0, 1, 2
 ```csharp
 public class RobustPublisher
 {
- public event Action<string>? OnMessage;
+    public event Action<string>? OnMessage;
 
- public void Publish(string message)
- {
- var handler = OnMessage; // capture to local for thread-safety
- if (handler is null) return;
+    public void Publish(string message)
+    {
+        var handler = OnMessage; // capture to local for thread-safety
+        if (handler is null) return;
 
- List<Exception>? exceptions = null;
- foreach (Action<string> subscriber in handler.GetInvocationList)
- {
- try
- {
- subscriber(message);
- }
- catch (Exception ex)
- {
- (exceptions??= new List<Exception>).Add(ex);
- }
- }
- if (exceptions is not null)
- throw new AggregateException("One or more subscribers failed.", exceptions);
- }
+        List<Exception>? exceptions = null;
+        foreach (Action<string> subscriber in handler.GetInvocationList)
+        {
+            try
+            {
+                subscriber(message);
+            }
+            catch (Exception ex)
+            {
+                (exceptions??= new List<Exception>).Add(ex);
+            }
+        }
+        if (exceptions is not null)
+            throw new AggregateException("One or more subscribers failed.", exceptions);
+    }
 }
 ```
 **Time complexity**: O(N) in subscriber count either way (invoking N subscribers is inherently O(N)) — the exercise adds no asymptotic cost, only per-subscriber exception-handling overhead (negligible in the non-throwing case). **Space**: O(1) in the common case (no exceptions); O(K) for K failed subscribers if exceptions occur.
@@ -501,35 +501,35 @@ public class RobustPublisher
 ```csharp
 public sealed class WeakEvent<TArgs>
 {
- private readonly List<WeakReference<Action<TArgs>>> _subscribers = new;
- private readonly object _lock = new;
+    private readonly List<WeakReference<Action<TArgs>>> _subscribers = new;
+    private readonly object _lock = new;
 
- public void Subscribe(Action<TArgs> handler)
- {
- lock (_lock) { _subscribers.Add(new WeakReference<Action<TArgs>>(handler)); }
- }
+    public void Subscribe(Action<TArgs> handler)
+    {
+        lock (_lock) { _subscribers.Add(new WeakReference<Action<TArgs>>(handler)); }
+    }
 
- public void Unsubscribe(Action<TArgs> handler)
- {
- lock (_lock)
- {
- _subscribers.RemoveAll(wr =>!wr.TryGetTarget(out var target) || target == handler);
- }
- }
+    public void Unsubscribe(Action<TArgs> handler)
+    {
+        lock (_lock)
+        {
+            _subscribers.RemoveAll(wr =>!wr.TryGetTarget(out var target) || target == handler);
+        }
+    }
 
- public void Raise(TArgs args)
- {
- List<Action<TArgs>> live = new;
- lock (_lock)
- {
- for (int i = _subscribers.Count - 1; i >= 0; i--)
- {
- if (_subscribers[i].TryGetTarget(out var handler)) live.Add(handler);
- else _subscribers.RemoveAt(i); // prune dead entries opportunistically
- }
- }
- foreach (var handler in live) handler(args); // invoke OUTSIDE the lock to avoid holding it during subscriber code
- }
+    public void Raise(TArgs args)
+    {
+        List<Action<TArgs>> live = new;
+        lock (_lock)
+        {
+            for (int i = _subscribers.Count - 1; i >= 0; i--)
+            {
+                if (_subscribers[i].TryGetTarget(out var handler)) live.Add(handler);
+                else _subscribers.RemoveAt(i); // prune dead entries opportunistically
+            }
+        }
+        foreach (var handler in live) handler(args); // invoke OUTSIDE the lock to avoid holding it during subscriber code
+    }
 }
 ```
 **Time complexity**: O(N) per `Raise` (N = current subscriber count, including pruning). **Space**: O(N) for the subscriber list, but crucially **does not** prevent subscriber GC — a subscriber with no other strong references is collected normally and simply pruned from `_subscribers` on the next `Raise`.
@@ -542,50 +542,50 @@ public interface INotification { }
 
 public interface INotificationHandler<in TNotification> where TNotification: INotification
 {
- Task HandleAsync(TNotification notification, CancellationToken ct);
+    Task HandleAsync(TNotification notification, CancellationToken ct);
 }
 
 public interface IDomainEventPublisher
 {
- Task PublishAsync<TNotification>(TNotification notification, CancellationToken ct = default)
- where TNotification: INotification;
+    Task PublishAsync<TNotification>(TNotification notification, CancellationToken ct = default)
+    where TNotification: INotification;
 }
 
 public sealed class Mediator: IDomainEventPublisher
 {
- private readonly IServiceProvider _serviceProvider;
- private readonly ILogger<Mediator> _logger;
+    private readonly IServiceProvider _serviceProvider;
+    private readonly ILogger<Mediator> _logger;
 
- public Mediator(IServiceProvider serviceProvider, ILogger<Mediator> logger)
- {
- _serviceProvider = serviceProvider;
- _logger = logger;
- }
+    public Mediator(IServiceProvider serviceProvider, ILogger<Mediator> logger)
+    {
+        _serviceProvider = serviceProvider;
+        _logger = logger;
+    }
 
- public async Task PublishAsync<TNotification>(TNotification notification, CancellationToken ct = default)
- where TNotification: INotification
- {
- // Handlers resolved FRESH per publish from DI -- no static invocation list, no lapsed-listener risk
- // the container's own scope/lifetime rules govern handler lifetime, not an event field.
- var handlers = _serviceProvider.GetServices<INotificationHandler<TNotification>>;
+    public async Task PublishAsync<TNotification>(TNotification notification, CancellationToken ct = default)
+    where TNotification: INotification
+    {
+        // Handlers resolved FRESH per publish from DI -- no static invocation list, no lapsed-listener risk
+        // the container's own scope/lifetime rules govern handler lifetime, not an event field.
+        var handlers = _serviceProvider.GetServices<INotificationHandler<TNotification>>;
 
- List<Exception>? exceptions = null;
- foreach (var handler in handlers)
- {
- try
- {
- await handler.HandleAsync(notification, ct);
- }
- catch (Exception ex)
- {
- _logger.LogError(ex, "Handler {Handler} failed for {Notification}",
- handler.GetType.Name, typeof(TNotification).Name);
- (exceptions??= new List<Exception>).Add(ex);
- }
- }
- if (exceptions is not null)
- throw new AggregateException($"{exceptions.Count} handler(s) failed.", exceptions);
- }
+        List<Exception>? exceptions = null;
+        foreach (var handler in handlers)
+        {
+            try
+            {
+                await handler.HandleAsync(notification, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Handler {Handler} failed for {Notification}",
+                    handler.GetType.Name, typeof(TNotification).Name);
+                (exceptions??= new List<Exception>).Add(ex);
+            }
+        }
+        if (exceptions is not null)
+            throw new AggregateException($"{exceptions.Count} handler(s) failed.", exceptions);
+    }
 }
 
 // Usage:
@@ -593,7 +593,7 @@ public record OrderShipped(Guid OrderId, DateTimeOffset ShippedAt): INotificatio
 
 public class SendShippingEmailHandler: INotificationHandler<OrderShipped>
 {
- public Task HandleAsync(OrderShipped n, CancellationToken ct) => SendEmailAsync(n.OrderId, ct);
+    public Task HandleAsync(OrderShipped n, CancellationToken ct) => SendEmailAsync(n.OrderId, ct);
 }
 // Registration: services.AddScoped<INotificationHandler<OrderShipped>, SendShippingEmailHandler>
 // Multiple handlers for the same notification register side-by-side via the same interface --
@@ -649,54 +649,54 @@ classDiagram
 ```csharp
 public interface IEventBus
 {
- IDisposable Subscribe<TEvent>(Action<TEvent> handler);
- void Publish<TEvent>(TEvent evt);
+    IDisposable Subscribe<TEvent>(Action<TEvent> handler);
+    void Publish<TEvent>(TEvent evt);
 }
 
 public sealed class InMemoryEventBus: IEventBus
 {
- private readonly ConcurrentDictionary<Type, List<object>> _subscribers = new;
- private readonly object _lock = new;
+    private readonly ConcurrentDictionary<Type, List<object>> _subscribers = new;
+    private readonly object _lock = new;
 
- public IDisposable Subscribe<TEvent>(Action<TEvent> handler)
- {
- var list = _subscribers.GetOrAdd(typeof(TEvent), _ => new List<object>);
- lock (_lock) { list.Add(handler); }
- return new Subscription(=>
- {
- lock (_lock) { list.Remove(handler); } // O(1) reference-based removal via a keyed handle, not delegate-equality (Expert Q7)
- });
- }
+    public IDisposable Subscribe<TEvent>(Action<TEvent> handler)
+    {
+        var list = _subscribers.GetOrAdd(typeof(TEvent), _ => new List<object>);
+        lock (_lock) { list.Add(handler); }
+        return new Subscription(=>
+            {
+                lock (_lock) { list.Remove(handler); } // O(1) reference-based removal via a keyed handle, not delegate-equality (Expert Q7)
+        });
+    }
 
- public void Publish<TEvent>(TEvent evt)
- {
- List<Action<TEvent>> snapshot;
- lock (_lock)
- {
- if (!_subscribers.TryGetValue(typeof(TEvent), out var list)) return;
- snapshot = list.Cast<Action<TEvent>>.ToList; // snapshot to invoke outside the lock
- }
- List<Exception>? exceptions = null;
- foreach (var handler in snapshot)
- {
- try { handler(evt); }
- catch (Exception ex) { (exceptions??= new).Add(ex); }
- }
- if (exceptions is not null) throw new AggregateException(exceptions);
- }
+    public void Publish<TEvent>(TEvent evt)
+    {
+        List<Action<TEvent>> snapshot;
+        lock (_lock)
+        {
+            if (!_subscribers.TryGetValue(typeof(TEvent), out var list)) return;
+            snapshot = list.Cast<Action<TEvent>>.ToList; // snapshot to invoke outside the lock
+        }
+        List<Exception>? exceptions = null;
+        foreach (var handler in snapshot)
+        {
+            try { handler(evt); }
+            catch (Exception ex) { (exceptions??= new).Add(ex); }
+        }
+        if (exceptions is not null) throw new AggregateException(exceptions);
+    }
 
- private sealed class Subscription: IDisposable
- {
- private readonly Action _unsubscribe;
- private bool _disposed;
- public Subscription(Action unsubscribe) => _unsubscribe = unsubscribe;
- public void Dispose
- {
- if (_disposed) return;
- _disposed = true;
- _unsubscribe;
- }
- }
+    private sealed class Subscription: IDisposable
+    {
+        private readonly Action _unsubscribe;
+        private bool _disposed;
+        public Subscription(Action unsubscribe) => _unsubscribe = unsubscribe;
+        public void Dispose
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _unsubscribe;
+        }
+    }
 }
 ```
 

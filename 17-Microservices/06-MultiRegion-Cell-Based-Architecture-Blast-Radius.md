@@ -467,18 +467,18 @@ The generalizable lesson: **cells contain only the failures that respect cell bo
 ```csharp
 public sealed class CellRouter
 {
- private volatile IReadOnlyDictionary<CustomerId, CellId> _assignments = new Dictionary<CustomerId, CellId>;
+    private volatile IReadOnlyDictionary<CustomerId, CellId> _assignments = new Dictionary<CustomerId, CellId>;
 
- public CellId Route(CustomerId customer) =>
- _assignments.TryGetValue(customer, out var cell)
-? cell
-: throw new UnassignedCustomerException(customer); // explicit, never a default cell
+    public CellId Route(CustomerId customer) =>
+        _assignments.TryGetValue(customer, out var cell)
+    ? cell
+    : throw new UnassignedCustomerException(customer); // explicit, never a default cell
 
- public void ApplyRefresh(IReadOnlyDictionary<CustomerId, CellId> fresh)
- {
- if (fresh.Count == 0) return; // never replace good with empty
- _assignments = fresh; // atomic swap, lock-free reads
- }
+    public void ApplyRefresh(IReadOnlyDictionary<CustomerId, CellId> fresh)
+    {
+        if (fresh.Count == 0) return; // never replace good with empty
+        _assignments = fresh; // atomic swap, lock-free reads
+    }
 }
 ```
 **Time complexity:** O(1) routing.
@@ -491,21 +491,21 @@ public sealed class CellRouter
 ```csharp
 public void RefreshFlags(string payload)
 {
- if (!TryParse(payload, out var candidate))
- {
- _metrics.IncrementRefreshParseFailure;
- return; // keep last-known-good
- }
+    if (!TryParse(payload, out var candidate))
+    {
+        _metrics.IncrementRefreshParseFailure;
+        return; // keep last-known-good
+    }
 
- if (candidate.Count < _lastGood.Count * 0.5) // plausibility, not just structure
- {
- _metrics.IncrementRefreshImplausible;
- _alerts.Raise($"Flag refresh returned {candidate.Count} vs {_lastGood.Count} — rejected");
- return;
- }
+    if (candidate.Count < _lastGood.Count * 0.5) // plausibility, not just structure
+    {
+        _metrics.IncrementRefreshImplausible;
+        _alerts.Raise($"Flag refresh returned {candidate.Count} vs {_lastGood.Count} — rejected");
+        return;
+    }
 
- _lastGood = candidate;
- _diskCache.Persist(candidate); // survives restart during outage
+    _lastGood = candidate;
+    _diskCache.Persist(candidate); // survives restart during outage
 }
 ```
 **Time complexity:** O(n) for n flags.
@@ -518,16 +518,16 @@ public void RefreshFlags(string payload)
 ```csharp
 public CorrelationVerdict Evaluate(IReadOnlyDictionary<CellId, HealthWindow> cells)
 {
- var degraded = cells.Where(c => c.Value.ErrorRate > _threshold).Select(c => c.Key).ToList;
- if (degraded.Count < 2) return CorrelationVerdict.Isolated;
+    var degraded = cells.Where(c => c.Value.ErrorRate > _threshold).Select(c => c.Key).ToList;
+    if (degraded.Count < 2) return CorrelationVerdict.Isolated;
 
- var fraction = (double)degraded.Count / cells.Count;
- if (fraction < 0.5) return CorrelationVerdict.MultiCell(degraded);
+    var fraction = (double)degraded.Count / cells.Count;
+    if (fraction < 0.5) return CorrelationVerdict.MultiCell(degraded);
 
- // Majority degraded simultaneously — impossible under genuine independence
- return CorrelationVerdict.SharedDependencySuspected(
- degraded,
- onsetSpread: cells.Values.Max(w => w.OnsetAt) - cells.Values.Min(w => w.OnsetAt));
+    // Majority degraded simultaneously — impossible under genuine independence
+    return CorrelationVerdict.SharedDependencySuspected(
+        degraded,
+            onsetSpread: cells.Values.Max(w => w.OnsetAt) - cells.Values.Min(w => w.OnsetAt));
 }
 ```
 **Time complexity:** O(n) for n cells.
@@ -540,18 +540,18 @@ public CorrelationVerdict Evaluate(IReadOnlyDictionary<CellId, HealthWindow> cel
 ```csharp
 public async Task MigrateAsync(CustomerId customer, CellId from, CellId to)
 {
- await _replication.StartAsync(customer, from, to); // continuous, source still serving
- await _replication.WaitForLagBelowAsync(customer, TimeSpan.FromSeconds(1));
+    await _replication.StartAsync(customer, from, to); // continuous, source still serving
+    await _replication.WaitForLagBelowAsync(customer, TimeSpan.FromSeconds(1));
 
- await using (await _writeGate.PauseAsync(customer)) // ONLY this customer pauses
- {
- await _replication.DrainAsync(customer); // final catch-up
- if (!await _verifier.MatchesAsync(customer, from, to))
- throw new MigrationVerificationException(customer); // abort, keep source authoritative
+    await using (await _writeGate.PauseAsync(customer)) // ONLY this customer pauses
+    {
+        await _replication.DrainAsync(customer); // final catch-up
+        if (!await _verifier.MatchesAsync(customer, from, to))
+            throw new MigrationVerificationException(customer); // abort, keep source authoritative
 
- await _assignments.ReassignAsync(customer, to);
- }
- await _cleanup.ScheduleSourceRemovalAsync(customer, from, delay: TimeSpan.FromDays(7));
+        await _assignments.ReassignAsync(customer, to);
+    }
+    await _cleanup.ScheduleSourceRemovalAsync(customer, from, delay: TimeSpan.FromDays(7));
 }
 ```
 **Time complexity:** O(d) for d records replicated; the pause is bounded by drain time only.

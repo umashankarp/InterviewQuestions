@@ -137,25 +137,25 @@ sequenceDiagram
 2. **Q: Design the full `Move` Command implementation handling castling's compound, two-piece effect, demonstrating the Command pattern's value concretely (Intermediate Q5).**
  **A:**
  ```csharp
- public class CastlingMove: IMove
- {
- private readonly Piece _king, _rook;
- private readonly Square _kingFrom, _kingTo, _rookFrom, _rookTo;
+public class CastlingMove: IMove
+{
+    private readonly Piece _king, _rook;
+    private readonly Square _kingFrom, _kingTo, _rookFrom, _rookTo;
 
- public void Execute
- {
- _board.MovePiece(_king, _kingFrom, _kingTo);
- _board.MovePiece(_rook, _rookFrom, _rookTo);
- _king.HasMoved = true; _rook.HasMoved = true; // castling rights consumed
- }
+    public void Execute
+    {
+        _board.MovePiece(_king, _kingFrom, _kingTo);
+        _board.MovePiece(_rook, _rookFrom, _rookTo);
+        _king.HasMoved = true; _rook.HasMoved = true; // castling rights consumed
+    }
 
- public void Undo
- {
- _board.MovePiece(_king, _kingTo, _kingFrom);
- _board.MovePiece(_rook, _rookTo, _rookFrom);
- _king.HasMoved = false; _rook.HasMoved = false; // restore castling-rights state too, not just position
- }
- }
+    public void Undo
+    {
+        _board.MovePiece(_king, _kingTo, _kingFrom);
+        _board.MovePiece(_rook, _rookTo, _rookFrom);
+        _king.HasMoved = false; _rook.HasMoved = false; // restore castling-rights state too, not just position
+    }
+}
  ```
  Note `Undo` restores **both** position and the `HasMoved` flags — a naive undo restoring only board position but forgetting the castling-rights side effect would produce an incorrect game state (allowing castling again after undo, when the original position, before the move, may have already had castling rights available) — precisely the kind of "the Command must capture and reverse ALL side effects, not just the obvious ones" rigor establishes.
 3. **Q: Explain how you would design the `MoveValidator` to efficiently determine "is my king in check after this candidate move" without recomputing every opposing piece's full move set from scratch for every single candidate move being evaluated.**
@@ -163,29 +163,29 @@ sequenceDiagram
 4. **Q: Design the composable borrowing-policy check precisely, demonstrating the "AND across independent policies" pattern concretely with actual code.**
  **A:**
  ```csharp
- public interface IBorrowingPolicy { PolicyResult CanBorrow(Member member, BookCopy copy); }
+public interface IBorrowingPolicy { PolicyResult CanBorrow(Member member, BookCopy copy); }
 
- public class BorrowingLimitPolicy: IBorrowingPolicy
- {
- public PolicyResult CanBorrow(Member member, BookCopy copy) =>
- member.CurrentLoans.Count < member.MaxBorrowLimit
-? PolicyResult.Allowed: PolicyResult.Denied("Borrowing limit reached.");
- }
+public class BorrowingLimitPolicy: IBorrowingPolicy
+{
+    public PolicyResult CanBorrow(Member member, BookCopy copy) =>
+        member.CurrentLoans.Count < member.MaxBorrowLimit
+    ? PolicyResult.Allowed: PolicyResult.Denied("Borrowing limit reached.");
+}
 
- public class LibraryService
- {
- private readonly IEnumerable<IBorrowingPolicy> _policies; // ALL must pass, directly the pattern
+public class LibraryService
+{
+    private readonly IEnumerable<IBorrowingPolicy> _policies; // ALL must pass, directly the pattern
 
- public async Task<Loan> BorrowAsync(Member member, BookCopy copy)
- {
- foreach (var policy in _policies)
- {
- var result = policy.CanBorrow(member, copy);
- if (!result.IsAllowed) throw new PolicyViolationException(result.Reason);
- }
- return await CreateLoanAsync(member, copy);
- }
- }
+    public async Task<Loan> BorrowAsync(Member member, BookCopy copy)
+    {
+        foreach (var policy in _policies)
+        {
+            var result = policy.CanBorrow(member, copy);
+            if (!result.IsAllowed) throw new PolicyViolationException(result.Reason);
+        }
+        return await CreateLoanAsync(member, copy);
+    }
+}
  ```
  Adding a new policy (e.g., "no more than 2 overdue books") requires only a new `IBorrowingPolicy` implementation and a registration entry — zero modification to `LibraryService.BorrowAsync`, directly demonstrating OCP compliance concretely, exactly mirroring the multi-tier rate-limit configuration structure.
 5. **Q: How would you extend the Chess LLD to support a "game replay/analysis" feature (stepping forward and backward through an entire completed game's move history), and explain why the Command pattern makes this straightforward.**
@@ -211,16 +211,16 @@ sequenceDiagram
 ```csharp
 public class Book // catalog entry
 {
- public string Isbn { get; init; } = "";
- public string Title { get; init; } = "";
- public string Author { get; init; } = "";
+    public string Isbn { get; init; } = "";
+    public string Title { get; init; } = "";
+    public string Author { get; init; } = "";
 }
 
 public class BookCopy // a SPECIFIC, individually-trackable physical item
 {
- public string CopyId { get; init; } = "";
- public Book Book { get; init; } = null!;
- public CopyStatus Status { get; set; } // Available, OnLoan, Withdrawn, Lost
+    public string CopyId { get; init; } = "";
+    public Book Book { get; init; } = null!;
+    public CopyStatus Status { get; set; } // Available, OnLoan, Withdrawn, Lost
 }
 
 public enum CopyStatus { Available, OnLoan, Withdrawn, Lost }
@@ -230,25 +230,25 @@ public enum CopyStatus { Available, OnLoan, Withdrawn, Lost }
 ```csharp
 public abstract class Piece
 {
- public Color Color { get; init; }
- public bool HasMoved { get; set; }
- public abstract IEnumerable<Square> GetCandidateMoves(Board board, Square currentPosition);
- // Deliberately does NOT check for check-safety here -- that's MoveValidator's job.
+    public Color Color { get; init; }
+    public bool HasMoved { get; set; }
+    public abstract IEnumerable<Square> GetCandidateMoves(Board board, Square currentPosition);
+    // Deliberately does NOT check for check-safety here -- that's MoveValidator's job.
 }
 
 public class Rook: Piece
 {
- public override IEnumerable<Square> GetCandidateMoves(Board board, Square currentPosition) =>
- board.GetSquaresAlongRanksAndFiles(currentPosition)
-.TakeWhile(sq => board.IsEmptyOrCapturable(sq, Color));
+    public override IEnumerable<Square> GetCandidateMoves(Board board, Square currentPosition) =>
+        board.GetSquaresAlongRanksAndFiles(currentPosition)
+    .TakeWhile(sq => board.IsEmptyOrCapturable(sq, Color));
 }
 
 public class Knight: Piece
 {
- public override IEnumerable<Square> GetCandidateMoves(Board board, Square currentPosition) =>
- Board.KnightOffsets
-.Select(offset => currentPosition + offset)
-.Where(sq => board.IsValidSquare(sq) && board.IsEmptyOrCapturable(sq, Color));
+    public override IEnumerable<Square> GetCandidateMoves(Board board, Square currentPosition) =>
+        Board.KnightOffsets
+    .Select(offset => currentPosition + offset)
+    .Where(sq => board.IsValidSquare(sq) && board.IsEmptyOrCapturable(sq, Color));
 }
 ```
 
@@ -256,24 +256,24 @@ public class Knight: Piece
 ```csharp
 public class MoveValidator
 {
- public IEnumerable<Square> GetLegalMoves(Piece piece, Square currentPosition, Board board)
- {
- var candidates = piece.GetCandidateMoves(board, currentPosition); // piece knows ONLY its own pattern
+    public IEnumerable<Square> GetLegalMoves(Piece piece, Square currentPosition, Board board)
+    {
+        var candidates = piece.GetCandidateMoves(board, currentPosition); // piece knows ONLY its own pattern
 
- foreach (var candidate in candidates)
- {
- var simulatedBoard = board.SimulateMove(currentPosition, candidate); // hypothetical, non-mutating
- if (!IsKingInCheck(simulatedBoard, piece.Color)) // board-wide concern, NOT the piece's responsibility
- yield return candidate;
- }
- }
+        foreach (var candidate in candidates)
+        {
+            var simulatedBoard = board.SimulateMove(currentPosition, candidate); // hypothetical, non-mutating
+            if (!IsKingInCheck(simulatedBoard, piece.Color)) // board-wide concern, NOT the piece's responsibility
+                yield return candidate;
+        }
+    }
 
- private bool IsKingInCheck(Board board, Color kingColor)
- {
- var kingSquare = board.FindKing(kingColor);
- return board.GetAllPieces(kingColor.Opponent)
-.Any(p => p.GetCandidateMoves(board, board.PositionOf(p)).Contains(kingSquare));
- }
+    private bool IsKingInCheck(Board board, Color kingColor)
+    {
+        var kingSquare = board.FindKing(kingColor);
+        return board.GetAllPieces(kingColor.Opponent)
+        .Any(p => p.GetCandidateMoves(board, board.PositionOf(p)).Contains(kingSquare));
+    }
 }
 ```
 
@@ -281,54 +281,54 @@ public class MoveValidator
 ```csharp
 public interface IMove
 {
- void Execute;
- void Undo;
+    void Execute;
+    void Undo;
 }
 
 public class StandardMove: IMove
 {
- private readonly Board _board;
- private readonly Square _from, _to;
- private Piece? _capturedPiece;
+    private readonly Board _board;
+    private readonly Square _from, _to;
+    private Piece? _capturedPiece;
 
- public StandardMove(Board board, Square from, Square to) { _board = board; _from = from; _to = to; }
+    public StandardMove(Board board, Square from, Square to) { _board = board; _from = from; _to = to; }
 
- public void Execute
- {
- _capturedPiece = _board.GetPieceAt(_to); // remember what was captured, for undo
- _board.MovePiece(_from, _to);
- }
+    public void Execute
+    {
+        _capturedPiece = _board.GetPieceAt(_to); // remember what was captured, for undo
+        _board.MovePiece(_from, _to);
+    }
 
- public void Undo
- {
- _board.MovePiece(_to, _from);
- if (_capturedPiece is not null) _board.PlacePiece(_capturedPiece, _to); // restore the capture
- }
+    public void Undo
+    {
+        _board.MovePiece(_to, _from);
+        if (_capturedPiece is not null) _board.PlacePiece(_capturedPiece, _to); // restore the capture
+    }
 }
 
 public class EnPassantMove: IMove
 {
- private readonly Board _board;
- private readonly Square _from, _to, _capturedPawnSquare; // NOTE: capturedPawnSquare!= _to
- private Piece? _capturedPawn;
+    private readonly Board _board;
+    private readonly Square _from, _to, _capturedPawnSquare; // NOTE: capturedPawnSquare!= _to
+    private Piece? _capturedPawn;
 
- public EnPassantMove(Board board, Square from, Square to, Square capturedPawnSquare)
- {
- _board = board; _from = from; _to = to; _capturedPawnSquare = capturedPawnSquare;
- }
+    public EnPassantMove(Board board, Square from, Square to, Square capturedPawnSquare)
+    {
+        _board = board; _from = from; _to = to; _capturedPawnSquare = capturedPawnSquare;
+    }
 
- public void Execute
- {
- _capturedPawn = _board.GetPieceAt(_capturedPawnSquare);
- _board.RemovePiece(_capturedPawnSquare); // captured pawn is NOT at the destination square
- _board.MovePiece(_from, _to);
- }
+    public void Execute
+    {
+        _capturedPawn = _board.GetPieceAt(_capturedPawnSquare);
+        _board.RemovePiece(_capturedPawnSquare); // captured pawn is NOT at the destination square
+        _board.MovePiece(_from, _to);
+    }
 
- public void Undo
- {
- _board.MovePiece(_to, _from);
- if (_capturedPawn is not null) _board.PlacePiece(_capturedPawn, _capturedPawnSquare); // restore at its OWN square
- }
+    public void Undo
+    {
+        _board.MovePiece(_to, _from);
+        if (_capturedPawn is not null) _board.PlacePiece(_capturedPawn, _capturedPawnSquare); // restore at its OWN square
+    }
 }
 ```
 **Discussion**: `EnPassantMove` as a **distinct** `IMove` implementation (rather than trying to force it into `StandardMove`'s "captured piece is always at the destination square" assumption) directly demonstrates Intermediate Q9's point — en passant genuinely needs different undo logic (restoring the captured pawn at *its own* square, not the move's destination), exactly the kind of edge case that validates (or breaks) whether a Command-pattern design is genuinely complete, not just superficially pattern-compliant.

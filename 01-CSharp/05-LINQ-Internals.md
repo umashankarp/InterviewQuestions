@@ -48,8 +48,8 @@ Mental model for interviews: **"`IEnumerable<T>` LINQ compiles your lambda into 
 // You write:
 IEnumerable<int> Range(int start, int count)
 {
- for (int i = 0; i < count; i++)
- yield return start + i;
+    for (int i = 0; i < count; i++)
+        yield return start + i;
 }
 
 // Compiler generates (simplified): a class implementing IEnumerable<int> AND IEnumerator<int>
@@ -387,25 +387,25 @@ graph TB
 ```csharp
 public ReportSummary BuildSummary(IEnumerable<Order> expensiveOrderSource)
 {
- return new ReportSummary
- {
- Total = expensiveOrderSource.Sum(o => o.Total),
- Count = expensiveOrderSource.Count,
- Items = expensiveOrderSource.ToList
- };
+    return new ReportSummary
+    {
+        Total = expensiveOrderSource.Sum(o => o.Total),
+            Count = expensiveOrderSource.Count,
+            Items = expensiveOrderSource.ToList
+    };
 }
 ```
 **Solution**:
 ```csharp
 public ReportSummary BuildSummary(IEnumerable<Order> expensiveOrderSource)
 {
- var orders = expensiveOrderSource.ToList; // materialize ONCE
- return new ReportSummary
- {
- Total = orders.Sum(o => o.Total),
- Count = orders.Count, // List<T>.Count property, O(1), not Enumerable.Count
- Items = orders
- };
+    var orders = expensiveOrderSource.ToList; // materialize ONCE
+    return new ReportSummary
+    {
+        Total = orders.Sum(o => o.Total),
+            Count = orders.Count, // List<T>.Count property, O(1), not Enumerable.Count
+            Items = orders
+    };
 }
 ```
 **Time complexity**: Original: O(3n) plus, if the source is a wrapped expensive operation (DB call, computed sequence), 3x the underlying cost. Fixed: O(n) total enumeration, O(1) for `.Count` (property access on the materialized `List<T>`).
@@ -416,27 +416,27 @@ public ReportSummary BuildSummary(IEnumerable<Order> expensiveOrderSource)
 ```csharp
 public static IEnumerable<IReadOnlyList<T>> Batch<T>(this IEnumerable<T> source, int batchSize)
 {
- if (batchSize <= 0) throw new ArgumentOutOfRangeException(nameof(batchSize));
+    if (batchSize <= 0) throw new ArgumentOutOfRangeException(nameof(batchSize));
 
- List<T>? currentBatch = null;
- foreach (var item in source)
- {
- currentBatch??= new List<T>(batchSize);
- currentBatch.Add(item);
- if (currentBatch.Count == batchSize)
- {
- yield return currentBatch;
- currentBatch = null; // start a fresh batch -- don't reuse/clear the same list (see discussion)
- }
- }
- if (currentBatch is { Count: > 0 })
- yield return currentBatch; // final partial batch, if any
+    List<T>? currentBatch = null;
+    foreach (var item in source)
+    {
+        currentBatch??= new List<T>(batchSize);
+        currentBatch.Add(item);
+        if (currentBatch.Count == batchSize)
+        {
+            yield return currentBatch;
+            currentBatch = null; // start a fresh batch -- don't reuse/clear the same list (see discussion)
+        }
+    }
+    if (currentBatch is { Count: > 0 })
+        yield return currentBatch; // final partial batch, if any
 }
 
 // Usage:
 foreach (var batch in bigSequence.Batch(100))
 {
- await ProcessBatchAsync(batch); // only ONE batch (100 items) materialized in memory at a time
+    await ProcessBatchAsync(batch); // only ONE batch (100 items) materialized in memory at a time
 }
 ```
 **Time complexity**: O(n) total across the whole enumeration. **Space**: O(batchSize) held at any one time (not O(n)) — this is the entire point: lazily batching a huge (or even infinite/streaming) source without ever buffering it all in memory at once.
@@ -447,26 +447,26 @@ foreach (var batch in bigSequence.Batch(100))
 ```csharp
 public List<CustomerSummary> GetActiveHighValueCustomers(AppDbContext db)
 {
- return db.Customers
-.Where(c => IsHighValue(c)) // plain C# method -- NOT translatable
-.Select(c => new CustomerSummary { Id = c.Id, Name = c.Name })
-.ToList;
+    return db.Customers
+    .Where(c => IsHighValue(c)) // plain C# method -- NOT translatable
+    .Select(c => new CustomerSummary { Id = c.Id, Name = c.Name })
+    .ToList;
 }
 
 private bool IsHighValue(Customer c) =>
- c.TotalLifetimeSpend > 10_000 && c.Orders.Count(o =>!o.IsRefunded) > 5;
+    c.TotalLifetimeSpend > 10_000 && c.Orders.Count(o =>!o.IsRefunded) > 5;
 ```
 **Solution**:
 ```csharp
 public List<CustomerSummary> GetActiveHighValueCustomers(AppDbContext db)
 {
- return db.Customers
- // Inline the translatable parts directly into the LINQ expression tree
- // instead of calling an opaque C# method -- EF Core CAN translate this.
-.Where(c => c.TotalLifetimeSpend > 10_000
- && c.Orders.Count(o =>!o.IsRefunded) > 5)
-.Select(c => new CustomerSummary { Id = c.Id, Name = c.Name })
-.ToList;
+    return db.Customers
+    // Inline the translatable parts directly into the LINQ expression tree
+    // instead of calling an opaque C# method -- EF Core CAN translate this.
+    .Where(c => c.TotalLifetimeSpend > 10_000
+        && c.Orders.Count(o =>!o.IsRefunded) > 5)
+    .Select(c => new CustomerSummary { Id = c.Id, Name = c.Name })
+    .ToList;
 }
 ```
 **Time complexity**: Original: O(entire Customers + Orders tables) transferred and evaluated in application memory. Fixed: the filter (including the correlated `Orders.Count(...)` subquery) translates entirely to SQL — the database evaluates it using indexes/joins, transferring only matching rows.
@@ -477,54 +477,54 @@ public List<CustomerSummary> GetActiveHighValueCustomers(AppDbContext db)
 ```csharp
 public interface ISpecification<T>
 {
- Expression<Func<T, bool>> Criteria { get; }
- List<Expression<Func<T, object>>> Includes { get; }
- Expression<Func<T, object>>? OrderBy { get; }
- int? Take { get; }
- int? Skip { get; }
+    Expression<Func<T, bool>> Criteria { get; }
+    List<Expression<Func<T, object>>> Includes { get; }
+    Expression<Func<T, object>>? OrderBy { get; }
+    int? Take { get; }
+    int? Skip { get; }
 }
 
 public abstract class Specification<T>: ISpecification<T>
 {
- public Expression<Func<T, bool>> Criteria { get; }
- public List<Expression<Func<T, object>>> Includes { get; } = new;
- public Expression<Func<T, object>>? OrderBy { get; private set; }
- public int? Take { get; private set; }
- public int? Skip { get; private set; }
+    public Expression<Func<T, bool>> Criteria { get; }
+    public List<Expression<Func<T, object>>> Includes { get; } = new;
+    public Expression<Func<T, object>>? OrderBy { get; private set; }
+    public int? Take { get; private set; }
+    public int? Skip { get; private set; }
 
- protected Specification(Expression<Func<T, bool>> criteria) => Criteria = criteria;
+    protected Specification(Expression<Func<T, bool>> criteria) => Criteria = criteria;
 
- protected void AddInclude(Expression<Func<T, object>> include) => Includes.Add(include);
- protected void ApplyOrderBy(Expression<Func<T, object>> orderBy) => OrderBy = orderBy;
- protected void ApplyPaging(int skip, int take) { Skip = skip; Take = take; }
+    protected void AddInclude(Expression<Func<T, object>> include) => Includes.Add(include);
+    protected void ApplyOrderBy(Expression<Func<T, object>> orderBy) => OrderBy = orderBy;
+    protected void ApplyPaging(int skip, int take) { Skip = skip; Take = take; }
 }
 
 public sealed class HighValueCustomersSpec: Specification<Customer>
 {
- public HighValueCustomersSpec(decimal threshold)
-: base(c => c.TotalLifetimeSpend > threshold && c.Orders.Count(o =>!o.IsRefunded) > 5)
- {
- AddInclude(c => c.Orders);
- ApplyOrderBy(c => c.TotalLifetimeSpend);
- }
+    public HighValueCustomersSpec(decimal threshold)
+    : base(c => c.TotalLifetimeSpend > threshold && c.Orders.Count(o =>!o.IsRefunded) > 5)
+    {
+        AddInclude(c => c.Orders);
+        ApplyOrderBy(c => c.TotalLifetimeSpend);
+    }
 }
 
 // Repository -- the ONLY place a live IQueryable<T> ever exists; never returned to callers.
 public sealed class Repository<T> where T: class
 {
- private readonly DbContext _db;
- public Repository(DbContext db) => _db = db;
+    private readonly DbContext _db;
+    public Repository(DbContext db) => _db = db;
 
- public async Task<List<T>> ListAsync(ISpecification<T> spec, CancellationToken ct)
- {
- IQueryable<T> query = _db.Set<T>.AsNoTracking;
- query = spec.Includes.Aggregate(query, (current, include) => current.Include(include));
- query = query.Where(spec.Criteria);
- if (spec.OrderBy is not null) query = query.OrderBy(spec.OrderBy);
- if (spec.Skip is not null) query = query.Skip(spec.Skip.Value);
- if (spec.Take is not null) query = query.Take(spec.Take.Value);
- return await query.ToListAsync(ct); // fully materialized -- caller gets a List<T>, never an IQueryable<T>
- }
+    public async Task<List<T>> ListAsync(ISpecification<T> spec, CancellationToken ct)
+    {
+        IQueryable<T> query = _db.Set<T>.AsNoTracking;
+        query = spec.Includes.Aggregate(query, (current, include) => current.Include(include));
+        query = query.Where(spec.Criteria);
+        if (spec.OrderBy is not null) query = query.OrderBy(spec.OrderBy);
+        if (spec.Skip is not null) query = query.Skip(spec.Skip.Value);
+        if (spec.Take is not null) query = query.Take(spec.Take.Value);
+        return await query.ToListAsync(ct); // fully materialized -- caller gets a List<T>, never an IQueryable<T>
+    }
 }
 
 // Usage -- caller never sees a raw IQueryable<T>, DbContext lifetime, or SQL translation details:
@@ -576,40 +576,40 @@ classDiagram
 ```csharp
 public sealed class TransactionFieldMap: ISortableFilterableSpec<Transaction>
 {
- // Explicit, statically-known, compile-time-checked allowlist -- NOT reflection, NOT string-eval.
- private static readonly Dictionary<string, Expression<Func<Transaction, object>>> SortFields = new
- {
- ["date"] = t => t.Date,
- ["amount"] = t => t.Amount,
- ["category"] = t => t.Category,
- };
+    // Explicit, statically-known, compile-time-checked allowlist -- NOT reflection, NOT string-eval.
+    private static readonly Dictionary<string, Expression<Func<Transaction, object>>> SortFields = new
+    {
+        ["date"] = t => t.Date,
+            ["amount"] = t => t.Amount,
+            ["category"] = t => t.Category,
+        };
 
- private static readonly Dictionary<string, Func<string, Expression<Func<Transaction, bool>>>> FilterFields = new
- {
- ["category"] = value => t => t.Category == value,
- ["minAmount"] = value => t => t.Amount >= decimal.Parse(value),
- };
+    private static readonly Dictionary<string, Func<string, Expression<Func<Transaction, bool>>>> FilterFields = new
+    {
+        ["category"] = value => t => t.Category == value,
+            ["minAmount"] = value => t => t.Amount >= decimal.Parse(value),
+        };
 
- public Expression<Func<Transaction, object>> GetSortExpression(string fieldName)
- {
- if (!SortFields.TryGetValue(fieldName, out var expr))
- throw new ArgumentException($"'{fieldName}' is not a sortable field.", nameof(fieldName));
- return expr;
- }
+    public Expression<Func<Transaction, object>> GetSortExpression(string fieldName)
+    {
+        if (!SortFields.TryGetValue(fieldName, out var expr))
+            throw new ArgumentException($"'{fieldName}' is not a sortable field.", nameof(fieldName));
+        return expr;
+    }
 
- public Expression<Func<Transaction, bool>> GetFilterExpression(string fieldName, string value)
- {
- if (!FilterFields.TryGetValue(fieldName, out var factory))
- throw new ArgumentException($"'{fieldName}' is not a filterable field.", nameof(fieldName));
- return factory(value); // value is used only as a PARAMETER VALUE inside a pre-defined expression --
- // never as field-name/structural input, so no injection surface exists here.
- }
+    public Expression<Func<Transaction, bool>> GetFilterExpression(string fieldName, string value)
+    {
+        if (!FilterFields.TryGetValue(fieldName, out var factory))
+            throw new ArgumentException($"'{fieldName}' is not a filterable field.", nameof(fieldName));
+        return factory(value); // value is used only as a PARAMETER VALUE inside a pre-defined expression --
+        // never as field-name/structural input, so no injection surface exists here.
+    }
 }
 
 // Usage in the repository/query layer:
 IQueryable<Transaction> query = db.Transactions.Where(t => t.TenantId == tenantId); // always-enforced tenant scope, first
 foreach (var (field, value) in requestedFilters)
- query = query.Where(fieldMap.GetFilterExpression(field, value)); // each further filter ANDed in, safely
+    query = query.Where(fieldMap.GetFilterExpression(field, value)); // each further filter ANDed in, safely
 query = requestedSortField is not null? query.OrderBy(fieldMap.GetSortExpression(requestedSortField)): query;
 ```
 

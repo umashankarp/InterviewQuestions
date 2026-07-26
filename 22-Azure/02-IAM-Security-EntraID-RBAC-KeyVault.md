@@ -151,71 +151,71 @@ graph LR
 ### Easy — Scoped RBAC assignment at Resource Group level, NOT Subscription
 ```hcl
 resource "azurerm_role_assignment" "platform_ops_checkout" {
- scope = azurerm_resource_group.checkout_prod.id # Resource Group scope --
- # NOT azurerm_subscription (the exact fix)
- role_definition_name = "Contributor"
- principal_id = data.azuread_group.platform_ops.object_id
+  scope = azurerm_resource_group.checkout_prod.id # Resource Group scope --
+    # NOT azurerm_subscription (the exact fix)
+  role_definition_name = "Contributor"
+  principal_id = data.azuread_group.platform_ops.object_id
 }
 ```
 
 ### Medium — System-assigned Managed Identity with object-scoped Key Vault access
 ```hcl
 resource "azurerm_linux_function_app" "checkout_processor" {
- name = "checkout-processor-func"
- identity { type = "SystemAssigned" } # lifecycle automatically bound to THIS function app
+  name = "checkout-processor-func"
+  identity { type = "SystemAssigned" } # lifecycle automatically bound to THIS function app
 }
 
 resource "azurerm_role_assignment" "func_kv_secret_access" {
- scope = azurerm_key_vault_secret.db_connection_string.resource_versionless_id # OBJECT-level,
- # not vault-wide
- role_definition_name = "Key Vault Secrets User"
- principal_id = azurerm_linux_function_app.checkout_processor.identity[0].principal_id
+  scope = azurerm_key_vault_secret.db_connection_string.resource_versionless_id # OBJECT-level,
+    # not vault-wide
+  role_definition_name = "Key Vault Secrets User"
+  principal_id = azurerm_linux_function_app.checkout_processor.identity[0].principal_id
 }
 ```
 
 ### Hard — Custom role definition scoped to exactly what a workload needs
 ```json
 {
- "Name": "Checkout-ReadOnly-Diagnostics",
- "IsCustom": true,
- "Actions": [
- "Microsoft.Compute/virtualMachineScaleSets/read",
- "Microsoft.Insights/metrics/read",
- "Microsoft.Insights/logs/read"
- ],
- "NotActions": [],
- "AssignableScopes": [
- "/subscriptions/{sub-id}/resourceGroups/checkout-prod"
- ]
+  "Name": "Checkout-ReadOnly-Diagnostics",
+    "IsCustom": true,
+    "Actions": [
+    "Microsoft.Compute/virtualMachineScaleSets/read",
+      "Microsoft.Insights/metrics/read",
+      "Microsoft.Insights/logs/read"
+  ],
+  "NotActions": [],
+    "AssignableScopes": [
+    "/subscriptions/{sub-id}/resourceGroups/checkout-prod"
+  ]
 }
 ```
 ```hcl
 resource "azurerm_role_definition" "checkout_diagnostics" {
- name = "Checkout-ReadOnly-Diagnostics"
- scope = azurerm_resource_group.checkout_prod.id
- permissions {
- actions = [
- "Microsoft.Compute/virtualMachineScaleSets/read",
- "Microsoft.Insights/metrics/read",
- "Microsoft.Insights/logs/read"
- ]
- }
- # NOT "Contributor" or "Reader" -- narrowly scoped to EXACTLY the diagnostics-read
- # access an on-call engineer needs (§Advanced Q10's custom-role-migration standard)
+  name = "Checkout-ReadOnly-Diagnostics"
+  scope = azurerm_resource_group.checkout_prod.id
+  permissions {
+    actions = [
+      "Microsoft.Compute/virtualMachineScaleSets/read",
+        "Microsoft.Insights/metrics/read",
+        "Microsoft.Insights/logs/read"
+    ]
+  }
+  # NOT "Contributor" or "Reader" -- narrowly scoped to EXACTLY the diagnostics-read
+  # access an on-call engineer needs (§Advanced Q10's custom-role-migration standard)
 }
 ```
 
 ### Expert — PIM-eligible role activation with break-glass considerations (§Advanced Q9)
 ```json
 {
- "roleDefinitionId": "/subscriptions/{sub-id}/providers/Microsoft.Authorization/roleDefinitions/{owner-role-id}",
- "principalId": "{oncall-rotation-group-id}",
- "requestType": "AdminAssign",
- "scheduleInfo": {
- "startDateTime": "2026-07-16T00:00:00Z",
- "expiration": { "type": "NoExpiration" }
- },
- "scope": "/subscriptions/{sub-id}/resourceGroups/checkout-prod"
+  "roleDefinitionId": "/subscriptions/{sub-id}/providers/Microsoft.Authorization/roleDefinitions/{owner-role-id}",
+    "principalId": "{oncall-rotation-group-id}",
+    "requestType": "AdminAssign",
+    "scheduleInfo": {
+    "startDateTime": "2026-07-16T00:00:00Z",
+      "expiration": { "type": "NoExpiration" }
+  },
+  "scope": "/subscriptions/{sub-id}/resourceGroups/checkout-prod"
 }
 ```
 ```csharp
@@ -223,10 +223,10 @@ resource "azurerm_role_definition" "checkout_diagnostics" {
 // auto-expires after 4 hours, MFA re-challenge required, justification LOGGED not BLOCKED (§Advanced Q9)
 var activationRequest = new PimActivationRequest
 {
- RoleAssignmentScheduleRequestType = "SelfActivate",
- Justification = "Incident INC-4471: production checkout latency spike, need DB diagnostic access",
- ScheduleInfo = new ScheduleInfo { Duration = TimeSpan.FromHours(4) }, // AUTO-EXPIRES -- no manual deactivation needed
- TicketInfo = new TicketInfo { TicketNumber = "INC-4471", TicketSystem = "PagerDuty" }
+    RoleAssignmentScheduleRequestType = "SelfActivate",
+        Justification = "Incident INC-4471: production checkout latency spike, need DB diagnostic access",
+        ScheduleInfo = new ScheduleInfo { Duration = TimeSpan.FromHours(4) }, // AUTO-EXPIRES -- no manual deactivation needed
+        TicketInfo = new TicketInfo { TicketNumber = "INC-4471", TicketSystem = "PagerDuty" }
 };
 await _pimClient.ActivateRoleAsync(activationRequest);
 // Justification + ticket reference auto-routed to security audit channel for POST-HOC review (§Advanced Q9)

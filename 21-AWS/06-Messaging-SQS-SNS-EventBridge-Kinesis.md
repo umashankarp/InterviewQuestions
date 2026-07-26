@@ -153,34 +153,34 @@ graph TD
 ### Easy — SNS-to-SQS fan-out subscription
 ```hcl
 resource "aws_sns_topic" "order_events" {
- name = "order-events"
+  name = "order-events"
 }
 
 resource "aws_sqs_queue" "inventory_queue" {
- name = "inventory-service-queue"
- visibility_timeout_seconds = 60
- redrive_policy = jsonencode({
- deadLetterTargetArn = aws_sqs_queue.inventory_dlq.arn
- maxReceiveCount = 5 # per-stage DLQ (§Advanced Q10)
- })
+  name = "inventory-service-queue"
+  visibility_timeout_seconds = 60
+  redrive_policy = jsonencode({
+      deadLetterTargetArn = aws_sqs_queue.inventory_dlq.arn
+      maxReceiveCount = 5 # per-stage DLQ (§Advanced Q10)
+  })
 }
 
 resource "aws_sns_topic_subscription" "inventory_sub" {
- topic_arn = aws_sns_topic.order_events.arn
- protocol = "sqs"
- endpoint = aws_sqs_queue.inventory_queue.arn # SQS buffers -- NOT a direct HTTP/Lambda subscriber
+  topic_arn = aws_sns_topic.order_events.arn
+  protocol = "sqs"
+  endpoint = aws_sqs_queue.inventory_queue.arn # SQS buffers -- NOT a direct HTTP/Lambda subscriber
 }
 ```
 
 ### Medium — SQS FIFO with per-entity message groups for partitioned ordering
 ```csharp
 await _sqsClient.SendMessageAsync(new SendMessageRequest
-{
- QueueUrl = fifoQueueUrl,
- MessageBody = JsonSerializer.Serialize(orderEvent),
- MessageGroupId = orderEvent.CustomerId.ToString, // ordering scoped per-customer, NOT globally --
- // different customers' groups scale independently
- MessageDeduplicationId = orderEvent.EventId.ToString
+    {
+        QueueUrl = fifoQueueUrl,
+            MessageBody = JsonSerializer.Serialize(orderEvent),
+            MessageGroupId = orderEvent.CustomerId.ToString, // ordering scoped per-customer, NOT globally --
+            // different customers' groups scale independently
+        MessageDeduplicationId = orderEvent.EventId.ToString
 });
 ```
 
@@ -188,44 +188,44 @@ await _sqsClient.SendMessageAsync(new SendMessageRequest
 ```csharp
 public class KinesisReplayConsumer
 {
- public async Task ConsumeFromTrimHorizonAsync(string streamName, string shardId)
- {
- // Each consumer application tracks its OWN shard iterator position --
- // completely independent of any other consumer reading the same stream (the fix).
- var iteratorResponse = await _kinesisClient.GetShardIteratorAsync(new GetShardIteratorRequest
- {
- StreamName = streamName,
- ShardId = shardId,
- ShardIteratorType = ShardIteratorType.TRIM_HORIZON // replay from the OLDEST retained record
- });
+    public async Task ConsumeFromTrimHorizonAsync(string streamName, string shardId)
+    {
+        // Each consumer application tracks its OWN shard iterator position --
+        // completely independent of any other consumer reading the same stream (the fix).
+        var iteratorResponse = await _kinesisClient.GetShardIteratorAsync(new GetShardIteratorRequest
+            {
+                StreamName = streamName,
+                    ShardId = shardId,
+                    ShardIteratorType = ShardIteratorType.TRIM_HORIZON // replay from the OLDEST retained record
+        });
 
- var shardIterator = iteratorResponse.ShardIterator;
- while (shardIterator is not null)
- {
- var recordsResponse = await _kinesisClient.GetRecordsAsync(
- new GetRecordsRequest { ShardIterator = shardIterator });
+        var shardIterator = iteratorResponse.ShardIterator;
+        while (shardIterator is not null)
+        {
+            var recordsResponse = await _kinesisClient.GetRecordsAsync(
+                new GetRecordsRequest { ShardIterator = shardIterator });
 
- foreach (var record in recordsResponse.Records)
- await ProcessClickEventIdempotentlyAsync(record); // still at-least-once -- idempotency required
+            foreach (var record in recordsResponse.Records)
+                await ProcessClickEventIdempotentlyAsync(record); // still at-least-once -- idempotency required
 
- // Monitor iterator age to detect lag BEFORE it's customer-visible (§Advanced Q7)
- EmitMetric("IteratorAgeMs", recordsResponse.MillisBehindLatest);
+            // Monitor iterator age to detect lag BEFORE it's customer-visible (§Advanced Q7)
+            EmitMetric("IteratorAgeMs", recordsResponse.MillisBehindLatest);
 
- shardIterator = recordsResponse.NextShardIterator;
- }
- }
+            shardIterator = recordsResponse.NextShardIterator;
+        }
+    }
 }
 ```
 
 ### Expert — EventBridge content-based routing rule with schema-aware target
 ```json
 {
- "Source": ["com.platform.orders"],
- "DetailType": ["OrderPlaced"],
- "Detail": {
- "orderTotal": [{ "numeric": [">", 1000] }],
- "customerTier": ["premium"]
- }
+  "Source": ["com.platform.orders"],
+    "DetailType": ["OrderPlaced"],
+    "Detail": {
+    "orderTotal": [{ "numeric": [">", 1000] }],
+      "customerTier": ["premium"]
+  }
 }
 ```
 ```csharp
@@ -233,12 +233,12 @@ public class KinesisReplayConsumer
 // content-based routing, NOT a separate topic/queue per condition combination.
 var ruleTarget = new PutTargetsRequest
 {
- Rule = "high-value-premium-order-fraud-review",
- EventBusName = "order-events-bus",
- Targets = new List<Target>
- {
- new Target { Id = "fraud-review-lambda", Arn = fraudReviewLambdaArn }
- }
+    Rule = "high-value-premium-order-fraud-review",
+        EventBusName = "order-events-bus",
+        Targets = new List<Target>
+    {
+        new Target { Id = "fraud-review-lambda", Arn = fraudReviewLambdaArn }
+    }
 };
 ```
 **Discussion**: content-based routing means the fraud-review Lambda receives *only* the specific subset of events matching both conditions, without the producer needing any awareness of this consumer's existence or its specific filtering logic — directly EventBridge's choreography strength: a new consumer with a new filtering rule can be added later with zero change to the order-placing producer, though (per Advanced Q6) this decoupling still depends on the `OrderPlaced` event's schema remaining stable per the evolution discipline.

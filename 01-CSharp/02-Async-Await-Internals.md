@@ -48,39 +48,39 @@ The compiler rewrites an `async` method into a type implementing `IAsyncStateMac
 // You write:
 async Task<int> GetDataAsync
 {
- var response = await httpClient.GetAsync(url);
- return Parse(response);
+    var response = await httpClient.GetAsync(url);
+    return Parse(response);
 }
 
 // Compiler generates (simplified):
 struct GetDataAsyncStateMachine: IAsyncStateMachine
 {
- public int _state; // -1 = not started/running, 0/1/... = suspended at await #N
- public AsyncTaskMethodBuilder<int> _builder;
- public HttpClient httpClient; // captured locals become fields
- public TaskAwaiter<HttpResponseMessage> _awaiter;
+    public int _state; // -1 = not started/running, 0/1/... = suspended at await #N
+    public AsyncTaskMethodBuilder<int> _builder;
+    public HttpClient httpClient; // captured locals become fields
+    public TaskAwaiter<HttpResponseMessage> _awaiter;
 
- public void MoveNext
- {
- int result;
- try
- {
- if (_state == 0) goto ResumePoint; // jump back in after suspension
- var task = httpClient.GetAsync(url);
- _awaiter = task.GetAwaiter;
- if (!_awaiter.IsCompleted)
- {
- _state = 0;
- _builder.AwaitUnsafeOnCompleted(ref _awaiter, ref this); // register continuation, RETURN
- return; // <-- this is the "suspend": control goes back to caller here
- }
- ResumePoint:
- var response = _awaiter.GetResult; // resumes here when continuation fires
- result = Parse(response);
- }
- catch (Exception ex) { _builder.SetException(ex); return; }
- _builder.SetResult(result);
- }
+    public void MoveNext
+    {
+        int result;
+        try
+        {
+            if (_state == 0) goto ResumePoint; // jump back in after suspension
+            var task = httpClient.GetAsync(url);
+            _awaiter = task.GetAwaiter;
+            if (!_awaiter.IsCompleted)
+            {
+                _state = 0;
+                _builder.AwaitUnsafeOnCompleted(ref _awaiter, ref this); // register continuation, RETURN
+                return; // <-- this is the "suspend": control goes back to caller here
+            }
+            ResumePoint:
+                var response = _awaiter.GetResult; // resumes here when continuation fires
+            result = Parse(response);
+        }
+        catch (Exception ex) { _builder.SetException(ex); return; }
+        _builder.SetResult(result);
+    }
 }
 ```
 
@@ -111,13 +111,13 @@ These are frequently confused; they solve **different problems**:
 // Classic ASP.NET (Framework) or WPF/WinForms:
 public ActionResult Index
 {
- var data = GetDataAsync.Result; // BLOCKS the current (UI/request) thread
- return View(data);
+    var data = GetDataAsync.Result; // BLOCKS the current (UI/request) thread
+    return View(data);
 }
 async Task<Data> GetDataAsync
 {
- var response = await httpClient.GetAsync(url); // captures SynchronizationContext
- return Parse(response); // this continuation is POSTED BACK to that same captured context
+    var response = await httpClient.GetAsync(url); // captures SynchronizationContext
+    return Parse(response); // this continuation is POSTED BACK to that same captured context
 }
 ```
 1. `.Result` blocks the calling thread (say, the one-and-only request-context thread in classic ASP.NET) waiting for `GetDataAsync`'s `Task` to complete.
@@ -420,26 +420,26 @@ graph TB
 ```csharp
 public void NotifyUser(string userId)
 {
- _ = SendNotificationAsync(userId); // fire-and-forget, exceptions vanish
+    _ = SendNotificationAsync(userId); // fire-and-forget, exceptions vanish
 }
 ```
 **Solution**:
 ```csharp
 public void NotifyUser(string userId)
 {
- _ = SendNotificationAsyncSafe(userId);
+    _ = SendNotificationAsyncSafe(userId);
 }
 
 private async Task SendNotificationAsyncSafe(string userId)
 {
- try
- {
- await SendNotificationAsync(userId);
- }
- catch (Exception ex)
- {
- _logger.LogError(ex, "Failed to send notification to {UserId}", userId);
- }
+    try
+    {
+        await SendNotificationAsync(userId);
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "Failed to send notification to {UserId}", userId);
+    }
 }
 ```
 **Time/Space**: Unchanged — this is a correctness fix, not a performance one. **Optimized**: For anything beyond best-effort logging, replace fire-and-forget entirely with a durable queue (message broker) so failures can be retried, not just logged and dropped.
@@ -449,23 +449,23 @@ private async Task SendNotificationAsyncSafe(string userId)
 ```csharp
 public async Task ProcessAllAsync(IEnumerable<string> ids)
 {
- var tasks = ids.Select(CallExternalApiAsync);
- await Task.WhenAll(tasks); // unbounded — will blow past the 20-concurrent limit
+    var tasks = ids.Select(CallExternalApiAsync);
+    await Task.WhenAll(tasks); // unbounded — will blow past the 20-concurrent limit
 }
 ```
 **Solution**:
 ```csharp
 public async Task ProcessAllAsync(IEnumerable<string> ids, CancellationToken ct)
 {
- var options = new ParallelOptions
- {
- MaxDegreeOfParallelism = 20,
- CancellationToken = ct
- };
- await Parallel.ForEachAsync(ids, options, async (id, token) =>
- {
- await CallExternalApiAsync(id).WaitAsync(token);
- });
+    var options = new ParallelOptions
+    {
+        MaxDegreeOfParallelism = 20,
+            CancellationToken = ct
+    };
+    await Parallel.ForEachAsync(ids, options, async (id, token) =>
+        {
+            await CallExternalApiAsync(id).WaitAsync(token);
+    });
 }
 ```
 **Time complexity**: O(n) calls total, bounded to 20 in flight at once (wall-clock ≈ n/20 × per-call latency). **Space**: O(20) in-flight state instead of O(n) tasks all queued/allocated at once.
@@ -475,29 +475,29 @@ public async Task ProcessAllAsync(IEnumerable<string> ids, CancellationToken ct)
 **Problem**: Implement a reusable helper that retries an async operation on transient failure with exponential backoff + jitter, respecting cancellation, without any external library (demonstrating you understand what `Polly` does under the hood).
 ```csharp
 public static async Task<T> RetryAsync<T>(
- Func<CancellationToken, Task<T>> operation,
- int maxAttempts,
- TimeSpan baseDelay,
- CancellationToken ct)
+    Func<CancellationToken, Task<T>> operation,
+        int maxAttempts,
+        TimeSpan baseDelay,
+        CancellationToken ct)
 {
- var random = Random.Shared;
- for (int attempt = 1;; attempt++)
- {
- try
- {
- return await operation(ct);
- }
- catch (Exception ex) when (attempt < maxAttempts && IsTransient(ex))
- {
- var exponential = baseDelay * Math.Pow(2, attempt - 1);
- var jitter = TimeSpan.FromMilliseconds(random.Next(0, 250));
- await Task.Delay(exponential + jitter, ct);
- }
- }
+    var random = Random.Shared;
+    for (int attempt = 1;; attempt++)
+    {
+        try
+        {
+            return await operation(ct);
+        }
+        catch (Exception ex) when (attempt < maxAttempts && IsTransient(ex))
+        {
+            var exponential = baseDelay * Math.Pow(2, attempt - 1);
+            var jitter = TimeSpan.FromMilliseconds(random.Next(0, 250));
+            await Task.Delay(exponential + jitter, ct);
+        }
+    }
 }
 
 private static bool IsTransient(Exception ex) =>
- ex is HttpRequestException or TimeoutException or TaskCanceledException;
+    ex is HttpRequestException or TimeoutException or TaskCanceledException;
 ```
 **Time complexity**: O(maxAttempts) worst case. **Space**: O(1) — no accumulation across attempts.
 **Discussion**: The `when (attempt < maxAttempts && IsTransient(ex))` exception filter is deliberate — exception filters run *before* stack unwinding, so this doesn't unwind-then-rethrow on non-matching exceptions, and it keeps non-transient exceptions (e.g., a 400 Bad Request-equivalent) propagating immediately without wasting retry attempts. `TaskCanceledException` classification is subtle: distinguish "operation timed out" (transient, retry) from "caller explicitly cancelled via the passed-in `ct`" (should NOT retry) — a production-grade version checks `ct.IsCancellationRequested` first and rethrows immediately if the *caller's* token (not an internal timeout token) was the cause.
@@ -508,63 +508,63 @@ private static bool IsTransient(Exception ex) =>
 ```csharp
 public sealed class WebhookDeliveryPipeline: IAsyncDisposable
 {
- private readonly Channel<WebhookPayload> _channel;
- private readonly List<Task> _consumers = new;
- private readonly CancellationTokenSource _shutdownCts = new;
- private readonly HttpClient _httpClient;
+    private readonly Channel<WebhookPayload> _channel;
+    private readonly List<Task> _consumers = new;
+    private readonly CancellationTokenSource _shutdownCts = new;
+    private readonly HttpClient _httpClient;
 
- public WebhookDeliveryPipeline(HttpClient httpClient, int consumerCount = 4, int capacity = 10_000)
- {
- _httpClient = httpClient;
- _channel = Channel.CreateBounded<WebhookPayload>(new BoundedChannelOptions(capacity)
- {
- FullMode = BoundedChannelFullMode.Wait, // apply backpressure to producers instead of dropping
- SingleReader = false,
- SingleWriter = false
- });
+    public WebhookDeliveryPipeline(HttpClient httpClient, int consumerCount = 4, int capacity = 10_000)
+    {
+        _httpClient = httpClient;
+        _channel = Channel.CreateBounded<WebhookPayload>(new BoundedChannelOptions(capacity)
+            {
+                FullMode = BoundedChannelFullMode.Wait, // apply backpressure to producers instead of dropping
+                    SingleReader = false,
+                    SingleWriter = false
+        });
 
- for (int i = 0; i < consumerCount; i++)
- _consumers.Add(Task.Run(=> ConsumeAsync(_shutdownCts.Token)));
- }
+        for (int i = 0; i < consumerCount; i++)
+            _consumers.Add(Task.Run(=> ConsumeAsync(_shutdownCts.Token)));
+    }
 
- public ValueTask EnqueueAsync(WebhookPayload payload, CancellationToken ct = default) =>
- _channel.Writer.WriteAsync(payload, ct);
+    public ValueTask EnqueueAsync(WebhookPayload payload, CancellationToken ct = default) =>
+        _channel.Writer.WriteAsync(payload, ct);
 
- private async Task ConsumeAsync(CancellationToken shutdownToken)
- {
- await foreach (var payload in _channel.Reader.ReadAllAsync(CancellationToken.None))
- {
- // Note: CancellationToken.None here -- we want to keep draining
- // already-queued items during graceful shutdown, not abandon them.
- try
- {
- await DeliverWithRetryAsync(payload, shutdownToken);
- }
- catch (Exception ex)
- {
- Log(ex, payload);
- }
- }
- }
+    private async Task ConsumeAsync(CancellationToken shutdownToken)
+    {
+        await foreach (var payload in _channel.Reader.ReadAllAsync(CancellationToken.None))
+        {
+            // Note: CancellationToken.None here -- we want to keep draining
+            // already-queued items during graceful shutdown, not abandon them.
+            try
+            {
+                await DeliverWithRetryAsync(payload, shutdownToken);
+            }
+            catch (Exception ex)
+            {
+                Log(ex, payload);
+            }
+        }
+    }
 
- private async Task DeliverWithRetryAsync(WebhookPayload payload, CancellationToken ct)
- {
- await RetryAsync(
- token => _httpClient.PostAsJsonAsync(payload.Url, payload.Body, token),
- maxAttempts: 5, baseDelay: TimeSpan.FromMilliseconds(200), ct);
- }
+    private async Task DeliverWithRetryAsync(WebhookPayload payload, CancellationToken ct)
+    {
+        await RetryAsync(
+            token => _httpClient.PostAsJsonAsync(payload.Url, payload.Body, token),
+                maxAttempts: 5, baseDelay: TimeSpan.FromMilliseconds(200), ct);
+    }
 
- public async ValueTask DisposeAsync
- {
- _channel.Writer.Complete; // stop accepting new items; ReadAllAsync completes once drained
- var drainTimeout = Task.Delay(TimeSpan.FromSeconds(30));
- var allConsumersDone = Task.WhenAll(_consumers);
- if (await Task.WhenAny(allConsumersDone, drainTimeout) == drainTimeout)
- _shutdownCts.Cancel; // force-cancel in-flight deliveries past the grace period
- await allConsumersDone.WaitAsync(TimeSpan.FromSeconds(5)).ContinueWith(_ => { });
- }
+    public async ValueTask DisposeAsync
+    {
+        _channel.Writer.Complete; // stop accepting new items; ReadAllAsync completes once drained
+        var drainTimeout = Task.Delay(TimeSpan.FromSeconds(30));
+        var allConsumersDone = Task.WhenAll(_consumers);
+        if (await Task.WhenAny(allConsumersDone, drainTimeout) == drainTimeout)
+            _shutdownCts.Cancel; // force-cancel in-flight deliveries past the grace period
+        await allConsumersDone.WaitAsync(TimeSpan.FromSeconds(5)).ContinueWith(_ => { });
+    }
 
- private void Log(Exception ex, WebhookPayload payload) { /* structured logging */ }
+    private void Log(Exception ex, WebhookPayload payload) { /* structured logging */ }
 }
 public record WebhookPayload(string Url, object Body);
 ```
@@ -640,33 +640,33 @@ sequenceDiagram
 ```csharp
 public interface IRateLimiter
 {
- ValueTask<IDisposable> AcquireAsync(CancellationToken ct = default);
+    ValueTask<IDisposable> AcquireAsync(CancellationToken ct = default);
 }
 
 public sealed class TokenBucketRateLimiter: IRateLimiter, IDisposable
 {
- private readonly SemaphoreSlim _semaphore;
- private readonly Timer _refillTimer;
+    private readonly SemaphoreSlim _semaphore;
+    private readonly Timer _refillTimer;
 
- public TokenBucketRateLimiter(int capacity, TimeSpan refillInterval, int refillAmount)
- {
- _semaphore = new SemaphoreSlim(capacity, capacity);
- _refillTimer = new Timer(_ =>
- {
- for (int i = 0; i < refillAmount && _semaphore.CurrentCount < capacity; i++)
- _semaphore.Release;
- }, null, refillInterval, refillInterval);
- }
+    public TokenBucketRateLimiter(int capacity, TimeSpan refillInterval, int refillAmount)
+    {
+        _semaphore = new SemaphoreSlim(capacity, capacity);
+        _refillTimer = new Timer(_ =>
+            {
+                for (int i = 0; i < refillAmount && _semaphore.CurrentCount < capacity; i++)
+                    _semaphore.Release;
+            }, null, refillInterval, refillInterval);
+    }
 
- public async ValueTask<IDisposable> AcquireAsync(CancellationToken ct = default)
- {
- await _semaphore.WaitAsync(ct); // suspends async -- no thread blocked while waiting for a token
- return new NoOpLease; // token bucket model: capacity is time-refilled, not returned on release
- }
+    public async ValueTask<IDisposable> AcquireAsync(CancellationToken ct = default)
+    {
+        await _semaphore.WaitAsync(ct); // suspends async -- no thread blocked while waiting for a token
+        return new NoOpLease; // token bucket model: capacity is time-refilled, not returned on release
+    }
 
- public void Dispose => _refillTimer.Dispose;
+    public void Dispose => _refillTimer.Dispose;
 
- private sealed class NoOpLease: IDisposable { public void Dispose { } }
+    private sealed class NoOpLease: IDisposable { public void Dispose { } }
 }
 ```
 

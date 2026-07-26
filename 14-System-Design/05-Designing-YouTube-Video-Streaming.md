@@ -160,18 +160,18 @@ public record TranscodeJob(string VideoId, string Resolution, int Priority); // 
 
 public class TranscodeJobScheduler
 {
- private readonly PriorityQueue<TranscodeJob, int> _queue = new; // the array-backed heap
+    private readonly PriorityQueue<TranscodeJob, int> _queue = new; // the array-backed heap
 
- public void Enqueue(TranscodeJob job) => _queue.Enqueue(job, job.Priority);
+    public void Enqueue(TranscodeJob job) => _queue.Enqueue(job, job.Priority);
 
- public async Task ProcessNextAsync(ITranscodeWorker worker)
- {
- if (_queue.TryDequeue(out var job, out _))
- {
- await worker.TranscodeAsync(job.VideoId, job.Resolution);
- await _metadataStore.MarkRenditionReadyAsync(job.VideoId, job.Resolution); // Advanced Q2's schema
- }
- }
+    public async Task ProcessNextAsync(ITranscodeWorker worker)
+    {
+        if (_queue.TryDequeue(out var job, out _))
+        {
+            await worker.TranscodeAsync(job.VideoId, job.Resolution);
+            await _metadataStore.MarkRenditionReadyAsync(job.VideoId, job.Resolution); // Advanced Q2's schema
+        }
+    }
 }
 ```
 
@@ -179,24 +179,24 @@ public class TranscodeJobScheduler
 ```csharp
 public class SignedUrlService
 {
- private readonly byte[] _signingKey;
+    private readonly byte[] _signingKey;
 
- public string GenerateSignedUrl(string videoPath, TimeSpan validFor)
- {
- long expiryUnixTime = DateTimeOffset.UtcNow.Add(validFor).ToUnixTimeSeconds;
- string dataToSign = $"{videoPath}:{expiryUnixTime}";
- string signature = ComputeHmacSha256(dataToSign, _signingKey);
- return $"https://cdn.example.com{videoPath}?expires={expiryUnixTime}&sig={signature}"
- }
+    public string GenerateSignedUrl(string videoPath, TimeSpan validFor)
+    {
+        long expiryUnixTime = DateTimeOffset.UtcNow.Add(validFor).ToUnixTimeSeconds;
+        string dataToSign = $"{videoPath}:{expiryUnixTime}";
+        string signature = ComputeHmacSha256(dataToSign, _signingKey);
+        return $"https://cdn.example.com{videoPath}?expires={expiryUnixTime}&sig={signature}"
+    }
 
- // CDN edge-side validation logic (conceptually -- CDNs typically support this via an edge function):
- public bool ValidateSignedUrl(string videoPath, long expires, string providedSignature)
- {
- if (DateTimeOffset.UtcNow.ToUnixTimeSeconds > expires) return false; // expired
- string expectedSignature = ComputeHmacSha256($"{videoPath}:{expires}", _signingKey);
- return CryptographicOperations.FixedTimeEquals(// constant-time comparison -- avoids a timing attack
- Encoding.UTF8.GetBytes(expectedSignature), Encoding.UTF8.GetBytes(providedSignature));
- }
+    // CDN edge-side validation logic (conceptually -- CDNs typically support this via an edge function):
+    public bool ValidateSignedUrl(string videoPath, long expires, string providedSignature)
+    {
+        if (DateTimeOffset.UtcNow.ToUnixTimeSeconds > expires) return false; // expired
+        string expectedSignature = ComputeHmacSha256($"{videoPath}:{expires}", _signingKey);
+        return CryptographicOperations.FixedTimeEquals(// constant-time comparison -- avoids a timing attack
+            Encoding.UTF8.GetBytes(expectedSignature), Encoding.UTF8.GetBytes(providedSignature));
+    }
 }
 ```
 **Discussion**: `FixedTimeEquals` (constant-time string comparison) is a deliberate, security-relevant detail — a naive `==`/`Equals` comparison could leak timing information about how many leading characters of the signature matched, a genuine (if narrow) timing-attack vector directly analogous to the authentication-timing-side-channel discussion, here applied to signature validation instead of password comparison.
@@ -205,34 +205,34 @@ public class SignedUrlService
 ```csharp
 public class ViewCountAggregator: BackgroundService
 {
- private readonly IConnectionMultiplexer _redis;
- private readonly IVideoMetadataStore _metadataStore;
+    private readonly IConnectionMultiplexer _redis;
+    private readonly IVideoMetadataStore _metadataStore;
 
- protected override async Task ExecuteAsync(CancellationToken stoppingToken)
- {
- while (!stoppingToken.IsCancellationRequested)
- {
- await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken); // batch flush interval
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken); // batch flush interval
 
- var db = _redis.GetDatabase;
- var dirtyVideoIds = await db.SetMembersAsync("dirty-view-counts");
+            var db = _redis.GetDatabase;
+            var dirtyVideoIds = await db.SetMembersAsync("dirty-view-counts");
 
- foreach (var videoId in dirtyVideoIds)
- {
- long count = (long)await db.StringGetAsync($"views:{videoId}");
- await _metadataStore.SetViewCountAsync(videoId.ToString, count); // periodic flush to durable store
- }
- await db.KeyDeleteAsync("dirty-view-counts"); // reset dirty-tracking for the next batch window
- }
- }
+            foreach (var videoId in dirtyVideoIds)
+            {
+                long count = (long)await db.StringGetAsync($"views:{videoId}");
+                await _metadataStore.SetViewCountAsync(videoId.ToString, count); // periodic flush to durable store
+            }
+            await db.KeyDeleteAsync("dirty-view-counts"); // reset dirty-tracking for the next batch window
+        }
+    }
 }
 
 // On each view event (called from the request-handling path, NOT this background service):
 public async Task RecordViewAsync(string videoId)
 {
- var db = _redis.GetDatabase;
- await db.StringIncrementAsync($"views:{videoId}"); // fast, atomic
- await db.SetAddAsync("dirty-view-counts", videoId); // track which videos need their next flush
+    var db = _redis.GetDatabase;
+    await db.StringIncrementAsync($"views:{videoId}"); // fast, atomic
+    await db.SetAddAsync("dirty-view-counts", videoId); // track which videos need their next flush
 }
 ```
 **Discussion**: The "dirty set" tracking (only flushing videos that actually received views since the last batch, not scanning every video in the system every 30 seconds) is the key efficiency detail — directly the same "only process what actually changed" principle as the replication-slot/WAL mechanics and the Streams consumer-group tracking, here applied to make the periodic flush's cost proportional to actual view activity rather than total video catalog size.

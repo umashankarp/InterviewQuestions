@@ -440,14 +440,14 @@ These are the CLR/GC questions that actually get asked in Principal/Staff loops 
 ```csharp
 void PrintAll(object[] items) // called with PrintAll(new object[]{1,2,3})
 {
- foreach (var item in items) Console.WriteLine(item);
+    foreach (var item in items) Console.WriteLine(item);
 }
 ```
 **Solution**:
 ```csharp
 void PrintAll<T>(T[] items)
 {
- foreach (var item in items) Console.WriteLine(item);
+    foreach (var item in items) Console.WriteLine(item);
 }
 // call: PrintAll(new int[]{1,2,3}); // no boxing, JIT specializes for int
 ```
@@ -459,26 +459,26 @@ void PrintAll<T>(T[] items)
 ```csharp
 public sealed class SimpleObjectPool<T> where T: class
 {
- private readonly ConcurrentBag<T> _items = new;
- private readonly Func<T> _factory;
- private readonly int _maxSize;
- private int _count;
+    private readonly ConcurrentBag<T> _items = new;
+    private readonly Func<T> _factory;
+    private readonly int _maxSize;
+    private int _count;
 
- public SimpleObjectPool(Func<T> factory, int maxSize)
- {
- _factory = factory;
- _maxSize = maxSize;
- }
+    public SimpleObjectPool(Func<T> factory, int maxSize)
+    {
+        _factory = factory;
+        _maxSize = maxSize;
+    }
 
- public T Rent => _items.TryTake(out var item)? item: _factory;
+    public T Rent => _items.TryTake(out var item)? item: _factory;
 
- public void Return(T item)
- {
- if (Interlocked.Increment(ref _count) <= _maxSize)
- _items.Add(item);
- else
- Interlocked.Decrement(ref _count);
- }
+    public void Return(T item)
+    {
+        if (Interlocked.Increment(ref _count) <= _maxSize)
+            _items.Add(item);
+        else
+            Interlocked.Decrement(ref _count);
+    }
 }
 ```
 **Time complexity**: O(1) amortized rent/return (ConcurrentBag uses thread-local lists). **Space**: O(maxSize) steady-state.
@@ -489,20 +489,20 @@ public sealed class SimpleObjectPool<T> where T: class
 ```csharp
 public byte[] SerializeAndCompress(MyDto dto)
 {
- using var ms = new MemoryStream; // grows internal buffer via doubling, can exceed 85K
- JsonSerializer.Serialize(ms, dto);
- return Compress(ms.ToArray); // ToArray = another full copy allocation
+    using var ms = new MemoryStream; // grows internal buffer via doubling, can exceed 85K
+    JsonSerializer.Serialize(ms, dto);
+    return Compress(ms.ToArray); // ToArray = another full copy allocation
 }
 ```
 **Solution**:
 ```csharp
 public async Task WriteCompressedAsync(MyDto dto, Stream destination, RecyclableMemoryStreamManager mgr)
 {
- using var ms = mgr.GetStream; // pooled, reused buffers, avoids ad-hoc LOH allocations
- await JsonSerializer.SerializeAsync(ms, dto);
- ms.Position = 0;
- using var gzip = new GZipStream(destination, CompressionLevel.Fastest, leaveOpen: true);
- await ms.CopyToAsync(gzip); // streams directly, no intermediate byte[] copy at all
+    using var ms = mgr.GetStream; // pooled, reused buffers, avoids ad-hoc LOH allocations
+    await JsonSerializer.SerializeAsync(ms, dto);
+    ms.Position = 0;
+    using var gzip = new GZipStream(destination, CompressionLevel.Fastest, leaveOpen: true);
+    await ms.CopyToAsync(gzip); // streams directly, no intermediate byte[] copy at all
 }
 ```
 **Time complexity**: Same O(n) in payload size. **Space**: Original: up to 2–3x payload size in transient allocations (`MemoryStream` internal buffer growth + `ToArray` copy + compressed output array), frequently landing on LOH. Optimized: pooled buffer reuse via `RecyclableMemoryStreamManager` + streaming compression avoids the extra full-array copies and LOH churn entirely.
@@ -513,46 +513,46 @@ public async Task WriteCompressedAsync(MyDto dto, Stream destination, Recyclable
 ```csharp
 public sealed class RingLogBuffer
 {
- private readonly byte[] _buffer; // single pre-allocated backing array
- private readonly int _entrySize;
- private readonly int _capacity;
- private int _writeIndex;
- private int _count;
- private readonly object _lock = new;
+    private readonly byte[] _buffer; // single pre-allocated backing array
+    private readonly int _entrySize;
+    private readonly int _capacity;
+    private int _writeIndex;
+    private int _count;
+    private readonly object _lock = new;
 
- public RingLogBuffer(int entrySize, int capacity)
- {
- _entrySize = entrySize;
- _capacity = capacity;
- _buffer = new byte[entrySize * capacity]; // one allocation, ever
- }
+    public RingLogBuffer(int entrySize, int capacity)
+    {
+        _entrySize = entrySize;
+        _capacity = capacity;
+        _buffer = new byte[entrySize * capacity]; // one allocation, ever
+    }
 
- public void Write(ReadOnlySpan<byte> entry)
- {
- if (entry.Length > _entrySize) throw new ArgumentException("entry too large");
- lock (_lock)
- {
- var offset = _writeIndex * _entrySize;
- var dest = _buffer.AsSpan(offset, _entrySize);
- dest.Clear;
- entry.CopyTo(dest);
- _writeIndex = (_writeIndex + 1) % _capacity;
- _count = Math.Min(_count + 1, _capacity);
- }
- }
+    public void Write(ReadOnlySpan<byte> entry)
+    {
+        if (entry.Length > _entrySize) throw new ArgumentException("entry too large");
+        lock (_lock)
+        {
+            var offset = _writeIndex * _entrySize;
+            var dest = _buffer.AsSpan(offset, _entrySize);
+            dest.Clear;
+            entry.CopyTo(dest);
+            _writeIndex = (_writeIndex + 1) % _capacity;
+            _count = Math.Min(_count + 1, _capacity);
+        }
+    }
 
- // Caller-provided callback avoids allocating an IEnumerable/array on every scan
- public void ScanNewestFirst(SpanAction<byte> onEntry)
- {
- lock (_lock)
- {
- for (int i = 0; i < _count; i++)
- {
- int idx = (_writeIndex - 1 - i + _capacity) % _capacity;
- onEntry(_buffer.AsSpan(idx * _entrySize, _entrySize));
- }
- }
- }
+    // Caller-provided callback avoids allocating an IEnumerable/array on every scan
+    public void ScanNewestFirst(SpanAction<byte> onEntry)
+    {
+        lock (_lock)
+        {
+            for (int i = 0; i < _count; i++)
+            {
+                int idx = (_writeIndex - 1 - i + _capacity) % _capacity;
+                onEntry(_buffer.AsSpan(idx * _entrySize, _entrySize));
+            }
+        }
+    }
 }
 public delegate void SpanAction<T>(Span<T> span);
 ```

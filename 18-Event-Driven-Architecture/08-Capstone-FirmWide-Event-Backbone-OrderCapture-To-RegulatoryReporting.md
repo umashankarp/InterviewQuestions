@@ -471,9 +471,9 @@ public enum FlowStyle { Orchestrated, Choreographed }
 
 public FlowStyle SelectFlowStyle(BackboneStage stage)
 {
- return stage.RequiresSingleAuthoritativeStateTransition
-? FlowStyle.Orchestrated // e.g., order lifecycle, settlement saga (123, 131)
-: FlowStyle.Choreographed; // independent reactions to an already-settled fact
+    return stage.RequiresSingleAuthoritativeStateTransition
+    ? FlowStyle.Orchestrated // e.g., order lifecycle, settlement saga (123, 131)
+    : FlowStyle.Choreographed; // independent reactions to an already-settled fact
 }
 ```
 **Time complexity:** O(1).
@@ -486,26 +486,26 @@ public FlowStyle SelectFlowStyle(BackboneStage stage)
 ```csharp
 public async Task<EmissionResult> EmitWindowResultIdempotentlyAsync(WindowResult result)
 {
- var aggregateKey = $"{result.InstrumentId}|{result.WindowStart:O}"; // instrument + window-start (reused)
+    var aggregateKey = $"{result.InstrumentId}|{result.WindowStart:O}"; // instrument + window-start (reused)
 
- await using var tx = await _db.BeginTransactionAsync;
- var alreadyEmitted = await _db.QuerySingleOrDefaultAsync<EmittedWindow>(
- "SELECT * FROM emitted_windows WHERE aggregate_key = @Key FOR UPDATE",
- new { Key = aggregateKey }, tx);
+    await using var tx = await _db.BeginTransactionAsync;
+    var alreadyEmitted = await _db.QuerySingleOrDefaultAsync<EmittedWindow>(
+        "SELECT * FROM emitted_windows WHERE aggregate_key = @Key FOR UPDATE",
+            new { Key = aggregateKey }, tx);
 
- if (alreadyEmitted is not null)
- {
- await tx.CommitAsync;
- return EmissionResult.Suppressed(aggregateKey); // the exact gap — now closed
- }
+    if (alreadyEmitted is not null)
+    {
+        await tx.CommitAsync;
+        return EmissionResult.Suppressed(aggregateKey); // the exact gap — now closed
+    }
 
- await _db.ExecuteAsync(
- "INSERT INTO emitted_windows (aggregate_key, value, emitted_at) VALUES (@Key, @Value, @Now)",
- new { Key = aggregateKey, result.Value, Now = DateTimeOffset.UtcNow }, tx);
- await _publisher.PublishAsync(result, tx); // emission + record, one transaction (reused)
+    await _db.ExecuteAsync(
+        "INSERT INTO emitted_windows (aggregate_key, value, emitted_at) VALUES (@Key, @Value, @Now)",
+            new { Key = aggregateKey, result.Value, Now = DateTimeOffset.UtcNow }, tx);
+    await _publisher.PublishAsync(result, tx); // emission + record, one transaction (reused)
 
- await tx.CommitAsync;
- return EmissionResult.Published(aggregateKey);
+    await tx.CommitAsync;
+    return EmissionResult.Published(aggregateKey);
 }
 ```
 **Time complexity:** O(1) per window emission.
@@ -518,26 +518,26 @@ public async Task<EmissionResult> EmitWindowResultIdempotentlyAsync(WindowResult
 ```csharp
 public class DerivedArtifactAuditor
 {
- public IReadOnlyList<RpoGap> AuditComponent(ComponentDescriptor component)
- {
- var gaps = new List<RpoGap>;
+    public IReadOnlyList<RpoGap> AuditComponent(ComponentDescriptor component)
+    {
+        var gaps = new List<RpoGap>;
 
- foreach (var artifact in component.ReplicatedArtifacts) // raw events AND snapshots/caches/materialized views
- {
- if (!artifact.HasIndependentRpoValidation)
- gaps.Add(new RpoGap(
- component.Name, artifact.Name,
- Reason: "Replicated artifact lacks its own measured worst-case lag validation — " +
- "may silently diverge from primary-data RPO"));
+        foreach (var artifact in component.ReplicatedArtifacts) // raw events AND snapshots/caches/materialized views
+        {
+            if (!artifact.HasIndependentRpoValidation)
+                gaps.Add(new RpoGap(
+                    component.Name, artifact.Name,
+                        Reason: "Replicated artifact lacks its own measured worst-case lag validation — " +
+                        "may silently diverge from primary-data RPO"));
 
- if (artifact.ReplicationCadence!= component.PrimaryDataReplicationCadence)
- gaps.Add(new RpoGap(
- component.Name, artifact.Name,
- Reason: $"Cadence ({artifact.ReplicationCadence}) differs from primary data " +
- $"({component.PrimaryDataReplicationCadence}) — exactly the root cause"));
- }
- return gaps;
- }
+            if (artifact.ReplicationCadence!= component.PrimaryDataReplicationCadence)
+                gaps.Add(new RpoGap(
+                    component.Name, artifact.Name,
+                        Reason: $"Cadence ({artifact.ReplicationCadence}) differs from primary data " +
+                        $"({component.PrimaryDataReplicationCadence}) — exactly the root cause"));
+        }
+        return gaps;
+    }
 }
 ```
 **Time complexity:** O(a) for a artifacts per component.
@@ -550,30 +550,30 @@ public class DerivedArtifactAuditor
 ```csharp
 public class ComposedFailoverExperiment
 {
- public async Task<ExperimentResult> RunAsync(
- IStreamJobController job, IRegionFailoverInjector failoverInjector,
- IWindowEmissionAuditor emissionAuditor, TimeSpan abortAfter)
- {
- using var cts = new CancellationTokenSource(abortAfter); // bounded blast radius
+    public async Task<ExperimentResult> RunAsync(
+        IStreamJobController job, IRegionFailoverInjector failoverInjector,
+            IWindowEmissionAuditor emissionAuditor, TimeSpan abortAfter)
+    {
+        using var cts = new CancellationTokenSource(abortAfter); // bounded blast radius
 
- var preFailoverEmissions = await emissionAuditor.CaptureEmittedWindowsAsync(cts.Token);
+        var preFailoverEmissions = await emissionAuditor.CaptureEmittedWindowsAsync(cts.Token);
 
- await failoverInjector.TriggerRegionalFailoverAsync(cts.Token); // real condition: kills primary, forces resume from snapshot
- await job.WaitForRecoveryAsync(cts.Token);
+        await failoverInjector.TriggerRegionalFailoverAsync(cts.Token); // real condition: kills primary, forces resume from snapshot
+        await job.WaitForRecoveryAsync(cts.Token);
 
- var postFailoverEmissions = await emissionAuditor.CaptureEmittedWindowsAsync(cts.Token);
+        var postFailoverEmissions = await emissionAuditor.CaptureEmittedWindowsAsync(cts.Token);
 
- var duplicates = postFailoverEmissions
-.GroupBy(w => w.AggregateKey)
-.Where(g => g.Count > 1)
-.Select(g => g.Key)
-.ToList;
+        var duplicates = postFailoverEmissions
+        .GroupBy(w => w.AggregateKey)
+        .Where(g => g.Count > 1)
+        .Select(g => g.Key)
+        .ToList;
 
- return new ExperimentResult(
- DuplicateWindowEmissions: duplicates, // must be EMPTY — the exact failure signature
- RecoveryTime: job.LastRecoveryDuration,
- Passed: duplicates.Count == 0);
- }
+        return new ExperimentResult(
+            DuplicateWindowEmissions: duplicates, // must be EMPTY — the exact failure signature
+                RecoveryTime: job.LastRecoveryDuration,
+                Passed: duplicates.Count == 0);
+    }
 }
 ```
 **Time complexity:** O(w) for w windows captured pre/post failover.

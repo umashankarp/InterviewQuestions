@@ -478,29 +478,29 @@ graph LR
 ```csharp
 public interface IOrderExecutionVenue
 {
- Task<ExecutionResult> SubmitOrderAsync(Order order, CancellationToken ct);
+    Task<ExecutionResult> SubmitOrderAsync(Order order, CancellationToken ct);
 }
 
 public abstract class OrderExecutionVenueContractTests
 {
- protected abstract IOrderExecutionVenue CreateVenue;
+    protected abstract IOrderExecutionVenue CreateVenue;
 
- [Fact]
- public async Task FullFill_ReturnsFilledResultWithMatchingQuantity
- {
- var venue = CreateVenue;
- var order = OrderTestBuilder.ForQuantity(1000).Build;
+    [Fact]
+    public async Task FullFill_ReturnsFilledResultWithMatchingQuantity
+    {
+        var venue = CreateVenue;
+        var order = OrderTestBuilder.ForQuantity(1000).Build;
 
- var result = await venue.SubmitOrderAsync(order, CancellationToken.None);
+        var result = await venue.SubmitOrderAsync(order, CancellationToken.None);
 
- Assert.Equal(ExecutionStatus.Filled, result.Status);
- Assert.Equal(1000, result.FilledQuantity);
- }
+        Assert.Equal(ExecutionStatus.Filled, result.Status);
+        Assert.Equal(1000, result.FilledQuantity);
+    }
 }
 
 public class SimulatedVenueContractTests: OrderExecutionVenueContractTests
 {
- protected override IOrderExecutionVenue CreateVenue => new SimulatedVenue;
+    protected override IOrderExecutionVenue CreateVenue => new SimulatedVenue;
 }
 ```
 **Time complexity:** O(1) per test scenario — a single order submission and assertion.
@@ -513,22 +513,22 @@ public class SimulatedVenueContractTests: OrderExecutionVenueContractTests
 ```csharp
 public class SubmitOrderUseCase: ISubmitOrderInputPort
 {
- private readonly IPositionRepository _repository;
- private readonly IOrderExecutionVenue _venue;
+    private readonly IPositionRepository _repository;
+    private readonly IOrderExecutionVenue _venue;
 
- public async Task<OrderOutputData> Execute(OrderInputData input)
- {
- var existing = await _repository.FindByIdempotencyKeyAsync(input.IdempotencyKey);
- if (existing is not null)
- return OrderOutputData.FromExisting(existing);
+    public async Task<OrderOutputData> Execute(OrderInputData input)
+    {
+        var existing = await _repository.FindByIdempotencyKeyAsync(input.IdempotencyKey);
+        if (existing is not null)
+            return OrderOutputData.FromExisting(existing);
 
- var order = Order.Create(input.IdempotencyKey, input.Symbol, input.Quantity);
- var result = await _venue.SubmitOrderAsync(order, CancellationToken.None);
- order.ApplyExecution(result);
+        var order = Order.Create(input.IdempotencyKey, input.Symbol, input.Quantity);
+        var result = await _venue.SubmitOrderAsync(order, CancellationToken.None);
+        order.ApplyExecution(result);
 
- await _repository.SaveAsync(order); // idempotency key persisted as part of Order
- return OrderOutputData.FromOrder(order);
- }
+        await _repository.SaveAsync(order); // idempotency key persisted as part of Order
+        return OrderOutputData.FromOrder(order);
+    }
 }
 ```
 **Time complexity:** O(1) amortized for the idempotency lookup, assuming an indexed key column/index in `IPositionRepository`'s backing store.
@@ -541,20 +541,20 @@ public class SubmitOrderUseCase: ISubmitOrderInputPort
 ```csharp
 public class PartitionedOrderConsumer: BackgroundService
 {
- private readonly IConsumer<string, byte[]> _kafkaConsumer; // keyed by AccountId
- private readonly ISubmitOrderInputPort _inputPort;
+    private readonly IConsumer<string, byte[]> _kafkaConsumer; // keyed by AccountId
+    private readonly ISubmitOrderInputPort _inputPort;
 
- protected override async Task ExecuteAsync(CancellationToken stoppingToken)
- {
- _kafkaConsumer.Subscribe("orders");
- while (!stoppingToken.IsCancellationRequested)
- {
- var result = _kafkaConsumer.Consume(stoppingToken);
- var input = OrderInputData.Deserialize(result.Message.Value);
- await _inputPort.Execute(input); // await — never block
- _kafkaConsumer.Commit(result);
- }
- }
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _kafkaConsumer.Subscribe("orders");
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            var result = _kafkaConsumer.Consume(stoppingToken);
+            var input = OrderInputData.Deserialize(result.Message.Value);
+            await _inputPort.Execute(input); // await — never block
+            _kafkaConsumer.Commit(result);
+        }
+    }
 }
 ```
 Kafka's own partition-key-based routing (keying messages by `AccountId`) guarantees all messages for one account land on the same partition, consumed sequentially by exactly one consumer instance at a time.
@@ -568,24 +568,24 @@ Kafka's own partition-key-based routing (keying messages by `AccountId`) guarant
 ```csharp
 public abstract class OrderExecutionVenueContractTests
 {
- protected abstract IOrderExecutionVenue CreateVenue;
- protected abstract Task SimulateLateCorrectionAsync(IOrderExecutionVenue venue, Order order, int correctedQuantity);
+    protected abstract IOrderExecutionVenue CreateVenue;
+    protected abstract Task SimulateLateCorrectionAsync(IOrderExecutionVenue venue, Order order, int correctedQuantity);
 
- [Fact]
- public async Task LateCorrection_ReducesReportedFillQuantity_AndOrderReflectsCorrection
- {
- var venue = CreateVenue;
- var order = OrderTestBuilder.ForQuantity(10_000).Build;
+    [Fact]
+    public async Task LateCorrection_ReducesReportedFillQuantity_AndOrderReflectsCorrection
+    {
+        var venue = CreateVenue;
+        var order = OrderTestBuilder.ForQuantity(10_000).Build;
 
- var initial = await venue.SubmitOrderAsync(order, CancellationToken.None);
- Assert.Equal(10_000, initial.FilledQuantity); // initial fill reported correctly
+        var initial = await venue.SubmitOrderAsync(order, CancellationToken.None);
+        Assert.Equal(10_000, initial.FilledQuantity); // initial fill reported correctly
 
- await SimulateLateCorrectionAsync(venue, order, correctedQuantity: 9_500);
+        await SimulateLateCorrectionAsync(venue, order, correctedQuantity: 9_500);
 
- var corrected = await venue.GetLatestExecutionStateAsync(order.Id);
- Assert.Equal(9_500, corrected.FilledQuantity); // correction must be reflected
- Assert.True(corrected.WasCorrected);
- }
+        var corrected = await venue.GetLatestExecutionStateAsync(order.Id);
+        Assert.Equal(9_500, corrected.FilledQuantity); // correction must be reflected
+        Assert.True(corrected.WasCorrected);
+    }
 }
 ```
 `SimulatedVenue` must implement `SimulateLateCorrectionAsync` by actually injecting a correction message into its own simulated order-matching state, not merely returning a hardcoded corrected value — otherwise the test would pass without genuinely validating the Adapter's real correction-handling logic.

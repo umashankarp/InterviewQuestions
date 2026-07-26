@@ -209,32 +209,35 @@ Two disciplines that make sponsorship work rather than backfire: **sponsor into 
 
 ### 3.1 Where Staff+ scope sits relative to org structure
 
-```
- ORG CHART PROBLEM TOPOLOGY
- (partitions people) (where failures live)
+```mermaid
+flowchart LR
+    subgraph ORG["ORG CHART — partitions people"]
+        direction TB
+        A1[Team A]:::box
+        B1[Team B]:::box
+        C1[Team C]:::box
+        D1[Team D]:::box
+    end
 
- ┌────────┬────────┬────────┐ ┌────────┬────────┬────────┐
- │ Team A │ Team B │ Team C │ │ Team A │ Team B │ Team C │
- │ │ │ │ │ ╳ │╳ │ │
- │ │ │ │ │ ╲│╱ │ │
- ├────────┼────────┼────────┤ ├────────╳────────┼────────┤
- │ Team D │ Team E │ Team F │ │ Team D │╲Team E │ Team F │
- │ │ │ │ │ │ ╲ ╳ │╳ │
- └────────┴────────┴────────┘ └────────┴────────┴────────┘
- ▲
- Each team owns a box. │
- Each box has an owner. Failures live on the LINES.
- Every box is monitored. The lines have no owner.
- Every team's dashboard is green.
+    subgraph TOPO["PROBLEM TOPOLOGY — where failures live"]
+        direction TB
+        A2[Team A] --- B2[Team B]
+        B2 --- C2[Team C]
+        A2 --- D2[Team D]
+        D2 --- C2
+    end
 
- ┌─────────────────────────────┐
- │ STAFF+ SCOPE = THE LINES │
- │ Deliberately defined to │
- │ span boundaries, because │
- │ boundaries are where the │
- │ unowned problems are. │
- └─────────────────────────────┘
+    classDef box fill:#eef,stroke:#88a
 ```
+
+| | Org chart | Problem topology |
+|---|---|---|
+| **Unit** | The box | The line between boxes |
+| **Ownership** | Every box has a named owner | The lines have no owner |
+| **Monitoring** | Every box is monitored | Every team's dashboard is green during a seam failure |
+| **Consequence** | Team-scoped problems get solved | Seam problems persist indefinitely |
+
+> **Staff+ scope is the lines.** The role's scope is deliberately defined to *span* boundaries, because org charts partition people while failures partition by seam — and a boundary that belongs to nobody is where the unowned problems accumulate.
 
 ### 3.2 Archetype selection as a function of organizational state
 
@@ -258,23 +261,16 @@ flowchart TD
 
 ### 3.3 The time-allocation reality, and the failure it hides
 
-```
-IDEAL (as described in job postings) ACTUAL (unmanaged, after 18 months)
+| Activity | Ideal (as advertised) | Actual (unmanaged, after 18 months) |
+|---|---|---|
+| Deep technical work | ████████ 40% | ██ 10% |
+| Multiplying others | ██████ 30% | ████ 20% |
+| Strategy / writing | ████ 20% | ██ 10% |
+| Glue / coordination | ██ 10% | ████████████ 60% |
 
-Deep technical work ████████ 40% Deep technical work ██ 10%
-Multiplying others ██████ 30% Multiplying others ████ 20%
-Strategy / writing ████ 20% Strategy / writing ██ 10%
-Glue / coordination ██ 10% Glue / coordination ████████████ 60%
+**The drift is monotonic and invisible.** Every individual instance of glue work genuinely needed doing, and taking it on was the right call each time — which is precisely why the aggregate is never noticed. The role becomes coordination one defensible decision at a time.
 
- ← The drift is monotonic and invisible.
- Each individual instance of glue work
- genuinely needed doing. The aggregate
- is a role that has become coordination.
-
- THE TELL: people stop bringing you
- hard problems and start bringing you
- process questions.
-```
+**The tell:** people stop bringing you hard problems and start bringing you process questions. That is a demotion the org chart has not recorded yet.
 
 ---
 
@@ -742,34 +738,34 @@ public sealed record ServiceEdge(string Caller, string Callee);
 
 public sealed class ServiceGraph
 {
- private readonly Dictionary<string, HashSet<string>> _out = [];
- private readonly Dictionary<string, HashSet<string>> _in = [];
+    private readonly Dictionary<string, HashSet<string>> _out = [];
+    private readonly Dictionary<string, HashSet<string>> _in = [];
 
- public void AddEdge(string caller, string callee)
- {
- if (caller == callee) return; // self-calls are not dependencies
- Out(caller).Add(callee);
- In(callee).Add(caller);
- _ = Out(callee); _ = In(caller); // ensure both nodes exist
- }
+    public void AddEdge(string caller, string callee)
+    {
+        if (caller == callee) return; // self-calls are not dependencies
+        Out(caller).Add(callee);
+        In(callee).Add(caller);
+        _ = Out(callee); _ = In(caller); // ensure both nodes exist
+    }
 
- public IReadOnlySet<string> Callees(string s) => Out(s);
- public IReadOnlySet<string> Callers(string s) => In(s);
- public IEnumerable<string> Services => _out.Keys;
+    public IReadOnlySet<string> Callees(string s) => Out(s);
+    public IReadOnlySet<string> Callers(string s) => In(s);
+    public IEnumerable<string> Services => _out.Keys;
 
- public (int FanIn, int FanOut) Degree(string s) => (In(s).Count, Out(s).Count);
+    public (int FanIn, int FanOut) Degree(string s) => (In(s).Count, Out(s).Count);
 
- private HashSet<string> Out(string s) =>
- _out.TryGetValue(s, out var v)? v: _out[s] = [];
- private HashSet<string> In(string s) =>
- _in.TryGetValue(s, out var v)? v: _in[s] = [];
+    private HashSet<string> Out(string s) =>
+        _out.TryGetValue(s, out var v)? v: _out[s] = [];
+    private HashSet<string> In(string s) =>
+        _in.TryGetValue(s, out var v)? v: _in[s] = [];
 }
 
 public static ServiceGraph BuildFrom(IEnumerable<ServiceEdge> spans)
 {
- var g = new ServiceGraph;
- foreach (var (caller, callee) in spans) g.AddEdge(caller, callee);
- return g;
+    var g = new ServiceGraph;
+    foreach (var (caller, callee) in spans) g.AddEdge(caller, callee);
+    return g;
 }
 ```
 
@@ -791,66 +787,66 @@ public static ServiceGraph BuildFrom(IEnumerable<ServiceEdge> spans)
 ```csharp
 public static List<List<string>> FindCoupledClusters(ServiceGraph g)
 {
- var index = new Dictionary<string, int>;
- var low = new Dictionary<string, int>;
- var onStack = new HashSet<string>;
- var stack = new Stack<string>;
- var components = new List<List<string>>;
- var next = 0;
+    var index = new Dictionary<string, int>;
+    var low = new Dictionary<string, int>;
+    var onStack = new HashSet<string>;
+    var stack = new Stack<string>;
+    var components = new List<List<string>>;
+    var next = 0;
 
- foreach (var start in g.Services)
- {
- if (index.ContainsKey(start)) continue;
+    foreach (var start in g.Services)
+    {
+        if (index.ContainsKey(start)) continue;
 
- // Iterative Tarjan: frame = (node, enumerator over its callees)
- var work = new Stack<(string Node, IEnumerator<string> It)>;
- index[start] = low[start] = next++;
- stack.Push(start); onStack.Add(start);
- work.Push((start, g.Callees(start).GetEnumerator));
+        // Iterative Tarjan: frame = (node, enumerator over its callees)
+        var work = new Stack<(string Node, IEnumerator<string> It)>;
+        index[start] = low[start] = next++;
+        stack.Push(start); onStack.Add(start);
+        work.Push((start, g.Callees(start).GetEnumerator));
 
- while (work.Count > 0)
- {
- var (node, it) = work.Peek;
- if (it.MoveNext)
- {
- var child = it.Current;
- if (!index.ContainsKey(child))
- {
- index[child] = low[child] = next++;
- stack.Push(child); onStack.Add(child);
- work.Push((child, g.Callees(child).GetEnumerator));
- }
- else if (onStack.Contains(child))
- {
- low[node] = Math.Min(low[node], index[child]);
- }
- }
- else
- {
- work.Pop;
- if (work.Count > 0)
- {
- var parent = work.Peek.Node;
- low[parent] = Math.Min(low[parent], low[node]);
- }
- if (low[node] == index[node]) // root of an SCC
- {
- var component = new List<string>;
- string member;
- do
- {
- member = stack.Pop;
- onStack.Remove(member);
- component.Add(member);
- } while (member!= node);
+        while (work.Count > 0)
+        {
+            var (node, it) = work.Peek;
+            if (it.MoveNext)
+            {
+                var child = it.Current;
+                if (!index.ContainsKey(child))
+                {
+                    index[child] = low[child] = next++;
+                    stack.Push(child); onStack.Add(child);
+                    work.Push((child, g.Callees(child).GetEnumerator));
+                }
+                else if (onStack.Contains(child))
+                {
+                    low[node] = Math.Min(low[node], index[child]);
+                }
+            }
+            else
+            {
+                work.Pop;
+                if (work.Count > 0)
+                {
+                    var parent = work.Peek.Node;
+                    low[parent] = Math.Min(low[parent], low[node]);
+                }
+                if (low[node] == index[node]) // root of an SCC
+                {
+                    var component = new List<string>;
+                    string member;
+                    do
+                    {
+                        member = stack.Pop;
+                        onStack.Remove(member);
+                        component.Add(member);
+                    } while (member!= node);
 
- if (component.Count > 1) // size 1 = not coupled
- components.Add(component);
- }
- }
- }
- }
- return components;
+                    if (component.Count > 1) // size 1 = not coupled
+                        components.Add(component);
+                }
+            }
+        }
+    }
+    return components;
 }
 ```
 
@@ -871,57 +867,57 @@ public static List<List<string>> FindCoupledClusters(ServiceGraph g)
 public sealed record Dep(string Caller, string Callee, bool IsSynchronous, double CalleeAvailability);
 
 public static HashSet<string> BlastRadius(
- string failed, IReadOnlyList<Dep> deps)
+    string failed, IReadOnlyList<Dep> deps)
 {
- // Reverse traversal over SYNCHRONOUS edges only:
- // if X calls `failed` synchronously, X is affected.
- var reverseSync = new Dictionary<string, List<string>>;
- foreach (var d in deps.Where(d => d.IsSynchronous))
- {
- if (!reverseSync.TryGetValue(d.Callee, out var list))
- reverseSync[d.Callee] = list = [];
- list.Add(d.Caller);
- }
+    // Reverse traversal over SYNCHRONOUS edges only:
+    // if X calls `failed` synchronously, X is affected.
+    var reverseSync = new Dictionary<string, List<string>>;
+    foreach (var d in deps.Where(d => d.IsSynchronous))
+    {
+        if (!reverseSync.TryGetValue(d.Callee, out var list))
+            reverseSync[d.Callee] = list = [];
+        list.Add(d.Caller);
+    }
 
- var affected = new HashSet<string>;
- var queue = new Queue<string>([failed]);
- while (queue.Count > 0)
- {
- var current = queue.Dequeue;
- if (!reverseSync.TryGetValue(current, out var callers)) continue;
- foreach (var caller in callers)
- if (affected.Add(caller)) // Add returns false if already present
- queue.Enqueue(caller);
- }
- return affected;
+    var affected = new HashSet<string>;
+    var queue = new Queue<string>([failed]);
+    while (queue.Count > 0)
+    {
+        var current = queue.Dequeue;
+        if (!reverseSync.TryGetValue(current, out var callers)) continue;
+        foreach (var caller in callers)
+            if (affected.Add(caller)) // Add returns false if already present
+            queue.Enqueue(caller);
+    }
+    return affected;
 }
 
 public static double EffectiveAvailability(
- string entryPoint, IReadOnlyList<Dep> deps)
+    string entryPoint, IReadOnlyList<Dep> deps)
 {
- // Availability of an entry point = product of availabilities of every
- // service reachable via synchronous edges. Async edges are excluded:
- // the queue absorbs the failure, converting an outage into lag.
- var adjacency = deps.Where(d => d.IsSynchronous)
-.GroupBy(d => d.Caller)
-.ToDictionary(gr => gr.Key, gr => gr.ToList);
+    // Availability of an entry point = product of availabilities of every
+    // service reachable via synchronous edges. Async edges are excluded:
+    // the queue absorbs the failure, converting an outage into lag.
+    var adjacency = deps.Where(d => d.IsSynchronous)
+    .GroupBy(d => d.Caller)
+    .ToDictionary(gr => gr.Key, gr => gr.ToList);
 
- var visited = new HashSet<string>;
- var product = 1.0;
- var stack = new Stack<string>([entryPoint]);
+    var visited = new HashSet<string>;
+    var product = 1.0;
+    var stack = new Stack<string>([entryPoint]);
 
- while (stack.Count > 0)
- {
- var current = stack.Pop;
- if (!adjacency.TryGetValue(current, out var edges)) continue;
- foreach (var e in edges)
- {
- if (!visited.Add(e.Callee)) continue; // count each service ONCE
- product *= e.CalleeAvailability;
- stack.Push(e.Callee);
- }
- }
- return product;
+    while (stack.Count > 0)
+    {
+        var current = stack.Pop;
+        if (!adjacency.TryGetValue(current, out var edges)) continue;
+        foreach (var e in edges)
+        {
+            if (!visited.Add(e.Callee)) continue; // count each service ONCE
+            product *= e.CalleeAvailability;
+            stack.Push(e.Callee);
+        }
+    }
+    return product;
 }
 ```
 
@@ -948,82 +944,82 @@ This is the **minimum feedback arc set** problem, which is NP-hard in general. T
 public sealed record WeightedDep(string Caller, string Callee, double CostToDecouple);
 
 public static (List<WeightedDep> Edges, double TotalCost) MinimumDecouplingSet(
- IReadOnlyList<string> component, IReadOnlyList<WeightedDep> edges, int exactThreshold = 12)
+    IReadOnlyList<string> component, IReadOnlyList<WeightedDep> edges, int exactThreshold = 12)
 {
- var inCluster = component.ToHashSet;
- var internalEdges = edges
-.Where(e => inCluster.Contains(e.Caller) && inCluster.Contains(e.Callee))
-.ToList;
+    var inCluster = component.ToHashSet;
+    var internalEdges = edges
+    .Where(e => inCluster.Contains(e.Caller) && inCluster.Contains(e.Callee))
+    .ToList;
 
- return component.Count <= exactThreshold
-? ExactViaOrdering(component, internalEdges)
-: GreedyByCycleCover(component, internalEdges);
+    return component.Count <= exactThreshold
+    ? ExactViaOrdering(component, internalEdges)
+    : GreedyByCycleCover(component, internalEdges);
 }
 
 // EXACT: for small components, minimum feedback arc set reduces to finding a
 // linear ordering of vertices minimizing the weight of "backward" edges.
 // Held-Karp style DP over subsets: O(2^n · n) — tractable to n≈15-20.
 private static (List<WeightedDep>, double) ExactViaOrdering(
- IReadOnlyList<string> nodes, IReadOnlyList<WeightedDep> edges)
+    IReadOnlyList<string> nodes, IReadOnlyList<WeightedDep> edges)
 {
- var n = nodes.Count;
- var idx = nodes.Select((s, i) => (s, i)).ToDictionary(t => t.s, t => t.i);
+    var n = nodes.Count;
+    var idx = nodes.Select((s, i) => (s, i)).ToDictionary(t => t.s, t => t.i);
 
- // cost[mask, v] = weight of edges from v into the already-placed set `mask`.
- // Placing v after `mask` means every edge v -> (u in mask) points backward.
- var backward = new double[1 << n, n];
- foreach (var e in edges)
- {
- int u = idx[e.Caller], v = idx[e.Callee];
- for (var mask = 0; mask < (1 << n); mask++)
- if ((mask & (1 << v))!= 0 && (mask & (1 << u)) == 0)
- backward[mask, u] += e.CostToDecouple;
- }
+    // cost[mask, v] = weight of edges from v into the already-placed set `mask`.
+    // Placing v after `mask` means every edge v -> (u in mask) points backward.
+    var backward = new double[1 << n, n];
+    foreach (var e in edges)
+    {
+        int u = idx[e.Caller], v = idx[e.Callee];
+        for (var mask = 0; mask < (1 << n); mask++)
+            if ((mask & (1 << v))!= 0 && (mask & (1 << u)) == 0)
+            backward[mask, u] += e.CostToDecouple;
+    }
 
- var dp = new double[1 << n];
- var choice = new int[1 << n];
- Array.Fill(dp, double.PositiveInfinity);
- dp[0] = 0;
+    var dp = new double[1 << n];
+    var choice = new int[1 << n];
+    Array.Fill(dp, double.PositiveInfinity);
+    dp[0] = 0;
 
- for (var mask = 0; mask < (1 << n); mask++)
- {
- if (double.IsPositiveInfinity(dp[mask])) continue;
- for (var v = 0; v < n; v++)
- {
- if ((mask & (1 << v))!= 0) continue;
- var next = mask | (1 << v);
- var cost = dp[mask] + backward[mask, v];
- if (cost < dp[next]) { dp[next] = cost; choice[next] = v; }
- }
- }
+    for (var mask = 0; mask < (1 << n); mask++)
+    {
+        if (double.IsPositiveInfinity(dp[mask])) continue;
+        for (var v = 0; v < n; v++)
+        {
+            if ((mask & (1 << v))!= 0) continue;
+            var next = mask | (1 << v);
+            var cost = dp[mask] + backward[mask, v];
+            if (cost < dp[next]) { dp[next] = cost; choice[next] = v; }
+        }
+    }
 
- // Reconstruct the ordering, then collect the backward edges.
- var order = new int[n];
- var full = (1 << n) - 1;
- for (var i = n - 1; i >= 0; i--) { order[i] = choice[full]; full ^= 1 << choice[full]; }
- var position = new int[n];
- for (var i = 0; i < n; i++) position[order[i]] = i;
+    // Reconstruct the ordering, then collect the backward edges.
+    var order = new int[n];
+    var full = (1 << n) - 1;
+    for (var i = n - 1; i >= 0; i--) { order[i] = choice[full]; full ^= 1 << choice[full]; }
+    var position = new int[n];
+    for (var i = 0; i < n; i++) position[order[i]] = i;
 
- var cut = edges.Where(e => position[idx[e.Caller]] > position[idx[e.Callee]]).ToList;
- return (cut, cut.Sum(e => e.CostToDecouple));
+    var cut = edges.Where(e => position[idx[e.Caller]] > position[idx[e.Callee]]).ToList;
+    return (cut, cut.Sum(e => e.CostToDecouple));
 }
 
 // HEURISTIC: for larger components, greedily cut the cheapest edge on the
 // cheapest cycle until acyclic. Not optimal, but bounded and explainable.
 private static (List<WeightedDep>, double) GreedyByCycleCover(
- IReadOnlyList<string> nodes, IReadOnlyList<WeightedDep> edges)
+    IReadOnlyList<string> nodes, IReadOnlyList<WeightedDep> edges)
 {
- var remaining = edges.ToList;
- var cut = new List<WeightedDep>;
+    var remaining = edges.ToList;
+    var cut = new List<WeightedDep>;
 
- while (TryFindCycle(nodes, remaining) is { } cycle)
- {
- // Cut the cheapest edge on this cycle — the classic greedy choice.
- var cheapest = cycle.MinBy(e => e.CostToDecouple)!;
- cut.Add(cheapest);
- remaining.Remove(cheapest);
- }
- return (cut, cut.Sum(e => e.CostToDecouple));
+    while (TryFindCycle(nodes, remaining) is { } cycle)
+    {
+        // Cut the cheapest edge on this cycle — the classic greedy choice.
+        var cheapest = cycle.MinBy(e => e.CostToDecouple)!;
+        cut.Add(cheapest);
+        remaining.Remove(cheapest);
+    }
+    return (cut, cut.Sum(e => e.CostToDecouple));
 }
 ```
 
@@ -1286,86 +1282,86 @@ public enum Confidence { Insufficient = 0, Qualified, High }
 // Insufficient is the zero value: an uninitialized result is never trusted.
 
 public sealed record AnalysisResult<T>(
- T? Value, Confidence Confidence, IReadOnlyList<string> Caveats)
+    T? Value, Confidence Confidence, IReadOnlyList<string> Caveats)
 {
- public bool IsUsable => Confidence!= Confidence.Insufficient;
+    public bool IsUsable => Confidence!= Confidence.Insufficient;
 
- public static AnalysisResult<T> Insufficient(string reason) =>
- new(default, Confidence.Insufficient, [reason]);
+    public static AnalysisResult<T> Insufficient(string reason) =>
+        new(default, Confidence.Insufficient, [reason]);
 
- // Confidence composes by taking the MINIMUM — a chain is never more
- // trustworthy than its weakest link. This single rule is what prevents
- // qualified inputs silently producing a confident-looking output.
- public AnalysisResult<TOut> Map<TOut>(Func<T, TOut> f, params string[] extra) =>
- Value is null
-? AnalysisResult<TOut>.Insufficient(Caveats[0])
-: new(f(Value), Confidence, [.. Caveats,.. extra]);
+    // Confidence composes by taking the MINIMUM — a chain is never more
+    // trustworthy than its weakest link. This single rule is what prevents
+    // qualified inputs silently producing a confident-looking output.
+    public AnalysisResult<TOut> Map<TOut>(Func<T, TOut> f, params string[] extra) =>
+        Value is null
+    ? AnalysisResult<TOut>.Insufficient(Caveats[0])
+    : new(f(Value), Confidence, [.. Caveats,.. extra]);
 }
 
 public interface IGraphAnalysis<T>
 {
- AnalysisResult<T> Analyze(GraphSnapshot snapshot);
+    AnalysisResult<T> Analyze(GraphSnapshot snapshot);
 }
 
 public sealed class AvailabilityAnalysis(int entryPoint): IGraphAnalysis<double>
 {
- public AnalysisResult<double> Analyze(GraphSnapshot s)
- {
- if (s.Quality == SnapshotQuality.Unusable)
- return AnalysisResult<double>.Insufficient("snapshot unusable");
+    public AnalysisResult<double> Analyze(GraphSnapshot s)
+    {
+        if (s.Quality == SnapshotQuality.Unusable)
+            return AnalysisResult<double>.Insufficient("snapshot unusable");
 
- var visited = new HashSet<int>;
- var product = 1.0;
- var inferredCount = 0;
- var totalTraversed = 0;
- var sawUnknownSemantics = false;
- var stack = new Stack<int>([entryPoint]);
+        var visited = new HashSet<int>;
+        var product = 1.0;
+        var inferredCount = 0;
+        var totalTraversed = 0;
+        var sawUnknownSemantics = false;
+        var stack = new Stack<int>([entryPoint]);
 
- while (stack.Count > 0)
- {
- foreach (var e in s.EdgesFrom(stack.Pop))
- {
- if (e.Semantics == CallSemantics.Unknown) { sawUnknownSemantics = true; continue; }
- if (e.Semantics == CallSemantics.Asynchronous) continue; // absorbed by the queue
- if (!visited.Add(e.CalleeId)) continue; // count each service ONCE
+        while (stack.Count > 0)
+        {
+            foreach (var e in s.EdgesFrom(stack.Pop))
+            {
+                if (e.Semantics == CallSemantics.Unknown) { sawUnknownSemantics = true; continue; }
+                if (e.Semantics == CallSemantics.Asynchronous) continue; // absorbed by the queue
+                if (!visited.Add(e.CalleeId)) continue; // count each service ONCE
 
- product *= e.CalleeAvailability;
- totalTraversed++;
- if (e.Method == ClassificationMethod.TimingInferred) inferredCount++;
- stack.Push(e.CalleeId);
- }
- }
+                product *= e.CalleeAvailability;
+                totalTraversed++;
+                if (e.Method == ClassificationMethod.TimingInferred) inferredCount++;
+                stack.Push(e.CalleeId);
+            }
+        }
 
- // An Unknown-semantics edge means we cannot know whether it propagates
- // failure. That is not a caveat — it makes the number meaningless.
- if (sawUnknownSemantics)
- return AnalysisResult<double>.Insufficient(
- "path contains edges with unknown call semantics");
+        // An Unknown-semantics edge means we cannot know whether it propagates
+        // failure. That is not a caveat — it makes the number meaningless.
+        if (sawUnknownSemantics)
+            return AnalysisResult<double>.Insufficient(
+            "path contains edges with unknown call semantics");
 
- var caveats = new List<string>;
- var confidence = Confidence.High;
+        var caveats = new List<string>;
+        var confidence = Confidence.High;
 
- if (inferredCount > 0)
- {
- caveats.Add($"{inferredCount} of {totalTraversed} edges timing-inferred");
- confidence = Confidence.Qualified;
- }
- if (s.Quality == SnapshotQuality.Degraded)
- {
- caveats.Add("snapshot degraded — some services missing trace data");
- confidence = Confidence.Qualified;
- }
+        if (inferredCount > 0)
+        {
+            caveats.Add($"{inferredCount} of {totalTraversed} edges timing-inferred");
+            confidence = Confidence.Qualified;
+        }
+        if (s.Quality == SnapshotQuality.Degraded)
+        {
+            caveats.Add("snapshot degraded — some services missing trace data");
+            confidence = Confidence.Qualified;
+        }
 
- return new AnalysisResult<double>(product, confidence, caveats);
- }
+        return new AnalysisResult<double>(product, confidence, caveats);
+    }
 }
 
 public sealed class WhatIfAnalysis<T>(
- IReadOnlyList<Mutation> mutations, IGraphAnalysis<T> inner): IGraphAnalysis<T>
+    IReadOnlyList<Mutation> mutations, IGraphAnalysis<T> inner): IGraphAnalysis<T>
 {
- public AnalysisResult<T> Analyze(GraphSnapshot s) =>
- inner.Analyze(s.With(mutations)) // derived snapshot; original immutable
-.Map(v => v, $"hypothetical: {mutations.Count} mutation(s) applied");
+    public AnalysisResult<T> Analyze(GraphSnapshot s) =>
+        inner.Analyze(s.With(mutations)) // derived snapshot; original immutable
+    .Map(v => v, $"hypothetical: {mutations.Count} mutation(s) applied");
 }
 ```
 

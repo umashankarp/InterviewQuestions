@@ -146,10 +146,10 @@ public record DeviceKeyRegistration(string UserId, string DeviceId, byte[] Publi
 
 public async Task RegisterDeviceAsync(string userId, string deviceId, byte[] publicKey)
 {
- await _deviceStore.UpsertAsync(new DeviceKeyRegistration(userId, deviceId, publicKey, DateTimeOffset.UtcNow));
- // A new device registration does NOT automatically receive historical messages --
- // it only participates in FUTURE message exchanges from this point forward (§Advanced Q3's
- // "old key material doesn't retroactively apply" principle).
+    await _deviceStore.UpsertAsync(new DeviceKeyRegistration(userId, deviceId, publicKey, DateTimeOffset.UtcNow));
+    // A new device registration does NOT automatically receive historical messages --
+    // it only participates in FUTURE message exchanges from this point forward (§Advanced Q3's
+    // "old key material doesn't retroactively apply" principle).
 }
 ```
 
@@ -157,14 +157,14 @@ public async Task RegisterDeviceAsync(string userId, string deviceId, byte[] pub
 ```csharp
 public async Task SendMessageAsync(string senderId, string recipientUserId, byte[] plaintext)
 {
- var recipientDevices = await _deviceStore.GetDevicesForUserAsync(recipientUserId);
+    var recipientDevices = await _deviceStore.GetDevicesForUserAsync(recipientUserId);
 
- foreach (var device in recipientDevices)
- {
- byte[] ciphertext = _signalProtocol.Encrypt(plaintext, device.PublicKey); // SEPARATE encryption PER device
- await _messageRelay.SendAsync(new EncryptedMessage(senderId, device.DeviceId, ciphertext));
- }
- // The server relay NEVER sees 'plaintext' -- only these already-encrypted, per-device payloads.
+    foreach (var device in recipientDevices)
+    {
+        byte[] ciphertext = _signalProtocol.Encrypt(plaintext, device.PublicKey); // SEPARATE encryption PER device
+        await _messageRelay.SendAsync(new EncryptedMessage(senderId, device.DeviceId, ciphertext));
+    }
+    // The server relay NEVER sees 'plaintext' -- only these already-encrypted, per-device payloads.
 }
 ```
 
@@ -172,35 +172,35 @@ public async Task SendMessageAsync(string senderId, string recipientUserId, byte
 ```csharp
 public class GroupMessagingService
 {
- public async Task RemoveMemberAsync(string groupId, string memberUserId)
- {
- await _groupStore.RemoveMemberAsync(groupId, memberUserId);
+    public async Task RemoveMemberAsync(string groupId, string memberUserId)
+    {
+        await _groupStore.RemoveMemberAsync(groupId, memberUserId);
 
- // ATOMIC: advance the sender-key version as PART OF the removal, closing Advanced Q4's race window.
- int newKeyVersion = await _groupStore.AdvanceSenderKeyVersionAsync(groupId);
- byte[] newSenderKey = _signalProtocol.GenerateSymmetricKey;
+        // ATOMIC: advance the sender-key version as PART OF the removal, closing Advanced Q4's race window.
+        int newKeyVersion = await _groupStore.AdvanceSenderKeyVersionAsync(groupId);
+        byte[] newSenderKey = _signalProtocol.GenerateSymmetricKey;
 
- var remainingMembers = await _groupStore.GetMembersAsync(groupId);
- foreach (var member in remainingMembers)
- {
- foreach (var device in await _deviceStore.GetDevicesForUserAsync(member.UserId))
- {
- byte[] encryptedKey = _signalProtocol.Encrypt(newSenderKey, device.PublicKey); // per-device, ONE-TIME
- await _keyDistribution.DistributeAsync(groupId, newKeyVersion, device.DeviceId, encryptedKey);
- }
- }
- // ANY message sent using the OLD key version after this point is REJECTED by recipients --
- // the removed member's retained old key can no longer decrypt anything new.
- }
+        var remainingMembers = await _groupStore.GetMembersAsync(groupId);
+        foreach (var member in remainingMembers)
+        {
+            foreach (var device in await _deviceStore.GetDevicesForUserAsync(member.UserId))
+            {
+                byte[] encryptedKey = _signalProtocol.Encrypt(newSenderKey, device.PublicKey); // per-device, ONE-TIME
+                await _keyDistribution.DistributeAsync(groupId, newKeyVersion, device.DeviceId, encryptedKey);
+            }
+        }
+        // ANY message sent using the OLD key version after this point is REJECTED by recipients --
+        // the removed member's retained old key can no longer decrypt anything new.
+    }
 
- public async Task SendGroupMessageAsync(string groupId, string senderId, byte[] plaintext)
- {
- var currentKeyVersion = await _groupStore.GetCurrentSenderKeyVersionAsync(groupId);
- var senderKey = await _keyDistribution.GetSenderKeyAsync(groupId, currentKeyVersion, senderId);
+    public async Task SendGroupMessageAsync(string groupId, string senderId, byte[] plaintext)
+    {
+        var currentKeyVersion = await _groupStore.GetCurrentSenderKeyVersionAsync(groupId);
+        var senderKey = await _keyDistribution.GetSenderKeyAsync(groupId, currentKeyVersion, senderId);
 
- byte[] ciphertext = _signalProtocol.EncryptSymmetric(plaintext, senderKey); // ONE encryption, regardless of group size
- await _messageRelay.BroadcastToGroupAsync(groupId, ciphertext, currentKeyVersion);
- }
+        byte[] ciphertext = _signalProtocol.EncryptSymmetric(plaintext, senderKey); // ONE encryption, regardless of group size
+        await _messageRelay.BroadcastToGroupAsync(groupId, ciphertext, currentKeyVersion);
+    }
 }
 ```
 
@@ -209,27 +209,27 @@ public class GroupMessagingService
 [Fact]
 public void Message_Encrypted_For_DeviceA_Should_NOT_Decrypt_With_DeviceB_PrivateKey
 {
- var (deviceAPublic, deviceAPrivate) = _signalProtocol.GenerateKeyPair;
- var (deviceBPublic, deviceBPrivate) = _signalProtocol.GenerateKeyPair; // SAME user's second device
+    var (deviceAPublic, deviceAPrivate) = _signalProtocol.GenerateKeyPair;
+    var (deviceBPublic, deviceBPrivate) = _signalProtocol.GenerateKeyPair; // SAME user's second device
 
- byte[] ciphertext = _signalProtocol.Encrypt(Encoding.UTF8.GetBytes("secret"), deviceAPublic);
+    byte[] ciphertext = _signalProtocol.Encrypt(Encoding.UTF8.GetBytes("secret"), deviceAPublic);
 
- Assert.Throws<DecryptionFailedException>(=>
- _signalProtocol.Decrypt(ciphertext, deviceBPrivate)); // MUST fail -- devices don't share keys, even same user
+    Assert.Throws<DecryptionFailedException>(=>
+        _signalProtocol.Decrypt(ciphertext, deviceBPrivate)); // MUST fail -- devices don't share keys, even same user
 }
 
 [Fact]
 public void Removed_Member_OldSenderKey_Should_NOT_Decrypt_PostRotation_Messages
 {
- var group = CreateTestGroupWithMembers("alice", "bob", "carol");
- byte[] oldSenderKey = group.CurrentSenderKey;
+    var group = CreateTestGroupWithMembers("alice", "bob", "carol");
+    byte[] oldSenderKey = group.CurrentSenderKey;
 
- group.RemoveMember("carol"); // triggers rotation per the Hard exercise
+    group.RemoveMember("carol"); // triggers rotation per the Hard exercise
 
- byte[] newMessage = group.SendMessage("alice", "hello after carol left");
+    byte[] newMessage = group.SendMessage("alice", "hello after carol left");
 
- Assert.Throws<DecryptionFailedException>(=>
- _signalProtocol.DecryptSymmetric(newMessage, oldSenderKey)); // carol's retained OLD key must fail
+    Assert.Throws<DecryptionFailedException>(=>
+        _signalProtocol.DecryptSymmetric(newMessage, oldSenderKey)); // carol's retained OLD key must fail
 }
 ```
 **Discussion**: These tests actively assert that a decryption **fails** under the wrong key/post-rotation, directly the kind of "prove the negative security property, not just the positive functional one" test Advanced Q7 calls for — an ordinary functional test suite (does Alice receive Bob's message correctly) would never catch a-class flaw, since the naive, broken design would still pass every ordinary "message delivered successfully" test while silently violating the actual E2E-encryption guarantee.

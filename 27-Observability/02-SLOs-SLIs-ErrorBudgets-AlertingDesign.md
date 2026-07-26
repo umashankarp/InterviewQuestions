@@ -328,25 +328,25 @@ Explanation B (silently broken alerting): the alert rule's underlying metric
 
 ```csharp
 public sealed record ErrorBudgetStatus(
- double TotalBudgetPercent, double ConsumedPercent, double RemainingPercent, double FractionConsumed);
+    double TotalBudgetPercent, double ConsumedPercent, double RemainingPercent, double FractionConsumed);
 
 public static class ErrorBudgetCalculator
 {
- public static ErrorBudgetStatus Calculate(double sloTargetPercent, double measuredSliPercent)
- {
- double totalBudget = 100.0 - sloTargetPercent;
- double consumed = Math.Max(0, sloTargetPercent - measuredSliPercent) is var shortfall && measuredSliPercent < sloTargetPercent
-? 100.0 - measuredSliPercent - totalBudget + totalBudget // simplifies below
-: 0;
+    public static ErrorBudgetStatus Calculate(double sloTargetPercent, double measuredSliPercent)
+    {
+        double totalBudget = 100.0 - sloTargetPercent;
+        double consumed = Math.Max(0, sloTargetPercent - measuredSliPercent) is var shortfall && measuredSliPercent < sloTargetPercent
+        ? 100.0 - measuredSliPercent - totalBudget + totalBudget // simplifies below
+        : 0;
 
- // Consumed = actual failure rate observed, capped at the total budget for reporting.
- double actualFailureRate = 100.0 - measuredSliPercent;
- double consumedPercent = Math.Min(actualFailureRate, totalBudget);
- double remainingPercent = Math.Max(0, totalBudget - consumedPercent);
- double fractionConsumed = totalBudget > 0? consumedPercent / totalBudget: 1.0;
+        // Consumed = actual failure rate observed, capped at the total budget for reporting.
+        double actualFailureRate = 100.0 - measuredSliPercent;
+        double consumedPercent = Math.Min(actualFailureRate, totalBudget);
+        double remainingPercent = Math.Max(0, totalBudget - consumedPercent);
+        double fractionConsumed = totalBudget > 0? consumedPercent / totalBudget: 1.0;
 
- return new ErrorBudgetStatus(totalBudget, consumedPercent, remainingPercent, fractionConsumed);
- }
+        return new ErrorBudgetStatus(totalBudget, consumedPercent, remainingPercent, fractionConsumed);
+    }
 }
 ```
 **Time complexity:** O(1).
@@ -363,23 +363,23 @@ public sealed record BurnRateWindow(TimeSpan Window, double CurrentBurnRate, dou
 
 public static class BurnRateAlertEvaluator
 {
- public static AlertSeverity Evaluate(
- BurnRateWindow fastWindow, BurnRateWindow corroboratingWindow, BurnRateWindow slowWindow)
- {
- bool fastBreached = fastWindow.CurrentBurnRate > fastWindow.Threshold;
- bool corroboratingBreached = corroboratingWindow.CurrentBurnRate > corroboratingWindow.Threshold;
+    public static AlertSeverity Evaluate(
+        BurnRateWindow fastWindow, BurnRateWindow corroboratingWindow, BurnRateWindow slowWindow)
+    {
+        bool fastBreached = fastWindow.CurrentBurnRate > fastWindow.Threshold;
+        bool corroboratingBreached = corroboratingWindow.CurrentBurnRate > corroboratingWindow.Threshold;
 
- // Sec2.4: BOTH windows must agree before paging -- avoids a single short
- // noisy spike triggering a false page.
- if (fastBreached && corroboratingBreached)
- return AlertSeverity.Page;
+        // Sec2.4: BOTH windows must agree before paging -- avoids a single short
+        // noisy spike triggering a false page.
+        if (fastBreached && corroboratingBreached)
+            return AlertSeverity.Page;
 
- bool slowBreached = slowWindow.CurrentBurnRate > slowWindow.Threshold;
- if (slowBreached)
- return AlertSeverity.Ticket;
+        bool slowBreached = slowWindow.CurrentBurnRate > slowWindow.Threshold;
+        if (slowBreached)
+            return AlertSeverity.Ticket;
 
- return AlertSeverity.None;
- }
+        return AlertSeverity.None;
+    }
 }
 ```
 **Time complexity:** O(1).
@@ -394,23 +394,23 @@ public sealed record Dependency(string Name, double SloPercent, string Correlati
 
 public static class CompositeSloAggregator
 {
- public static double EstimateCompositeReliability(IReadOnlyList<Dependency> dependencies)
- {
- // Group dependencies sharing infrastructure -- Sec Advanced Q8's correlation concern.
- var groups = dependencies.GroupBy(d => d.CorrelationGroup);
+    public static double EstimateCompositeReliability(IReadOnlyList<Dependency> dependencies)
+    {
+        // Group dependencies sharing infrastructure -- Sec Advanced Q8's correlation concern.
+        var groups = dependencies.GroupBy(d => d.CorrelationGroup);
 
- double compositeReliability = 1.0;
- foreach (var group in groups)
- {
- // Within a correlated group, assume WORST-CASE correlation: the group's
- // effective reliability is bounded by its LEAST reliable member, not the
- // product of its members (which would understate correlated risk).
- double groupReliability = group.Min(d => d.SloPercent) / 100.0;
- compositeReliability *= groupReliability;
- }
+        double compositeReliability = 1.0;
+        foreach (var group in groups)
+        {
+            // Within a correlated group, assume WORST-CASE correlation: the group's
+            // effective reliability is bounded by its LEAST reliable member, not the
+            // product of its members (which would understate correlated risk).
+            double groupReliability = group.Min(d => d.SloPercent) / 100.0;
+            compositeReliability *= groupReliability;
+        }
 
- return compositeReliability * 100.0;
- }
+        return compositeReliability * 100.0;
+    }
 }
 ```
 **Time complexity:** O(n log n) for grouping (or O(n) with a hash-based grouping), where n is the number of dependencies.
@@ -425,58 +425,58 @@ public enum CanaryState { Idle, BreachInjected, AwaitingAlert, Confirmed, Escala
 
 public sealed class AlertLivenessCanary
 {
- private readonly TimeSpan _alertTimeout;
- private readonly int _consecutiveFailuresBeforeEscalation;
- private int _consecutiveFailures;
- private CanaryState _state = CanaryState.Idle;
- private DateTime _breachInjectedAt;
+    private readonly TimeSpan _alertTimeout;
+    private readonly int _consecutiveFailuresBeforeEscalation;
+    private int _consecutiveFailures;
+    private CanaryState _state = CanaryState.Idle;
+    private DateTime _breachInjectedAt;
 
- public AlertLivenessCanary(TimeSpan alertTimeout, int consecutiveFailuresBeforeEscalation)
- {
- _alertTimeout = alertTimeout;
- _consecutiveFailuresBeforeEscalation = consecutiveFailuresBeforeEscalation;
- }
+    public AlertLivenessCanary(TimeSpan alertTimeout, int consecutiveFailuresBeforeEscalation)
+    {
+        _alertTimeout = alertTimeout;
+        _consecutiveFailuresBeforeEscalation = consecutiveFailuresBeforeEscalation;
+    }
 
- public void InjectSyntheticBreach(DateTime now)
- {
- _state = CanaryState.BreachInjected;
- _breachInjectedAt = now;
- _state = CanaryState.AwaitingAlert;
- // Actual injection call to the monitored system happens here (omitted --
- // e.g., writing a synthetic metric sample that should cross the real
- // alert's threshold).
- }
+    public void InjectSyntheticBreach(DateTime now)
+    {
+        _state = CanaryState.BreachInjected;
+        _breachInjectedAt = now;
+        _state = CanaryState.AwaitingAlert;
+        // Actual injection call to the monitored system happens here (omitted --
+        // e.g., writing a synthetic metric sample that should cross the real
+        // alert's threshold).
+    }
 
- // Called by the real alerting system's webhook/notification handler when
- // the monitored alert fires, correlated to this canary's specific synthetic breach.
- public void OnAlertObserved(DateTime observedAt)
- {
- if (_state!= CanaryState.AwaitingAlert) return;
+    // Called by the real alerting system's webhook/notification handler when
+    // the monitored alert fires, correlated to this canary's specific synthetic breach.
+    public void OnAlertObserved(DateTime observedAt)
+    {
+        if (_state!= CanaryState.AwaitingAlert) return;
 
- if (observedAt - _breachInjectedAt <= _alertTimeout)
- {
- _consecutiveFailures = 0; // genuine success resets the failure streak
- _state = CanaryState.Confirmed;
- }
- // else: arrived too late -- treated as a failure by the timeout check below.
- }
+        if (observedAt - _breachInjectedAt <= _alertTimeout)
+        {
+            _consecutiveFailures = 0; // genuine success resets the failure streak
+            _state = CanaryState.Confirmed;
+        }
+        // else: arrived too late -- treated as a failure by the timeout check below.
+    }
 
- // Called on a scheduled tick; 'now' drives the timeout check so this is
- // testable without wall-clock sleeps.
- public CanaryState CheckTimeout(DateTime now)
- {
- if (_state!= CanaryState.AwaitingAlert)
- return _state;
+    // Called on a scheduled tick; 'now' drives the timeout check so this is
+    // testable without wall-clock sleeps.
+    public CanaryState CheckTimeout(DateTime now)
+    {
+        if (_state!= CanaryState.AwaitingAlert)
+            return _state;
 
- if (now - _breachInjectedAt > _alertTimeout)
- {
- _consecutiveFailures++;
- _state = _consecutiveFailures >= _consecutiveFailuresBeforeEscalation
-? CanaryState.Escalated // Sec Advanced Q7: a confirmed, persistent break -- page a human
-: CanaryState.Idle; // a single miss -- retry next cycle before escalating
- }
- return _state;
- }
+        if (now - _breachInjectedAt > _alertTimeout)
+        {
+            _consecutiveFailures++;
+            _state = _consecutiveFailures >= _consecutiveFailuresBeforeEscalation
+            ? CanaryState.Escalated // Sec Advanced Q7: a confirmed, persistent break -- page a human
+            : CanaryState.Idle; // a single miss -- retry next cycle before escalating
+        }
+        return _state;
+    }
 }
 ```
 **Time complexity:** O(1) per method call.
@@ -549,61 +549,61 @@ public sealed record SloDefinition(string ServiceName, string SliQuery, double T
 
 public interface IBurnRateCalculator
 {
- double Calculate(SloDefinition slo, TimeSpan evaluationWindow, DateTime asOf);
+    double Calculate(SloDefinition slo, TimeSpan evaluationWindow, DateTime asOf);
 }
 
 public interface IAlertRule
 {
- string Name { get; }
- bool IsSymptomBased { get; } // symptom-based => pages; cause-based => dashboard only
- AlertSeverity Evaluate(SloDefinition slo, IBurnRateCalculator burnRateCalculator, DateTime now);
+    string Name { get; }
+    bool IsSymptomBased { get; } // symptom-based => pages; cause-based => dashboard only
+    AlertSeverity Evaluate(SloDefinition slo, IBurnRateCalculator burnRateCalculator, DateTime now);
 }
 
 public sealed class MultiWindowBurnRateRule: IAlertRule
 {
- public required string Name { get; init; }
- public bool IsSymptomBased => true;
- public required BurnRateWindow FastWindowConfig { get; init; }
- public required BurnRateWindow CorroboratingWindowConfig { get; init; }
- public required BurnRateWindow SlowWindowConfig { get; init; }
+    public required string Name { get; init; }
+    public bool IsSymptomBased => true;
+    public required BurnRateWindow FastWindowConfig { get; init; }
+    public required BurnRateWindow CorroboratingWindowConfig { get; init; }
+    public required BurnRateWindow SlowWindowConfig { get; init; }
 
- public AlertSeverity Evaluate(SloDefinition slo, IBurnRateCalculator calc, DateTime now)
- {
- var fast = FastWindowConfig with { CurrentBurnRate = calc.Calculate(slo, FastWindowConfig.Window, now) };
- var corroborating = CorroboratingWindowConfig with
- { CurrentBurnRate = calc.Calculate(slo, CorroboratingWindowConfig.Window, now) };
- var slow = SlowWindowConfig with { CurrentBurnRate = calc.Calculate(slo, SlowWindowConfig.Window, now) };
+    public AlertSeverity Evaluate(SloDefinition slo, IBurnRateCalculator calc, DateTime now)
+    {
+        var fast = FastWindowConfig with { CurrentBurnRate = calc.Calculate(slo, FastWindowConfig.Window, now) };
+        var corroborating = CorroboratingWindowConfig with
+        { CurrentBurnRate = calc.Calculate(slo, CorroboratingWindowConfig.Window, now) };
+        var slow = SlowWindowConfig with { CurrentBurnRate = calc.Calculate(slo, SlowWindowConfig.Window, now) };
 
- return BurnRateAlertEvaluator.Evaluate(fast, corroborating, slow); // Sec11 Medium
- }
+        return BurnRateAlertEvaluator.Evaluate(fast, corroborating, slow); // Sec11 Medium
+    }
 }
 
 public interface IAlertRouter
 {
- Task RouteAsync(IAlertRule rule, AlertSeverity severity, CancellationToken ct);
+    Task RouteAsync(IAlertRule rule, AlertSeverity severity, CancellationToken ct);
 }
 
 public sealed class AlertOrchestrator
 {
- private readonly IAlertRouter _router;
- private readonly IReadOnlyDictionary<string, AlertLivenessCanary> _canaries; // one per paging-critical rule
+    private readonly IAlertRouter _router;
+    private readonly IReadOnlyDictionary<string, AlertLivenessCanary> _canaries; // one per paging-critical rule
 
- public async Task EvaluateAllAsync(
- SloDefinition slo, IReadOnlyList<IAlertRule> rules, IBurnRateCalculator calc,
- DateTime now, CancellationToken ct)
- {
- foreach (var rule in rules)
- {
- var severity = rule.Evaluate(slo, calc, now);
- if (severity!= AlertSeverity.None)
- await _router.RouteAsync(rule, severity, ct);
+    public async Task EvaluateAllAsync(
+        SloDefinition slo, IReadOnlyList<IAlertRule> rules, IBurnRateCalculator calc,
+            DateTime now, CancellationToken ct)
+    {
+        foreach (var rule in rules)
+        {
+            var severity = rule.Evaluate(slo, calc, now);
+            if (severity!= AlertSeverity.None)
+                await _router.RouteAsync(rule, severity, ct);
 
- // Every symptom-based (paging) rule has an auto-provisioned canary --
- // Sec4/Sec Advanced Q1's structural fix, never an optional, per-team add-on.
- if (rule.IsSymptomBased && _canaries.TryGetValue(rule.Name, out var canary))
- canary.CheckTimeout(now);
- }
- }
+            // Every symptom-based (paging) rule has an auto-provisioned canary --
+            // Sec4/Sec Advanced Q1's structural fix, never an optional, per-team add-on.
+            if (rule.IsSymptomBased && _canaries.TryGetValue(rule.Name, out var canary))
+                canary.CheckTimeout(now);
+        }
+    }
 }
 ```
 

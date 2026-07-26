@@ -192,27 +192,27 @@ POST /payments (retry, same Idempotency-Key) -> 201 Created (SAME result, no dup
 ### Easy — Correct 201 with Location header
 ```csharp
 app.MapPost("/orders", async (CreateOrderRequest request, IOrderService service) =>
-{
- var order = await service.CreateAsync(request);
- return Results.Created($"/orders/{order.Id}", order); // Location header + 201, not a bare 200
+    {
+        var order = await service.CreateAsync(request);
+        return Results.Created($"/orders/{order.Id}", order); // Location header + 201, not a bare 200
 });
 ```
 
 ### Medium — ETag generation and `If-Match` validation
 ```csharp
 app.MapPut("/orders/{id}", async (string id, UpdateOrderRequest request, HttpRequest http, IOrderRepository repo) =>
-{
- var order = await repo.GetByIdAsync(id);
- if (order is null) return Results.NotFound;
+    {
+        var order = await repo.GetByIdAsync(id);
+        if (order is null) return Results.NotFound;
 
- var currentETag = $"\"{order.Version}\"";
- if (http.Headers.IfMatch.Count > 0 && http.Headers.IfMatch[0]!= currentETag)
- return Results.StatusCode(StatusCodes.Status412PreconditionFailed);
+        var currentETag = $"\"{order.Version}\"";
+        if (http.Headers.IfMatch.Count > 0 && http.Headers.IfMatch[0]!= currentETag)
+            return Results.StatusCode(StatusCodes.Status412PreconditionFailed);
 
- order.ApplyUpdate(request);
- order.Version++;
- await repo.SaveAsync(order);
- return Results.Ok(order);
+        order.ApplyUpdate(request);
+        order.Version++;
+        await repo.SaveAsync(order);
+        return Results.Ok(order);
 });
 ```
 
@@ -220,55 +220,55 @@ app.MapPut("/orders/{id}", async (string id, UpdateOrderRequest request, HttpReq
 ```csharp
 public class IdempotencyMiddleware
 {
- private readonly RequestDelegate _next;
- private readonly IDistributedCache _cache;
+    private readonly RequestDelegate _next;
+    private readonly IDistributedCache _cache;
 
- public IdempotencyMiddleware(RequestDelegate next, IDistributedCache cache) { _next = next; _cache = cache; }
+    public IdempotencyMiddleware(RequestDelegate next, IDistributedCache cache) { _next = next; _cache = cache; }
 
- public async Task InvokeAsync(HttpContext context)
- {
- if (!context.Request.Headers.TryGetValue("Idempotency-Key", out var key) || string.IsNullOrEmpty(key))
- {
- await _next(context);
- return;
- }
+    public async Task InvokeAsync(HttpContext context)
+    {
+        if (!context.Request.Headers.TryGetValue("Idempotency-Key", out var key) || string.IsNullOrEmpty(key))
+        {
+            await _next(context);
+            return;
+        }
 
- string cacheKey = $"idem:{context.User.FindFirstValue(ClaimTypes.NameIdentifier)}:{key}";
- var existing = await _cache.GetStringAsync(cacheKey);
+        string cacheKey = $"idem:{context.User.FindFirstValue(ClaimTypes.NameIdentifier)}:{key}";
+        var existing = await _cache.GetStringAsync(cacheKey);
 
- if (existing == "InProgress")
- {
- context.Response.StatusCode = StatusCodes.Status409Conflict;
- return;
- }
- if (existing is not null)
- {
- context.Response.StatusCode = StatusCodes.Status200OK;
- await context.Response.WriteAsync(existing); // cached final response
- return;
- }
+        if (existing == "InProgress")
+        {
+            context.Response.StatusCode = StatusCodes.Status409Conflict;
+            return;
+        }
+        if (existing is not null)
+        {
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            await context.Response.WriteAsync(existing); // cached final response
+            return;
+        }
 
- await _cache.SetStringAsync(cacheKey, "InProgress", new DistributedCacheEntryOptions
- {
- AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5)
- });
+        await _cache.SetStringAsync(cacheKey, "InProgress", new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5)
+        });
 
- var originalBody = context.Response.Body;
- using var buffer = new MemoryStream;
- context.Response.Body = buffer;
+        var originalBody = context.Response.Body;
+        using var buffer = new MemoryStream;
+        context.Response.Body = buffer;
 
- await _next(context);
+        await _next(context);
 
- buffer.Seek(0, SeekOrigin.Begin);
- var responseText = await new StreamReader(buffer).ReadToEndAsync;
- await _cache.SetStringAsync(cacheKey, responseText, new DistributedCacheEntryOptions
- {
- AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(24)
- });
+        buffer.Seek(0, SeekOrigin.Begin);
+        var responseText = await new StreamReader(buffer).ReadToEndAsync;
+        await _cache.SetStringAsync(cacheKey, responseText, new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(24)
+        });
 
- buffer.Seek(0, SeekOrigin.Begin);
- await buffer.CopyToAsync(originalBody);
- }
+        buffer.Seek(0, SeekOrigin.Begin);
+        await buffer.CopyToAsync(originalBody);
+    }
 }
 ```
 **Discussion**: The response-body-buffering pattern here directly reuses the request-body-buffering technique from the Minimal-APIs-vs-Controllers module (`EnableBuffering`/position-reset), applied to the *response* side instead — swapping `context.Response.Body` temporarily, capturing the written content, then replaying it both into the cache and back to the real output stream.
@@ -276,22 +276,22 @@ public class IdempotencyMiddleware
 ### Expert — Combined optimistic-concurrency + idempotency-key payment flow
 ```csharp
 app.MapPost("/payments", async (
- ProcessPaymentRequest request, HttpRequest http, IPaymentService service, IIdempotencyStore idemStore) =>
-{
- if (!http.Headers.TryGetValue("Idempotency-Key", out var key))
- return Results.BadRequest("Idempotency-Key header is required.");
+        ProcessPaymentRequest request, HttpRequest http, IPaymentService service, IIdempotencyStore idemStore) =>
+    {
+        if (!http.Headers.TryGetValue("Idempotency-Key", out var key))
+            return Results.BadRequest("Idempotency-Key header is required.");
 
- var existing = await idemStore.TryGetAsync(key!, request); // validates body hash matches, per Advanced Q8
- if (existing is { Status: IdempotencyStatus.InProgress }) return Results.StatusCode(409);
- if (existing is { Status: IdempotencyStatus.Completed }) return Results.Ok(existing.CachedResult);
- if (existing is { Status: IdempotencyStatus.KeyReusedWithDifferentPayload })
- return Results.Conflict("Idempotency-Key was reused with a different request payload.");
+        var existing = await idemStore.TryGetAsync(key!, request); // validates body hash matches, per Advanced Q8
+        if (existing is { Status: IdempotencyStatus.InProgress }) return Results.StatusCode(409);
+        if (existing is { Status: IdempotencyStatus.Completed }) return Results.Ok(existing.CachedResult);
+        if (existing is { Status: IdempotencyStatus.KeyReusedWithDifferentPayload })
+            return Results.Conflict("Idempotency-Key was reused with a different request payload.");
 
- await idemStore.MarkInProgressAsync(key!, request);
+        await idemStore.MarkInProgressAsync(key!, request);
 
- // Payment charge, idempotency-record completion, and outbox event insert -- ONE transaction (Advanced Q5).
- var result = await service.ProcessPaymentInSingleTransactionAsync(request, key!);
- return Results.Created($"/payments/{result.PaymentId}", result);
+        // Payment charge, idempotency-record completion, and outbox event insert -- ONE transaction (Advanced Q5).
+        var result = await service.ProcessPaymentInSingleTransactionAsync(request, key!);
+        return Results.Created($"/payments/{result.PaymentId}", result);
 });
 ```
 **Discussion**: `TryGetAsync` returning a `KeyReusedWithDifferentPayload` case is the concrete fix for Advanced Q8's bug scenario — comparing a hash of the incoming request body against what was originally recorded for that key, rejecting a mismatch explicitly rather than silently serving a wrong cached result.

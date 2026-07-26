@@ -145,20 +145,20 @@ graph TB
 ```csharp
 public async Task PlaceOrderAsync(Order order)
 {
- using var transaction = await _dbContext.Database.BeginTransactionAsync;
+    using var transaction = await _dbContext.Database.BeginTransactionAsync;
 
- _dbContext.Orders.Add(order); // business write
+    _dbContext.Orders.Add(order); // business write
 
- _dbContext.OutboxEvents.Add(new OutboxEvent // event write -- SAME transaction, the fix
- {
- AggregateId = order.Id,
- EventType = "OrderConfirmationEmailRequested",
- Payload = JsonSerializer.Serialize(new { order.Id, order.CustomerEmail }),
- CreatedAt = DateTimeOffset.UtcNow
- });
+    _dbContext.OutboxEvents.Add(new OutboxEvent // event write -- SAME transaction, the fix
+        {
+            AggregateId = order.Id,
+                EventType = "OrderConfirmationEmailRequested",
+                Payload = JsonSerializer.Serialize(new { order.Id, order.CustomerEmail }),
+                CreatedAt = DateTimeOffset.UtcNow
+    });
 
- await _dbContext.SaveChangesAsync; // ONE atomic commit -- both succeed or both roll back
- await transaction.CommitAsync;
+    await _dbContext.SaveChangesAsync; // ONE atomic commit -- both succeed or both roll back
+    await transaction.CommitAsync;
 }
 ```
 
@@ -166,35 +166,35 @@ public async Task PlaceOrderAsync(Order order)
 ```csharp
 public class OutboxRelayWorker: BackgroundService
 {
- protected override async Task ExecuteAsync(CancellationToken stoppingToken)
- {
- while (!stoppingToken.IsCancellationRequested)
- {
- var unpublished = await _dbContext.OutboxEvents
-.Where(e => e.PublishedAt == null && e.RetryCount < 5)
-.OrderBy(e => e.Id)
-.Take(100)
-.ToListAsync(stoppingToken);
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            var unpublished = await _dbContext.OutboxEvents
+            .Where(e => e.PublishedAt == null && e.RetryCount < 5)
+            .OrderBy(e => e.Id)
+            .Take(100)
+            .ToListAsync(stoppingToken);
 
- foreach (var evt in unpublished)
- {
- try
- {
- await _messageBroker.PublishAsync(evt.EventType, evt.Payload);
- evt.PublishedAt = DateTimeOffset.UtcNow;
- }
- catch (Exception ex)
- {
- evt.RetryCount++;
- if (evt.RetryCount >= 5)
- await _deadLetterStore.MoveAsync(evt); // Advanced Q6's poison-event handling
- _logger.LogWarning(ex, "Failed to publish outbox event {Id}, attempt {Count}", evt.Id, evt.RetryCount);
- }
- }
- await _dbContext.SaveChangesAsync(stoppingToken);
- await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken); // polling interval
- }
- }
+            foreach (var evt in unpublished)
+            {
+                try
+                {
+                    await _messageBroker.PublishAsync(evt.EventType, evt.Payload);
+                    evt.PublishedAt = DateTimeOffset.UtcNow;
+                }
+                catch (Exception ex)
+                {
+                    evt.RetryCount++;
+                    if (evt.RetryCount >= 5)
+                        await _deadLetterStore.MoveAsync(evt); // Advanced Q6's poison-event handling
+                    _logger.LogWarning(ex, "Failed to publish outbox event {Id}, attempt {Count}", evt.Id, evt.RetryCount);
+                }
+            }
+            await _dbContext.SaveChangesAsync(stoppingToken);
+            await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken); // polling interval
+        }
+    }
 }
 ```
 
@@ -202,16 +202,16 @@ public class OutboxRelayWorker: BackgroundService
 ```csharp
 public async Task HandleOrderConfirmationEmailRequestedAsync(OutboxEventMessage message)
 {
- // Idempotency check FIRST -- directly the IIdempotencyStore pattern
- // now applied to message-consumption instead of HTTP API requests.
- if (await _processedEventStore.HasBeenProcessedAsync(message.EventId))
- {
- _logger.LogInformation("Event {EventId} already processed, skipping (at-least-once redelivery).", message.EventId);
- return;
- }
+    // Idempotency check FIRST -- directly the IIdempotencyStore pattern
+    // now applied to message-consumption instead of HTTP API requests.
+    if (await _processedEventStore.HasBeenProcessedAsync(message.EventId))
+    {
+        _logger.LogInformation("Event {EventId} already processed, skipping (at-least-once redelivery).", message.EventId);
+        return;
+    }
 
- await _emailService.SendOrderConfirmationAsync(message.OrderId, message.CustomerEmail);
- await _processedEventStore.MarkProcessedAsync(message.EventId); // record AFTER successful processing
+    await _emailService.SendOrderConfirmationAsync(message.OrderId, message.CustomerEmail);
+    await _processedEventStore.MarkProcessedAsync(message.EventId); // record AFTER successful processing
 }
 ```
 
@@ -219,31 +219,31 @@ public async Task HandleOrderConfirmationEmailRequestedAsync(OutboxEventMessage 
 ```csharp
 public class ShardedOutboxRelay
 {
- private readonly int _shardId, _totalShards;
+    private readonly int _shardId, _totalShards;
 
- public async Task RunAsync(CancellationToken ct)
- {
- while (!ct.IsCancellationRequested)
- {
- // Each relay INSTANCE handles only rows whose AggregateId hashes to ITS shard --
- // directly the partition-key-based parallelization, applied to relay scaling.
- var unpublished = await _dbContext.OutboxEvents
-.Where(e => e.PublishedAt == null)
-.Where(e => EF.Functions.DataLength(e.AggregateId) > 0) // conceptual filter placeholder
-.AsEnumerable // hash computation happens client-side in this illustrative example
-.Where(e => Math.Abs(e.AggregateId.GetHashCode) % _totalShards == _shardId)
-.Take(100)
-.ToList;
+    public async Task RunAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            // Each relay INSTANCE handles only rows whose AggregateId hashes to ITS shard --
+            // directly the partition-key-based parallelization, applied to relay scaling.
+            var unpublished = await _dbContext.OutboxEvents
+            .Where(e => e.PublishedAt == null)
+            .Where(e => EF.Functions.DataLength(e.AggregateId) > 0) // conceptual filter placeholder
+            .AsEnumerable // hash computation happens client-side in this illustrative example
+            .Where(e => Math.Abs(e.AggregateId.GetHashCode) % _totalShards == _shardId)
+            .Take(100)
+            .ToList;
 
- foreach (var evt in unpublished)
- {
- await _messageBroker.PublishAsync(evt.EventType, evt.Payload);
- evt.PublishedAt = DateTimeOffset.UtcNow;
- }
- await _dbContext.SaveChangesAsync(ct);
- await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
- }
- }
+            foreach (var evt in unpublished)
+            {
+                await _messageBroker.PublishAsync(evt.EventType, evt.Payload);
+                evt.PublishedAt = DateTimeOffset.UtcNow;
+            }
+            await _dbContext.SaveChangesAsync(ct);
+            await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
+        }
+    }
 }
 // Deploying N instances (each with a distinct _shardId, 0..N-1) scales aggregate relay
 // throughput roughly linearly with N, directly addressing Advanced Q4's growing-lag scenario.

@@ -340,17 +340,17 @@ public sealed record GateResult(string Name, bool Passed, bool RequiresApproval,
 
 public static class PromotionEvaluator
 {
- public static bool CanPromote(IReadOnlyList<GateResult> gates)
- {
- foreach (var gate in gates)
- {
- if (!gate.Passed)
- return false;
- if (gate.RequiresApproval &&!gate.ApprovalGranted)
- return false;
- }
- return true;
- }
+    public static bool CanPromote(IReadOnlyList<GateResult> gates)
+    {
+        foreach (var gate in gates)
+        {
+            if (!gate.Passed)
+                return false;
+            if (gate.RequiresApproval &&!gate.ApprovalGranted)
+                return false;
+        }
+        return true;
+    }
 }
 ```
 **Time complexity:** O(n) in the number of gates.
@@ -365,21 +365,21 @@ public sealed record DeploymentRecord(DateTime Timestamp, bool IsEmergencyPath);
 
 public static class EmergencyPathAnomalyDetector
 {
- public static bool IsAnomalous(
- IReadOnlyList<DeploymentRecord> recentDeployments,
- double expectedIncidentRate, // e.g., 0.02 => ~2% of deployments are genuine incidents
- double toleranceMultiplier) // e.g., 3.0 => flag if actual rate exceeds 3x expected
- {
- if (recentDeployments.Count == 0)
- return false;
+    public static bool IsAnomalous(
+        IReadOnlyList<DeploymentRecord> recentDeployments,
+            double expectedIncidentRate, // e.g., 0.02 => ~2% of deployments are genuine incidents
+            double toleranceMultiplier) // e.g., 3.0 => flag if actual rate exceeds 3x expected
+    {
+        if (recentDeployments.Count == 0)
+            return false;
 
- int emergencyCount = recentDeployments.Count(d => d.IsEmergencyPath);
- double actualRate = (double)emergencyCount / recentDeployments.Count;
+        int emergencyCount = recentDeployments.Count(d => d.IsEmergencyPath);
+        double actualRate = (double)emergencyCount / recentDeployments.Count;
 
- // Flag only if usage meaningfully exceeds the expected genuine-incident baseline --
- // avoids false positives from small-sample noise on a low-volume window.
- return actualRate > expectedIncidentRate * toleranceMultiplier;
- }
+        // Flag only if usage meaningfully exceeds the expected genuine-incident baseline --
+        // avoids false positives from small-sample noise on a low-volume window.
+        return actualRate > expectedIncidentRate * toleranceMultiplier;
+    }
 }
 ```
 **Time complexity:** O(n) in the number of deployments in the window.
@@ -396,29 +396,29 @@ public enum CanaryVerdict { Promote, Rollback, InsufficientData }
 
 public static class CanaryAnalyzer
 {
- public static CanaryVerdict Analyze(
- CohortSample canary, CohortSample control, double zThreshold = 2.58) // ~99% confidence
- {
- if (canary.TotalRequests < 100 || control.TotalRequests < 100)
- return CanaryVerdict.InsufficientData; // too small a sample to trust either way
+    public static CanaryVerdict Analyze(
+        CohortSample canary, CohortSample control, double zThreshold = 2.58) // ~99% confidence
+    {
+        if (canary.TotalRequests < 100 || control.TotalRequests < 100)
+            return CanaryVerdict.InsufficientData; // too small a sample to trust either way
 
- double pCanary = (double)canary.ErrorCount / canary.TotalRequests;
- double pControl = (double)control.ErrorCount / control.TotalRequests;
- double pPooled = (double)(canary.ErrorCount + control.ErrorCount)
- / (canary.TotalRequests + control.TotalRequests);
+        double pCanary = (double)canary.ErrorCount / canary.TotalRequests;
+        double pControl = (double)control.ErrorCount / control.TotalRequests;
+        double pPooled = (double)(canary.ErrorCount + control.ErrorCount)
+        / (canary.TotalRequests + control.TotalRequests);
 
- double standardError = Math.Sqrt(pPooled * (1 - pPooled) *
- (1.0 / canary.TotalRequests + 1.0 / control.TotalRequests));
+        double standardError = Math.Sqrt(pPooled * (1 - pPooled) *
+            (1.0 / canary.TotalRequests + 1.0 / control.TotalRequests));
 
- if (standardError == 0)
- return CanaryVerdict.Promote; // no variance and no observed difference
+        if (standardError == 0)
+            return CanaryVerdict.Promote; // no variance and no observed difference
 
- double zScore = (pCanary - pControl) / standardError;
+        double zScore = (pCanary - pControl) / standardError;
 
- // Only a canary error rate SIGNIFICANTLY WORSE than control triggers rollback --
- // a canary that's significantly BETTER is not itself a rollback trigger.
- return zScore > zThreshold? CanaryVerdict.Rollback: CanaryVerdict.Promote;
- }
+        // Only a canary error rate SIGNIFICANTLY WORSE than control triggers rollback --
+        // a canary that's significantly BETTER is not itself a rollback trigger.
+        return zScore > zThreshold? CanaryVerdict.Rollback: CanaryVerdict.Promote;
+    }
 }
 ```
 **Time complexity:** O(1) — a fixed-size statistical computation regardless of sample size (the samples are pre-aggregated counts, not raw per-request data).
@@ -431,65 +431,65 @@ public static class CanaryAnalyzer
 ```csharp
 public interface IDistributedLockStore
 {
- // Returns true if the lock was acquired (key didn't exist or had expired).
- Task<bool> TryAcquireAsync(string key, string holderId, TimeSpan leaseDuration);
- Task<bool> RenewAsync(string key, string holderId, TimeSpan leaseDuration);
- Task ReleaseAsync(string key, string holderId);
+    // Returns true if the lock was acquired (key didn't exist or had expired).
+    Task<bool> TryAcquireAsync(string key, string holderId, TimeSpan leaseDuration);
+    Task<bool> RenewAsync(string key, string holderId, TimeSpan leaseDuration);
+    Task ReleaseAsync(string key, string holderId);
 }
 
 public sealed class PromotionLock: IAsyncDisposable
 {
- private readonly IDistributedLockStore _store;
- private readonly string _key;
- private readonly string _holderId = Guid.NewGuid.ToString;
- private readonly TimeSpan _leaseDuration;
- private readonly Timer _renewalTimer;
- private volatile bool _held;
+    private readonly IDistributedLockStore _store;
+    private readonly string _key;
+    private readonly string _holderId = Guid.NewGuid.ToString;
+    private readonly TimeSpan _leaseDuration;
+    private readonly Timer _renewalTimer;
+    private volatile bool _held;
 
- private PromotionLock(IDistributedLockStore store, string key, TimeSpan leaseDuration)
- {
- _store = store;
- _key = key;
- _leaseDuration = leaseDuration;
- // Renew at half the lease duration -- leaves margin so a slow renewal attempt
- // still completes before the lease actually expires under normal conditions.
- _renewalTimer = new Timer(_ => RenewLoop, null,
- TimeSpan.FromMilliseconds(leaseDuration.TotalMilliseconds / 2),
- TimeSpan.FromMilliseconds(leaseDuration.TotalMilliseconds / 2));
- }
+    private PromotionLock(IDistributedLockStore store, string key, TimeSpan leaseDuration)
+    {
+        _store = store;
+        _key = key;
+        _leaseDuration = leaseDuration;
+        // Renew at half the lease duration -- leaves margin so a slow renewal attempt
+        // still completes before the lease actually expires under normal conditions.
+        _renewalTimer = new Timer(_ => RenewLoop, null,
+            TimeSpan.FromMilliseconds(leaseDuration.TotalMilliseconds / 2),
+                TimeSpan.FromMilliseconds(leaseDuration.TotalMilliseconds / 2));
+    }
 
- public static async Task<PromotionLock?> TryAcquireAsync(
- IDistributedLockStore store, string serviceName, TimeSpan leaseDuration)
- {
- string key = $"promotion-lock:{serviceName}";
- var acquired = await store.TryAcquireAsync(key, Guid.NewGuid.ToString, leaseDuration);
- if (!acquired)
- return null; // another promotion is currently in progress for this service
+    public static async Task<PromotionLock?> TryAcquireAsync(
+        IDistributedLockStore store, string serviceName, TimeSpan leaseDuration)
+    {
+        string key = $"promotion-lock:{serviceName}";
+        var acquired = await store.TryAcquireAsync(key, Guid.NewGuid.ToString, leaseDuration);
+        if (!acquired)
+            return null; // another promotion is currently in progress for this service
 
- return new PromotionLock(store, key, leaseDuration);
- }
+        return new PromotionLock(store, key, leaseDuration);
+    }
 
- private async void RenewLoop
- {
- if (!_held) return;
- bool renewed = await _store.RenewAsync(_key, _holderId, _leaseDuration);
- if (!renewed)
- {
- // Lost the lease (e.g., a network partition prevented timely renewal) --
- // stop treating this instance as still holding the lock so it doesn't
- // proceed under a false assumption of exclusivity.
- _held = false;
- }
- }
+    private async void RenewLoop
+    {
+        if (!_held) return;
+        bool renewed = await _store.RenewAsync(_key, _holderId, _leaseDuration);
+        if (!renewed)
+        {
+            // Lost the lease (e.g., a network partition prevented timely renewal) --
+            // stop treating this instance as still holding the lock so it doesn't
+            // proceed under a false assumption of exclusivity.
+            _held = false;
+        }
+    }
 
- public bool IsStillHeld => _held;
+    public bool IsStillHeld => _held;
 
- public async ValueTask DisposeAsync
- {
- _held = false;
- await _renewalTimer.DisposeAsync;
- await _store.ReleaseAsync(_key, _holderId);
- }
+    public async ValueTask DisposeAsync
+    {
+        _held = false;
+        await _renewalTimer.DisposeAsync;
+        await _store.ReleaseAsync(_key, _holderId);
+    }
 }
 ```
 **Time complexity:** O(1) per acquire/renew/release call (a single key operation against the lock store).
@@ -560,7 +560,7 @@ graph TB
 ```csharp
 public interface IDeploymentStrategy
 {
- Task<DeploymentResult> ExecuteAsync(Artifact artifact, Environment target, CancellationToken ct);
+    Task<DeploymentResult> ExecuteAsync(Artifact artifact, Environment target, CancellationToken ct);
 }
 
 public sealed class CanaryStrategy: IDeploymentStrategy { /* Sec2.3 mechanics */ }
@@ -568,9 +568,9 @@ public sealed class BlueGreenStrategy: IDeploymentStrategy { /* Sec2.1 mechanics
 
 public interface IPromotionGate
 {
- string Name { get; }
- bool RequiresHumanApproval { get; }
- Task<GateVerdict> EvaluateAsync(PromotionContext context, CancellationToken ct);
+    string Name { get; }
+    bool RequiresHumanApproval { get; }
+    Task<GateVerdict> EvaluateAsync(PromotionContext context, CancellationToken ct);
 }
 
 public sealed class AutomatedCanaryAnalysisGate: IPromotionGate { /* Sec11 Hard's statistical verdict */ }
@@ -579,66 +579,66 @@ public sealed class ManualApprovalGate: IPromotionGate { public bool RequiresHum
 
 public sealed class PipelineStage
 {
- public required Environment Target { get; init; }
- public required IDeploymentStrategy Strategy { get; init; }
- public required IReadOnlyList<IPromotionGate> Gates { get; init; }
+    public required Environment Target { get; init; }
+    public required IDeploymentStrategy Strategy { get; init; }
+    public required IReadOnlyList<IPromotionGate> Gates { get; init; }
 }
 
 public enum PromotionPath { Normal, Emergency }
 
 public sealed class PromotionOrchestrator
 {
- private readonly IAuditLog _auditLog;
- private readonly IArtifactRepository _artifacts;
+    private readonly IAuditLog _auditLog;
+    private readonly IArtifactRepository _artifacts;
 
- public async Task<PromotionOutcome> PromoteAsync(
- Artifact artifact,
- IReadOnlyList<PipelineStage> stages,
- PromotionPath path,
- string? emergencyJustification,
- CancellationToken ct)
- {
- // The emergency path reuses THIS SAME method and audit call -- never a
- // separate, parallel code path bypassing logging, which was Sec4's exact gap.
- await _auditLog.RecordPromotionStartAsync(artifact, path, emergencyJustification);
+    public async Task<PromotionOutcome> PromoteAsync(
+        Artifact artifact,
+            IReadOnlyList<PipelineStage> stages,
+            PromotionPath path,
+            string? emergencyJustification,
+            CancellationToken ct)
+    {
+        // The emergency path reuses THIS SAME method and audit call -- never a
+        // separate, parallel code path bypassing logging, which was Sec4's exact gap.
+        await _auditLog.RecordPromotionStartAsync(artifact, path, emergencyJustification);
 
- foreach (var stage in stages)
- {
- var deployResult = await stage.Strategy.ExecuteAsync(artifact, stage.Target, ct);
- if (!deployResult.Succeeded)
- {
- await RollbackAsync(artifact, stage.Target, ct);
- return PromotionOutcome.Failed(stage.Target, "deployment execution failed");
- }
+        foreach (var stage in stages)
+        {
+            var deployResult = await stage.Strategy.ExecuteAsync(artifact, stage.Target, ct);
+            if (!deployResult.Succeeded)
+            {
+                await RollbackAsync(artifact, stage.Target, ct);
+                return PromotionOutcome.Failed(stage.Target, "deployment execution failed");
+            }
 
- foreach (var gate in stage.Gates)
- {
- var verdict = await gate.EvaluateAsync(new PromotionContext(artifact, stage.Target), ct);
- // Every gate's verdict is logged on EVERY path, including emergency --
- // even if the emergency path's gate LIST is abbreviated (Sec4's fix #3)
- // whatever gates DO run are never silently unlogged.
- await _auditLog.RecordGateVerdictAsync(artifact, stage.Target, gate.Name, verdict, path);
+            foreach (var gate in stage.Gates)
+            {
+                var verdict = await gate.EvaluateAsync(new PromotionContext(artifact, stage.Target), ct);
+                // Every gate's verdict is logged on EVERY path, including emergency --
+                // even if the emergency path's gate LIST is abbreviated (Sec4's fix #3)
+                // whatever gates DO run are never silently unlogged.
+                await _auditLog.RecordGateVerdictAsync(artifact, stage.Target, gate.Name, verdict, path);
 
- if (!verdict.Passed)
- {
- await RollbackAsync(artifact, stage.Target, ct);
- return PromotionOutcome.Blocked(stage.Target, gate.Name);
- }
- }
- }
+                if (!verdict.Passed)
+                {
+                    await RollbackAsync(artifact, stage.Target, ct);
+                    return PromotionOutcome.Blocked(stage.Target, gate.Name);
+                }
+            }
+        }
 
- return PromotionOutcome.Success;
- }
+        return PromotionOutcome.Success;
+    }
 
- private async Task RollbackAsync(Artifact failedArtifact, Environment target, CancellationToken ct)
- {
- var lastKnownGood = await _artifacts.GetLastKnownGoodDigestAsync(target);
- // Sec2.5/Sec14: coordinated rollback updates the DECLARED desired state
- // (e.g., committing to the GitOps source repo), not merely the live target --
- // otherwise a reconciliation controller will "correct" this rollback right back.
- await _artifacts.UpdateDeclaredDesiredStateAsync(target, lastKnownGood, ct);
- await _auditLog.RecordRollbackAsync(failedArtifact, lastKnownGood, target);
- }
+    private async Task RollbackAsync(Artifact failedArtifact, Environment target, CancellationToken ct)
+    {
+        var lastKnownGood = await _artifacts.GetLastKnownGoodDigestAsync(target);
+        // Sec2.5/Sec14: coordinated rollback updates the DECLARED desired state
+        // (e.g., committing to the GitOps source repo), not merely the live target --
+        // otherwise a reconciliation controller will "correct" this rollback right back.
+        await _artifacts.UpdateDeclaredDesiredStateAsync(target, lastKnownGood, ct);
+        await _auditLog.RecordRollbackAsync(failedArtifact, lastKnownGood, target);
+    }
 }
 ```
 

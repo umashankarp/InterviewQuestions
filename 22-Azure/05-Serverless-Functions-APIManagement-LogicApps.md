@@ -159,14 +159,14 @@ graph TD
 ```csharp
 [FunctionName("OrderFulfillmentOrchestrator")]
 public static async Task RunOrchestrator(
- [OrchestrationTrigger] IDurableOrchestrationContext context)
+    [OrchestrationTrigger] IDurableOrchestrationContext context)
 {
- // CORRECT: deterministic-safe, replay-consistent APIs -- NOT DateTime.UtcNow / Guid.NewGuid (the fix)
- var timestamp = context.CurrentUtcDateTime;
- var correlationId = context.NewGuid;
+    // CORRECT: deterministic-safe, replay-consistent APIs -- NOT DateTime.UtcNow / Guid.NewGuid (the fix)
+    var timestamp = context.CurrentUtcDateTime;
+    var correlationId = context.NewGuid;
 
- await context.CallActivityAsync("ChargePayment", (context.InstanceId, correlationId));
- await context.CallActivityAsync("ReserveShipping", (context.InstanceId, timestamp));
+    await context.CallActivityAsync("ChargePayment", (context.InstanceId, correlationId));
+    await context.CallActivityAsync("ReserveShipping", (context.InstanceId, timestamp));
 }
 ```
 
@@ -174,15 +174,15 @@ public static async Task RunOrchestrator(
 ```csharp
 [FunctionName("ChargePayment")]
 public static async Task<PaymentResult> ChargePayment(
- [ActivityTrigger] (string InstanceId, Guid CorrelationId) input,
- [CosmosDB(...)] IAsyncCollector<IdempotencyRecord> idempotencyStore)
+    [ActivityTrigger] (string InstanceId, Guid CorrelationId) input,
+        [CosmosDB(...)] IAsyncCollector<IdempotencyRecord> idempotencyStore)
 {
- // Activity Functions ARE subject to at-least-once execution -- idempotency
- // required HERE, a SEPARATE concern from the orchestrator's determinism requirement.
- var existingCharge = await CheckExistingChargeAsync(input.CorrelationId);
- if (existingCharge is not null) return existingCharge; // duplicate activity invocation -- short-circuit
+    // Activity Functions ARE subject to at-least-once execution -- idempotency
+    // required HERE, a SEPARATE concern from the orchestrator's determinism requirement.
+    var existingCharge = await CheckExistingChargeAsync(input.CorrelationId);
+    if (existingCharge is not null) return existingCharge; // duplicate activity invocation -- short-circuit
 
- return await ProcessPaymentChargeAsync(input.CorrelationId);
+    return await ProcessPaymentChargeAsync(input.CorrelationId);
 }
 ```
 
@@ -191,51 +191,51 @@ public static async Task<PaymentResult> ChargePayment(
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public class DurableOrchestratorDeterminismAnalyzer: DiagnosticAnalyzer
 {
- private static readonly HashSet<string> BannedApis = new
- {
- "System.DateTime.Now", "System.DateTime.UtcNow", "System.Guid.NewGuid", "System.Random"
- };
+    private static readonly HashSet<string> BannedApis = new
+    {
+        "System.DateTime.Now", "System.DateTime.UtcNow", "System.Guid.NewGuid", "System.Random"
+    };
 
- public override void Initialize(AnalysisContext context)
- {
- context.RegisterSyntaxNodeAction(AnalyzeInvocation, SyntaxKind.InvocationExpression);
- }
+    public override void Initialize(AnalysisContext context)
+    {
+        context.RegisterSyntaxNodeAction(AnalyzeInvocation, SyntaxKind.InvocationExpression);
+    }
 
- private void AnalyzeInvocation(SyntaxNodeAnalysisContext ctx)
- {
- // Only flag within methods decorated with [OrchestrationTrigger] parameter --
- // Activity Functions are EXEMPT (they're checkpointed, not replayed -- vs distinction)
- if (!IsWithinOrchestratorFunction(ctx)) return;
+    private void AnalyzeInvocation(SyntaxNodeAnalysisContext ctx)
+    {
+        // Only flag within methods decorated with [OrchestrationTrigger] parameter --
+        // Activity Functions are EXEMPT (they're checkpointed, not replayed -- vs distinction)
+        if (!IsWithinOrchestratorFunction(ctx)) return;
 
- var symbol = ctx.SemanticModel.GetSymbolInfo(ctx.Node).Symbol;
- if (symbol is not null && BannedApis.Contains(symbol.ToDisplayString))
- {
- ctx.ReportDiagnostic(Diagnostic.Create(DeterminismRule, ctx.Node.GetLocation,
- symbol.Name, "use context.CurrentUtcDateTime / context.NewGuid instead"));
- }
- }
+        var symbol = ctx.SemanticModel.GetSymbolInfo(ctx.Node).Symbol;
+        if (symbol is not null && BannedApis.Contains(symbol.ToDisplayString))
+        {
+            ctx.ReportDiagnostic(Diagnostic.Create(DeterminismRule, ctx.Node.GetLocation,
+                    symbol.Name, "use context.CurrentUtcDateTime / context.NewGuid instead"));
+        }
+    }
 }
 ```
 
 ### Expert — Zero-downtime hosting-plan migration from Consumption to Premium (§Advanced Q9)
 ```hcl
 resource "azurerm_service_plan" "checkout_premium" {
- name = "checkout-func-premium-plan"
- sku_name = "EP1" # Premium plan -- VNet integration, no cold start
+  name = "checkout-func-premium-plan"
+  sku_name = "EP1" # Premium plan -- VNet integration, no cold start
 }
 
 resource "azurerm_linux_function_app" "checkout_v2_premium" {
- name = "checkout-func-premium" # NEW app, running ALONGSIDE the existing Consumption app
- service_plan_id = azurerm_service_plan.checkout_premium.id
- virtual_network_subnet_id = azurerm_subnet.private.id # VNet integration -- the NEW compliance requirement
- #... identical function code deployed here for validation before cutover (§Advanced Q9)...
-}
+  name = "checkout-func-premium" # NEW app, running ALONGSIDE the existing Consumption app
+  service_plan_id = azurerm_service_plan.checkout_premium.id
+  virtual_network_subnet_id = azurerm_subnet.private.id # VNet integration -- the NEW compliance requirement
+  #... identical function code deployed here for validation before cutover (§Advanced Q9)...
+  }
 
 # Traffic Manager / Front Door routing weight shifted from 0% -> 100% toward the new
 # Premium app only AFTER validating parity -- the OLD Consumption app decommissioned last.
-resource "azurerm_frontdoor" "checkout_router" {
- #... progressive traffic-weight shift, directly mirroring §Advanced Q6's canary pattern...
-}
+  resource "azurerm_frontdoor" "checkout_router" {
+  #... progressive traffic-weight shift, directly mirroring §Advanced Q6's canary pattern...
+  }
 ```
 
 ---

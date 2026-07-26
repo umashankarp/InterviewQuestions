@@ -460,16 +460,16 @@ The fix had three parts, and the third is the one that generalizes: (1) unmapped
 ```csharp
 public sealed class ConflatingSlots
 {
- private readonly ConcurrentDictionary<InstrumentId, Tick> _pending = new;
+    private readonly ConcurrentDictionary<InstrumentId, Tick> _pending = new;
 
- public void Publish(Tick tick) => _pending[tick.Instrument] = tick; // overwrite, never queue
+    public void Publish(Tick tick) => _pending[tick.Instrument] = tick; // overwrite, never queue
 
- public IEnumerable<Tick> DrainForConsumer
- {
- foreach (var key in _pending.Keys)
- if (_pending.TryRemove(key, out var tick))
- yield return tick;
- }
+    public IEnumerable<Tick> DrainForConsumer
+    {
+        foreach (var key in _pending.Keys)
+            if (_pending.TryRemove(key, out var tick))
+            yield return tick;
+    }
 }
 ```
 **Time complexity:** O(1) publish; O(k) drain for k pending instruments.
@@ -482,14 +482,14 @@ public sealed class ConflatingSlots
 ```csharp
 public Snapshot BuildSnapshot(long barrierSeq)
 {
- var values = new Dictionary<InstrumentId, Tick>(_universe.Count);
- foreach (var instrument in _universe)
- {
- var latest = _history.LatestAtOrBefore(instrument, barrierSeq); // same barrier for all
- if (latest is null) throw new IncompleteSnapshotException(instrument, barrierSeq);
- values[instrument] = latest;
- }
- return Snapshot.CreateImmutable(SnapshotId.New, barrierSeq, values);
+    var values = new Dictionary<InstrumentId, Tick>(_universe.Count);
+    foreach (var instrument in _universe)
+    {
+        var latest = _history.LatestAtOrBefore(instrument, barrierSeq); // same barrier for all
+        if (latest is null) throw new IncompleteSnapshotException(instrument, barrierSeq);
+        values[instrument] = latest;
+    }
+    return Snapshot.CreateImmutable(SnapshotId.New, barrierSeq, values);
 }
 ```
 **Time complexity:** O(n log m) for n instruments over m-length histories with binary search.
@@ -501,7 +501,7 @@ public Snapshot BuildSnapshot(long barrierSeq)
 **Solution:**
 ```csharp
 public IReadOnlyList<Tick> AsKnownAt(InstrumentId id, DateTime eventFrom, DateTime eventTo, DateTime knownAt) =>
- _archive
+    _archive
 .Query(id, eventFrom, eventTo)
 .Where(t => t.KnowledgeTime <= knownAt) // exclude later-arriving corrections
 .GroupBy(t => t.VenueSequence)
@@ -519,19 +519,19 @@ public IReadOnlyList<Tick> AsKnownAt(InstrumentId id, DateTime eventFrom, DateTi
 ```csharp
 public async Task<ReconciliationReport> ReconcileAsync(DateOnly session, IReadOnlyList<InstrumentId> sample)
 {
- var findings = new List<Divergence>;
- foreach (var id in sample)
- {
- var platform = await _platformArchive.ClosingPricesAsync(id, session);
- var direct = await _directFeedArchive.ClosingPricesAsync(id, session);
+    var findings = new List<Divergence>;
+    foreach (var id in sample)
+    {
+        var platform = await _platformArchive.ClosingPricesAsync(id, session);
+        var direct = await _directFeedArchive.ClosingPricesAsync(id, session);
 
- foreach (var (seq, platformPrice) in platform)
- {
- if (!direct.TryGetValue(seq, out var directPrice)) { findings.Add(Divergence.Missing(id, seq)); continue; }
- if (platformPrice!= directPrice) findings.Add(Divergence.Mismatch(id, seq, platformPrice, directPrice));
- }
- }
- return new ReconciliationReport(findings, sample.Count);
+        foreach (var (seq, platformPrice) in platform)
+        {
+            if (!direct.TryGetValue(seq, out var directPrice)) { findings.Add(Divergence.Missing(id, seq)); continue; }
+            if (platformPrice!= directPrice) findings.Add(Divergence.Mismatch(id, seq, platformPrice, directPrice));
+        }
+    }
+    return new ReconciliationReport(findings, sample.Count);
 }
 ```
 **Time complexity:** O(s × t) for s sampled instruments and t ticks each.

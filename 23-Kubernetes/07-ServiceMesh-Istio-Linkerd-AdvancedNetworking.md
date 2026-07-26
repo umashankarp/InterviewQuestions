@@ -418,28 +418,28 @@ spec:
 ```csharp
 public class RetryWithBackoff
 {
- private readonly Random _random = new;
+    private readonly Random _random = new;
 
- public async Task<T> ExecuteAsync<T>(Func<Task<T>> operation, int maxAttempts = 3, int baseDelayMs = 100)
- {
- for (int attempt = 1; attempt <= maxAttempts; attempt++)
- {
- try
- {
- return await operation;
- }
- catch (Exception) when (attempt < maxAttempts)
- {
- // Exponential backoff with full jitter -- avoids the "thundering herd"
- // of every retrying client synchronizing on the identical delay ('s
- // resilience-pattern discussion, applied at the client-code layer).
- int exponentialDelay = baseDelayMs * (int)Math.Pow(2, attempt - 1);
- int jitteredDelay = _random.Next(0, exponentialDelay);
- await Task.Delay(jitteredDelay);
- }
- }
- return await operation; // final attempt -- let any exception propagate
- }
+    public async Task<T> ExecuteAsync<T>(Func<Task<T>> operation, int maxAttempts = 3, int baseDelayMs = 100)
+    {
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                return await operation;
+            }
+            catch (Exception) when (attempt < maxAttempts)
+            {
+                // Exponential backoff with full jitter -- avoids the "thundering herd"
+                // of every retrying client synchronizing on the identical delay ('s
+                // resilience-pattern discussion, applied at the client-code layer).
+                int exponentialDelay = baseDelayMs * (int)Math.Pow(2, attempt - 1);
+                int jitteredDelay = _random.Next(0, exponentialDelay);
+                await Task.Delay(jitteredDelay);
+            }
+        }
+        return await operation; // final attempt -- let any exception propagate
+    }
 }
 ```
 **Time complexity:** O(n) where n is `maxAttempts` — each retry is a constant-time decision (compute delay, sleep, retry), bounded by the fixed attempt ceiling.
@@ -452,52 +452,52 @@ public class RetryWithBackoff
 ```csharp
 public class CircuitBreaker
 {
- private enum State { Closed, Open, HalfOpen }
- private State _state = State.Closed;
- private int _consecutiveFailures;
- private DateTime _openedAt;
- private readonly int _failureThreshold;
- private readonly TimeSpan _cooldown;
- private readonly object _lock = new;
+    private enum State { Closed, Open, HalfOpen }
+    private State _state = State.Closed;
+    private int _consecutiveFailures;
+    private DateTime _openedAt;
+    private readonly int _failureThreshold;
+    private readonly TimeSpan _cooldown;
+    private readonly object _lock = new;
 
- public CircuitBreaker(int failureThreshold = 5, TimeSpan? cooldown = null)
- {
- _failureThreshold = failureThreshold;
- _cooldown = cooldown?? TimeSpan.FromSeconds(30);
- }
+    public CircuitBreaker(int failureThreshold = 5, TimeSpan? cooldown = null)
+    {
+        _failureThreshold = failureThreshold;
+        _cooldown = cooldown?? TimeSpan.FromSeconds(30);
+    }
 
- public async Task<T> ExecuteAsync<T>(Func<Task<T>> operation)
- {
- lock (_lock)
- {
- if (_state == State.Open)
- {
- if (DateTime.UtcNow - _openedAt < _cooldown)
- throw new CircuitOpenException; // fail fast -- no call attempted at all
- _state = State.HalfOpen; // cooldown elapsed -- allow ONE trial request
- }
- }
+    public async Task<T> ExecuteAsync<T>(Func<Task<T>> operation)
+    {
+        lock (_lock)
+        {
+            if (_state == State.Open)
+            {
+                if (DateTime.UtcNow - _openedAt < _cooldown)
+                    throw new CircuitOpenException; // fail fast -- no call attempted at all
+                _state = State.HalfOpen; // cooldown elapsed -- allow ONE trial request
+            }
+        }
 
- try
- {
- var result = await operation;
- lock (_lock) { _consecutiveFailures = 0; _state = State.Closed; } // success -- fully reset
- return result;
- }
- catch (Exception)
- {
- lock (_lock)
- {
- _consecutiveFailures++;
- if (_state == State.HalfOpen || _consecutiveFailures >= _failureThreshold)
- {
- _state = State.Open;
- _openedAt = DateTime.UtcNow;
- }
- }
- throw;
- }
- }
+        try
+        {
+            var result = await operation;
+            lock (_lock) { _consecutiveFailures = 0; _state = State.Closed; } // success -- fully reset
+            return result;
+        }
+        catch (Exception)
+        {
+            lock (_lock)
+            {
+                _consecutiveFailures++;
+                if (_state == State.HalfOpen || _consecutiveFailures >= _failureThreshold)
+                {
+                    _state = State.Open;
+                    _openedAt = DateTime.UtcNow;
+                }
+            }
+            throw;
+        }
+    }
 }
 ```
 **Time complexity:** O(1) per call — state transitions and threshold checks are constant-time comparisons, independent of call volume or history depth.

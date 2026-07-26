@@ -458,19 +458,19 @@ The generalizable lesson: **a dropped-late-data metric that has always been zero
 ```csharp
 public IEnumerable<WindowResult> Aggregate(IEnumerable<Trade> trades, TimeSpan size)
 {
- return trades
-.GroupBy(t => new WindowKey(
- t.InstrumentId,
- Floor(t.EventTime, size))) // EVENT time, not arrival time
-.Select(g => new WindowResult(
- g.Key.Instrument,
- g.Key.WindowStart,
- Volume: g.Sum(t => t.Quantity),
- ContributingSources: g.Select(t => t.VenueId).Distinct.ToList)); // completeness input
+    return trades
+    .GroupBy(t => new WindowKey(
+            t.InstrumentId,
+                Floor(t.EventTime, size))) // EVENT time, not arrival time
+    .Select(g => new WindowResult(
+            g.Key.Instrument,
+                g.Key.WindowStart,
+                Volume: g.Sum(t => t.Quantity),
+                ContributingSources: g.Select(t => t.VenueId).Distinct.ToList)); // completeness input
 }
 
 private static DateTimeOffset Floor(DateTimeOffset t, TimeSpan size) =>
- new(t.Ticks - (t.Ticks % size.Ticks), t.Offset);
+    new(t.Ticks - (t.Ticks % size.Ticks), t.Offset);
 ```
 **Time complexity:** O(n) for n trades.
 **Space complexity:** O(w × k) for w open windows and k keys.
@@ -482,15 +482,15 @@ private static DateTimeOffset Floor(DateTimeOffset t, TimeSpan size) =>
 ```csharp
 public AlertDecision Evaluate(WindowResult window, IReadOnlySet<VenueId> expectedSources)
 {
- var missing = expectedSources.Except(window.ContributingSources).ToList;
- if (missing.Count > 0)
- return AlertDecision.Suppressed(
- reason: $"Incomplete window — missing {string.Join(",", missing)}",
- raiseDataQualitySignal: true); // distinct signal, not a quieter version
+    var missing = expectedSources.Except(window.ContributingSources).ToList;
+    if (missing.Count > 0)
+        return AlertDecision.Suppressed(
+        reason: $"Incomplete window — missing {string.Join(",", missing)}",
+            raiseDataQualitySignal: true); // distinct signal, not a quieter version
 
- return window.Volume > _threshold
-? AlertDecision.Fire(window)
-: AlertDecision.NoAlert;
+    return window.Volume > _threshold
+    ? AlertDecision.Fire(window)
+    : AlertDecision.NoAlert;
 }
 ```
 **Time complexity:** O(s) for s expected sources.
@@ -502,18 +502,18 @@ public AlertDecision Evaluate(WindowResult window, IReadOnlySet<VenueId> expecte
 **Solution:**
 ```csharp
 public DateTimeOffset ComputeWatermark(IReadOnlyDictionary<VenueId, DelayStats> stats,
- DateTimeOffset maxEventTime)
+    DateTimeOffset maxEventTime)
 {
- var requiredLag = stats.Values
-.Select(s => s.Percentile99)
-.DefaultIfEmpty(_minimumLag)
-.Max;
+    var requiredLag = stats.Values
+    .Select(s => s.Percentile99)
+    .DefaultIfEmpty(_minimumLag)
+    .Max;
 
- var cappedLag = requiredLag > _maximumLag? _maximumLag: requiredLag;
- if (requiredLag > _maximumLag)
- _alerts.Raise($"Source delay {requiredLag} exceeds watermark ceiling {_maximumLag} — data will be late");
+    var cappedLag = requiredLag > _maximumLag? _maximumLag: requiredLag;
+    if (requiredLag > _maximumLag)
+        _alerts.Raise($"Source delay {requiredLag} exceeds watermark ceiling {_maximumLag} — data will be late");
 
- return maxEventTime - cappedLag;
+    return maxEventTime - cappedLag;
 }
 ```
 **Time complexity:** O(s) for s sources.
@@ -526,16 +526,16 @@ public DateTimeOffset ComputeWatermark(IReadOnlyDictionary<VenueId, DelayStats> 
 ```csharp
 public IEnumerable<EnrichedTrade> Join(Trade trade, IQuoteBuffer buffer, TimeSpan lookback)
 {
- buffer.EvictOlderThan(trade.EventTime - lookback); // bound state by time
+    buffer.EvictOlderThan(trade.EventTime - lookback); // bound state by time
 
- var quote = buffer.LatestAtOrBefore(trade.InstrumentId, trade.EventTime);
- if (quote is null)
- {
- _metrics.IncrementUnmatchedTrade(trade.VenueId); // visible, never silent
- yield return EnrichedTrade.WithoutQuote(trade); // explicit absence, not a default
- yield break;
- }
- yield return EnrichedTrade.With(trade, quote);
+    var quote = buffer.LatestAtOrBefore(trade.InstrumentId, trade.EventTime);
+    if (quote is null)
+    {
+        _metrics.IncrementUnmatchedTrade(trade.VenueId); // visible, never silent
+        yield return EnrichedTrade.WithoutQuote(trade); // explicit absence, not a default
+        yield break;
+    }
+    yield return EnrichedTrade.With(trade, quote);
 }
 ```
 **Time complexity:** O(log q) for the buffer lookup; eviction amortized O(1) per event.

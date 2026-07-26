@@ -154,38 +154,38 @@ stateDiagram-v2
 ```csharp
 public class NotificationHandler
 {
- private readonly IAmazonDynamoDB _dedupeTable;
- private readonly IEmailClient _emailClient;
+    private readonly IAmazonDynamoDB _dedupeTable;
+    private readonly IEmailClient _emailClient;
 
- public async Task HandleAsync(SQSEvent evt)
- {
- foreach (var record in evt.Records)
- {
- var idempotencyKey = ExtractDomainIdempotencyKey(record.Body); // NOT record.MessageId alone (§Advanced Q1)
+    public async Task HandleAsync(SQSEvent evt)
+    {
+        foreach (var record in evt.Records)
+        {
+            var idempotencyKey = ExtractDomainIdempotencyKey(record.Body); // NOT record.MessageId alone (§Advanced Q1)
 
- var alreadyProcessed = await TryClaimIdempotencyKeyAsync(idempotencyKey);
- if (alreadyProcessed) continue; // duplicate delivery -- short-circuit, no second email
+            var alreadyProcessed = await TryClaimIdempotencyKeyAsync(idempotencyKey);
+            if (alreadyProcessed) continue; // duplicate delivery -- short-circuit, no second email
 
- var notification = JsonSerializer.Deserialize<NotificationRequest>(record.Body);
- await _emailClient.SendAsync(notification);
- }
- }
+            var notification = JsonSerializer.Deserialize<NotificationRequest>(record.Body);
+            await _emailClient.SendAsync(notification);
+        }
+    }
 
- private async Task<bool> TryClaimIdempotencyKeyAsync(string key)
- {
- try
- {
- // Conditional PutItem -- atomically claims the key ONLY if it doesn't already exist.
- await _dedupeTable.PutItemAsync(new PutItemRequest
- {
- TableName = "processed-notifications",
- Item = new { ["id"] = new AttributeValue(key), ["ttl"] = new AttributeValue { N = Ttl24hFromNow } },
- ConditionExpression = "attribute_not_exists(id)"
- });
- return false; // successfully claimed -- this is a NEW event
- }
- catch (ConditionalCheckFailedException) { return true; } // already claimed -- DUPLICATE
- }
+    private async Task<bool> TryClaimIdempotencyKeyAsync(string key)
+    {
+        try
+        {
+            // Conditional PutItem -- atomically claims the key ONLY if it doesn't already exist.
+            await _dedupeTable.PutItemAsync(new PutItemRequest
+                {
+                    TableName = "processed-notifications",
+                        Item = new { ["id"] = new AttributeValue(key), ["ttl"] = new AttributeValue { N = Ttl24hFromNow } },
+                        ConditionExpression = "attribute_not_exists(id)"
+            });
+            return false; // successfully claimed -- this is a NEW event
+        }
+        catch (ConditionalCheckFailedException) { return true; } // already claimed -- DUPLICATE
+    }
 }
 ```
 
@@ -193,77 +193,77 @@ public class NotificationHandler
 ```csharp
 public class OrderHandler
 {
- // Initialized ONCE per execution environment, opportunistically reused -- NEVER assumed present.
- private static NpgsqlConnection? _connection;
+    // Initialized ONCE per execution environment, opportunistically reused -- NEVER assumed present.
+    private static NpgsqlConnection? _connection;
 
- public async Task<APIGatewayProxyResponse> HandleAsync(APIGatewayProxyRequest request)
- {
- // Re-establish if this is a cold start OR if a reused connection has gone stale --
- // never assume a prior invocation's connection is still valid (the lesson).
- if (_connection is null || _connection.State!= ConnectionState.Open)
- {
- _connection = new NpgsqlConnection(await GetConnectionStringAsync);
- await _connection.OpenAsync;
- }
+    public async Task<APIGatewayProxyResponse> HandleAsync(APIGatewayProxyRequest request)
+    {
+        // Re-establish if this is a cold start OR if a reused connection has gone stale --
+        // never assume a prior invocation's connection is still valid (the lesson).
+        if (_connection is null || _connection.State!= ConnectionState.Open)
+        {
+            _connection = new NpgsqlConnection(await GetConnectionStringAsync);
+            await _connection.OpenAsync;
+        }
 
- var order = await ProcessOrderAsync(_connection, request);
- return new APIGatewayProxyResponse { StatusCode = 200, Body = JsonSerializer.Serialize(order) };
- }
+        var order = await ProcessOrderAsync(_connection, request);
+        return new APIGatewayProxyResponse { StatusCode = 200, Body = JsonSerializer.Serialize(order) };
+    }
 }
 ```
 
 ### Hard — Reserved concurrency + provisioned concurrency configuration (§Advanced Q5)
 ```hcl
 resource "aws_lambda_function" "checkout_processor" {
- function_name = "checkout-processor"
- #...
-}
+  function_name = "checkout-processor"
+  #...
+  }
 
 resource "aws_lambda_provisioned_concurrency_config" "checkout_warm" {
- function_name = aws_lambda_function.checkout_processor.function_name
- qualifier = aws_lambda_function.checkout_processor.version
- provisioned_concurrent_executions = 20 # sized to observed BASELINE traffic, not peak
+  function_name = aws_lambda_function.checkout_processor.function_name
+  qualifier = aws_lambda_function.checkout_processor.version
+  provisioned_concurrent_executions = 20 # sized to observed BASELINE traffic, not peak
 }
 
 resource "aws_lambda_function_event_invoke_config" "checkout_reserved" {
- function_name = aws_lambda_function.checkout_processor.function_name
- maximum_retry_attempts = 2
+  function_name = aws_lambda_function.checkout_processor.function_name
+  maximum_retry_attempts = 2
 }
 
 # Reserved concurrency explicitly capped to match what RDS Proxy + the underlying
 # Aurora cluster can actually absorb -- NOT set in isolation (§Advanced Q5).
-resource "aws_lambda_function" "checkout_processor_concurrency" {
- reserved_concurrent_executions = 50 # reconciled against RDS Proxy's own max connections
+  resource "aws_lambda_function" "checkout_processor_concurrency" {
+  reserved_concurrent_executions = 50 # reconciled against RDS Proxy's own max connections
 }
 ```
 
 ### Expert — Step Functions saga with compensating action (§Advanced Q6)
 ```json
 {
- "StartAt": "ChargePayment",
- "States": {
- "ChargePayment": {
- "Type": "Task",
- "Resource": "arn:aws:lambda:us-east-1:222222222222:function:charge-payment",
- "Retry": [{ "ErrorEquals": ["TransientError"], "IntervalSeconds": 2, "MaxAttempts": 3, "BackoffRate": 2.0 }],
- "Catch": [{ "ErrorEquals": ["States.ALL"], "Next": "OrderFailed" }],
- "Next": "ReserveShipping"
- },
- "ReserveShipping": {
- "Type": "Task",
- "Resource": "arn:aws:lambda:us-east-1:222222222222:function:reserve-shipping",
- "Catch": [{ "ErrorEquals": ["States.ALL"], "Next": "RefundPayment" }],
- "Next": "OrderConfirmed"
- },
- "RefundPayment": {
- "Type": "Task",
- "Resource": "arn:aws:lambda:us-east-1:222222222222:function:refund-payment",
- "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 5 }],
- "Next": "OrderFailed"
- },
- "OrderFailed": { "Type": "Fail" },
- "OrderConfirmed": { "Type": "Succeed" }
- }
+  "StartAt": "ChargePayment",
+    "States": {
+    "ChargePayment": {
+      "Type": "Task",
+        "Resource": "arn:aws:lambda:us-east-1:222222222222:function:charge-payment",
+        "Retry": [{ "ErrorEquals": ["TransientError"], "IntervalSeconds": 2, "MaxAttempts": 3, "BackoffRate": 2.0 }],
+        "Catch": [{ "ErrorEquals": ["States.ALL"], "Next": "OrderFailed" }],
+        "Next": "ReserveShipping"
+    },
+    "ReserveShipping": {
+      "Type": "Task",
+        "Resource": "arn:aws:lambda:us-east-1:222222222222:function:reserve-shipping",
+        "Catch": [{ "ErrorEquals": ["States.ALL"], "Next": "RefundPayment" }],
+        "Next": "OrderConfirmed"
+    },
+    "RefundPayment": {
+      "Type": "Task",
+        "Resource": "arn:aws:lambda:us-east-1:222222222222:function:refund-payment",
+        "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 5 }],
+        "Next": "OrderFailed"
+    },
+    "OrderFailed": { "Type": "Fail" },
+      "OrderConfirmed": { "Type": "Succeed" }
+  }
 }
 ```
 **Discussion**: the `RefundPayment` compensating step itself has aggressive retry configuration (§Advanced Q6's lesson that compensating actions carry the same idempotency/at-least-once requirements as any other step) — `refund-payment`'s own Lambda implementation must be idempotent (safe to invoke multiple times for the same charge ID) exactly per the discipline, since Step Functions' own retry mechanism is itself an at-least-once invoker.

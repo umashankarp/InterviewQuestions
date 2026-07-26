@@ -310,13 +310,13 @@ graph TB
 **Solution:**
 ```hcl
 resource "aws_security_group_rule" "emergency_partner_access" {
- type = "ingress"
- from_port = 443
- to_port = 443
- protocol = "tcp"
- cidr_blocks = ["203.0.113.42/32"] # partner's specific IP -- captured in HCL, not console-only (the fix)
- security_group_id = aws_security_group.api.id
- description = "TEMP: emergency partner monitoring access -- incident #4521, review by 2026-08-01"
+  type = "ingress"
+  from_port = 443
+  to_port = 443
+  protocol = "tcp"
+  cidr_blocks = ["203.0.113.42/32"] # partner's specific IP -- captured in HCL, not console-only (the fix)
+  security_group_id = aws_security_group.api.id
+  description = "TEMP: emergency partner monitoring access -- incident #4521, review by 2026-08-01"
 }
 ```
 **Time complexity:** N/A (infrastructure-configuration exercise) — eliminates the silent-reversion risk deterministically, since the rule is now part of the declared, authoritative configuration.
@@ -328,14 +328,14 @@ resource "aws_security_group_rule" "emergency_partner_access" {
 **Solution:**
 ```hcl
 terraform {
- backend "s3" {
- bucket = "acme-terraform-state"
- key = "prod/api-platform/terraform.tfstate"
- region = "us-east-1"
- dynamodb_table = "terraform-locks" # provides STATE LOCKING --
- # a concurrent apply against this same key blocks until released
- encrypt = true # addresses/the plaintext-secret-in-state exposure at rest
- }
+  backend "s3" {
+    bucket = "acme-terraform-state"
+    key = "prod/api-platform/terraform.tfstate"
+    region = "us-east-1"
+    dynamodb_table = "terraform-locks" # provides STATE LOCKING --
+      # a concurrent apply against this same key blocks until released
+    encrypt = true # addresses/the plaintext-secret-in-state exposure at rest
+  }
 }
 ```
 **Time complexity:** N/A.
@@ -348,31 +348,31 @@ terraform {
 ```csharp
 public class DriftDetectionJob
 {
- private readonly ITerraformRunner _terraform;
- private readonly IAlertNotifier _notifier;
+    private readonly ITerraformRunner _terraform;
+    private readonly IAlertNotifier _notifier;
 
- // Directly the proactive-detection design -- converts an otherwise UNBOUNDED
- // silent drift window (/) into a bounded, alertable one (at most one
- // schedule interval old), without ever proposing or applying a correction itself.
- public async Task RunAsync(IEnumerable<TerraformStateTarget> targets)
- {
- foreach (var target in targets)
- {
- var result = await _terraform.PlanRefreshOnlyAsync(target); // NEVER a normal plan/apply
+    // Directly the proactive-detection design -- converts an otherwise UNBOUNDED
+    // silent drift window (/) into a bounded, alertable one (at most one
+    // schedule interval old), without ever proposing or applying a correction itself.
+    public async Task RunAsync(IEnumerable<TerraformStateTarget> targets)
+    {
+        foreach (var target in targets)
+        {
+            var result = await _terraform.PlanRefreshOnlyAsync(target); // NEVER a normal plan/apply
 
- if (result.HasDetectedDrift)
- {
- await _notifier.SendAsync(new DriftAlert(
- target.Name,
- result.DriftedResources,
- detectedAt: DateTimeOffset.UtcNow,
- // Deliberately ISOLATED from routine PR-driven change notifications (§Intermediate Q3) --
- // a reviewer's attention is a finite resource; commingling this with routine
- // changes is the exact structural gap that let the incident go unnoticed.
- channel: AlertChannel.DedicatedDriftChannel));
- }
- }
- }
+            if (result.HasDetectedDrift)
+            {
+                await _notifier.SendAsync(new DriftAlert(
+                        target.Name,
+                            result.DriftedResources,
+                            detectedAt: DateTimeOffset.UtcNow,
+                            // Deliberately ISOLATED from routine PR-driven change notifications (§Intermediate Q3) --
+                        // a reviewer's attention is a finite resource; commingling this with routine
+                        // changes is the exact structural gap that let the incident go unnoticed.
+                        channel: AlertChannel.DedicatedDriftChannel));
+            }
+        }
+    }
 }
 ```
 **Time complexity:** O(n) in the number of managed state targets, each independently refreshed — parallelizable across targets (bounded by cloud-provider API rate limits) since they're unrelated state files with no cross-target dependency.

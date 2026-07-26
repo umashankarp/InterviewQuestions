@@ -189,124 +189,62 @@ Principal Engineers spend meaningful time with people who do not have engineerin
 
 ### 3.1 The mechanism shift, drawn
 
+```mermaid
+flowchart TB
+    subgraph STAFF["STAFF+ MECHANISM — personal, caps at ~5-8 teams"]
+        direction TB
+        SE["Staff Engineer<br/><i>every significant decision<br/>routes through this person</i>"]
+        SE --> STA[Team A]
+        SE --> STB[Team B]
+        SE --> STC[Team C]
+    end
+
+    subgraph PRIN["PRINCIPAL MECHANISM — systemic, scales with the org"]
+        direction TB
+        DS["DECISION SYSTEM<br/>decision rights · default paths<br/>mechanical verification · expiring exceptions"]
+        P["Principal<br/><i>personally decides only ~2-4 bets/year:<br/>irreversible, org-wide, 5-10 yr horizon</i>"]
+        SL["Staff+ layer<br/><i>executes within the system —<br/>developed BY the Principal</i>"]
+        Teams["20+ teams decide locally,<br/>safely, in parallel"]
+        P -->|designs & maintains| DS
+        DS --> SL --> Teams
+    end
 ```
-STAFF+ MECHANISM (personal, caps at ~5-8 teams)
 
- ┌───────────┐
- │ Staff │ ◄── every significant decision
- │ Engineer │ routes through this person
- └─────┬─────┘
- ┌───────────┼───────────┐
- ▼ ▼ ▼
- ┌───────┐ ┌───────┐ ┌───────┐
- │Team A │ │Team B │ │Team C │
- └───────┘ └───────┘ └───────┘
-
- Throughput = f(one person's calendar)
- Quality = high, uniformly
- Ceiling = HARD
-
-
-PRINCIPAL MECHANISM (systemic, scales with the org)
-
- ┌──────────────────────────────────────────────────┐
- │ DECISION SYSTEM │
- │ ┌────────────┐ ┌────────────┐ ┌──────────────┐ │
- │ │ Decision │ │ Default │ │ Mechanical │ │
- │ │ rights │ │ paths │ │ verification │ │
- │ │ (who │ │ (most │ │ (continuous, │ │
- │ │ decides) │ │ decisions │ │ fail-closed)│ │
- │ │ │ │ removed) │ │ │ │
- │ └────────────┘ └────────────┘ └──────────────┘ │
- │ ┌──────────────────────────────┐ │
- │ │ Exceptions: approver + risk │ │
- │ │ owner + EXPIRY (count is a │ │
- │ │ health metric on the standard)│ │
- │ └──────────────────────────────┘ │
- └──────────────────────┬───────────────────────────┘
- │ designed & maintained by
- ┌──────▼──────┐
- │ Principal │──── personally decides only
- └──────┬──────┘ ~2-4 bets/year: irreversible,
- │ org-wide, 5-10 yr horizon
- ┌──────▼──────┐
- │ Staff+ │──── execute within the system
- │ layer │ (developed BY the Principal —
- └──┬───┬───┬──┘ this is not a side activity)
- ▼ ▼ ▼
- 20+ teams decide locally, safely, in parallel
-
- Throughput = f(number of capable decision-makers)
- Quality = bounded by the system's design, verified in aggregate
- Ceiling = scales with the organization
-```
+| | Staff+ mechanism | Principal mechanism |
+|---|---|---|
+| **Throughput** | f(one person's calendar) | f(number of capable decision-makers) |
+| **Quality** | High, uniformly | Bounded by the system's design, verified in aggregate |
+| **Ceiling** | Hard — ~5–8 teams | Scales with the organisation |
 
 ### 3.2 Build-vs-buy total cost over the real horizon
 
-```
-Cumulative
- cost
- │ ╭─── BUILD
- │ ╭───╯ (maintenance
- │ ╭───╯ is the term
- │ ╭───╯ everyone omits)
- │ ╭───╯
- │ ╭───╯
- │ ╭───╯
- │ ╭───────────╮ ╱ ╭──────── BUY
- │ ╱ build cost ╲╱ ╭────╯ (licence grows
- │ ╱ (the part │ ╭────╯ with usage)
- │ ╱ estimates │ ╭────╯
- │ ╱ capture) │ ╭────╯
- │ ╱ │ ╱
- │╱ ╭────────┴╯ ◄── BUY + THIN ABSTRACTION
- ├───────────╯ (small upfront premium; converts
- │ lock-in from strategic risk to
- │ a bounded engineering cost)
- └────┬──────┬──────┬──────┬──────┬──────┬──────► Years
- 1 2 3 4 5 6
+Illustrative cumulative cost, £k, for a capability estimated at 6 engineer-months to build:
 
- ▲ Crossover is typically year 3-5 and is HIGHLY sensitive to
- the maintenance-rate assumption. Sensitivity-test it; if the
- recommendation flips at ±25% on maintenance rate, say so
- rather than presenting a point answer.
-```
+| Year | Build | Buy | Buy + thin abstraction | Note |
+|---:|---:|---:|---:|---|
+| 1 | 180 | 95 | 125 | Build looks cheapest *after* year 1 only if you stop counting here |
+| 2 | 255 | 180 | 215 | Maintenance begins — the term estimates omit |
+| 3 | 330 | 270 | 310 | **Crossover band begins** |
+| 4 | 405 | 365 | 410 | Build overtakes buy |
+| 5 | 480 | 465 | 515 | |
+| 6 | 555 | 570 | 625 | Buy's licence growth finally catches up |
+
+Three things this table is meant to make concrete:
+
+- **Maintenance dominates, and it is the term build estimates omit.** A system built in 6 engineer-months typically consumes 20–40% of one engineer indefinitely thereafter. The build column's slope after year 1 *is* that cost.
+- **The crossover is typically year 3–5 and is highly sensitive to the maintenance-rate assumption.** At 20% it lands in year 6; at 40% it lands in year 3. That sensitivity is why a point estimate here is misleading — if the recommendation flips within the plausible range, say so rather than presenting a single number.
+- **Buy-behind-a-thin-abstraction carries a small upfront premium** and converts vendor lock-in from a strategic risk into a bounded engineering cost. It is rarely the cheapest column and is frequently the right answer.
 
 ### 3.3 Where a Principal's attention should go
 
-```
- HIGH BLAST RADIUS
- │
- ┌─────────────────────┼─────────────────────┐
- │ │ │
- │ DELEGATE WITH │ PRINCIPAL │
- │ VERIFICATION │ DECIDES │
- R │ │ PERSONALLY │
- E │ Standards, │ │
- V │ golden paths, │ ~2-4 per year. │
- E │ fitness functions. │ Datastore bets, │
- R │ Wrong is │ build-vs-buy, │
- S │ correctable. │ platform choice. │
- I │ │ │
- B ├─────────────────────┼─────────────────────┤
- L │ │ │
- E │ IGNORE │ OWNING TEAM │
- │ │ DECIDES │
- │ Genuinely not │ │
- │ the Principal's │ Irreversible but │
- │ concern. Resisting │ local. Team knows │
- │ the pull to │ best. Principal │
- │ opine here is │ sets the guardrail │
- │ itself a skill. │ not the choice. │
- │ │ │
- └─────────────────────┴─────────────────────┘
- │
- LOW BLAST RADIUS
+Two axes: **blast radius** (how much breaks if this is wrong) and **reversibility** (what it costs to undo).
 
- The bottom-left quadrant is where Principal Engineers
- most often waste their scarcest resource — because
- those decisions are legible, fast, and satisfying.
-```
+| | **Reversible** | **Irreversible** |
+|---|---|---|
+| **High blast radius** | **Delegate with verification.**<br/>Standards, golden paths, fitness functions. Being wrong is correctable, so the mechanism matters more than the choice. | **Principal decides personally.**<br/>~2–4 per year: datastore bets, build-vs-buy at org scale, platform choice. Nobody else has both the scope and the horizon. |
+| **Low blast radius** | **Ignore.**<br/>Genuinely not the Principal's concern. Resisting the pull to opine here is itself a skill. | **Owning team decides.**<br/>Irreversible but local — the team knows best. The Principal sets the guardrail, not the choice. |
+
+**The trap is the bottom-left quadrant.** It is where Principal Engineers most often spend their scarcest resource, precisely because those decisions are legible, fast, and satisfying to make — while the top-right quadrant, which is the actual job, is slow, ambiguous, and produces no immediate feedback.
 
 ---
 
@@ -790,37 +728,37 @@ At Principal scope, the performance quantities are **organizational throughput a
 
 ```csharp
 public sealed record BuildOption(
- decimal UpfrontCost,
- decimal AnnualMaintenanceRate, // fraction of upfront, e.g. 0.30m
- decimal AnnualOpsCost);
+    decimal UpfrontCost,
+        decimal AnnualMaintenanceRate, // fraction of upfront, e.g. 0.30m
+        decimal AnnualOpsCost);
 
 public sealed record BuyOption(
- decimal Year1Licence,
- decimal AnnualGrowthRate, // e.g. 0.15m for 15%/yr
- decimal IntegrationCost);
+    decimal Year1Licence,
+        decimal AnnualGrowthRate, // e.g. 0.15m for 15%/yr
+        decimal IntegrationCost);
 
 public static (decimal Build, decimal Buy, int? Crossover) CompareTco(
- BuildOption build, BuyOption buy, int years, decimal discountRate)
+    BuildOption build, BuyOption buy, int years, decimal discountRate)
 {
- decimal buildTotal = build.UpfrontCost, buyTotal = buy.IntegrationCost;
- int? crossover = null;
+    decimal buildTotal = build.UpfrontCost, buyTotal = buy.IntegrationCost;
+    int? crossover = null;
 
- for (var year = 1; year <= years; year++)
- {
- var discount = (decimal)Math.Pow(1.0 + (double)discountRate, year);
+    for (var year = 1; year <= years; year++)
+    {
+        var discount = (decimal)Math.Pow(1.0 + (double)discountRate, year);
 
- var buildAnnual = (build.UpfrontCost * build.AnnualMaintenanceRate)
- + build.AnnualOpsCost;
- var buyAnnual = buy.Year1Licence
- * (decimal)Math.Pow(1.0 + (double)buy.AnnualGrowthRate, year - 1);
+        var buildAnnual = (build.UpfrontCost * build.AnnualMaintenanceRate)
+        + build.AnnualOpsCost;
+        var buyAnnual = buy.Year1Licence
+        * (decimal)Math.Pow(1.0 + (double)buy.AnnualGrowthRate, year - 1);
 
- buildTotal += buildAnnual / discount;
- buyTotal += buyAnnual / discount;
+        buildTotal += buildAnnual / discount;
+        buyTotal += buyAnnual / discount;
 
- // Crossover = the first year cumulative build cost exceeds cumulative buy.
- if (crossover is null && buildTotal > buyTotal) crossover = year;
- }
- return (buildTotal, buyTotal, crossover);
+        // Crossover = the first year cumulative build cost exceeds cumulative buy.
+        if (crossover is null && buildTotal > buyTotal) crossover = year;
+    }
+    return (buildTotal, buyTotal, crossover);
 }
 ```
 
@@ -841,47 +779,47 @@ public static (decimal Build, decimal Buy, int? Crossover) CompareTco(
 
 ```csharp
 public sealed record Initiative(
- string Name, int CostQuarters, decimal RiskAdjustedValue, bool IsMandatory);
+    string Name, int CostQuarters, decimal RiskAdjustedValue, bool IsMandatory);
 
 public static (List<Initiative> Selected, decimal TotalValue) SelectPortfolio(
- IReadOnlyList<Initiative> candidates, int capacityQuarters)
+    IReadOnlyList<Initiative> candidates, int capacityQuarters)
 {
- // Mandatory items are pre-committed; they consume capacity and are not optional.
- var mandatory = candidates.Where(i => i.IsMandatory).ToList;
- var mandatoryCost = mandatory.Sum(i => i.CostQuarters);
- if (mandatoryCost > capacityQuarters)
- throw new InvalidOperationException(
- $"Mandatory commitments ({mandatoryCost}q) exceed capacity ({capacityQuarters}q). " +
- "This is the finding — report it rather than solving around it.");
+    // Mandatory items are pre-committed; they consume capacity and are not optional.
+    var mandatory = candidates.Where(i => i.IsMandatory).ToList;
+    var mandatoryCost = mandatory.Sum(i => i.CostQuarters);
+    if (mandatoryCost > capacityQuarters)
+        throw new InvalidOperationException(
+        $"Mandatory commitments ({mandatoryCost}q) exceed capacity ({capacityQuarters}q). " +
+            "This is the finding — report it rather than solving around it.");
 
- var optional = candidates.Where(i =>!i.IsMandatory).ToList;
- var remaining = capacityQuarters - mandatoryCost;
+    var optional = candidates.Where(i =>!i.IsMandatory).ToList;
+    var remaining = capacityQuarters - mandatoryCost;
 
- // dp[c] = best value achievable with exactly capacity c available.
- var dp = new decimal[remaining + 1];
- var take = new bool[optional.Count, remaining + 1];
+    // dp[c] = best value achievable with exactly capacity c available.
+    var dp = new decimal[remaining + 1];
+    var take = new bool[optional.Count, remaining + 1];
 
- for (var i = 0; i < optional.Count; i++)
- {
- var item = optional[i];
- // Iterate capacity DOWNWARD so each item is used at most once (0/1, not unbounded).
- for (var c = remaining; c >= item.CostQuarters; c--)
- {
- var candidate = dp[c - item.CostQuarters] + item.RiskAdjustedValue;
- if (candidate > dp[c]) { dp[c] = candidate; take[i, c] = true; }
- }
- }
+    for (var i = 0; i < optional.Count; i++)
+    {
+        var item = optional[i];
+        // Iterate capacity DOWNWARD so each item is used at most once (0/1, not unbounded).
+        for (var c = remaining; c >= item.CostQuarters; c--)
+        {
+            var candidate = dp[c - item.CostQuarters] + item.RiskAdjustedValue;
+            if (candidate > dp[c]) { dp[c] = candidate; take[i, c] = true; }
+        }
+    }
 
- // Reconstruct the chosen set.
- var selected = new List<Initiative>(mandatory);
- var cap = remaining;
- for (var i = optional.Count - 1; i >= 0; i--)
- {
- if (!take[i, cap]) continue;
- selected.Add(optional[i]);
- cap -= optional[i].CostQuarters;
- }
- return (selected, selected.Sum(i => i.RiskAdjustedValue));
+    // Reconstruct the chosen set.
+    var selected = new List<Initiative>(mandatory);
+    var cap = remaining;
+    for (var i = optional.Count - 1; i >= 0; i--)
+    {
+        if (!take[i, cap]) continue;
+        selected.Add(optional[i]);
+        cap -= optional[i].CostQuarters;
+    }
+    return (selected, selected.Sum(i => i.RiskAdjustedValue));
 }
 ```
 
@@ -904,79 +842,79 @@ public static (List<Initiative> Selected, decimal TotalValue) SelectPortfolio(
 public sealed record Workstream(string Id, int DurationWeeks, int TeamsRequired);
 
 public static (int Makespan, Dictionary<string,int> StartWeek, List<string> CriticalPath)
- Schedule(IReadOnlyList<Workstream> streams,
- IReadOnlyDictionary<string, List<string>> dependsOn,
- int totalTeams)
+Schedule(IReadOnlyList<Workstream> streams,
+    IReadOnlyDictionary<string, List<string>> dependsOn,
+        int totalTeams)
 {
- var byId = streams.ToDictionary(s => s.Id);
+    var byId = streams.ToDictionary(s => s.Id);
 
- // 1. Longest remaining path from each node — the classic priority for
- // list scheduling, and it also yields the critical path directly.
- var order = TopologicalOrder(streams, dependsOn);
- var longestFrom = new Dictionary<string, int>;
- foreach (var id in Enumerable.Reverse(order))
- {
- var successors = streams.Where(s => dependsOn.GetValueOrDefault(s.Id, []).Contains(id));
- longestFrom[id] = byId[id].DurationWeeks
- + (successors.Any? successors.Max(s => longestFrom[s.Id]): 0);
- }
+    // 1. Longest remaining path from each node — the classic priority for
+    // list scheduling, and it also yields the critical path directly.
+    var order = TopologicalOrder(streams, dependsOn);
+    var longestFrom = new Dictionary<string, int>;
+    foreach (var id in Enumerable.Reverse(order))
+    {
+        var successors = streams.Where(s => dependsOn.GetValueOrDefault(s.Id, []).Contains(id));
+        longestFrom[id] = byId[id].DurationWeeks
+        + (successors.Any? successors.Max(s => longestFrom[s.Id]): 0);
+    }
 
- // 2. Greedy list schedule: at each time step, start any ready stream
- // (deps complete, teams available), highest longestFrom first.
- var start = new Dictionary<string, int>;
- var finish = new Dictionary<string, int>;
- var running = new List<(string Id, int EndsAt, int Teams)>;
- var pending = streams.Select(s => s.Id).ToHashSet;
- var week = 0;
- var freeTeams = totalTeams;
+    // 2. Greedy list schedule: at each time step, start any ready stream
+    // (deps complete, teams available), highest longestFrom first.
+    var start = new Dictionary<string, int>;
+    var finish = new Dictionary<string, int>;
+    var running = new List<(string Id, int EndsAt, int Teams)>;
+    var pending = streams.Select(s => s.Id).ToHashSet;
+    var week = 0;
+    var freeTeams = totalTeams;
 
- while (pending.Count > 0 || running.Count > 0)
- {
- // Release teams from anything finishing now.
- foreach (var done in running.Where(r => r.EndsAt <= week).ToList)
- {
- freeTeams += done.Teams;
- running.Remove(done);
- }
+    while (pending.Count > 0 || running.Count > 0)
+    {
+        // Release teams from anything finishing now.
+        foreach (var done in running.Where(r => r.EndsAt <= week).ToList)
+        {
+            freeTeams += done.Teams;
+            running.Remove(done);
+        }
 
- var ready = pending
-.Where(id => dependsOn.GetValueOrDefault(id, []).All(finish.ContainsKey))
-.Where(id => finish.Count == 0 ||
- dependsOn.GetValueOrDefault(id, []).All(d => finish[d] <= week))
-.OrderByDescending(id => longestFrom[id]) // critical path first
-.ToList;
+        var ready = pending
+        .Where(id => dependsOn.GetValueOrDefault(id, []).All(finish.ContainsKey))
+        .Where(id => finish.Count == 0 ||
+            dependsOn.GetValueOrDefault(id, []).All(d => finish[d] <= week))
+        .OrderByDescending(id => longestFrom[id]) // critical path first
+        .ToList;
 
- foreach (var id in ready)
- {
- var s = byId[id];
- if (s.TeamsRequired > freeTeams) continue; // wait for capacity
- start[id] = week;
- finish[id] = week + s.DurationWeeks;
- running.Add((id, finish[id], s.TeamsRequired));
- freeTeams -= s.TeamsRequired;
- pending.Remove(id);
- }
+        foreach (var id in ready)
+        {
+            var s = byId[id];
+            if (s.TeamsRequired > freeTeams) continue; // wait for capacity
+            start[id] = week;
+            finish[id] = week + s.DurationWeeks;
+            running.Add((id, finish[id], s.TeamsRequired));
+            freeTeams -= s.TeamsRequired;
+            pending.Remove(id);
+        }
 
- if (running.Count == 0 && pending.Count > 0)
- throw new InvalidOperationException(
- "No stream can start — a single workstream requires more teams than exist.");
+        if (running.Count == 0 && pending.Count > 0)
+            throw new InvalidOperationException(
+            "No stream can start — a single workstream requires more teams than exist.");
 
- week = running.Count > 0? running.Min(r => r.EndsAt): week + 1;
- }
+        week = running.Count > 0? running.Min(r => r.EndsAt): week + 1;
+    }
 
- // 3. Critical path = follow max longestFrom from the highest starting node.
- var criticalPath = new List<string>;
- var current = longestFrom.MaxBy(kv => kv.Value).Key;
- while (current is not null)
- {
- criticalPath.Add(current);
- var next = streams
-.Where(s => dependsOn.GetValueOrDefault(s.Id, []).Contains(current))
-.MaxBy(s => longestFrom[s.Id]);
- current = next?.Id;
- }
+    // 3. Critical path = follow max longestFrom from the highest starting node.
+    var criticalPath = new List<string>;
+    var current = longestFrom.MaxBy(kv => kv.Value).Key;
+    while (current is not null)
+    {
+        criticalPath.Add(current);
+        var next = streams
+        .Where(s => dependsOn.GetValueOrDefault(s.Id, []).Contains(current))
+        .MaxBy(s => longestFrom[s.Id]);
+        current = next?.Id;
+    }
 
- return (finish.Values.DefaultIfEmpty(0).Max, start, criticalPath);
+    return (finish.Values.DefaultIfEmpty(0).Max, start, criticalPath);
 }
 ```
 
@@ -997,80 +935,80 @@ public static (int Makespan, Dictionary<string,int> StartWeek, List<string> Crit
 public sealed record UncertainInput(string Name, double Low, double Likely, double High);
 
 public sealed record SensitivityResult(
- double ProbabilityBuildCheaper,
- string MostInfluentialInput,
- IReadOnlyDictionary<string, double> InputCorrelations,
- string Verdict);
+    double ProbabilityBuildCheaper,
+        string MostInfluentialInput,
+        IReadOnlyDictionary<string, double> InputCorrelations,
+        string Verdict);
 
 public static SensitivityResult Analyze(
- IReadOnlyList<UncertainInput> inputs,
- Func<IReadOnlyDictionary<string, double>, (decimal Build, decimal Buy)> model,
- int trials = 50_000,
- int seed = 42) // fixed seed: reproducible for audit
+    IReadOnlyList<UncertainInput> inputs,
+        Func<IReadOnlyDictionary<string, double>, (decimal Build, decimal Buy)> model,
+        int trials = 50_000,
+        int seed = 42) // fixed seed: reproducible for audit
 {
- var rng = new Random(seed);
- var samples = new List<(Dictionary<string, double> Inputs, bool BuildCheaper)>(trials);
+    var rng = new Random(seed);
+    var samples = new List<(Dictionary<string, double> Inputs, bool BuildCheaper)>(trials);
 
- for (var t = 0; t < trials; t++)
- {
- var draw = inputs.ToDictionary(
- i => i.Name,
- i => TriangularSample(rng, i.Low, i.Likely, i.High));
+    for (var t = 0; t < trials; t++)
+    {
+        var draw = inputs.ToDictionary(
+            i => i.Name,
+                i => TriangularSample(rng, i.Low, i.Likely, i.High));
 
- var (build, buy) = model(draw);
- samples.Add((draw, build < buy));
- }
+        var (build, buy) = model(draw);
+        samples.Add((draw, build < buy));
+    }
 
- var pBuild = samples.Count(s => s.BuildCheaper) / (double)trials;
+    var pBuild = samples.Count(s => s.BuildCheaper) / (double)trials;
 
- // Sensitivity: point-biserial correlation between each input and the
- // binary outcome. |r| near 1 => this input alone drives the conclusion.
- var correlations = inputs.ToDictionary(
- i => i.Name,
- i => PointBiserial(
- samples.Select(s => s.Inputs[i.Name]).ToArray,
- samples.Select(s => s.BuildCheaper).ToArray));
+    // Sensitivity: point-biserial correlation between each input and the
+    // binary outcome. |r| near 1 => this input alone drives the conclusion.
+    var correlations = inputs.ToDictionary(
+        i => i.Name,
+            i => PointBiserial(
+            samples.Select(s => s.Inputs[i.Name]).ToArray,
+                samples.Select(s => s.BuildCheaper).ToArray));
 
- var dominant = correlations.MaxBy(kv => Math.Abs(kv.Value)).Key;
+    var dominant = correlations.MaxBy(kv => Math.Abs(kv.Value)).Key;
 
- // The verdict is the actual deliverable — a probability without an
- // interpretation gets read as a point estimate, which defeats the exercise.
- var verdict = pBuild switch
- {
- >= 0.85 => "Robust: build, across nearly the whole plausible input range.",
- <= 0.15 => "Robust: buy, across nearly the whole plausible input range.",
- _ => $"NOT ROBUST ({pBuild:P0} build). The recommendation flips within the " +
- $"plausible range of '{dominant}'. Do not present a single " +
- $"recommendation — either narrow '{dominant}' with a spike first, " +
- $"or choose on a criterion other than cost."
- };
+    // The verdict is the actual deliverable — a probability without an
+    // interpretation gets read as a point estimate, which defeats the exercise.
+    var verdict = pBuild switch
+    {
+        >= 0.85 => "Robust: build, across nearly the whole plausible input range.",
+            <= 0.15 => "Robust: buy, across nearly the whole plausible input range.",
+            _ => $"NOT ROBUST ({pBuild:P0} build). The recommendation flips within the " +
+            $"plausible range of '{dominant}'. Do not present a single " +
+            $"recommendation — either narrow '{dominant}' with a spike first, " +
+            $"or choose on a criterion other than cost."
+    };
 
- return new SensitivityResult(pBuild, dominant, correlations, verdict);
+    return new SensitivityResult(pBuild, dominant, correlations, verdict);
 }
 
 // Triangular distribution: the right default for expert-elicited estimates
 // where you have a low, a likely, and a high but no distributional evidence.
 private static double TriangularSample(Random rng, double lo, double mode, double hi)
 {
- var u = rng.NextDouble;
- var c = (mode - lo) / (hi - lo);
- return u < c
-? lo + Math.Sqrt(u * (hi - lo) * (mode - lo))
-: hi - Math.Sqrt((1 - u) * (hi - lo) * (hi - mode));
+    var u = rng.NextDouble;
+    var c = (mode - lo) / (hi - lo);
+    return u < c
+    ? lo + Math.Sqrt(u * (hi - lo) * (mode - lo))
+    : hi - Math.Sqrt((1 - u) * (hi - lo) * (hi - mode));
 }
 
 private static double PointBiserial(double[] values, bool[] outcomes)
 {
- var g1 = values.Where((_, i) => outcomes[i]).ToArray;
- var g0 = values.Where((_, i) =>!outcomes[i]).ToArray;
- if (g1.Length == 0 || g0.Length == 0) return 0;
+    var g1 = values.Where((_, i) => outcomes[i]).ToArray;
+    var g0 = values.Where((_, i) =>!outcomes[i]).ToArray;
+    if (g1.Length == 0 || g0.Length == 0) return 0;
 
- var n = values.Length;
- var sd = StdDev(values);
- if (sd == 0) return 0;
+    var n = values.Length;
+    var sd = StdDev(values);
+    if (sd == 0) return 0;
 
- return (g1.Average - g0.Average) / sd
- * Math.Sqrt(g1.Length * (double)g0.Length / ((double)n * n));
+    return (g1.Average - g0.Average) / sd
+    * Math.Sqrt(g1.Length * (double)g0.Length / ((double)n * n));
 }
 ```
 
@@ -1336,75 +1274,75 @@ public enum EvaluationOutcome { Unknown = 0, Conformant, NonConformant }
 // "we do not know", never as "this is fine".
 
 public sealed record ConformanceResult(
- PolicyId Policy,
- ServiceRef Service,
- EvaluationOutcome Outcome,
- ExceptionRef? AppliedException,
- DateTimeOffset EvaluatedAt,
- string Explanation,
- bool BlocksMerge);
+    PolicyId Policy,
+        ServiceRef Service,
+        EvaluationOutcome Outcome,
+        ExceptionRef? AppliedException,
+        DateTimeOffset EvaluatedAt,
+        string Explanation,
+        bool BlocksMerge);
 
 public sealed class ConformanceEvaluator(IExceptionRegistry exceptions)
 {
- public ConformanceResult Evaluate(Policy policy, ServiceContext ctx, DateOnly asOf)
- {
- var outcome = policy.Rule.Evaluate(ctx);
+    public ConformanceResult Evaluate(Policy policy, ServiceContext ctx, DateOnly asOf)
+    {
+        var outcome = policy.Rule.Evaluate(ctx);
 
- // Unknown never blocks (we cannot justify blocking on ignorance) and
- // never reports conformant (we cannot justify assurance from ignorance).
- if (outcome == EvaluationOutcome.Unknown)
- return new(policy.Id, ctx.Service, EvaluationOutcome.Unknown, null,
- DateTimeOffset.UtcNow,
- $"Could not evaluate: {ctx.LastEvaluationFailure?? "data unavailable"}. " +
- $"See {policy.SourceDecision}.",
- BlocksMerge: false);
+        // Unknown never blocks (we cannot justify blocking on ignorance) and
+        // never reports conformant (we cannot justify assurance from ignorance).
+        if (outcome == EvaluationOutcome.Unknown)
+            return new(policy.Id, ctx.Service, EvaluationOutcome.Unknown, null,
+            DateTimeOffset.UtcNow,
+                $"Could not evaluate: {ctx.LastEvaluationFailure?? "data unavailable"}. " +
+                $"See {policy.SourceDecision}.",
+                BlocksMerge: false);
 
- if (outcome == EvaluationOutcome.Conformant)
- return new(policy.Id, ctx.Service, outcome, null, DateTimeOffset.UtcNow,
- "Conformant.", BlocksMerge: false);
+        if (outcome == EvaluationOutcome.Conformant)
+            return new(policy.Id, ctx.Service, outcome, null, DateTimeOffset.UtcNow,
+            "Conformant.", BlocksMerge: false);
 
- var exception = exceptions.FindActive(policy.Id, ctx.Service, asOf);
+        var exception = exceptions.FindActive(policy.Id, ctx.Service, asOf);
 
- return new(policy.Id, ctx.Service,
- EvaluationOutcome.NonConformant, // NOT downgraded by the exception
- exception?.Reference,
- DateTimeOffset.UtcNow,
- exception is null
-? $"Fails {policy.Name} (see {policy.SourceDecision}). Fix: {policy.Remediation}. " +
- $"Or request an exception: {policy.ExceptionProcessUrl}"
-: $"Fails {policy.Name}; exception {exception.Reference} active until " +
- $"{exception.ExpiresOn:yyyy-MM-dd}, risk owned by {exception.RiskOwner}.",
- BlocksMerge: exception is null && policy.Severity >= Severity.Blocking);
- }
+        return new(policy.Id, ctx.Service,
+            EvaluationOutcome.NonConformant, // NOT downgraded by the exception
+                exception?.Reference,
+                DateTimeOffset.UtcNow,
+                exception is null
+            ? $"Fails {policy.Name} (see {policy.SourceDecision}). Fix: {policy.Remediation}. " +
+                $"Or request an exception: {policy.ExceptionProcessUrl}"
+            : $"Fails {policy.Name}; exception {exception.Reference} active until " +
+                $"{exception.ExpiresOn:yyyy-MM-dd}, risk owned by {exception.RiskOwner}.",
+                BlocksMerge: exception is null && policy.Severity >= Severity.Blocking);
+    }
 }
 
 public sealed class CompositeRule(IReadOnlyList<IPolicyRule> all): IPolicyRule
 {
- public EvaluationOutcome Evaluate(ServiceContext ctx)
- {
- var sawUnknown = false;
- foreach (var rule in all)
- switch (rule.Evaluate(ctx))
- {
- case EvaluationOutcome.NonConformant: return EvaluationOutcome.NonConformant;
- case EvaluationOutcome.Unknown: sawUnknown = true; break;
- }
- // Unknown poisons the composite — never silently ignored.
- return sawUnknown? EvaluationOutcome.Unknown: EvaluationOutcome.Conformant;
- }
+    public EvaluationOutcome Evaluate(ServiceContext ctx)
+    {
+        var sawUnknown = false;
+        foreach (var rule in all)
+            switch (rule.Evaluate(ctx))
+        {
+            case EvaluationOutcome.NonConformant: return EvaluationOutcome.NonConformant;
+            case EvaluationOutcome.Unknown: sawUnknown = true; break;
+        }
+        // Unknown poisons the composite — never silently ignored.
+        return sawUnknown? EvaluationOutcome.Unknown: EvaluationOutcome.Conformant;
+    }
 }
 
 public sealed record PolicyHealth(PolicyId Policy, int ServicesInScope, int ActiveExceptions)
 {
- public double ExceptionRate => ServicesInScope == 0? 0: (double)ActiveExceptions / ServicesInScope;
+    public double ExceptionRate => ServicesInScope == 0? 0: (double)ActiveExceptions / ServicesInScope;
 
- //: the exception count is a health metric ON THE STANDARD.
- public HealthVerdict Verdict => ExceptionRate switch
- {
- >= 0.40 => HealthVerdict.StandardLikelyWrong, // most teams cannot comply
- >= 0.15 => HealthVerdict.ReviewRecommended, // a cluster of edge cases
- _ => HealthVerdict.Healthy
- };
+    //: the exception count is a health metric ON THE STANDARD.
+    public HealthVerdict Verdict => ExceptionRate switch
+    {
+        >= 0.40 => HealthVerdict.StandardLikelyWrong, // most teams cannot comply
+            >= 0.15 => HealthVerdict.ReviewRecommended, // a cluster of edge cases
+            _ => HealthVerdict.Healthy
+    };
 }
 ```
 

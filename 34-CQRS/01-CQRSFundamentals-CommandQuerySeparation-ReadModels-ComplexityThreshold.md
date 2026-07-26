@@ -517,11 +517,11 @@ sequenceDiagram
 ```csharp
 public class OrderSummaryQueryHandler
 {
- private readonly IDbConnection _connection;
- public async Task<IReadOnlyList<OrderSummary>> Handle(GetOrderSummariesQuery query) =>
- (await _connection.QueryAsync<OrderSummary>(
- "SELECT Id, Symbol, Quantity, Status FROM Orders WHERE ClientId = @ClientId",
- new { query.ClientId })).ToList;
+    private readonly IDbConnection _connection;
+    public async Task<IReadOnlyList<OrderSummary>> Handle(GetOrderSummariesQuery query) =>
+        (await _connection.QueryAsync<OrderSummary>(
+            "SELECT Id, Symbol, Quantity, Status FROM Orders WHERE ClientId = @ClientId",
+                new { query.ClientId })).ToList;
 }
 ```
 **Time complexity:** O(n) in rows returned, driven by the underlying query's own index usage.
@@ -534,18 +534,18 @@ public class OrderSummaryQueryHandler
 ```csharp
 public class OrderBlotterProjector
 {
- public async Task Apply(OrderExecuted evt)
- {
- using var tx = await _readStore.BeginTransactionAsync;
- var alreadyProcessed = await _readStore.ExistsAsync("ProcessedEvents", evt.EventId, tx);
- if (alreadyProcessed) { await tx.CommitAsync; return; } // idempotent no-op
+    public async Task Apply(OrderExecuted evt)
+    {
+        using var tx = await _readStore.BeginTransactionAsync;
+        var alreadyProcessed = await _readStore.ExistsAsync("ProcessedEvents", evt.EventId, tx);
+        if (alreadyProcessed) { await tx.CommitAsync; return; } // idempotent no-op
 
- await _readStore.UpsertAsync("OrderBlotter", evt.OrderId, new {
- evt.OrderId, evt.Symbol, evt.FilledQuantity, evt.Status
- }, tx);
- await _readStore.InsertAsync("ProcessedEvents", new { evt.EventId }, tx);
- await tx.CommitAsync; // atomic: both writes succeed or neither does
- }
+        await _readStore.UpsertAsync("OrderBlotter", evt.OrderId, new {
+                evt.OrderId, evt.Symbol, evt.FilledQuantity, evt.Status
+            }, tx);
+        await _readStore.InsertAsync("ProcessedEvents", new { evt.EventId }, tx);
+        await tx.CommitAsync; // atomic: both writes succeed or neither does
+    }
 }
 ```
 **Time complexity:** O(1) per event, assuming indexed lookups on `EventId` and `OrderId`.
@@ -558,15 +558,15 @@ public class OrderBlotterProjector
 ```csharp
 public class PartitionedProjectorHost: BackgroundService
 {
- // Kafka partition key = OrderId, guaranteeing per-order ordering within a partition
- protected override async Task ExecuteAsync(CancellationToken ct)
- {
- await foreach (var evt in _consumer.ConsumeAsync(ct))
- {
- await _projector.Apply(evt); // sequential within this partition
- await _consumer.CommitAsync(evt);
- }
- }
+    // Kafka partition key = OrderId, guaranteeing per-order ordering within a partition
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        await foreach (var evt in _consumer.ConsumeAsync(ct))
+        {
+            await _projector.Apply(evt); // sequential within this partition
+            await _consumer.CommitAsync(evt);
+        }
+    }
 }
 ```
 **Time complexity:** O(1) per event for routing (Kafka's own partitioner, keyed by `OrderId`).
@@ -579,20 +579,20 @@ public class PartitionedProjectorHost: BackgroundService
 ```csharp
 public class ReadModelReconciliationJob
 {
- public async Task<ReconciliationReport> RunAsync(DateOnly asOf)
- {
- var events = await _eventStore.GetAllEventsUpTo(asOf);
- var rebuiltModel = new InMemoryReadModelBuilder;
- foreach (var evt in events) rebuiltModel.Apply(evt); // full, deterministic replay
+    public async Task<ReconciliationReport> RunAsync(DateOnly asOf)
+    {
+        var events = await _eventStore.GetAllEventsUpTo(asOf);
+        var rebuiltModel = new InMemoryReadModelBuilder;
+        foreach (var evt in events) rebuiltModel.Apply(evt); // full, deterministic replay
 
- var liveSnapshot = await _readStore.SnapshotAsOf(asOf);
- var diffs = rebuiltModel.DiffAgainst(liveSnapshot);
+        var liveSnapshot = await _readStore.SnapshotAsOf(asOf);
+        var diffs = rebuiltModel.DiffAgainst(liveSnapshot);
 
- if (diffs.Any)
- _alerts.RaiseDriftDetected(diffs); // never silently ignore a detected divergence
+        if (diffs.Any)
+            _alerts.RaiseDriftDetected(diffs); // never silently ignore a detected divergence
 
- return new ReconciliationReport(diffs);
- }
+        return new ReconciliationReport(diffs);
+    }
 }
 ```
 **Time complexity:** O(e) where e is the number of events replayed — genuinely expensive for a long-lived system, motivating periodic snapshotting rather than full-history replay every run.

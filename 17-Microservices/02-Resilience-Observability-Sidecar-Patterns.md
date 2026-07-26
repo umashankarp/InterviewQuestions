@@ -179,22 +179,22 @@ var httpClient = new HttpClient { Timeout = TimeSpan.FromMilliseconds(500) };
 ```csharp
 public async Task<HttpResponseMessage> CallWithRetryAsync(Func<Task<HttpResponseMessage>> call)
 {
- var random = new Random;
- for (int attempt = 0; attempt < 3; attempt++)
- {
- try
- {
- var response = await call;
- if (response.IsSuccessStatusCode) return response;
- if (!IsTransient(response.StatusCode)) return response; // NEVER retry non-transient failures
- }
- catch (HttpRequestException) when (attempt < 2) { /* fall through to backoff */ }
+    var random = new Random;
+    for (int attempt = 0; attempt < 3; attempt++)
+    {
+        try
+        {
+            var response = await call;
+            if (response.IsSuccessStatusCode) return response;
+            if (!IsTransient(response.StatusCode)) return response; // NEVER retry non-transient failures
+        }
+        catch (HttpRequestException) when (attempt < 2) { /* fall through to backoff */ }
 
- int baseDelayMs = (int)Math.Pow(2, attempt) * 100; // exponential: 100ms, 200ms, 400ms
- int jitterMs = random.Next(0, baseDelayMs / 2); // jitter: prevents synchronized retry storms
- await Task.Delay(baseDelayMs + jitterMs);
- }
- throw new InvalidOperationException("Retries exhausted");
+        int baseDelayMs = (int)Math.Pow(2, attempt) * 100; // exponential: 100ms, 200ms, 400ms
+        int jitterMs = random.Next(0, baseDelayMs / 2); // jitter: prevents synchronized retry storms
+        await Task.Delay(baseDelayMs + jitterMs);
+    }
+    throw new InvalidOperationException("Retries exhausted");
 }
 ```
 
@@ -202,36 +202,36 @@ public async Task<HttpResponseMessage> CallWithRetryAsync(Func<Task<HttpResponse
 ```csharp
 public class DependencyClient
 {
- private readonly SemaphoreSlim _bulkhead; // DEDICATED pool per dependency -- NOT shared (the root cause, fixed)
- private readonly CircuitBreaker _circuitBreaker;
- private readonly HttpClient _httpClient;
+    private readonly SemaphoreSlim _bulkhead; // DEDICATED pool per dependency -- NOT shared (the root cause, fixed)
+    private readonly CircuitBreaker _circuitBreaker;
+    private readonly HttpClient _httpClient;
 
- public DependencyClient(int maxConcurrentCalls, CircuitBreakerConfig cbConfig)
- {
- _bulkhead = new SemaphoreSlim(maxConcurrentCalls, maxConcurrentCalls); // e.g., Payment: 50; Recommendations: 10
- _circuitBreaker = new CircuitBreaker(cbConfig);
- }
+    public DependencyClient(int maxConcurrentCalls, CircuitBreakerConfig cbConfig)
+    {
+        _bulkhead = new SemaphoreSlim(maxConcurrentCalls, maxConcurrentCalls); // e.g., Payment: 50; Recommendations: 10
+        _circuitBreaker = new CircuitBreaker(cbConfig);
+    }
 
- public async Task<T?> CallAsync<T>(Func<HttpClient, Task<T>> operation, T? fallback = default)
- {
- if (_circuitBreaker.IsOpen) return fallback; // fail fast, no network call, no bulkhead slot consumed
+    public async Task<T?> CallAsync<T>(Func<HttpClient, Task<T>> operation, T? fallback = default)
+    {
+        if (_circuitBreaker.IsOpen) return fallback; // fail fast, no network call, no bulkhead slot consumed
 
- if (!await _bulkhead.WaitAsync(TimeSpan.FromMilliseconds(50)))
- return fallback; // pool exhausted for THIS dependency specifically -- isolated, doesn't affect others
+        if (!await _bulkhead.WaitAsync(TimeSpan.FromMilliseconds(50)))
+            return fallback; // pool exhausted for THIS dependency specifically -- isolated, doesn't affect others
 
- try
- {
- var result = await operation(_httpClient);
- _circuitBreaker.RecordSuccess;
- return result;
- }
- catch (Exception)
- {
- _circuitBreaker.RecordFailure;
- return fallback; // graceful degradation (Advanced Q3) for non-critical dependencies
- }
- finally { _bulkhead.Release; }
- }
+        try
+        {
+            var result = await operation(_httpClient);
+            _circuitBreaker.RecordSuccess;
+            return result;
+        }
+        catch (Exception)
+        {
+            _circuitBreaker.RecordFailure;
+            return fallback; // graceful degradation (Advanced Q3) for non-critical dependencies
+        }
+        finally { _bulkhead.Release; }
+    }
 }
 // Order Service now instantiates SEPARATE DependencyClient instances for Payment and Recommendations
 // each with its OWN bulkhead sizing and circuit breaker -- exactly the fix.
@@ -241,35 +241,35 @@ public class DependencyClient
 ```csharp
 public class CorrelationIdMiddleware
 {
- private readonly RequestDelegate _next;
- private const string HeaderName = "X-Correlation-ID";
+    private readonly RequestDelegate _next;
+    private const string HeaderName = "X-Correlation-ID";
 
- public async Task InvokeAsync(HttpContext context)
- {
- string correlationId = context.Request.Headers.TryGetValue(HeaderName, out var existing)
-? existing.ToString // propagated from an upstream caller -- preserve it
-: Guid.NewGuid.ToString; // this service is the entry point -- generate a new one
+    public async Task InvokeAsync(HttpContext context)
+    {
+        string correlationId = context.Request.Headers.TryGetValue(HeaderName, out var existing)
+        ? existing.ToString // propagated from an upstream caller -- preserve it
+        : Guid.NewGuid.ToString; // this service is the entry point -- generate a new one
 
- context.Items["CorrelationId"] = correlationId;
- using (LogContext.PushProperty("CorrelationId", correlationId)) // every log line in this request now tagged
- {
- await _next(context);
- }
- }
+        context.Items["CorrelationId"] = correlationId;
+        using (LogContext.PushProperty("CorrelationId", correlationId)) // every log line in this request now tagged
+        {
+            await _next(context);
+        }
+    }
 }
 
 public class OutboundCallHandler: DelegatingHandler // attached to every HttpClient used for inter-service calls
 {
- private readonly IHttpContextAccessor _contextAccessor;
+    private readonly IHttpContextAccessor _contextAccessor;
 
- protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
- {
- if (_contextAccessor.HttpContext?.Items["CorrelationId"] is string correlationId)
- {
- request.Headers.Add("X-Correlation-ID", correlationId); // PROPAGATE to the next hop, unconditionally
- }
- return base.SendAsync(request, ct);
- }
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        if (_contextAccessor.HttpContext?.Items["CorrelationId"] is string correlationId)
+        {
+            request.Headers.Add("X-Correlation-ID", correlationId); // PROPAGATE to the next hop, unconditionally
+        }
+        return base.SendAsync(request, ct);
+    }
 }
 ```
 **Discussion**: this pair of middleware/handler is the minimal mechanism implementing the correlation-ID propagation — every service in the chain both reads an inbound correlation ID (preserving it if present) and writes it to every outbound call, ensuring the same ID threads through the entire multi-hop chain regardless of how many services the request ultimately traverses, directly enabling the trace-based diagnosis that would have cut the 40-minute misdiagnosis down to minutes.

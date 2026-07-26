@@ -329,24 +329,24 @@ public sealed record ImageReference(string ServiceName, string Reference);
 
 public static class DigestPinningValidator
 {
- public static IReadOnlyList<string> FindTagOnlyReferences(IReadOnlyList<ImageReference> deployments)
- {
- var violations = new List<string>;
+    public static IReadOnlyList<string> FindTagOnlyReferences(IReadOnlyList<ImageReference> deployments)
+    {
+        var violations = new List<string>;
 
- foreach (var deployment in deployments)
- {
- // A digest-pinned reference contains "@sha256:" -- anything without it
- // is a mutable tag reference, vulnerable to Sec2.1's tag-reuse risk.
- if (!deployment.Reference.Contains("@sha256:"))
- {
- violations.Add(
- $"Service '{deployment.ServiceName}' references '{deployment.Reference}' " +
- "by tag only -- not pinned to an immutable digest.");
- }
- }
+        foreach (var deployment in deployments)
+        {
+            // A digest-pinned reference contains "@sha256:" -- anything without it
+            // is a mutable tag reference, vulnerable to Sec2.1's tag-reuse risk.
+            if (!deployment.Reference.Contains("@sha256:"))
+            {
+                violations.Add(
+                    $"Service '{deployment.ServiceName}' references '{deployment.Reference}' " +
+                        "by tag only -- not pinned to an immutable digest.");
+            }
+        }
 
- return violations;
- }
+        return violations;
+    }
 }
 ```
 **Time complexity:** O(n) where n is the number of deployment entries.
@@ -358,40 +358,40 @@ public static class DigestPinningValidator
 
 ```csharp
 public sealed record ArtifactRetentionContext(
- TimeSpan Age,
- TimeSpan MaxAgeBeforeCleanupEligible,
- bool IsCurrentlyDeployed,
- bool IsDocumentedRollbackCandidate,
- DateTime? RollbackCandidateExpiresOn,
- bool IsSubjectToComplianceRetention,
- DateTime? ComplianceRetentionExpiresOn);
+    TimeSpan Age,
+        TimeSpan MaxAgeBeforeCleanupEligible,
+        bool IsCurrentlyDeployed,
+        bool IsDocumentedRollbackCandidate,
+        DateTime? RollbackCandidateExpiresOn,
+        bool IsSubjectToComplianceRetention,
+        DateTime? ComplianceRetentionExpiresOn);
 
 public static class RetentionPolicyEvaluator
 {
- public static (bool SafeToDelete, string Reason) Evaluate(ArtifactRetentionContext context, DateTime now)
- {
- if (context.Age < context.MaxAgeBeforeCleanupEligible)
- return (false, "Not yet eligible by age.");
+    public static (bool SafeToDelete, string Reason) Evaluate(ArtifactRetentionContext context, DateTime now)
+    {
+        if (context.Age < context.MaxAgeBeforeCleanupEligible)
+            return (false, "Not yet eligible by age.");
 
- if (context.IsCurrentlyDeployed)
- return (false, "Currently deployed -- must never be deleted while active.");
+        if (context.IsCurrentlyDeployed)
+            return (false, "Currently deployed -- must never be deleted while active.");
 
- if (context.IsDocumentedRollbackCandidate)
- {
- // A rollback-candidate designation must carry an explicit expiration
- // (Sec Intermediate Q9) -- an undated designation is treated as still active.
- if (context.RollbackCandidateExpiresOn is null || context.RollbackCandidateExpiresOn > now)
- return (false, "Documented rollback candidate, designation not yet expired.");
- }
+        if (context.IsDocumentedRollbackCandidate)
+        {
+            // A rollback-candidate designation must carry an explicit expiration
+            // (Sec Intermediate Q9) -- an undated designation is treated as still active.
+            if (context.RollbackCandidateExpiresOn is null || context.RollbackCandidateExpiresOn > now)
+                return (false, "Documented rollback candidate, designation not yet expired.");
+        }
 
- if (context.IsSubjectToComplianceRetention)
- {
- if (context.ComplianceRetentionExpiresOn is null || context.ComplianceRetentionExpiresOn > now)
- return (false, "Subject to compliance retention requirement, not yet expired.");
- }
+        if (context.IsSubjectToComplianceRetention)
+        {
+            if (context.ComplianceRetentionExpiresOn is null || context.ComplianceRetentionExpiresOn > now)
+                return (false, "Subject to compliance retention requirement, not yet expired.");
+        }
 
- return (true, "All three constraints cleared -- safe to delete.");
- }
+        return (true, "All three constraints cleared -- safe to delete.");
+    }
 }
 ```
 **Time complexity:** O(1) per artifact evaluated.
@@ -404,42 +404,42 @@ public static class RetentionPolicyEvaluator
 ```csharp
 public sealed class ReproducibilityBisector
 {
- private readonly Func<string, string> _buildAndGetDigest; // commit SHA -> digest
- private readonly Func<string, string> _buildAndGetDigestAgain; // rebuild same commit again -> digest
+    private readonly Func<string, string> _buildAndGetDigest; // commit SHA -> digest
+    private readonly Func<string, string> _buildAndGetDigestAgain; // rebuild same commit again -> digest
 
- public ReproducibilityBisector(
- Func<string, string> buildAndGetDigest,
- Func<string, string> buildAndGetDigestAgain)
- {
- _buildAndGetDigest = buildAndGetDigest;
- _buildAndGetDigestAgain = buildAndGetDigestAgain;
- }
+    public ReproducibilityBisector(
+        Func<string, string> buildAndGetDigest,
+            Func<string, string> buildAndGetDigestAgain)
+    {
+        _buildAndGetDigest = buildAndGetDigest;
+        _buildAndGetDigestAgain = buildAndGetDigestAgain;
+    }
 
- // Returns true if rebuilding this commit twice produces matching digests.
- private bool IsReproducible(string commitSha)
- {
- string firstDigest = _buildAndGetDigest(commitSha);
- string secondDigest = _buildAndGetDigestAgain(commitSha);
- return firstDigest == secondDigest;
- }
+    // Returns true if rebuilding this commit twice produces matching digests.
+    private bool IsReproducible(string commitSha)
+    {
+        string firstDigest = _buildAndGetDigest(commitSha);
+        string secondDigest = _buildAndGetDigestAgain(commitSha);
+        return firstDigest == secondDigest;
+    }
 
- public string FindFirstNonReproducibleCommit(IReadOnlyList<string> orderedCommits)
- {
- // Precondition: orderedCommits[0] is known-good (reproducible)
- // orderedCommits[^1] is known-bad (non-reproducible).
- int low = 0, high = orderedCommits.Count - 1;
+    public string FindFirstNonReproducibleCommit(IReadOnlyList<string> orderedCommits)
+    {
+        // Precondition: orderedCommits[0] is known-good (reproducible)
+        // orderedCommits[^1] is known-bad (non-reproducible).
+        int low = 0, high = orderedCommits.Count - 1;
 
- while (low < high)
- {
- int mid = low + (high - low) / 2;
- if (IsReproducible(orderedCommits[mid]))
- low = mid + 1; // Regression is somewhere after mid.
- else
- high = mid; // mid itself is bad or the regression is at/before mid.
- }
+        while (low < high)
+        {
+            int mid = low + (high - low) / 2;
+            if (IsReproducible(orderedCommits[mid]))
+                low = mid + 1; // Regression is somewhere after mid.
+            else
+                high = mid; // mid itself is bad or the regression is at/before mid.
+        }
 
- return orderedCommits[low]; // The first commit found to be non-reproducible.
- }
+        return orderedCommits[low]; // The first commit found to be non-reproducible.
+    }
 }
 ```
 **Time complexity:** O(log n × build_cost) where n is the number of commits in the bracketed range and build_cost is the (potentially very expensive) cost of a single rebuild-and-diff verification — the logarithmic factor is precisely why bisection is far cheaper than a linear scan across every commit in the range.

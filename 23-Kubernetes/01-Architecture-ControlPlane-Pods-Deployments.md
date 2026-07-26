@@ -209,33 +209,33 @@ kubectl describe nodes | grep -A 5 "Allocatable"
 ```csharp
 public class SimpleReconciler
 {
- private readonly IKubernetesClient _client;
+    private readonly IKubernetesClient _client;
 
- // The generalized pattern EVERY Kubernetes controller implements --
- // observe, compare, act, repeat -- shown explicitly rather than hidden inside
- // a framework, to make the underlying mechanism concrete.
- public async Task ReconcileLoopAsync(CancellationToken ct)
- {
- while (!ct.IsCancellationRequested)
- {
- var desired = await _client.GetDesiredStateAsync("checkout-config");
- var actual = await _client.GetActualStateAsync("checkout-config");
+    // The generalized pattern EVERY Kubernetes controller implements --
+    // observe, compare, act, repeat -- shown explicitly rather than hidden inside
+    // a framework, to make the underlying mechanism concrete.
+    public async Task ReconcileLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            var desired = await _client.GetDesiredStateAsync("checkout-config");
+            var actual = await _client.GetActualStateAsync("checkout-config");
 
- if (!StatesMatch(desired, actual))
- {
- await ConvergeAsync(desired, actual); // take action toward desired state
- }
+            if (!StatesMatch(desired, actual))
+            {
+                await ConvergeAsync(desired, actual); // take action toward desired state
+            }
 
- await Task.Delay(TimeSpan.FromSeconds(10), ct); // repeat, indefinitely
- }
- }
+            await Task.Delay(TimeSpan.FromSeconds(10), ct); // repeat, indefinitely
+        }
+    }
 
- private bool StatesMatch(DesiredState d, ActualState a) => d.Replicas == a.ReadyReplicas;
+    private bool StatesMatch(DesiredState d, ActualState a) => d.Replicas == a.ReadyReplicas;
 
- private Task ConvergeAsync(DesiredState d, ActualState a) =>
- d.Replicas > a.ReadyReplicas
-? _client.ScaleUpAsync("checkout-config", d.Replicas - a.ReadyReplicas)
-: _client.ScaleDownAsync("checkout-config", a.ReadyReplicas - d.Replicas);
+    private Task ConvergeAsync(DesiredState d, ActualState a) =>
+        d.Replicas > a.ReadyReplicas
+    ? _client.ScaleUpAsync("checkout-config", d.Replicas - a.ReadyReplicas)
+    : _client.ScaleDownAsync("checkout-config", a.ReadyReplicas - d.Replicas);
 }
 ```
 

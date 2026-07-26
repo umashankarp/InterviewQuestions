@@ -150,12 +150,12 @@ await _redis.KeyExpireAsync($"conn-heartbeat:{userId}", TimeSpan.FromSeconds(30)
 var location = await _redis.HashGetAsync("connections", recipientUserId);
 if (location.HasValue)
 {
- var (serverId, connectionId) = ParseLocation(location);
- await RouteToServerAsync(serverId, connectionId, message); // via Redis Pub/Sub or Streams
+    var (serverId, connectionId) = ParseLocation(location);
+    await RouteToServerAsync(serverId, connectionId, message); // via Redis Pub/Sub or Streams
 }
 else
 {
- await QueueForOfflineDeliveryAsync(recipientUserId, message); // Streams-based backlog pattern
+    await QueueForOfflineDeliveryAsync(recipientUserId, message); // Streams-based backlog pattern
 }
 ```
 
@@ -163,24 +163,24 @@ else
 ```csharp
 public async Task<Message> SendMessageAsync(string conversationId, string senderId, string content)
 {
- // SEQUENCE ASSIGNMENT IS A PREREQUISITE GATE -- fan-out literally cannot start before this completes
- // directly the structural fix from Advanced Q1 (not just "add a sequence field").
- long sequenceNumber = await _conversationStore.AppendMessageAsync(conversationId, senderId, content);
- // AppendMessageAsync performs a single, serialized write (e.g., an atomic INCREMENT + INSERT
- // within one transaction) -- this is the ONE authoritative ordering decision for this message.
+    // SEQUENCE ASSIGNMENT IS A PREREQUISITE GATE -- fan-out literally cannot start before this completes
+    // directly the structural fix from Advanced Q1 (not just "add a sequence field").
+    long sequenceNumber = await _conversationStore.AppendMessageAsync(conversationId, senderId, content);
+    // AppendMessageAsync performs a single, serialized write (e.g., an atomic INCREMENT + INSERT
+    // within one transaction) -- this is the ONE authoritative ordering decision for this message.
 
- var message = new Message(conversationId, sequenceNumber, senderId, content);
+    var message = new Message(conversationId, sequenceNumber, senderId, content);
 
- await FanOutMessageAsync(message); // only reachable AFTER sequencing -- cannot race ahead of it
- return message;
+    await FanOutMessageAsync(message); // only reachable AFTER sequencing -- cannot race ahead of it
+    return message;
 }
 
 private async Task FanOutMessageAsync(Message message)
 {
- var members = await _conversationStore.GetMembersAsync(message.ConversationId);
- await Task.WhenAll(members.Select(memberId => DeliverToMemberAsync(memberId, message)));
- // Recipients' OWN connection-side logic (not shown) buffers/reorders by sequenceNumber
- // as a second, defense-in-depth layer, per Advanced Q1's full fix.
+    var members = await _conversationStore.GetMembersAsync(message.ConversationId);
+    await Task.WhenAll(members.Select(memberId => DeliverToMemberAsync(memberId, message)));
+    // Recipients' OWN connection-side logic (not shown) buffers/reorders by sequenceNumber
+    // as a second, defense-in-depth layer, per Advanced Q1's full fix.
 }
 ```
 
@@ -188,15 +188,15 @@ private async Task FanOutMessageAsync(Message message)
 ```csharp
 public class ChatMessageDeduplicator
 {
- private readonly HashSet<string> _seenMessageIds = new; // bounded via periodic cleanup, per the discipline
+    private readonly HashSet<string> _seenMessageIds = new; // bounded via periodic cleanup, per the discipline
 
- public bool ShouldDisplay(IncomingMessage message)
- {
- // Client-generated message ID (assigned at SEND time, before the network round-trip) --
- // survives retries: a retried send carries the SAME id, letting the client recognize
- // "I already displayed this" even if the server's at-least-once delivery sends it twice.
- return _seenMessageIds.Add(message.ClientGeneratedId); // HashSet.Add returns false if already present
- }
+    public bool ShouldDisplay(IncomingMessage message)
+    {
+        // Client-generated message ID (assigned at SEND time, before the network round-trip) --
+        // survives retries: a retried send carries the SAME id, letting the client recognize
+        // "I already displayed this" even if the server's at-least-once delivery sends it twice.
+        return _seenMessageIds.Add(message.ClientGeneratedId); // HashSet.Add returns false if already present
+    }
 }
 ```
 **Discussion**: The client-generated ID (not a server-assigned one) is the critical detail — if the ID were assigned only after the message reaches the server, a network failure *during* the original send (before the client receives acknowledgment) would cause the client to retry with what it believes is a "new" send attempt, and the server, having actually received and processed the original attempt already, would have no way to recognize the retry as a duplicate of an already-processed message without the client's own stable, pre-assigned ID to compare against — directly the idempotency-key pattern, essential here for exactly the same "client can't know if its original request succeeded before retrying" reason.

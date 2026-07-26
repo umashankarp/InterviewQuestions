@@ -44,12 +44,12 @@ Under the hood, the entire pipeline is built from `RequestDelegate` (`Func<HttpC
 
 ```csharp
 app.Use(async (context, next) =>
-{
- // ---- code here runs on the way IN ----
- Console.WriteLine("Before");
- await next(context); // invoke the REST of the pipeline
- // ---- code here runs on the way OUT (after everything downstream completes) ----
- Console.WriteLine("After");
+    {
+        // ---- code here runs on the way IN ----
+        Console.WriteLine("Before");
+        await next(context); // invoke the REST of the pipeline
+        // ---- code here runs on the way OUT (after everything downstream completes) ----
+        Console.WriteLine("After");
 });
 ```
 
@@ -339,23 +339,23 @@ sequenceDiagram
 ```csharp
 public class RequestTimingMiddleware
 {
- private readonly RequestDelegate _next;
- private readonly ILogger<RequestTimingMiddleware> _logger;
+    private readonly RequestDelegate _next;
+    private readonly ILogger<RequestTimingMiddleware> _logger;
 
- public RequestTimingMiddleware(RequestDelegate next, ILogger<RequestTimingMiddleware> logger)
- {
- _next = next;
- _logger = logger;
- }
+    public RequestTimingMiddleware(RequestDelegate next, ILogger<RequestTimingMiddleware> logger)
+    {
+        _next = next;
+        _logger = logger;
+    }
 
- public async Task InvokeAsync(HttpContext context)
- {
- var stopwatch = Stopwatch.StartNew;
- await _next(context); // everything downstream runs HERE
- stopwatch.Stop;
- _logger.LogInformation("{Method} {Path} took {ElapsedMs}ms -> {StatusCode}",
- context.Request.Method, context.Request.Path, stopwatch.ElapsedMilliseconds, context.Response.StatusCode);
- }
+    public async Task InvokeAsync(HttpContext context)
+    {
+        var stopwatch = Stopwatch.StartNew;
+        await _next(context); // everything downstream runs HERE
+        stopwatch.Stop;
+        _logger.LogInformation("{Method} {Path} took {ElapsedMs}ms -> {StatusCode}",
+            context.Request.Method, context.Request.Path, stopwatch.ElapsedMilliseconds, context.Response.StatusCode);
+    }
 }
 // Registration: app.UseMiddleware<RequestTimingMiddleware>; -- placed EARLY to time the full downstream pipeline
 ```
@@ -366,26 +366,26 @@ public class RequestTimingMiddleware
 ```csharp
 public class MaintenanceModeMiddleware
 {
- private readonly RequestDelegate _next;
- private readonly IOptionsMonitor<MaintenanceOptions> _options;
+    private readonly RequestDelegate _next;
+    private readonly IOptionsMonitor<MaintenanceOptions> _options;
 
- public MaintenanceModeMiddleware(RequestDelegate next, IOptionsMonitor<MaintenanceOptions> options)
- {
- _next = next;
- _options = options;
- }
+    public MaintenanceModeMiddleware(RequestDelegate next, IOptionsMonitor<MaintenanceOptions> options)
+    {
+        _next = next;
+        _options = options;
+    }
 
- public async Task InvokeAsync(HttpContext context)
- {
- if (_options.CurrentValue.IsEnabled && context.Request.Path!= "/health")
- {
- context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
- context.Response.Headers.RetryAfter = "300";
- await context.Response.WriteAsJsonAsync(new { message = "Service is under maintenance." });
- return; // deliberately NOT calling next -- full short-circuit
- }
- await _next(context);
- }
+    public async Task InvokeAsync(HttpContext context)
+    {
+        if (_options.CurrentValue.IsEnabled && context.Request.Path!= "/health")
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            context.Response.Headers.RetryAfter = "300";
+            await context.Response.WriteAsJsonAsync(new { message = "Service is under maintenance." });
+            return; // deliberately NOT calling next -- full short-circuit
+        }
+        await _next(context);
+    }
 }
 public class MaintenanceOptions { public bool IsEnabled { get; set; } }
 // Registration: app.UseMiddleware<MaintenanceModeMiddleware>; -- registered VERY early
@@ -398,33 +398,33 @@ public class MaintenanceOptions { public bool IsEnabled { get; set; } }
 ```csharp
 public class RequestBodyAuditMiddleware
 {
- private readonly RequestDelegate _next;
- private readonly ILogger<RequestBodyAuditMiddleware> _logger;
+    private readonly RequestDelegate _next;
+    private readonly ILogger<RequestBodyAuditMiddleware> _logger;
 
- public RequestBodyAuditMiddleware(RequestDelegate next, ILogger<RequestBodyAuditMiddleware> logger)
- {
- _next = next;
- _logger = logger;
- }
+    public RequestBodyAuditMiddleware(RequestDelegate next, ILogger<RequestBodyAuditMiddleware> logger)
+    {
+        _next = next;
+        _logger = logger;
+    }
 
- public async Task InvokeAsync(HttpContext context)
- {
- if (HttpMethods.IsPost(context.Request.Method) || HttpMethods.IsPut(context.Request.Method))
- {
- context.Request.EnableBuffering; // allows the stream to be read multiple times
+    public async Task InvokeAsync(HttpContext context)
+    {
+        if (HttpMethods.IsPost(context.Request.Method) || HttpMethods.IsPut(context.Request.Method))
+        {
+            context.Request.EnableBuffering; // allows the stream to be read multiple times
 
- using var reader = new StreamReader(
- context.Request.Body, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
- string body = await reader.ReadToEndAsync;
+            using var reader = new StreamReader(
+                context.Request.Body, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+            string body = await reader.ReadToEndAsync;
 
- _logger.LogInformation("Audit: {Method} {Path} body: {Body}",
- context.Request.Method, context.Request.Path, body);
+            _logger.LogInformation("Audit: {Method} {Path} body: {Body}",
+                context.Request.Method, context.Request.Path, body);
 
- context.Request.Body.Position = 0; // CRITICAL: reset for downstream model binding to read it again
- }
+            context.Request.Body.Position = 0; // CRITICAL: reset for downstream model binding to read it again
+        }
 
- await _next(context);
- }
+        await _next(context);
+    }
 }
 ```
 **Time/Space discussion**: `EnableBuffering` buffers the request body in memory (spilling to a temp file past a configurable threshold, by default) — for endpoints accepting large request bodies, this is a real memory/disk cost added specifically for the audit-logging feature, a deliberate trade-off that should be scoped (e.g., only for specific sensitive endpoints, not globally for every POST/PUT across the entire API) rather than applied blanket-wide without considering the cost, directly connecting to the "pay only for what you need, where you need it" discipline.
@@ -436,46 +436,46 @@ public class RequestBodyAuditMiddleware
 [AttributeUsage(AttributeTargets.Method | AttributeTargets.Class)]
 public class RateLimitAttribute: Attribute
 {
- public int RequestsPerMinute { get; }
- public RateLimitAttribute(int requestsPerMinute) => RequestsPerMinute = requestsPerMinute;
+    public int RequestsPerMinute { get; }
+    public RateLimitAttribute(int requestsPerMinute) => RequestsPerMinute = requestsPerMinute;
 }
 
 public class EndpointRateLimitMiddleware
 {
- private readonly RequestDelegate _next;
- private readonly IDistributedRateLimiter _limiter; // e.g., a Redis-token-bucket implementation
+    private readonly RequestDelegate _next;
+    private readonly IDistributedRateLimiter _limiter; // e.g., a Redis-token-bucket implementation
 
- public EndpointRateLimitMiddleware(RequestDelegate next, IDistributedRateLimiter limiter)
- {
- _next = next;
- _limiter = limiter;
- }
+    public EndpointRateLimitMiddleware(RequestDelegate next, IDistributedRateLimiter limiter)
+    {
+        _next = next;
+        _limiter = limiter;
+    }
 
- public async Task InvokeAsync(HttpContext context)
- {
- var endpoint = context.GetEndpoint; // ONLY populated because this runs AFTER UseRouting
- var rateLimitAttr = endpoint?.Metadata.GetMetadata<RateLimitAttribute>;
+    public async Task InvokeAsync(HttpContext context)
+    {
+        var endpoint = context.GetEndpoint; // ONLY populated because this runs AFTER UseRouting
+        var rateLimitAttr = endpoint?.Metadata.GetMetadata<RateLimitAttribute>;
 
- if (rateLimitAttr is not null)
- {
- // Key by authenticated user if available (requires this middleware to run AFTER
- // UseAuthentication -- see registration note below), falling back to IP otherwise.
- string key = context.User.Identity?.IsAuthenticated == true
-? $"user:{context.User.FindFirstValue(ClaimTypes.NameIdentifier)}:{endpoint!.DisplayName}"
-: $"ip:{context.Connection.RemoteIpAddress}:{endpoint!.DisplayName}";
+        if (rateLimitAttr is not null)
+        {
+            // Key by authenticated user if available (requires this middleware to run AFTER
+            // UseAuthentication -- see registration note below), falling back to IP otherwise.
+            string key = context.User.Identity?.IsAuthenticated == true
+            ? $"user:{context.User.FindFirstValue(ClaimTypes.NameIdentifier)}:{endpoint!.DisplayName}"
+            : $"ip:{context.Connection.RemoteIpAddress}:{endpoint!.DisplayName}";
 
- bool allowed = await _limiter.TryAcquireAsync(key, rateLimitAttr.RequestsPerMinute, TimeSpan.FromMinutes(1));
- if (!allowed)
- {
- context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
- context.Response.Headers.RetryAfter = "60";
- await context.Response.WriteAsJsonAsync(new { error = "Rate limit exceeded for this endpoint." });
- return; // short-circuit
- }
- }
+            bool allowed = await _limiter.TryAcquireAsync(key, rateLimitAttr.RequestsPerMinute, TimeSpan.FromMinutes(1));
+            if (!allowed)
+            {
+                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                context.Response.Headers.RetryAfter = "60";
+                await context.Response.WriteAsJsonAsync(new { error = "Rate limit exceeded for this endpoint." });
+                return; // short-circuit
+            }
+        }
 
- await _next(context);
- }
+        await _next(context);
+    }
 }
 
 // Registration -- ORDER IS LOAD-BEARING, per Advanced Q4/Q8:
@@ -531,40 +531,40 @@ classDiagram
 ```csharp
 public static class MiddlewareExtensions
 {
- public static IApplicationBuilder UseWhenEndpointHasMetadata<TMetadata>(
- this IApplicationBuilder app,
- Action<IApplicationBuilder> configureBranch)
- where TMetadata: class
- {
- // IMPORTANT: this must run AFTER UseRouting for GetEndpoint to be populated --
- // exactly the same ordering constraint as the Expert coding exercise's rate limiter.
- var branchBuilder = app.New; // a fresh, independent builder sharing the same DI container
- configureBranch(branchBuilder);
- var branch = branchBuilder.Build;
+    public static IApplicationBuilder UseWhenEndpointHasMetadata<TMetadata>(
+        this IApplicationBuilder app,
+            Action<IApplicationBuilder> configureBranch)
+    where TMetadata: class
+    {
+        // IMPORTANT: this must run AFTER UseRouting for GetEndpoint to be populated --
+        // exactly the same ordering constraint as the Expert coding exercise's rate limiter.
+        var branchBuilder = app.New; // a fresh, independent builder sharing the same DI container
+        configureBranch(branchBuilder);
+        var branch = branchBuilder.Build;
 
- return app.Use(async (context, next) =>
- {
- var metadata = context.GetEndpoint?.Metadata.GetMetadata<TMetadata>;
- if (metadata is not null)
- {
- await branch(context); // run the branch's pipeline instead
- // NOTE: branch pipelines built this way are typically terminal for this request --
- // if the branch's own middleware doesn't call further into `next`, this request
- // does NOT continue into the ORIGINAL pipeline's remaining middleware either.
- }
- else
- {
- await next(context); // metadata not present -- continue the ORIGINAL pipeline normally
- }
- });
- }
+        return app.Use(async (context, next) =>
+            {
+                var metadata = context.GetEndpoint?.Metadata.GetMetadata<TMetadata>;
+                if (metadata is not null)
+                {
+                    await branch(context); // run the branch's pipeline instead
+                    // NOTE: branch pipelines built this way are typically terminal for this request --
+                    // if the branch's own middleware doesn't call further into `next`, this request
+                    // does NOT continue into the ORIGINAL pipeline's remaining middleware either.
+                }
+                else
+                {
+                    await next(context); // metadata not present -- continue the ORIGINAL pipeline normally
+                }
+        });
+    }
 }
 
 // Usage: apply extra, expensive validation middleware ONLY to endpoints marked with a custom attribute
 app.UseRouting;
 app.UseWhenEndpointHasMetadata<RequiresExtraValidationAttribute>(branch =>
-{
- branch.UseMiddleware<ExpensiveSchemaValidationMiddleware>;
+    {
+        branch.UseMiddleware<ExpensiveSchemaValidationMiddleware>;
 });
 app.UseAuthentication;
 app.UseAuthorization;

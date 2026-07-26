@@ -29,14 +29,14 @@ builder.Services.AddTransient<IEmailSender, SmtpEmailSender>;
 // Consumption (anywhere in the app, via constructor injection):
 public class OrderService
 {
- private readonly IOrderRepository _repository;
- private readonly IEmailSender _emailSender;
+    private readonly IOrderRepository _repository;
+    private readonly IEmailSender _emailSender;
 
- public OrderService(IOrderRepository repository, IEmailSender emailSender)
- {
- _repository = repository; // the container supplied THIS, OrderService never called 'new'
- _emailSender = emailSender;
- }
+    public OrderService(IOrderRepository repository, IEmailSender emailSender)
+    {
+        _repository = repository; // the container supplied THIS, OrderService never called 'new'
+        _emailSender = emailSender;
+    }
 }
 ```
 
@@ -79,22 +79,22 @@ For any component that genuinely needs its own independent `Scoped`-service inst
 ```csharp
 public class OrderProcessingBackgroundService: BackgroundService
 {
- private readonly IServiceScopeFactory _scopeFactory; // Singleton-safe to hold
+    private readonly IServiceScopeFactory _scopeFactory; // Singleton-safe to hold
 
- public OrderProcessingBackgroundService(IServiceScopeFactory scopeFactory) => _scopeFactory = scopeFactory;
+    public OrderProcessingBackgroundService(IServiceScopeFactory scopeFactory) => _scopeFactory = scopeFactory;
 
- protected override async Task ExecuteAsync(CancellationToken stoppingToken)
- {
- while (!stoppingToken.IsCancellationRequested)
- {
- using (var scope = _scopeFactory.CreateScope) // a FRESH scope, per iteration
- {
- var repository = scope.ServiceProvider.GetRequiredService<IOrderRepository>; // Scoped, resolved FRESH here
- await repository.ProcessPendingOrdersAsync(stoppingToken);
- } // scope disposed here -- the Scoped DbContext etc. is correctly torn down
- await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
- }
- }
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            using (var scope = _scopeFactory.CreateScope) // a FRESH scope, per iteration
+            {
+                var repository = scope.ServiceProvider.GetRequiredService<IOrderRepository>; // Scoped, resolved FRESH here
+                await repository.ProcessPendingOrdersAsync(stoppingToken);
+            } // scope disposed here -- the Scoped DbContext etc. is correctly torn down
+            await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
+        }
+    }
 }
 ```
 This is precisely the mechanism that lets a long-lived component (a `Singleton`/`BackgroundService`) safely use short-lived (`Scoped`) dependencies **correctly**, over and over, without ever violating the captive-dependency rule — the key distinction from the anti-pattern is that `IServiceScopeFactory` itself has no state tied to any particular scope; it's a **factory**, safe to be long-lived, that produces fresh scopes on demand.
@@ -341,17 +341,17 @@ services.AddScoped<ICurrentUserContext, HttpCurrentUserContext>;
 
 public class NotificationDispatcher: INotificationDispatcher
 {
- private readonly ICurrentUserContext _userContext; // CAPTIVE DEPENDENCY -- Scoped captured by Singleton
- public NotificationDispatcher(ICurrentUserContext userContext) => _userContext = userContext;
- public void Dispatch(string message) => Console.WriteLine($"[{_userContext.UserId}] {message}");
+    private readonly ICurrentUserContext _userContext; // CAPTIVE DEPENDENCY -- Scoped captured by Singleton
+    public NotificationDispatcher(ICurrentUserContext userContext) => _userContext = userContext;
+    public void Dispatch(string message) => Console.WriteLine($"[{_userContext.UserId}] {message}");
 }
 ```
 **Solution**:
 ```csharp
 public class NotificationDispatcher: INotificationDispatcher
 {
- public void Dispatch(string message, string userId) => Console.WriteLine($"[{userId}] {message}");
- // ICurrentUserContext removed entirely -- caller (who has legitimate per-request access to it) passes userId explicitly
+    public void Dispatch(string message, string userId) => Console.WriteLine($"[{userId}] {message}");
+    // ICurrentUserContext removed entirely -- caller (who has legitimate per-request access to it) passes userId explicitly
 }
 ```
 **Discussion**: The simplest, most robust fix for a captive-dependency bug is frequently not "use `IServiceScopeFactory`" (which is the right tool when the `Singleton` genuinely needs autonomous, self-initiated access to scoped data) but simply **removing the dependency entirely** and having the correctly-`Scoped` calling code pass the needed data explicitly as a parameter — the smallest, least-mechanism-heavy fix is usually best when it's available, reserving `IServiceScopeFactory` for cases where the `Singleton` genuinely needs to *initiate* its own scoped-data access (background timers, the coding exercise below) rather than simply being handed data by an already-scoped caller.
@@ -361,22 +361,22 @@ public class NotificationDispatcher: INotificationDispatcher
 ```csharp
 public class DiContainerValidationTests
 {
- [Fact]
- public void ServiceCollection_Should_Build_Without_Captive_Dependencies
- {
- var builder = WebApplication.CreateBuilder;
- Startup.ConfigureServices(builder.Services, builder.Configuration); // the app's REAL registration logic
+    [Fact]
+    public void ServiceCollection_Should_Build_Without_Captive_Dependencies
+    {
+        var builder = WebApplication.CreateBuilder;
+        Startup.ConfigureServices(builder.Services, builder.Configuration); // the app's REAL registration logic
 
- var provider = builder.Services.BuildServiceProvider(new ServiceProviderOptions
- {
- ValidateScopes = true,
- ValidateOnBuild = true
- });
- // If BuildServiceProvider above didn't throw, no captive dependencies (or other resolution errors)
- // exist anywhere in the ENTIRE registered graph -- this assertion is almost incidental
- // the real check already happened during BuildServiceProvider itself.
- Assert.NotNull(provider);
- }
+        var provider = builder.Services.BuildServiceProvider(new ServiceProviderOptions
+            {
+                ValidateScopes = true,
+                    ValidateOnBuild = true
+        });
+        // If BuildServiceProvider above didn't throw, no captive dependencies (or other resolution errors)
+        // exist anywhere in the ENTIRE registered graph -- this assertion is almost incidental
+        // the real check already happened during BuildServiceProvider itself.
+        Assert.NotNull(provider);
+    }
 }
 ```
 **Discussion**: This test's real value is running in **seconds**, on **every pull request**, catching this entire bug class before merge — dramatically cheaper and faster feedback than discovering it via a staging deployment (as in the incident) or, worse, in production. Note this requires the application's service-registration logic to be **extractable/callable independently** from the full hosting startup sequence (a `Startup.ConfigureServices(IServiceCollection, IConfiguration)` static method, or equivalent, rather than registration logic inextricably tangled into `Program.cs`'s top-level statements) — a good architectural reason, beyond just testability in general, to keep registration logic in a separately-callable method.
@@ -386,40 +386,40 @@ public class DiContainerValidationTests
 ```csharp
 public interface IProductCatalogCache
 {
- IReadOnlyList<Product> GetAll;
+    IReadOnlyList<Product> GetAll;
 }
 
 public sealed class ProductCatalogCache: IProductCatalogCache, IHostedService, IDisposable
 {
- private readonly IServiceScopeFactory _scopeFactory;
- private volatile IReadOnlyList<Product> _products = Array.Empty<Product>; // volatile: safe concurrent read
- private Timer? _timer;
+    private readonly IServiceScopeFactory _scopeFactory;
+    private volatile IReadOnlyList<Product> _products = Array.Empty<Product>; // volatile: safe concurrent read
+    private Timer? _timer;
 
- public ProductCatalogCache(IServiceScopeFactory scopeFactory) => _scopeFactory = scopeFactory;
+    public ProductCatalogCache(IServiceScopeFactory scopeFactory) => _scopeFactory = scopeFactory;
 
- public IReadOnlyList<Product> GetAll => _products; // thread-safe: reading a reference is atomic
+    public IReadOnlyList<Product> GetAll => _products; // thread-safe: reading a reference is atomic
 
- public Task StartAsync(CancellationToken ct)
- {
- _timer = new Timer(_ => RefreshAsync.GetAwaiter.GetResult, null, TimeSpan.Zero, TimeSpan.FromMinutes(5));
- return Task.CompletedTask;
- }
+    public Task StartAsync(CancellationToken ct)
+    {
+        _timer = new Timer(_ => RefreshAsync.GetAwaiter.GetResult, null, TimeSpan.Zero, TimeSpan.FromMinutes(5));
+        return Task.CompletedTask;
+    }
 
- private async Task RefreshAsync
- {
- using var scope = _scopeFactory.CreateScope; // FRESH scope, per refresh cycle -- never captured long-term
- var repository = scope.ServiceProvider.GetRequiredService<IProductRepository>; // Scoped, resolved fresh
- var freshProducts = await repository.GetAllProductsAsync;
- _products = freshProducts; // atomic reference swap -- readers never see a partially-updated list
- }
+    private async Task RefreshAsync
+    {
+        using var scope = _scopeFactory.CreateScope; // FRESH scope, per refresh cycle -- never captured long-term
+        var repository = scope.ServiceProvider.GetRequiredService<IProductRepository>; // Scoped, resolved fresh
+        var freshProducts = await repository.GetAllProductsAsync;
+        _products = freshProducts; // atomic reference swap -- readers never see a partially-updated list
+    }
 
- public Task StopAsync(CancellationToken ct)
- {
- _timer?.Change(Timeout.Infinite, 0);
- return Task.CompletedTask;
- }
+    public Task StopAsync(CancellationToken ct)
+    {
+        _timer?.Change(Timeout.Infinite, 0);
+        return Task.CompletedTask;
+    }
 
- public void Dispose => _timer?.Dispose;
+    public void Dispose => _timer?.Dispose;
 }
 
 // Registration:
@@ -434,46 +434,46 @@ public sealed class ProductCatalogCache: IProductCatalogCache, IHostedService, I
 ```csharp
 public interface IRepository<T> where T: class
 {
- Task<T?> GetByIdAsync(string id);
+    Task<T?> GetByIdAsync(string id);
 }
 
 public sealed class EfRepository<T>: IRepository<T> where T: class
 {
- private readonly DbContext _dbContext;
- public EfRepository(DbContext dbContext) => _dbContext = dbContext;
- public async Task<T?> GetByIdAsync(string id) => await _dbContext.Set<T>.FindAsync(id);
+    private readonly DbContext _dbContext;
+    public EfRepository(DbContext dbContext) => _dbContext = dbContext;
+    public async Task<T?> GetByIdAsync(string id) => await _dbContext.Set<T>.FindAsync(id);
 }
 
 // DECORATOR: wraps an existing IRepository<T> registration, adding caching WITHOUT modifying EfRepository<T> at all.
 public sealed class CachingRepositoryDecorator<T>: IRepository<T> where T: class
 {
- private readonly IRepository<T> _inner; // the DECORATED instance -- injected by name via a keyed/factory registration
- private readonly IMemoryCache _cache;
+    private readonly IRepository<T> _inner; // the DECORATED instance -- injected by name via a keyed/factory registration
+    private readonly IMemoryCache _cache;
 
- public CachingRepositoryDecorator(IRepository<T> inner, IMemoryCache cache)
- {
- _inner = inner;
- _cache = cache;
- }
+    public CachingRepositoryDecorator(IRepository<T> inner, IMemoryCache cache)
+    {
+        _inner = inner;
+        _cache = cache;
+    }
 
- public async Task<T?> GetByIdAsync(string id)
- {
- string cacheKey = $"{typeof(T).Name}:{id}";
- if (_cache.TryGetValue(cacheKey, out T? cached)) return cached;
+    public async Task<T?> GetByIdAsync(string id)
+    {
+        string cacheKey = $"{typeof(T).Name}:{id}";
+        if (_cache.TryGetValue(cacheKey, out T? cached)) return cached;
 
- var result = await _inner.GetByIdAsync(id);
- if (result is not null) _cache.Set(cacheKey, result, TimeSpan.FromMinutes(5));
- return result;
- }
+        var result = await _inner.GetByIdAsync(id);
+        if (result is not null) _cache.Set(cacheKey, result, TimeSpan.FromMinutes(5));
+        return result;
+    }
 }
 
 // Manual decoration registration (what Scrutor's.Decorate<T> automates):
 services.AddScoped(typeof(IRepository<>), sp =>
-{
- // This factory pattern manually constructs the "inner" EfRepository<T> first
- // then wraps it -- since the container has no built-in "decorate an existing
- // registration" primitive without a library like Scrutor.
- throw new NotSupportedException("See discussion: open generics + decoration requires either Scrutor or a non-generic-factory-per-T approach.");
+    {
+        // This factory pattern manually constructs the "inner" EfRepository<T> first
+        // then wraps it -- since the container has no built-in "decorate an existing
+        // registration" primitive without a library like Scrutor.
+        throw new NotSupportedException("See discussion: open generics + decoration requires either Scrutor or a non-generic-factory-per-T approach.");
 });
 ```
 **Discussion points**: This exercise deliberately surfaces a genuine limitation: `Microsoft.Extensions.DependencyInjection`'s built-in container has **no native "decorate an existing open-generic registration" primitive** — achieving true open-generic decoration (working for `IRepository<Order>`, `IRepository<Customer>`, etc. uniformly, without one explicit registration per concrete `T`) in practice requires either the popular third-party **Scrutor** library (`services.Decorate<IRepository<object>>(...)`-style, which uses reflection/assembly-scanning tricks to make this work generically) or falling back to explicit, per-concrete-type registrations (losing the open-generic conciseness). This is an important, honest "here's a real gap in the built-in container" point to raise in an Advanced/Expert interview — demonstrating awareness that `Microsoft.Extensions.DependencyInjection` is a deliberately minimal, "good enough for 90% of cases" container (unlike more feature-rich third-party containers such as Autofac, which natively support decoration, property injection, and more advanced registration modules) rather than presenting it as universally capable of every DI pattern without qualification.
@@ -524,32 +524,32 @@ classDiagram
 // this illustrates the CORE detection logic, not a complete, buildable analyzer).
 public static class CaptiveDependencyDetectionLogic
 {
- public static IEnumerable<string> FindViolations(
- IReadOnlyDictionary<string, ServiceLifetime> registeredLifetimes,
- IReadOnlyDictionary<string, string[]> typeConstructorParameterTypes)
- {
- var violations = new List<string>;
+    public static IEnumerable<string> FindViolations(
+        IReadOnlyDictionary<string, ServiceLifetime> registeredLifetimes,
+            IReadOnlyDictionary<string, string[]> typeConstructorParameterTypes)
+    {
+        var violations = new List<string>;
 
- foreach (var (typeName, lifetime) in registeredLifetimes)
- {
- if (lifetime!= ServiceLifetime.Singleton) continue;
- if (!typeConstructorParameterTypes.TryGetValue(typeName, out var paramTypes)) continue;
+        foreach (var (typeName, lifetime) in registeredLifetimes)
+        {
+            if (lifetime!= ServiceLifetime.Singleton) continue;
+            if (!typeConstructorParameterTypes.TryGetValue(typeName, out var paramTypes)) continue;
 
- foreach (var paramType in paramTypes)
- {
- if (registeredLifetimes.TryGetValue(paramType, out var paramLifetime)
- && paramLifetime is ServiceLifetime.Scoped or ServiceLifetime.Transient)
- {
- // NOTE: Transient is flagged too, IF that Transient type itself
- // (transitively) captures something Scoped -- a fuller analyzer would
- // recurse through the Transient's own dependencies here.
- violations.Add(
- $"{typeName} (Singleton) depends on {paramType} ({paramLifetime}) -- potential captive dependency.");
- }
- }
- }
- return violations;
- }
+            foreach (var paramType in paramTypes)
+            {
+                if (registeredLifetimes.TryGetValue(paramType, out var paramLifetime)
+                    && paramLifetime is ServiceLifetime.Scoped or ServiceLifetime.Transient)
+                {
+                    // NOTE: Transient is flagged too, IF that Transient type itself
+                    // (transitively) captures something Scoped -- a fuller analyzer would
+                    // recurse through the Transient's own dependencies here.
+                    violations.Add(
+                        $"{typeName} (Singleton) depends on {paramType} ({paramLifetime}) -- potential captive dependency.");
+                }
+            }
+        }
+        return violations;
+    }
 }
 ```
 

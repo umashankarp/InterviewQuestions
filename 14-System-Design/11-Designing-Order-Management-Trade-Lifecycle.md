@@ -472,20 +472,20 @@ The fix: composite deduplication key of `(VenueId, SessionId, ExecID)`, restorin
 ```csharp
 public async Task ApplyFillAsync(ExecutionReport report)
 {
- await using var tx = await _db.BeginTransactionAsync;
+    await using var tx = await _db.BeginTransactionAsync;
 
- var key = new ExecutionKey(report.VenueId, report.SessionId, report.ExecId); // the composite scope
- if (!await _executions.TryRecordAsync(key, tx)) // unique constraint; false = already applied
- {
- await tx.CommitAsync;
- return; // idempotent no-op
- }
+    var key = new ExecutionKey(report.VenueId, report.SessionId, report.ExecId); // the composite scope
+    if (!await _executions.TryRecordAsync(key, tx)) // unique constraint; false = already applied
+    {
+        await tx.CommitAsync;
+        return; // idempotent no-op
+    }
 
- var order = await _orders.LoadAsync(report.ClOrdId, tx);
- order.ApplyFill(report.LastQty, report.LastPx, report.ExecId);
- await _orders.AppendEventsAsync(order, tx);
+    var order = await _orders.LoadAsync(report.ClOrdId, tx);
+    order.ApplyFill(report.LastQty, report.LastPx, report.ExecId);
+    await _orders.AppendEventsAsync(order, tx);
 
- await tx.CommitAsync; // dedup record + fill commit atomically
+    await tx.CommitAsync; // dedup record + fill commit atomically
 }
 ```
 **Time complexity:** O(1) with a unique index on the composite key.
@@ -498,26 +498,26 @@ public async Task ApplyFillAsync(ExecutionReport report)
 ```csharp
 public IReadOnlyList<Allocation> Allocate(long filledQty, IReadOnlyList<AccountTarget> targets)
 {
- var totalTarget = targets.Sum(t => t.TargetQty);
- var provisional = targets
-.Select(t => {
- var exact = (decimal)filledQty * t.TargetQty / totalTarget;
- var floor = (long)Math.Floor(exact);
- return new { t.AccountId, Floor = floor, Remainder = exact - floor };
- })
-.ToList;
+    var totalTarget = targets.Sum(t => t.TargetQty);
+    var provisional = targets
+    .Select(t => {
+            var exact = (decimal)filledQty * t.TargetQty / totalTarget;
+            var floor = (long)Math.Floor(exact);
+            return new { t.AccountId, Floor = floor, Remainder = exact - floor };
+    })
+    .ToList;
 
- var allocated = provisional.Sum(p => p.Floor);
- var leftover = filledQty - allocated;
+    var allocated = provisional.Sum(p => p.Floor);
+    var leftover = filledQty - allocated;
 
- var ranked = provisional
-.OrderByDescending(p => p.Remainder)
-.ThenBy(p => p.AccountId, StringComparer.Ordinal) // deterministic tie-break
-.ToList;
+    var ranked = provisional
+    .OrderByDescending(p => p.Remainder)
+    .ThenBy(p => p.AccountId, StringComparer.Ordinal) // deterministic tie-break
+    .ToList;
 
- return ranked
-.Select((p, i) => new Allocation(p.AccountId, p.Floor + (i < leftover? 1: 0)))
-.ToList; // sums to filledQty by construction
+    return ranked
+    .Select((p, i) => new Allocation(p.AccountId, p.Floor + (i < leftover? 1: 0)))
+    .ToList; // sums to filledQty by construction
 }
 ```
 **Time complexity:** O(n log n) for n accounts.
@@ -530,24 +530,24 @@ public IReadOnlyList<Allocation> Allocate(long filledQty, IReadOnlyList<AccountT
 ```csharp
 public sealed class Order
 {
- private static readonly Dictionary<OrderState, OrderState[]> Allowed = new
- {
- [OrderState.PendingNew] = [OrderState.Working, OrderState.Rejected],
- [OrderState.Working] = [OrderState.PartiallyFilled, OrderState.Filled,
- OrderState.PendingCancel, OrderState.Expired],
- [OrderState.PartiallyFilled]= [OrderState.PartiallyFilled, OrderState.Filled,
- OrderState.PendingCancel],
- [OrderState.PendingCancel] = [OrderState.Cancelled, OrderState.Filled, // fill can still land
- OrderState.PartiallyFilled],
- [OrderState.Filled] = [OrderState.Busted], //: not terminal
- };
+    private static readonly Dictionary<OrderState, OrderState[]> Allowed = new
+    {
+        [OrderState.PendingNew] = [OrderState.Working, OrderState.Rejected],
+            [OrderState.Working] = [OrderState.PartiallyFilled, OrderState.Filled,
+            OrderState.PendingCancel, OrderState.Expired],
+        [OrderState.PartiallyFilled]= [OrderState.PartiallyFilled, OrderState.Filled,
+            OrderState.PendingCancel],
+        [OrderState.PendingCancel] = [OrderState.Cancelled, OrderState.Filled, // fill can still land
+            OrderState.PartiallyFilled],
+        [OrderState.Filled] = [OrderState.Busted], //: not terminal
+        };
 
- public void Transition(OrderState target, ExecutionReport cause)
- {
- if (!Allowed.TryGetValue(State, out var permitted) ||!permitted.Contains(target))
- throw new InvalidOrderTransitionException(State, target, cause.ExecId);
- Raise(new OrderStateChanged(Id, State, target, cause.ExecId, cause.VenueTimestamp));
- }
+    public void Transition(OrderState target, ExecutionReport cause)
+    {
+        if (!Allowed.TryGetValue(State, out var permitted) ||!permitted.Contains(target))
+            throw new InvalidOrderTransitionException(State, target, cause.ExecId);
+        Raise(new OrderStateChanged(Id, State, target, cause.ExecId, cause.VenueTimestamp));
+    }
 }
 ```
 **Time complexity:** O(k) for k permitted transitions per state — effectively O(1).
@@ -560,22 +560,22 @@ public sealed class Order
 ```csharp
 public async Task<ReconciliationReport> ReconcileAsync(VenueId venue, DateOnly session)
 {
- var ours = (await _oms.ExecutionsAsync(venue, session)).ToDictionary(e => e.ExecId);
- var theirs = (await _venueFiles.LoadTradeFileAsync(venue, session)).ToDictionary(e => e.ExecId);
+    var ours = (await _oms.ExecutionsAsync(venue, session)).ToDictionary(e => e.ExecId);
+    var theirs = (await _venueFiles.LoadTradeFileAsync(venue, session)).ToDictionary(e => e.ExecId);
 
- var breaks = new List<Break>;
+    var breaks = new List<Break>;
 
- foreach (var (execId, theirExec) in theirs)
- if (!ours.TryGetValue(execId, out var ourExec))
- breaks.Add(Break.MissingInOms(execId, theirExec)); // MOST URGENT: unknown position
- else if (ourExec.Qty!= theirExec.Qty || ourExec.Px!= theirExec.Px)
- breaks.Add(Break.Mismatch(execId, ourExec, theirExec));
+    foreach (var (execId, theirExec) in theirs)
+        if (!ours.TryGetValue(execId, out var ourExec))
+        breaks.Add(Break.MissingInOms(execId, theirExec)); // MOST URGENT: unknown position
+    else if (ourExec.Qty!= theirExec.Qty || ourExec.Px!= theirExec.Px)
+        breaks.Add(Break.Mismatch(execId, ourExec, theirExec));
 
- foreach (var (execId, ourExec) in ours)
- if (!theirs.ContainsKey(execId))
- breaks.Add(Break.MissingAtVenue(execId, ourExec)); // possible duplicate we sent
+    foreach (var (execId, ourExec) in ours)
+        if (!theirs.ContainsKey(execId))
+        breaks.Add(Break.MissingAtVenue(execId, ourExec)); // possible duplicate we sent
 
- return new ReconciliationReport(venue, session, breaks);
+    return new ReconciliationReport(venue, session, breaks);
 }
 ```
 **Time complexity:** O(n + m) for n our-side and m venue-side executions.

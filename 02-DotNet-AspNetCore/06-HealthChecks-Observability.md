@@ -193,35 +193,35 @@ graph LR
 ```csharp
 public class DatabaseHealthCheck: IHealthCheck
 {
- private readonly AppDbContext _db;
- public DatabaseHealthCheck(AppDbContext db) => _db = db;
+    private readonly AppDbContext _db;
+    public DatabaseHealthCheck(AppDbContext db) => _db = db;
 
- public async Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context, CancellationToken ct)
- {
- using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
- cts.CancelAfter(TimeSpan.FromSeconds(2)); // never let a slow check itself become the problem
- try
- {
- await _db.Database.CanConnectAsync(cts.Token);
- return HealthCheckResult.Healthy;
- }
- catch (OperationCanceledException)
- {
- return HealthCheckResult.Unhealthy("Database connectivity check timed out.");
- }
- }
+    public async Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context, CancellationToken ct)
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(2)); // never let a slow check itself become the problem
+        try
+        {
+            await _db.Database.CanConnectAsync(cts.Token);
+            return HealthCheckResult.Healthy;
+        }
+        catch (OperationCanceledException)
+        {
+            return HealthCheckResult.Unhealthy("Database connectivity check timed out.");
+        }
+    }
 }
 ```
 
 ### Medium — Separate live/ready endpoints
 ```csharp
 app.MapHealthChecks("/health/live", new HealthCheckOptions
-{
- Predicate = check => check.Tags.Contains("live") // only the trivial self-check
+    {
+        Predicate = check => check.Tags.Contains("live") // only the trivial self-check
 });
 app.MapHealthChecks("/health/ready", new HealthCheckOptions
-{
- Predicate = check => check.Tags.Contains("ready") // database, cache, downstream deps
+    {
+        Predicate = check => check.Tags.Contains("ready") // database, cache, downstream deps
 });
 ```
 
@@ -229,27 +229,27 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 ```csharp
 public class RecommendationCacheHealthCheck: IHealthCheck
 {
- public async Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context, CancellationToken ct)
- {
- try
- {
- await PingCacheAsync(ct);
- return HealthCheckResult.Healthy;
- }
- catch
- {
- return HealthCheckResult.Degraded("Recommendation cache unavailable; serving without recommendations.");
- }
- }
+    public async Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context, CancellationToken ct)
+    {
+        try
+        {
+            await PingCacheAsync(ct);
+            return HealthCheckResult.Healthy;
+        }
+        catch
+        {
+            return HealthCheckResult.Degraded("Recommendation cache unavailable; serving without recommendations.");
+        }
+    }
 }
 
 app.MapHealthChecks("/health/ready", new HealthCheckOptions
-{
- Predicate = c => c.Tags.Contains("ready"),
- ResultStatusCodes =
- {
- [HealthStatus.Degraded] = StatusCodes.Status200OK // keep serving traffic; body still reports "Degraded"
- }
+    {
+        Predicate = c => c.Tags.Contains("ready"),
+            ResultStatusCodes =
+        {
+            [HealthStatus.Degraded] = StatusCodes.Status200OK // keep serving traffic; body still reports "Degraded"
+        }
 });
 ```
 **Discussion**: The explicit `ResultStatusCodes` mapping is the key mechanism — without it, `HealthCheckResult.Degraded` still defaults to a non-200 status by the built-in writer in some configurations, which would incorrectly pull the replica from rotation over a genuinely non-critical dependency.
@@ -258,31 +258,31 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 ```csharp
 public class InstrumentedApiClient
 {
- private static readonly ActivitySource _activitySource = new("MyApp.ApiClient");
- private static readonly Meter _meter = new("MyApp.ApiClient");
- private static readonly Histogram<double> _callDuration = _meter.CreateHistogram<double>("api_client.call.duration_ms");
+    private static readonly ActivitySource _activitySource = new("MyApp.ApiClient");
+    private static readonly Meter _meter = new("MyApp.ApiClient");
+    private static readonly Histogram<double> _callDuration = _meter.CreateHistogram<double>("api_client.call.duration_ms");
 
- private readonly HttpClient _httpClient;
- public InstrumentedApiClient(HttpClient httpClient) => _httpClient = httpClient;
+    private readonly HttpClient _httpClient;
+    public InstrumentedApiClient(HttpClient httpClient) => _httpClient = httpClient;
 
- public async Task<HttpResponseMessage> GetAsync(string path, CancellationToken ct)
- {
- using var activity = _activitySource.StartActivity("ApiClient.Get", ActivityKind.Client);
- activity?.SetTag("http.path", path);
+    public async Task<HttpResponseMessage> GetAsync(string path, CancellationToken ct)
+    {
+        using var activity = _activitySource.StartActivity("ApiClient.Get", ActivityKind.Client);
+        activity?.SetTag("http.path", path);
 
- var sw = Stopwatch.StartNew;
- try
- {
- var response = await _httpClient.GetAsync(path, ct); // traceparent header propagated automatically
- // by HttpClient's built-in DiagnosticsHandler
- activity?.SetTag("http.status_code", (int)response.StatusCode);
- return response;
- }
- finally
- {
- _callDuration.Record(sw.Elapsed.TotalMilliseconds, new KeyValuePair<string, object?>("path", path));
- }
- }
+        var sw = Stopwatch.StartNew;
+        try
+        {
+            var response = await _httpClient.GetAsync(path, ct); // traceparent header propagated automatically
+            // by HttpClient's built-in DiagnosticsHandler
+            activity?.SetTag("http.status_code", (int)response.StatusCode);
+            return response;
+        }
+        finally
+        {
+            _callDuration.Record(sw.Elapsed.TotalMilliseconds, new KeyValuePair<string, object?>("path", path));
+        }
+    }
 }
 ```
 **Discussion**: Modern `HttpClient` already propagates `traceparent` automatically via its built-in diagnostics handler as long as `Activity.Current` is set when the call is made — the explicit `StartActivity` here creates the **client-side span** itself (giving it a name/tags), not the propagation mechanism, which happens transparently underneath.

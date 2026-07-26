@@ -21,12 +21,12 @@ Any codebase with genuine construction complexity or structural composition need
 public interface IPaymentGatewayFactory { IPaymentGateway Create(string region); }
 public class PaymentGatewayFactory: IPaymentGatewayFactory
 {
- public IPaymentGateway Create(string region) => region switch
- {
- "US" => new StripeGateway,
- "EU" => new AdyenGateway,
- _ => throw new NotSupportedException
- };
+    public IPaymentGateway Create(string region) => region switch
+    {
+        "US" => new StripeGateway,
+            "EU" => new AdyenGateway,
+            _ => throw new NotSupportedException
+    };
 }
 ```
 
@@ -131,24 +131,24 @@ classDiagram
 2. **Q: Design an Abstract Factory for a multi-cloud deployment strategy needing to produce a consistent family of cloud-provider-specific clients (storage, queue, compute) for whichever provider a given deployment targets.**
  **A:**
  ```csharp
- public interface ICloudProviderFactory
- {
- IBlobStorage CreateBlobStorage;
- IMessageQueue CreateMessageQueue;
- ICompute CreateCompute;
- }
- public class AwsProviderFactory: ICloudProviderFactory
- {
- public IBlobStorage CreateBlobStorage => new S3Storage;
- public IMessageQueue CreateMessageQueue => new SqsQueue;
- public ICompute CreateCompute => new Ec2Compute;
- }
- public class AzureProviderFactory: ICloudProviderFactory
- {
- public IBlobStorage CreateBlobStorage => new BlobStorageAdapter;
- public IMessageQueue CreateMessageQueue => new ServiceBusQueue;
- public ICompute CreateCompute => new VirtualMachineCompute;
- }
+public interface ICloudProviderFactory
+{
+    IBlobStorage CreateBlobStorage;
+    IMessageQueue CreateMessageQueue;
+    ICompute CreateCompute;
+}
+public class AwsProviderFactory: ICloudProviderFactory
+{
+    public IBlobStorage CreateBlobStorage => new S3Storage;
+    public IMessageQueue CreateMessageQueue => new SqsQueue;
+    public ICompute CreateCompute => new Ec2Compute;
+}
+public class AzureProviderFactory: ICloudProviderFactory
+{
+    public IBlobStorage CreateBlobStorage => new BlobStorageAdapter;
+    public IMessageQueue CreateMessageQueue => new ServiceBusQueue;
+    public ICompute CreateCompute => new VirtualMachineCompute;
+}
  ```
  The family-consistency guarantee here is structural: resolving `ICloudProviderFactory` once (via DI, based on deployment configuration) and using it to construct all three dependent services guarantees they're all from the **same** provider — preventing an accidental, inconsistent mix (an AWS storage client paired with an Azure queue client) that independent Factory Methods for each service, chosen separately, could not structurally prevent.
 3. **Q: Explain why a Builder pattern's fluent interface, if not carefully designed, can itself violate the Open/Closed Principle when new optional parameters are added over time.**
@@ -158,12 +158,12 @@ classDiagram
 5. **Q: Design a virtual proxy for a very expensive-to-construct reporting-data object, and explain how it interacts with the captive-dependency concerns.**
  **A:**
  ```csharp
- public class LazyReportDataProxy: IReportData
- {
- private readonly Lazy<IReportData> _lazyInner;
- public LazyReportDataProxy(Func<IReportData> factory) => _lazyInner = new Lazy<IReportData>(factory);
- public ReportSummary GetSummary => _lazyInner.Value.GetSummary; // construction deferred until FIRST actual use
- }
+public class LazyReportDataProxy: IReportData
+{
+    private readonly Lazy<IReportData> _lazyInner;
+    public LazyReportDataProxy(Func<IReportData> factory) => _lazyInner = new Lazy<IReportData>(factory);
+    public ReportSummary GetSummary => _lazyInner.Value.GetSummary; // construction deferred until FIRST actual use
+}
  ```
  If `factory` itself resolves a `Scoped` dependency (e.g., a `DbContext`-backed report builder), this proxy must itself be `Scoped` (not `Singleton`) to avoid exactly the captive-dependency violation — a virtual proxy's deferred-construction benefit doesn't exempt it from the same DI-lifetime rules governing whatever it ultimately constructs; the proxy's own lifetime must still correctly match its wrapped dependency's actual lifetime requirements.
 6. **Q: Explain a scenario where using Adapter to wrap a legacy system creates a long-term architectural liability if not deliberately time-boxed.**
@@ -186,12 +186,12 @@ classDiagram
 public interface IPaymentGatewayFactory { IPaymentGateway Create(string region); }
 public class PaymentGatewayFactory: IPaymentGatewayFactory
 {
- public IPaymentGateway Create(string region) => region switch
- {
- "US" => new StripeGateway,
- "EU" => new AdyenGateway,
- _ => throw new NotSupportedException($"No gateway configured for region {region}")
- };
+    public IPaymentGateway Create(string region) => region switch
+    {
+        "US" => new StripeGateway,
+            "EU" => new AdyenGateway,
+            _ => throw new NotSupportedException($"No gateway configured for region {region}")
+    };
 }
 ```
 
@@ -199,22 +199,22 @@ public class PaymentGatewayFactory: IPaymentGatewayFactory
 ```csharp
 public class ReportBuilder
 {
- private readonly List<string> _columns = new;
- private DateRange? _dateRange;
- private string? _groupBy;
+    private readonly List<string> _columns = new;
+    private DateRange? _dateRange;
+    private string? _groupBy;
 
- public ReportBuilder WithColumns(params string[] columns) { _columns.AddRange(columns); return this; }
- public ReportBuilder WithDateRange(DateTime from, DateTime to) { _dateRange = new DateRange(from, to); return this; }
- public ReportBuilder GroupBy(string column) { _groupBy = column; return this; }
+    public ReportBuilder WithColumns(params string[] columns) { _columns.AddRange(columns); return this; }
+    public ReportBuilder WithDateRange(DateTime from, DateTime to) { _dateRange = new DateRange(from, to); return this; }
+    public ReportBuilder GroupBy(string column) { _groupBy = column; return this; }
 
- public Report Build
- {
- if (_columns.Count == 0) throw new InvalidOperationException("At least one column is required.");
- if (_dateRange is null) throw new InvalidOperationException("A date range is required.");
- if (_groupBy is not null &&!_columns.Contains(_groupBy))
- throw new InvalidOperationException("GroupBy column must be one of the selected columns."); // cross-field validation
- return new Report(_columns, _dateRange, _groupBy);
- }
+    public Report Build
+    {
+        if (_columns.Count == 0) throw new InvalidOperationException("At least one column is required.");
+        if (_dateRange is null) throw new InvalidOperationException("A date range is required.");
+        if (_groupBy is not null &&!_columns.Contains(_groupBy))
+            throw new InvalidOperationException("GroupBy column must be one of the selected columns."); // cross-field validation
+        return new Report(_columns, _dateRange, _groupBy);
+    }
 }
 ```
 
@@ -222,37 +222,37 @@ public class ReportBuilder
 ```csharp
 public class RetryDecorator<TService> where TService: class
 {
- // Illustrative -- a genuinely generic retry decorator requires dynamic proxy generation
- // (e.g., via Castle DynamicProxy or a source generator) to implement TService generically
- // shown here in its concrete, interface-specific form for clarity:
+    // Illustrative -- a genuinely generic retry decorator requires dynamic proxy generation
+    // (e.g., via Castle DynamicProxy or a source generator) to implement TService generically
+    // shown here in its concrete, interface-specific form for clarity:
 }
 
 public class RetryGatewayDecorator: IPaymentGateway
 {
- private readonly IPaymentGateway _inner;
- public RetryGatewayDecorator(IPaymentGateway inner) => _inner = inner;
+    private readonly IPaymentGateway _inner;
+    public RetryGatewayDecorator(IPaymentGateway inner) => _inner = inner;
 
- public async Task<bool> ChargeAsync(decimal amount)
- {
- for (int attempt = 1;; attempt++)
- {
- try { return await _inner.ChargeAsync(amount); }
- catch (TransientGatewayException) when (attempt < 3)
- {
- await Task.Delay(TimeSpan.FromMilliseconds(100 * attempt));
- }
- }
- }
+    public async Task<bool> ChargeAsync(decimal amount)
+    {
+        for (int attempt = 1;; attempt++)
+        {
+            try { return await _inner.ChargeAsync(amount); }
+            catch (TransientGatewayException) when (attempt < 3)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(100 * attempt));
+            }
+        }
+    }
 }
 
 public class CachingGatewayDecorator: IPaymentGateway
 {
- private readonly IPaymentGateway _inner;
- private readonly IMemoryCache _cache;
- public CachingGatewayDecorator(IPaymentGateway inner, IMemoryCache cache) { _inner = inner; _cache = cache; }
+    private readonly IPaymentGateway _inner;
+    private readonly IMemoryCache _cache;
+    public CachingGatewayDecorator(IPaymentGateway inner, IMemoryCache cache) { _inner = inner; _cache = cache; }
 
- public Task<bool> ChargeAsync(decimal amount) => _inner.ChargeAsync(amount); // caching N/A for charges (non-idempotent!) --
- // shown here only to illustrate composition structure
+    public Task<bool> ChargeAsync(decimal amount) => _inner.ChargeAsync(amount); // caching N/A for charges (non-idempotent!) --
+    // shown here only to illustrate composition structure
 
 }
 // Composition order matters (Advanced Q7): Retry MUST wrap the innermost real gateway call
@@ -264,23 +264,23 @@ public class CachingGatewayDecorator: IPaymentGateway
 ```csharp
 public class AuthorizingOrderRepositoryProxy: IOrderRepository
 {
- private readonly IOrderRepository _inner;
- private readonly IAuthorizationService _authService;
- private readonly ClaimsPrincipal _currentUser;
+    private readonly IOrderRepository _inner;
+    private readonly IAuthorizationService _authService;
+    private readonly ClaimsPrincipal _currentUser;
 
- public AuthorizingOrderRepositoryProxy(IOrderRepository inner, IAuthorizationService authService, ClaimsPrincipal currentUser)
- {
- _inner = inner; _authService = authService; _currentUser = currentUser;
- }
+    public AuthorizingOrderRepositoryProxy(IOrderRepository inner, IAuthorizationService authService, ClaimsPrincipal currentUser)
+    {
+        _inner = inner; _authService = authService; _currentUser = currentUser;
+    }
 
- public async Task<Order?> GetByIdAsync(string id)
- {
- var order = await _inner.GetByIdAsync(id);
- if (order is null) return null;
+    public async Task<Order?> GetByIdAsync(string id)
+    {
+        var order = await _inner.GetByIdAsync(id);
+        if (order is null) return null;
 
- var authResult = await _authService.AuthorizeAsync(_currentUser, order, "OrderAccess");
- return authResult.Succeeded? order: null; // caller sees "not found," never distinguishing unauthorized
- }
+        var authResult = await _authService.AuthorizeAsync(_currentUser, order, "OrderAccess");
+        return authResult.Succeeded? order: null; // caller sees "not found," never distinguishing unauthorized
+    }
 }
 // Callers depend on IOrderRepository as normal -- COMPLETELY UNAWARE that authorization
 // enforcement is happening transparently via this proxy, wired in at the DI registration point.

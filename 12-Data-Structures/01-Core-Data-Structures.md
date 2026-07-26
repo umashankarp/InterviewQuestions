@@ -115,40 +115,40 @@ graph TB
 4. **Q: Explain how you would implement an LRU (Least Recently Used) cache combining a `Dictionary` and a `LinkedList`, and analyze its complexity.**
  **A:**
  ```csharp
- public class LruCache<TKey, TValue> where TKey: notnull
- {
- private readonly int _capacity;
- private readonly Dictionary<TKey, LinkedListNode<(TKey Key, TValue Value)>> _map = new;
- private readonly LinkedList<(TKey Key, TValue Value)> _order = new;
+public class LruCache<TKey, TValue> where TKey: notnull
+{
+    private readonly int _capacity;
+    private readonly Dictionary<TKey, LinkedListNode<(TKey Key, TValue Value)>> _map = new;
+    private readonly LinkedList<(TKey Key, TValue Value)> _order = new;
 
- public LruCache(int capacity) => _capacity = capacity;
+    public LruCache(int capacity) => _capacity = capacity;
 
- public bool TryGet(TKey key, out TValue value)
- {
- if (_map.TryGetValue(key, out var node))
- {
- _order.Remove(node);
- _order.AddFirst(node); // O(1) -- node reference already in hand, no search needed
- value = node.Value.Value;
- return true;
- }
- value = default!;
- return false;
- }
+    public bool TryGet(TKey key, out TValue value)
+    {
+        if (_map.TryGetValue(key, out var node))
+        {
+            _order.Remove(node);
+            _order.AddFirst(node); // O(1) -- node reference already in hand, no search needed
+            value = node.Value.Value;
+            return true;
+        }
+        value = default!;
+        return false;
+    }
 
- public void Put(TKey key, TValue value)
- {
- if (_map.TryGetValue(key, out var existing)) _order.Remove(existing);
- else if (_map.Count >= _capacity)
- {
- var lru = _order.Last!;
- _map.Remove(lru.Value.Key);
- _order.RemoveLast;
- }
- var node = _order.AddFirst((key, value));
- _map[key] = node;
- }
- }
+    public void Put(TKey key, TValue value)
+    {
+        if (_map.TryGetValue(key, out var existing)) _order.Remove(existing);
+        else if (_map.Count >= _capacity)
+        {
+            var lru = _order.Last!;
+            _map.Remove(lru.Value.Key);
+            _order.RemoveLast;
+        }
+        var node = _order.AddFirst((key, value));
+        _map[key] = node;
+    }
+}
  ```
  Both `TryGet` and `Put` are O(1) — the `Dictionary` provides O(1) key-to-node lookup, and the `LinkedList` provides O(1) reordering/removal **given** the node reference the dictionary just supplied, exactly the condition from Advanced Q3 that makes `LinkedList<T>` genuinely the right tool here, not a reflexive choice.
 5. **Q: Explain why choosing `SortedDictionary<K,V>` over `Dictionary<K,V>` has a real, quantifiable performance cost, and when that cost is justified.**
@@ -174,9 +174,9 @@ graph TB
 private readonly List<string> _processedIds = new;
 public bool TryProcess(string webhookId)
 {
- if (_processedIds.Contains(webhookId)) return false; // O(n) linear scan
- _processedIds.Add(webhookId);
- return true;
+    if (_processedIds.Contains(webhookId)) return false; // O(n) linear scan
+    _processedIds.Add(webhookId);
+    return true;
 }
 
 // AFTER: O(1) average-case
@@ -188,38 +188,38 @@ public bool TryProcess(string webhookId) => _processedIds.Add(webhookId); // Add
 ```csharp
 public class MinHeap<T> where T: IComparable<T>
 {
- private readonly List<T> _items = new;
+    private readonly List<T> _items = new;
 
- public void Push(T item)
- {
- _items.Add(item);
- int i = _items.Count - 1;
- while (i > 0)
- {
- int parent = (i - 1) / 2;
- if (_items[parent].CompareTo(_items[i]) <= 0) break;
- (_items[parent], _items[i]) = (_items[i], _items[parent]); // swap up
- i = parent;
- }
- }
+    public void Push(T item)
+    {
+        _items.Add(item);
+        int i = _items.Count - 1;
+        while (i > 0)
+        {
+            int parent = (i - 1) / 2;
+            if (_items[parent].CompareTo(_items[i]) <= 0) break;
+            (_items[parent], _items[i]) = (_items[i], _items[parent]); // swap up
+            i = parent;
+        }
+    }
 
- public T PopMin
- {
- var min = _items[0];
- _items[0] = _items[^1];
- _items.RemoveAt(_items.Count - 1);
- int i = 0;
- while (true)
- {
- int left = 2 * i + 1, right = 2 * i + 2, smallest = i;
- if (left < _items.Count && _items[left].CompareTo(_items[smallest]) < 0) smallest = left;
- if (right < _items.Count && _items[right].CompareTo(_items[smallest]) < 0) smallest = right;
- if (smallest == i) break;
- (_items[i], _items[smallest]) = (_items[smallest], _items[i]);
- i = smallest;
- }
- return min;
- }
+    public T PopMin
+    {
+        var min = _items[0];
+        _items[0] = _items[^1];
+        _items.RemoveAt(_items.Count - 1);
+        int i = 0;
+        while (true)
+        {
+            int left = 2 * i + 1, right = 2 * i + 2, smallest = i;
+            if (left < _items.Count && _items[left].CompareTo(_items[smallest]) < 0) smallest = left;
+            if (right < _items.Count && _items[right].CompareTo(_items[smallest]) < 0) smallest = right;
+            if (smallest == i) break;
+            (_items[i], _items[smallest]) = (_items[smallest], _items[i]);
+            i = smallest;
+        }
+        return min;
+    }
 }
 ```
 **Discussion**: Directly demonstrates the index-arithmetic mechanism (`(i-1)/2` for parent, `2i+1`/`2i+2` for children) over a plain `List<T>` backing store — no node objects, no pointers, exactly how.NET's own `PriorityQueue<TElement,TPriority>` is implemented internally, worth building by hand once to fully understand the abstraction used daily thereafter (the same "build the primitive once, for understanding" pedagogical pattern used in the Expert exercise for `ExceptionDispatchInfo`).
@@ -231,39 +231,39 @@ See Advanced Q4's full implementation — the canonical "combine two structures,
 ```csharp
 public class BloomFilterPreCheck
 {
- private readonly BitArray _bits;
- private readonly int _hashCount;
- private readonly int _size;
+    private readonly BitArray _bits;
+    private readonly int _hashCount;
+    private readonly int _size;
 
- public BloomFilterPreCheck(int expectedItems, double falsePositiveRate)
- {
- _size = (int)(-expectedItems * Math.Log(falsePositiveRate) / (Math.Log(2) * Math.Log(2)));
- _hashCount = (int)(_size / (double)expectedItems * Math.Log(2));
- _bits = new BitArray(_size);
- }
+    public BloomFilterPreCheck(int expectedItems, double falsePositiveRate)
+    {
+        _size = (int)(-expectedItems * Math.Log(falsePositiveRate) / (Math.Log(2) * Math.Log(2)));
+        _hashCount = (int)(_size / (double)expectedItems * Math.Log(2));
+        _bits = new BitArray(_size);
+    }
 
- public void Add(string item)
- {
- foreach (int hash in ComputeHashes(item)) _bits[hash] = true;
- }
+    public void Add(string item)
+    {
+        foreach (int hash in ComputeHashes(item)) _bits[hash] = true;
+    }
 
- public bool MightContain(string item) => ComputeHashes(item).All(hash => _bits[hash]);
- // Returns TRUE for definite non-members correctly (no false negatives)
- // may return TRUE for some non-members too (false positives) -- caller must
- // still verify against the real backing store, using this ONLY as a cheap pre-filter.
+    public bool MightContain(string item) => ComputeHashes(item).All(hash => _bits[hash]);
+    // Returns TRUE for definite non-members correctly (no false negatives)
+    // may return TRUE for some non-members too (false positives) -- caller must
+    // still verify against the real backing store, using this ONLY as a cheap pre-filter.
 
- private IEnumerable<int> ComputeHashes(string item)
- {
- int h1 = item.GetHashCode, h2 = (item + "salt").GetHashCode;
- for (int i = 0; i < _hashCount; i++)
- yield return Math.Abs((h1 + i * h2) % _size);
- }
+    private IEnumerable<int> ComputeHashes(string item)
+    {
+        int h1 = item.GetHashCode, h2 = (item + "salt").GetHashCode;
+        for (int i = 0; i < _hashCount; i++)
+            yield return Math.Abs((h1 + i * h2) % _size);
+    }
 }
 
 // Usage: cheap pre-filter before an expensive database existence check
 if (bloomFilter.MightContain(userId) && await db.Users.AnyAsync(u => u.Id == userId))
 {
- // genuinely exists -- proceed
+    // genuinely exists -- proceed
 }
 // If MightContain returns false, we SKIP the database call entirely -- guaranteed correct
 // since Bloom filters never produce false negatives.

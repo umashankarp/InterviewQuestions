@@ -464,16 +464,16 @@ The reconciliation had been verifying the wrong thing. It confirmed the pipeline
 ```csharp
 public ReportabilityDecision Classify(TradeEvent e)
 {
- if (!_taxonomy.TryGetClassification(e.InstrumentId, out var cls))
- return ReportabilityDecision.PendingReview(// never a silent "no"
- reason: $"Unrecognized instrument classification for {e.InstrumentId}");
+    if (!_taxonomy.TryGetClassification(e.InstrumentId, out var cls))
+        return ReportabilityDecision.PendingReview(// never a silent "no"
+        reason: $"Unrecognized instrument classification for {e.InstrumentId}");
 
- return _rules.Evaluate(cls, e.Venue, e.CounterpartyType, e.Capacity) switch
- {
- RuleOutcome.Reportable => ReportabilityDecision.Reportable,
- RuleOutcome.NotReportable => ReportabilityDecision.Excluded(_rules.ExplainExclusion(cls, e)),
- _ => ReportabilityDecision.PendingReview("Rules returned no decision")
- };
+    return _rules.Evaluate(cls, e.Venue, e.CounterpartyType, e.Capacity) switch
+    {
+        RuleOutcome.Reportable => ReportabilityDecision.Reportable,
+            RuleOutcome.NotReportable => ReportabilityDecision.Excluded(_rules.ExplainExclusion(cls, e)),
+            _ => ReportabilityDecision.PendingReview("Rules returned no decision")
+    };
 }
 ```
 **Time complexity:** O(1) with indexed taxonomy lookup.
@@ -486,23 +486,23 @@ public ReportabilityDecision Classify(TradeEvent e)
 ```csharp
 public async Task<CompletenessReport> ReconcileAsync(DateOnly businessDate)
 {
- var allTrades = await _oms.ExecutedTradesAsync(businessDate); // independent source
- var submitted = (await _archive.SubmittedAsync(businessDate)).ToHashSet(t => t.InternalEventId);
+    var allTrades = await _oms.ExecutedTradesAsync(businessDate); // independent source
+    var submitted = (await _archive.SubmittedAsync(businessDate)).ToHashSet(t => t.InternalEventId);
 
- var unexplained = new List<TradeEvent>;
- var exclusionsByReason = new Dictionary<string, int>;
+    var unexplained = new List<TradeEvent>;
+    var exclusionsByReason = new Dictionary<string, int>;
 
- foreach (var trade in allTrades)
- {
- if (submitted.Contains(trade.EventId)) continue;
+    foreach (var trade in allTrades)
+    {
+        if (submitted.Contains(trade.EventId)) continue;
 
- var decision = _classifier.Classify(trade);
- if (decision.IsExcluded)
- exclusionsByReason.Increment(decision.Reason); // grouped for review
- else
- unexplained.Add(trade); // gap: reportable, not submitted
- }
- return new CompletenessReport(allTrades.Count, submitted.Count, exclusionsByReason, unexplained);
+        var decision = _classifier.Classify(trade);
+        if (decision.IsExcluded)
+            exclusionsByReason.Increment(decision.Reason); // grouped for review
+        else
+            unexplained.Add(trade); // gap: reportable, not submitted
+    }
+    return new CompletenessReport(allTrades.Count, submitted.Count, exclusionsByReason, unexplained);
 }
 ```
 **Time complexity:** O(n) for n trades.
@@ -515,17 +515,17 @@ public async Task<CompletenessReport> ReconcileAsync(DateOnly businessDate)
 ```csharp
 public sealed class RepairQueue
 {
- private readonly PriorityQueue<RepairItem, DateTime> _byDeadline = new;
+    private readonly PriorityQueue<RepairItem, DateTime> _byDeadline = new;
 
- public void Enqueue(RepairItem item) =>
- _byDeadline.Enqueue(item, item.RegulatoryDeadline); // NOT arrival time
+    public void Enqueue(RepairItem item) =>
+        _byDeadline.Enqueue(item, item.RegulatoryDeadline); // NOT arrival time
 
- public RepairItem? Next => _byDeadline.TryDequeue(out var item, out _)? item: null;
+    public RepairItem? Next => _byDeadline.TryDequeue(out var item, out _)? item: null;
 
- public IReadOnlyDictionary<RepairCause, int> CategoryCounts =>
- _byDeadline.UnorderedItems
-.GroupBy(i => i.Element.Cause)
-.ToDictionary(g => g.Key, g => g.Count); // systemic signal, not individual errors
+    public IReadOnlyDictionary<RepairCause, int> CategoryCounts =>
+        _byDeadline.UnorderedItems
+    .GroupBy(i => i.Element.Cause)
+    .ToDictionary(g => g.Key, g => g.Count); // systemic signal, not individual errors
 }
 ```
 **Time complexity:** O(log n) enqueue and dequeue.
@@ -538,18 +538,18 @@ public sealed class RepairQueue
 ```csharp
 public async Task<Submission> BuildAmendmentAsync(InternalEventId eventId, TradeEvent currentState)
 {
- var original = await _archive.FindLatestSubmissionAsync(eventId)
-?? throw new NoPriorSubmissionException(eventId); // must submit as original, not amendment
+    var original = await _archive.FindLatestSubmissionAsync(eventId)
+    ?? throw new NoPriorSubmissionException(eventId); // must submit as original, not amendment
 
- var current = _transformer.Transform(currentState);
- var changed = _differ.ChangedFields(original.Content, current); // diff vs ARCHIVE, not source
+    var current = _transformer.Transform(currentState);
+    var changed = _differ.ChangedFields(original.Content, current); // diff vs ARCHIVE, not source
 
- if (changed.Count == 0) return Submission.NoChangeRequired(eventId);
+    if (changed.Count == 0) return Submission.NoChangeRequired(eventId);
 
- return Submission.Amendment(
- referencingReportId: original.RegulatorReportId, // regulator's identifier
- content: current,
- changedFields: changed);
+    return Submission.Amendment(
+        referencingReportId: original.RegulatorReportId, // regulator's identifier
+            content: current,
+            changedFields: changed);
 }
 ```
 **Time complexity:** O(f) for f fields compared.

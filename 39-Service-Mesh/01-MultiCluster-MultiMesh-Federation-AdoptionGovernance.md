@@ -460,9 +460,9 @@ public enum MeshTopologyChoice { MultiClusterSingleMesh, MultiMeshFederation }
 
 public MeshTopologyChoice ClassifyTopology(ClusterRelationship relationship)
 {
- return relationship.SharesSingleSecurityAndComplianceBoundary
-? MeshTopologyChoice.MultiClusterSingleMesh // e.g., cells, same org
-: MeshTopologyChoice.MultiMeshFederation; // genuine org/compliance boundary — narrow trust required
+    return relationship.SharesSingleSecurityAndComplianceBoundary
+    ? MeshTopologyChoice.MultiClusterSingleMesh // e.g., cells, same org
+    : MeshTopologyChoice.MultiMeshFederation; // genuine org/compliance boundary — narrow trust required
 }
 ```
 **Time complexity:** O(1).
@@ -475,16 +475,16 @@ public MeshTopologyChoice ClassifyTopology(ClusterRelationship relationship)
 ```csharp
 public class CrossMeshAuthorizationGate
 {
- private readonly HashSet<(string SourceIdentity, string DestinationService)> _allowList;
+    private readonly HashSet<(string SourceIdentity, string DestinationService)> _allowList;
 
- public AuthorizationResult Authorize(string sourceSpiffeId, string destinationService)
- {
- if (!_allowList.Contains((sourceSpiffeId, destinationService)))
- return AuthorizationResult.Denied(// DEFAULT DENY — federation alone is insufficient
- $"{sourceSpiffeId} -> {destinationService} not explicitly allow-listed");
+    public AuthorizationResult Authorize(string sourceSpiffeId, string destinationService)
+    {
+        if (!_allowList.Contains((sourceSpiffeId, destinationService)))
+            return AuthorizationResult.Denied(// DEFAULT DENY — federation alone is insufficient
+            $"{sourceSpiffeId} -> {destinationService} not explicitly allow-listed");
 
- return AuthorizationResult.Allowed;
- }
+        return AuthorizationResult.Allowed;
+    }
 }
 ```
 **Time complexity:** O(1) per authorization check.
@@ -496,20 +496,20 @@ public class CrossMeshAuthorizationGate
 **Solution:**
 ```csharp
 public IReadOnlyList<UnusedAccessFinding> ReviewAccess(
- IReadOnlyCollection<(string Source, string Dest)> allowListEntries,
- IReadOnlyCollection<ObservedCrossMeshCall> recentTraffic, TimeSpan lookbackWindow)
+    IReadOnlyCollection<(string Source, string Dest)> allowListEntries,
+        IReadOnlyCollection<ObservedCrossMeshCall> recentTraffic, TimeSpan lookbackWindow)
 {
- var observedPairs = recentTraffic
-.Where(c => c.Timestamp > DateTimeOffset.UtcNow - lookbackWindow)
-.Select(c => (c.SourceIdentity, c.DestinationService))
-.ToHashSet;
+    var observedPairs = recentTraffic
+    .Where(c => c.Timestamp > DateTimeOffset.UtcNow - lookbackWindow)
+    .Select(c => (c.SourceIdentity, c.DestinationService))
+    .ToHashSet;
 
- return allowListEntries
-.Where(entry =>!observedPairs.Contains(entry))
-.Select(entry => new UnusedAccessFinding(
- entry.Source, entry.Dest,
- Recommendation: "No observed traffic in lookback window — confirm still needed before removal (Advanced Q5)"))
-.ToList;
+    return allowListEntries
+    .Where(entry =>!observedPairs.Contains(entry))
+    .Select(entry => new UnusedAccessFinding(
+            entry.Source, entry.Dest,
+                Recommendation: "No observed traffic in lookback window — confirm still needed before removal (Advanced Q5)"))
+    .ToList;
 }
 ```
 **Time complexity:** O(t + a) for t traffic events and a allow-list entries.
@@ -522,24 +522,24 @@ public IReadOnlyList<UnusedAccessFinding> ReviewAccess(
 ```csharp
 public class ConfigDivergenceDetector
 {
- public IReadOnlyList<DivergenceFinding> Detect(
- IReadOnlyDictionary<string, TrafficSplitState> perClusterActualState, // e.g., {"clusterA": 50%, "clusterB": 10%}
- TrafficSplitState intendedState, // from the CD pipeline — the source of truth (Advanced Q4)
- double tolerance = 0.01)
- {
- var findings = new List<DivergenceFinding>;
+    public IReadOnlyList<DivergenceFinding> Detect(
+        IReadOnlyDictionary<string, TrafficSplitState> perClusterActualState, // e.g., {"clusterA": 50%, "clusterB": 10%}
+            TrafficSplitState intendedState, // from the CD pipeline — the source of truth (Advanced Q4)
+            double tolerance = 0.01)
+    {
+        var findings = new List<DivergenceFinding>;
 
- foreach (var (cluster, actual) in perClusterActualState)
- {
- var deviation = Math.Abs(actual.Weight - intendedState.Weight);
- if (deviation > tolerance)
- findings.Add(new DivergenceFinding(
- cluster, actual.Weight, intendedState.Weight,
- // NOT compared only against other clusters — against the EXTERNAL intended state (Advanced Q4)
- Reason: "Diverges from CD-pipeline-declared intended rollout state"));
- }
- return findings;
- }
+        foreach (var (cluster, actual) in perClusterActualState)
+        {
+            var deviation = Math.Abs(actual.Weight - intendedState.Weight);
+            if (deviation > tolerance)
+                findings.Add(new DivergenceFinding(
+                    cluster, actual.Weight, intendedState.Weight,
+                        // NOT compared only against other clusters — against the EXTERNAL intended state (Advanced Q4)
+                    Reason: "Diverges from CD-pipeline-declared intended rollout state"));
+        }
+        return findings;
+    }
 }
 ```
 **Time complexity:** O(c) for c clusters.

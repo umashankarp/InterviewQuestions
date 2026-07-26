@@ -166,12 +166,12 @@ graph LR
 ```csharp
 public class ShipmentStatusChangedEventV2
 {
- public string ShipmentId { get; set; } = default!; // ordering/partition key -- UNCHANGED from v1
- public string Status { get; set; } = default!;
- public DateTimeOffset Timestamp { get; set; }
- public string? CarrierTrackingUrl { get; set; } // NEW in v2, OPTIONAL with null default --
- // old (v1) consumers simply ignore this field (forward-compatible)
- // new (v2) consumers reading OLD (v1) events get null here (backward-compatible)
+    public string ShipmentId { get; set; } = default!; // ordering/partition key -- UNCHANGED from v1
+    public string Status { get; set; } = default!;
+    public DateTimeOffset Timestamp { get; set; }
+    public string? CarrierTrackingUrl { get; set; } // NEW in v2, OPTIONAL with null default --
+    // old (v1) consumers simply ignore this field (forward-compatible)
+    // new (v2) consumers reading OLD (v1) events get null here (backward-compatible)
 }
 ```
 
@@ -179,14 +179,14 @@ public class ShipmentStatusChangedEventV2
 ```csharp
 public class ShipmentEventPublisher
 {
- public async Task PublishAsync(ShipmentStatusChangedEvent evt)
- {
- // CORRECT: partition key = ShipmentId -- ALL events for one shipment land in the SAME
- // partition, guaranteeing strict publish-order delivery to any one consumer instance.
- await _producer.PublishAsync(topic: "shipment-status-changed",
- key: evt.ShipmentId, // NEVER a random/round-robin key when order matters
- value: evt);
- }
+    public async Task PublishAsync(ShipmentStatusChangedEvent evt)
+    {
+        // CORRECT: partition key = ShipmentId -- ALL events for one shipment land in the SAME
+        // partition, guaranteeing strict publish-order delivery to any one consumer instance.
+        await _producer.PublishAsync(topic: "shipment-status-changed",
+            key: evt.ShipmentId, // NEVER a random/round-robin key when order matters
+                value: evt);
+    }
 }
 ```
 
@@ -194,20 +194,20 @@ public class ShipmentEventPublisher
 ```csharp
 public class IdempotentShipmentConsumer
 {
- private readonly IIdempotencyStore _idempotencyStore; // durable, survives consumer restarts
+    private readonly IIdempotencyStore _idempotencyStore; // durable, survives consumer restarts
 
- public async Task HandleAsync(ShipmentStatusChangedEvent evt, string messageId)
- {
- if (await _idempotencyStore.HasProcessedAsync(messageId))
- return; // safe no-op -- this exact message was already processed, likely a redelivered duplicate
+    public async Task HandleAsync(ShipmentStatusChangedEvent evt, string messageId)
+    {
+        if (await _idempotencyStore.HasProcessedAsync(messageId))
+            return; // safe no-op -- this exact message was already processed, likely a redelivered duplicate
 
- await using var transaction = await _db.BeginTransactionAsync;
- await _shipmentRepository.UpdateStatusAsync(evt.ShipmentId, evt.Status);
- await _idempotencyStore.MarkProcessedAsync(messageId); // SAME transaction -- atomic with the business update
- await transaction.CommitAsync;
- // Handles at-least-once redelivery safely. Does NOT, by itself, handle reordering (§Advanced Q4) --
- // that's solved separately by correct partition-key design (Medium exercise above), not by this.
- }
+        await using var transaction = await _db.BeginTransactionAsync;
+        await _shipmentRepository.UpdateStatusAsync(evt.ShipmentId, evt.Status);
+        await _idempotencyStore.MarkProcessedAsync(messageId); // SAME transaction -- atomic with the business update
+        await transaction.CommitAsync;
+        // Handles at-least-once redelivery safely. Does NOT, by itself, handle reordering (§Advanced Q4) --
+        // that's solved separately by correct partition-key design (Medium exercise above), not by this.
+    }
 }
 ```
 
@@ -215,32 +215,32 @@ public class IdempotentShipmentConsumer
 ```csharp
 public class ResilientEventConsumer
 {
- private const int MaxRetries = 3;
+    private const int MaxRetries = 3;
 
- public async Task HandleAsync(ConsumedMessage message)
- {
- try
- {
- await _businessHandler.ProcessAsync(message);
- await _broker.AcknowledgeAsync(message);
- }
- catch (Exception ex)
- {
- int retryCount = message.GetRetryCount;
- if (retryCount < MaxRetries)
- {
- await _broker.RetryWithBackoffAsync(message, retryCount, ex);
- }
- else
- {
- await _deadLetterQueue.PublishAsync(message, ex);
- await _broker.AcknowledgeAsync(message); // acknowledge on MAIN stream -- unblocks subsequent messages
- await _alerting.RaiseAsync(
- $"Message {message.Id} moved to DLQ after {MaxRetries} retries: {ex.Message}",
- severity: Severity.High); // NOT a silent graveyard (§Advanced Q5) -- routed to the incident pipeline
- }
- }
- }
+    public async Task HandleAsync(ConsumedMessage message)
+    {
+        try
+        {
+            await _businessHandler.ProcessAsync(message);
+            await _broker.AcknowledgeAsync(message);
+        }
+        catch (Exception ex)
+        {
+            int retryCount = message.GetRetryCount;
+            if (retryCount < MaxRetries)
+            {
+                await _broker.RetryWithBackoffAsync(message, retryCount, ex);
+            }
+            else
+            {
+                await _deadLetterQueue.PublishAsync(message, ex);
+                await _broker.AcknowledgeAsync(message); // acknowledge on MAIN stream -- unblocks subsequent messages
+                await _alerting.RaiseAsync(
+                    $"Message {message.Id} moved to DLQ after {MaxRetries} retries: {ex.Message}",
+                        severity: Severity.High); // NOT a silent graveyard (§Advanced Q5) -- routed to the incident pipeline
+            }
+        }
+    }
 }
 ```
 **Discussion**: acknowledging the message on the main stream once it's routed to the DLQ (rather than leaving it unacknowledged and endlessly retried) is the critical detail preventing exactly the "one poison message blocks everything behind it" failure mode describes — combined with the mandatory alerting call, this directly implements Advanced Q10's "DLQ routing with attached, staffed alerting" gate rather than a passive, unmonitored dead-letter mechanism.

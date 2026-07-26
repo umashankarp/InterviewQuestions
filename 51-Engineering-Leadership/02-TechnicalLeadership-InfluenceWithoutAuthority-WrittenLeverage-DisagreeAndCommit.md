@@ -278,51 +278,48 @@ stateDiagram-v2
 
 ### 3.2 Influence propagation vs. authority propagation
 
-```
-AUTHORITY PATH (routes up and back down) INFLUENCE PATH (routes across)
+```mermaid
+flowchart TB
+    subgraph AUTH["AUTHORITY PATH — routes up, then back down"]
+        direction TB
+        VP[VP] --> DirA[Director A]
+        VP --> DirB[Director B]
+        DirA --> TA1[Team A]
+        DirB --> TB1[Team B]
+    end
 
- ┌─────────┐ ┌──────────┐
- │ VP │ │ Engineer │
- └────┬────┘ │ + doc │
- ┌─────────┴─────────┐ └────┬─────┘
- ┌────▼────┐ ┌────▼────┐ ┌───────────┼───────────┐
- │ Dir A │ │ Dir B │ │ │ │
- └────┬────┘ └────┬────┘ ┌───▼───┐ ┌───▼───┐ ┌───▼───┐
- ┌────▼────┐ ┌────▼────┐ │Team A │ │Team B │ │Team C │
- │ Team A │ │ Team B │ │ owns │ │ owns │ │ owns │
- └─────────┘ └─────────┘ │ it │ │ it │ │ it │
- └───────┘ └───────┘ └───────┘
- Latency: weeks (calendar-bound) Latency: weeks (also!)
- Cost: scarce exec attention Cost: the leader's own time
- Ownership: imposed → low adherence Ownership: participatory → high adherence
- Scales to: ~5 decisions/quarter Scales to: as many leaders as you have
+    subgraph INFL["INFLUENCE PATH — routes across"]
+        direction TB
+        Eng[Engineer + written proposal]
+        Eng --> TA2[Team A<br/>owns it]
+        Eng --> TB2[Team B<br/>owns it]
+        Eng --> TC2[Team C<br/>owns it]
+    end
 ```
+
+| | Authority path | Influence path |
+|---|---|---|
+| **Latency** | Weeks — calendar-bound | Weeks — often longer |
+| **Cost falls on** | Scarce executive attention | The leader's own time |
+| **Ownership produced** | Imposed → low adherence | Participatory → high adherence |
+| **Concurrent capacity** | ~5 contested decisions/quarter | As many as you have capable leaders |
 
 The critical read: **the influence path is not faster.** It is often slower for any single decision. Its advantage is that it *parallelizes* — an organization can run as many influence-path decisions concurrently as it has people willing to lead them, whereas the authority path is serialized through a small number of calendars. Candidates who claim influence is faster are usually describing a case where they had informal authority already.
 
 ### 3.3 The credibility ledger over time
 
-```
-Credibility
- │
- High│ ╭──╮ ╭─────────╮
- │ ╭──╮ ╱ ╰──╮ ╱ ╰──╮
- │ ╱ ╰─╮ ╱ ╲╱ ╰──
- Med│ ╱ ╰──╯
- │ ╱
- Low│╱
- └──────────────────────────────────────────────────► Time
- │ │ │ │ │
- │ │ │ │ └─ Sustained: shipped + was right,
- │ │ │ │ on record, about the Q3 incident
- │ │ │ └─ Dip: blocked a launch;
- │ │ │ correct call, real cost
- │ │ └─ Sharp rise: publicly changed position
- │ │ when shown benchmark data
- │ └─ Dip: was confidently wrong about
- │ Kafka partition sizing, publicly
- └─ Entry: no balance; earn by shipping first
-```
+A credibility balance is earned, spent, and can be overdrawn. Traced over one engineer's first two years in an organisation:
+
+| # | Event | Direction | Why the balance moves that way |
+|---|---|---|---|
+| 1 | Joins the organisation | **Zero** | Credibility does not transfer from a previous employer; it is earned locally |
+| 2 | Ships a small, genuinely useful thing early | **↑** | Delivery is the only unconditional deposit |
+| 3 | Is confidently wrong in public about Kafka partition sizing | **↓↓** | Confidence multiplies the cost of being wrong |
+| 4 | Publicly changes position when shown benchmark data | **↑↑** | Counter-intuitive: proves positions track evidence, so *unchanged* positions become more believable |
+| 5 | Blocks a launch — correct call, real delivery cost | **↓** | A block always spends, in proportion to how much the blocked party wanted it |
+| 6 | The Q3 incident happens exactly as they documented in advance | **↑↑↑** | A written, dated, uncomfortable prediction that came true is the single largest deposit available |
+
+Two properties that follow from the model: the balance is **domain-scoped** (credit earned in payments transfers only partly to a market-data argument), and it **decays** — which is the mechanical reason Staff+ engineers must keep genuine technical depth rather than trading on past results.
 
 ---
 
@@ -1099,51 +1096,51 @@ public enum AdoptionResult { Unknown = 0, Compliant, NonCompliant }
 
 public interface IAdoptionSignal
 {
- ValueTask<AdoptionResult> EvaluateAsync(ServiceRef service, CancellationToken ct);
+    ValueTask<AdoptionResult> EvaluateAsync(ServiceRef service, CancellationToken ct);
 }
 
 public sealed class PackageVersionSignal(PackageId package, SemVerRange range, IPackageInventory inventory)
 : IAdoptionSignal
 {
- public async ValueTask<AdoptionResult> EvaluateAsync(ServiceRef service, CancellationToken ct)
- {
- var installed = await inventory.TryGetVersionAsync(service, package, ct);
- return installed switch
- {
- { IsStale: true } => AdoptionResult.Unknown, // data older than freshness SLA
- { Version: var v } when range.Satisfies(v) => AdoptionResult.Compliant,
- { } => AdoptionResult.NonCompliant,
- null => AdoptionResult.Unknown // absence is not evidence of absence
- };
- }
+    public async ValueTask<AdoptionResult> EvaluateAsync(ServiceRef service, CancellationToken ct)
+    {
+        var installed = await inventory.TryGetVersionAsync(service, package, ct);
+        return installed switch
+        {
+            { IsStale: true } => AdoptionResult.Unknown, // data older than freshness SLA
+            { Version: var v } when range.Satisfies(v) => AdoptionResult.Compliant,
+            { } => AdoptionResult.NonCompliant,
+                null => AdoptionResult.Unknown // absence is not evidence of absence
+        };
+    }
 }
 
 public sealed class CompositeSignal(IReadOnlyList<IAdoptionSignal> all): IAdoptionSignal
 {
- // Compliant only if EVERY child is Compliant.
- // Any Unknown poisons the result to Unknown — never silently ignored.
- public async ValueTask<AdoptionResult> EvaluateAsync(ServiceRef service, CancellationToken ct)
- {
- var sawUnknown = false;
- foreach (var signal in all)
- {
- switch (await signal.EvaluateAsync(service, ct))
- {
- case AdoptionResult.NonCompliant: return AdoptionResult.NonCompliant;
- case AdoptionResult.Unknown: sawUnknown = true; break;
- }
- }
- return sawUnknown? AdoptionResult.Unknown: AdoptionResult.Compliant;
- }
+    // Compliant only if EVERY child is Compliant.
+    // Any Unknown poisons the result to Unknown — never silently ignored.
+    public async ValueTask<AdoptionResult> EvaluateAsync(ServiceRef service, CancellationToken ct)
+    {
+        var sawUnknown = false;
+        foreach (var signal in all)
+        {
+            switch (await signal.EvaluateAsync(service, ct))
+            {
+                case AdoptionResult.NonCompliant: return AdoptionResult.NonCompliant;
+                case AdoptionResult.Unknown: sawUnknown = true; break;
+            }
+        }
+        return sawUnknown? AdoptionResult.Unknown: AdoptionResult.Compliant;
+    }
 }
 
 public sealed record Exception_(
- DecisionId Decision, ServiceRef Service, OwnerRef Approver,
- OwnerRef RiskOwner, DateOnly ExpiresOn)
+    DecisionId Decision, ServiceRef Service, OwnerRef Approver,
+        OwnerRef RiskOwner, DateOnly ExpiresOn)
 {
- public bool IsActive(DateOnly asOf) => asOf <= ExpiresOn;
- // No indefinite exceptions are representable. A permanent exception
- // is a standard change in disguise, and the type prevents expressing it.
+    public bool IsActive(DateOnly asOf) => asOf <= ExpiresOn;
+    // No indefinite exceptions are representable. A permanent exception
+    // is a standard change in disguise, and the type prevents expressing it.
 }
 ```
 
@@ -1152,19 +1149,19 @@ public sealed record Exception_(
 ```csharp
 public sealed class DecisionRecord
 {
- private static readonly FrozenDictionary<DecisionStatus, FrozenSet<DecisionStatus>> Legal =
- new Dictionary<DecisionStatus, FrozenSet<DecisionStatus>>
- {
- [DecisionStatus.Proposed] = [DecisionStatus.Accepted, DecisionStatus.Withdrawn],
- [DecisionStatus.Accepted] = [DecisionStatus.Superseded],
- [DecisionStatus.Superseded] = [], // terminal — cannot be resurrected
- [DecisionStatus.Withdrawn] = [] // terminal
- }.ToFrozenDictionary(kv => kv.Key, kv => kv.Value.ToFrozenSet);
+    private static readonly FrozenDictionary<DecisionStatus, FrozenSet<DecisionStatus>> Legal =
+    new Dictionary<DecisionStatus, FrozenSet<DecisionStatus>>
+    {
+        [DecisionStatus.Proposed] = [DecisionStatus.Accepted, DecisionStatus.Withdrawn],
+            [DecisionStatus.Accepted] = [DecisionStatus.Superseded],
+            [DecisionStatus.Superseded] = [], // terminal — cannot be resurrected
+            [DecisionStatus.Withdrawn] = [] // terminal
+    }.ToFrozenDictionary(kv => kv.Key, kv => kv.Value.ToFrozenSet);
 
- public Result TransitionTo(DecisionStatus next, Approver by) =>
- Legal[Status].Contains(next)
-? Apply(next, by)
-: Result.Invalid($"{Status} → {next} is not a legal transition");
+    public Result TransitionTo(DecisionStatus next, Approver by) =>
+        Legal[Status].Contains(next)
+    ? Apply(next, by)
+    : Result.Invalid($"{Status} → {next} is not a legal transition");
 }
 ```
 

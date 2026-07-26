@@ -113,17 +113,17 @@
 1. **Q: Write out the concrete `Program.cs` DI-registration code wiring together the full `PlaceOrder` Use Case example.**
  **A:**
  ```csharp
- var builder = WebApplication.CreateBuilder(args);
- builder.Services.AddDbContext<AppDbContext>(options =>
- options.UseSqlServer(builder.Configuration.GetConnectionString("Default")));
- builder.Services.AddScoped<IOrderRepository, EfCoreOrderRepository>;
- builder.Services.AddScoped<IUnitOfWork, EfCoreUnitOfWork>;
- builder.Services.AddScoped<IPlaceOrderInputBoundary, PlaceOrderUseCase>;
- builder.Services.AddScoped<IPlaceOrderOutputBoundary, PlaceOrderPresenter>;
- builder.Services.AddControllers;
- var app = builder.Build;
- app.MapControllers;
- app.Run;
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlServer(builder.Configuration.GetConnectionString("Default")));
+builder.Services.AddScoped<IOrderRepository, EfCoreOrderRepository>;
+builder.Services.AddScoped<IUnitOfWork, EfCoreUnitOfWork>;
+builder.Services.AddScoped<IPlaceOrderInputBoundary, PlaceOrderUseCase>;
+builder.Services.AddScoped<IPlaceOrderOutputBoundary, PlaceOrderPresenter>;
+builder.Services.AddControllers;
+var app = builder.Build;
+app.MapControllers;
+app.Run;
  ```
  Each line registers exactly one Port-to-Adapter mapping established across Modules 113–114's running example, all `Scoped` to correctly share `AppDbContext`'s lifetime (Intermediate Q3) within a single request.
  **Why correct:** Provides complete, runnable, concrete code implementing the exact example this domain has built up across two modules, with correct lifetimes for every registration, rather than a partial or hypothetical snippet.
@@ -133,15 +133,15 @@
 2. **Q: Write a concrete `NetArchTest`-style fitness-function test enforcing the Dependency Rule assertion.**
  **A:**
  ```csharp
- [Fact]
- public void Domain_Should_Not_Reference_Infrastructure_Or_EFCore
- {
- var result = Types.InAssembly(typeof(Order).Assembly)
-.Should
-.NotHaveDependencyOnAny("Infrastructure", "Microsoft.EntityFrameworkCore", "Microsoft.AspNetCore")
-.GetResult;
- Assert.True(result.IsSuccessful, string.Join(", ", result.FailingTypeNames?? Array.Empty<string>));
- }
+[Fact]
+public void Domain_Should_Not_Reference_Infrastructure_Or_EFCore
+{
+    var result = Types.InAssembly(typeof(Order).Assembly)
+    .Should
+    .NotHaveDependencyOnAny("Infrastructure", "Microsoft.EntityFrameworkCore", "Microsoft.AspNetCore")
+    .GetResult;
+    Assert.True(result.IsSuccessful, string.Join(", ", result.FailingTypeNames?? Array.Empty<string>));
+}
  ```
  Run as a normal xUnit test in CI on every pull request, this fails the build the instant any `Domain`-assembly type introduces a reference to a forbidden outer-ring namespace — exactly the mechanical, continuously-running enforcement called for, now as literal, runnable code rather than a described concept.
  **Why correct:** Supplies actual, syntactically plausible fitness-function code using a real, named.NET architecture-testing library, directly fulfilling the concrete implementation previewed but didn't provide code for.

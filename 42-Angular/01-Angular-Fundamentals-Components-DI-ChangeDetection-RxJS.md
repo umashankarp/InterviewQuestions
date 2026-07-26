@@ -358,30 +358,30 @@ The injector-tree model scales cleanly to large applications specifically becaus
 **Solution (TypeScript):**
 ```typescript
 interface Position {
- symbol: string;
- quantity: number;
+  symbol: string;
+  quantity: number;
 }
 
 @Component({
- selector: 'app-position-list',
- changeDetection: ChangeDetectionStrategy.OnPush,
- template: `<div *ngFor="let p of positions">{{ p.symbol }}: {{ p.quantity }}</div>`
+    selector: 'app-position-list',
+      changeDetection: ChangeDetectionStrategy.OnPush,
+      template: `<div *ngFor="let p of positions">{{ p.symbol }}: {{ p.quantity }}</div>`
 })
 export class PositionListComponent {
- @Input positions: Position[] = [];
+  @Input positions: Position[] = [];
 }
 
 // Parent component — the update that actually triggers OnPush re-check:
 export class PositionsContainerComponent {
- positions: Position[] = [];
+  positions: Position[] = [];
 
- addPosition(newPosition: Position): void {
- // NEW array reference — OnPush's identity check sees this as changed.
- this.positions = [...this.positions, newPosition];
+  addPosition(newPosition: Position): void {
+    // NEW array reference — OnPush's identity check sees this as changed.
+    this.positions = [...this.positions, newPosition];
 
- // WRONG (the I2 bug): this.positions.push(newPosition)
- // — same reference, OnPush never re-renders.
- }
+    // WRONG (the I2 bug): this.positions.push(newPosition)
+    // — same reference, OnPush never re-renders.
+  }
 }
 ```
 **Time complexity:** O(n) for the array copy (n = current position count). **Space complexity:** O(n) for the new array.
@@ -395,26 +395,26 @@ export class PositionsContainerComponent {
 **Solution (TypeScript):**
 ```typescript
 @Component({
- selector: 'app-instrument-search',
- template: `
- <input [formControl]="searchControl" placeholder="Search instruments...">
- <div *ngFor="let result of results$ | async">{{ result.name }}</div>
- `
+    selector: 'app-instrument-search',
+      template: `
+    <input [formControl]="searchControl" placeholder="Search instruments...">
+    <div *ngFor="let result of results$ | async">{{ result.name }}</div>
+    `
 })
 export class InstrumentSearchComponent {
- searchControl = new FormControl('');
+  searchControl = new FormControl('');
 
- results$: Observable<Instrument[]> = this.searchControl.valueChanges.pipe(
- debounceTime(200), // reduce request volume, not a race-condition fix by itself
- distinctUntilChanged, // skip redundant identical queries
- switchMap(query => // cancels any in-flight request on a new query — THE race-condition fix
- this.searchService.search(query?? '').pipe(
- catchError(=> of([])) // don't let one failed search break the stream permanently
-)
-)
-);
+  results$: Observable<Instrument[]> = this.searchControl.valueChanges.pipe(
+    debounceTime(200), // reduce request volume, not a race-condition fix by itself
+      distinctUntilChanged, // skip redundant identical queries
+      switchMap(query => // cancels any in-flight request on a new query — THE race-condition fix
+      this.searchService.search(query?? '').pipe(
+        catchError(=> of([])) // don't let one failed search break the stream permanently
+      )
+    )
+  );
 
- constructor(private searchService: InstrumentSearchService) {}
+  constructor(private searchService: InstrumentSearchService) {}
 }
 ```
 **Time complexity:** O(1) per emission (excluding the network call itself). **Space complexity:** O(1) — `switchMap` holds at most one in-flight inner subscription.
@@ -429,32 +429,32 @@ export class InstrumentSearchComponent {
 ```typescript
 @Injectable
 export class WidgetStateService {
- private readonly stateSubject = new BehaviorSubject<WidgetState>(initialState);
- readonly state$ = this.stateSubject.asObservable;
+  private readonly stateSubject = new BehaviorSubject<WidgetState>(initialState);
+  readonly state$ = this.stateSubject.asObservable;
 
- updateState(patch: Partial<WidgetState>): void {
- this.stateSubject.next({...this.stateSubject.value,...patch });
- }
+  updateState(patch: Partial<WidgetState>): void {
+    this.stateSubject.next({...this.stateSubject.value,...patch });
+  }
 }
 
 @Component({
- selector: 'app-trading-widget',
- providers: [WidgetStateService], // isolated instance by default (Advanced Q4)
- template: `<ng-content></ng-content>`
+    selector: 'app-trading-widget',
+      providers: [WidgetStateService], // isolated instance by default (Advanced Q4)
+      template: `<ng-content></ng-content>`
 })
 export class TradingWidgetComponent {
- constructor(public state: WidgetStateService) {}
+  constructor(public state: WidgetStateService) {}
 }
 
 @Component({
- selector: 'app-shared-trading-widget',
- // NO own providers entry — explicit opt-in to inherit the ancestor's instance
- // instead of creating a new isolated one, resolving `WidgetStateService`
- // by walking UP the injector tree per the mechanics.
- template: `<ng-content></ng-content>`
+    selector: 'app-shared-trading-widget',
+      // NO own providers entry — explicit opt-in to inherit the ancestor's instance
+    // instead of creating a new isolated one, resolving `WidgetStateService`
+    // by walking UP the injector tree per the mechanics.
+    template: `<ng-content></ng-content>`
 })
 export class SharedTradingWidgetComponent {
- constructor(public state: WidgetStateService) {} // resolves to nearest ANCESTOR's instance
+  constructor(public state: WidgetStateService) {} // resolves to nearest ANCESTOR's instance
 }
 ```
 **Time complexity:** O(1) injector resolution per instantiation (bounded by injector-tree depth). **Space complexity:** O(1) per isolated instance; zero additional state for the sharing variant.
@@ -471,46 +471,46 @@ interface Tick { symbol: string; price: number; timestamp: number; }
 
 @Injectable({ providedIn: 'root' })
 export class TickFeedService {
- private readonly rawTicks$: Observable<Tick> = this.webSocketSource;
+  private readonly rawTicks$: Observable<Tick> = this.webSocketSource;
 
- // Buffer bursts of ticks over a short window rather than emitting (and
- // triggering change detection for) every single message individually —
- // the trigger-frequency lever /I7.
- readonly bufferedTicks$: Observable<Tick[]> = this.rawTicks$.pipe(
- bufferTime(100), // 100ms batching window
- filter(batch => batch.length > 0), // skip empty windows
- map(batch => this.dedupeToLatestPerSymbol(batch)), // collapse rapid re-quotes
- shareReplay({ bufferSize: 1, refCount: true }) // one subscription shared across consumers
-);
+  // Buffer bursts of ticks over a short window rather than emitting (and
+  // triggering change detection for) every single message individually —
+  // the trigger-frequency lever /I7.
+  readonly bufferedTicks$: Observable<Tick[]> = this.rawTicks$.pipe(
+    bufferTime(100), // 100ms batching window
+      filter(batch => batch.length > 0), // skip empty windows
+      map(batch => this.dedupeToLatestPerSymbol(batch)), // collapse rapid re-quotes
+      shareReplay({ bufferSize: 1, refCount: true }) // one subscription shared across consumers
+  );
 
- private dedupeToLatestPerSymbol(batch: Tick[]): Tick[] {
- const latest = new Map<string, Tick>;
- for (const tick of batch) latest.set(tick.symbol, tick); // last-write-wins within the window
- return Array.from(latest.values);
- }
+  private dedupeToLatestPerSymbol(batch: Tick[]): Tick[] {
+    const latest = new Map<string, Tick>;
+    for (const tick of batch) latest.set(tick.symbol, tick); // last-write-wins within the window
+    return Array.from(latest.values);
+  }
 
- private webSocketSource: Observable<Tick> {
- return new Observable<Tick>(subscriber => {
- const ws = new WebSocket('wss://market-data.internal/ticks')
- ws.onmessage = (event) => subscriber.next(JSON.parse(event.data));
- ws.onerror = (err) => subscriber.error(err);
- return => ws.close; // structural cleanup on unsubscribe — closes the exact leak class
- });
- }
+  private webSocketSource: Observable<Tick> {
+    return new Observable<Tick>(subscriber => {
+        const ws = new WebSocket('wss://market-data.internal/ticks')
+        ws.onmessage = (event) => subscriber.next(JSON.parse(event.data));
+        ws.onerror = (err) => subscriber.error(err);
+        return => ws.close; // structural cleanup on unsubscribe — closes the exact leak class
+    });
+  }
 }
 
 @Component({
- selector: 'app-tick-grid',
- changeDetection: ChangeDetectionStrategy.OnPush, // tree-size lever 
- template: `
- <div *ngFor="let tick of (tickFeed.bufferedTicks$ | async); trackBy: trackBySymbol">
- {{ tick.symbol }}: {{ tick.price }}
- </div>
- `
+    selector: 'app-tick-grid',
+      changeDetection: ChangeDetectionStrategy.OnPush, // tree-size lever
+      template: `
+    <div *ngFor="let tick of (tickFeed.bufferedTicks$ | async); trackBy: trackBySymbol">
+    {{ tick.symbol }}: {{ tick.price }}
+    </div>
+    `
 })
 export class TickGridComponent {
- constructor(public tickFeed: TickFeedService) {}
- trackBySymbol(_: number, tick: Tick): string { return tick.symbol; }
+  constructor(public tickFeed: TickFeedService) {}
+  trackBySymbol(_: number, tick: Tick): string { return tick.symbol; }
 }
 ```
 **Time complexity:** O(k) per buffer window (k = ticks in that 100ms window, typically ≪ total tick volume). **Space complexity:** O(distinct symbols) for the dedup map per window.

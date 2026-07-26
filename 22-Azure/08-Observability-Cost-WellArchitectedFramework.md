@@ -158,22 +158,22 @@ graph LR
 ### Easy — Azure Monitor alert tied to a specific business-tolerance threshold (mirrors)
 ```hcl
 resource "azurerm_monitor_metric_alert" "checkout_sql_dtu_critical" {
- name = "checkout-sql-dtu-critical"
- resource_group_name = azurerm_resource_group.main.name
- scopes = [azurerm_mssql_database.checkout.id]
+  name = "checkout-sql-dtu-critical"
+  resource_group_name = azurerm_resource_group.main.name
+  scopes = [azurerm_mssql_database.checkout.id]
 
- criteria {
- metric_namespace = "Microsoft.Sql/servers/databases"
- metric_name = "dtu_consumption_percent"
- aggregation = "Average"
- operator = "GreaterThan"
- # 85% threshold -- derived from checkout's OWN documented capacity headroom
- # requirement, NOT a generic default reused across every database.
- threshold = 85
- }
- window_size = "PT5M"
- frequency = "PT1M"
- action { action_group_id = azurerm_monitor_action_group.pagerduty_critical.id }
+  criteria {
+    metric_namespace = "Microsoft.Sql/servers/databases"
+    metric_name = "dtu_consumption_percent"
+    aggregation = "Average"
+    operator = "GreaterThan"
+    # 85% threshold -- derived from checkout's OWN documented capacity headroom
+    # requirement, NOT a generic default reused across every database.
+      threshold = 85
+  }
+  window_size = "PT5M"
+  frequency = "PT1M"
+  action { action_group_id = azurerm_monitor_action_group.pagerduty_critical.id }
 }
 ```
 
@@ -181,25 +181,25 @@ resource "azurerm_monitor_metric_alert" "checkout_sql_dtu_critical" {
 ```csharp
 public async Task<PaymentResult> ChargePaymentAsync(PaymentRequest request)
 {
- // Explicit DependencyTelemetry -- required because the third-party payment
- // gateway is NOT auto-instrumented by Application Insights (§Advanced Q4).
- var operation = _telemetryClient.StartOperation<DependencyTelemetry>("PaymentGateway.Charge");
- operation.Telemetry.Type = "Http";
- operation.Telemetry.Target = "external-payment-gateway.example.com";
+    // Explicit DependencyTelemetry -- required because the third-party payment
+    // gateway is NOT auto-instrumented by Application Insights (§Advanced Q4).
+    var operation = _telemetryClient.StartOperation<DependencyTelemetry>("PaymentGateway.Charge");
+    operation.Telemetry.Type = "Http";
+    operation.Telemetry.Target = "external-payment-gateway.example.com";
 
- try
- {
- var result = await _httpClient.PostAsJsonAsync("https://external-payment-gateway.example.com/charge", request)
- operation.Telemetry.Success = result.IsSuccessStatusCode;
- return await result.Content.ReadFromJsonAsync<PaymentResult>;
- }
- catch (Exception ex)
- {
- operation.Telemetry.Success = false;
- _telemetryClient.TrackException(ex);
- throw;
- }
- finally { _telemetryClient.StopOperation(operation); }
+    try
+    {
+        var result = await _httpClient.PostAsJsonAsync("https://external-payment-gateway.example.com/charge", request)
+        operation.Telemetry.Success = result.IsSuccessStatusCode;
+        return await result.Content.ReadFromJsonAsync<PaymentResult>;
+    }
+    catch (Exception ex)
+    {
+        operation.Telemetry.Success = false;
+        _telemetryClient.TrackException(ex);
+        throw;
+    }
+    finally { _telemetryClient.StopOperation(operation); }
 }
 ```
 
@@ -207,73 +207,73 @@ public async Task<PaymentResult> ChargePaymentAsync(PaymentRequest request)
 ```csharp
 public class AzureGovernanceCheck
 {
- public GovernanceResult Validate(DeploymentManifest manifest)
- {
- var findings = new List<string>;
+    public GovernanceResult Validate(DeploymentManifest manifest)
+    {
+        var findings = new List<string>;
 
- //: Availability Zone verification (not Availability Set)
- if (manifest.Vms.Any(v => v.Environment == "production" && v.RedundancyMode!= "AvailabilityZone"))
- findings.Add("Production VM not using Availability Zones");
+        //: Availability Zone verification (not Availability Set)
+        if (manifest.Vms.Any(v => v.Environment == "production" && v.RedundancyMode!= "AvailabilityZone"))
+            findings.Add("Production VM not using Availability Zones");
 
- //: shared Managed Identity detection
- var identityUsage = manifest.ManagedIdentities.GroupBy(i => i.IdentityId);
- foreach (var g in identityUsage.Where(g => g.Count > 1))
- findings.Add($"Managed Identity {g.Key} shared across {g.Count} resources (/ this module)");
+        //: shared Managed Identity detection
+        var identityUsage = manifest.ManagedIdentities.GroupBy(i => i.IdentityId);
+        foreach (var g in identityUsage.Where(g => g.Count > 1))
+            findings.Add($"Managed Identity {g.Key} shared across {g.Count} resources (/ this module)");
 
- //: redundancy tier vs. data-criticality mismatch (both directions, per the inversion finding)
- foreach (var sa in manifest.StorageAccounts)
- {
- if (sa.Criticality == "low" && sa.Redundancy is "GRS" or "RA-GZRS")
- findings.Add($"Storage account {sa.Name}: over-provisioned redundancy for low-criticality data (this module)");
- if (sa.Criticality == "high" && sa.Redundancy == "LRS")
- findings.Add($"Storage account {sa.Name}: under-provisioned redundancy for high-criticality data");
- }
+        //: redundancy tier vs. data-criticality mismatch (both directions, per the inversion finding)
+        foreach (var sa in manifest.StorageAccounts)
+        {
+            if (sa.Criticality == "low" && sa.Redundancy is "GRS" or "RA-GZRS")
+                findings.Add($"Storage account {sa.Name}: over-provisioned redundancy for low-criticality data (this module)");
+            if (sa.Criticality == "high" && sa.Redundancy == "LRS")
+                findings.Add($"Storage account {sa.Name}: under-provisioned redundancy for high-criticality data");
+        }
 
- // This module: missing documented RTO/RPO
- if (manifest.Workloads.Any(w => w.DocumentedRto == null || w.DocumentedRpo == null))
- findings.Add("Workload missing documented RTO/RPO (this module /)");
+        // This module: missing documented RTO/RPO
+        if (manifest.Workloads.Any(w => w.DocumentedRto == null || w.DocumentedRpo == null))
+            findings.Add("Workload missing documented RTO/RPO (this module /)");
 
- return new GovernanceResult { Passed = findings.Count == 0, Findings = findings };
- }
+        return new GovernanceResult { Passed = findings.Count == 0, Findings = findings };
+    }
 }
 ```
 
 ### Expert — Paired-region-validated Traffic Manager failover, explicitly checked rather than defaulted (§Advanced Q3)
 ```hcl
 # Explicit validation step (conceptual -- run in CI before this config is applied):
-# confirm East US's paired region (West US) actually satisfies checkout's documented
+  # confirm East US's paired region (West US) actually satisfies checkout's documented
 # RTO/RPO and compliance requirements BEFORE wiring it as the failover target (§Advanced Q3).
-# Do NOT skip this step purely because West US is the platform-assigned pair.
+  # Do NOT skip this step purely because West US is the platform-assigned pair.
 
-resource "azurerm_traffic_manager_profile" "checkout_api" {
- name = "checkout-api-tm"
- traffic_routing_method = "Priority"
+  resource "azurerm_traffic_manager_profile" "checkout_api" {
+  name = "checkout-api-tm"
+  traffic_routing_method = "Priority"
 
- monitor_config {
- protocol = "HTTPS"
- port = 443
- path = "/ready" # genuine readiness check, NOT liveness-only --
- #/65's recurring readiness-vs-liveness lesson,
- # now at the Traffic-Manager failover-detection layer
- interval_in_seconds = 10
- timeout_in_seconds = 5
- tolerated_number_of_failures = 3
- }
+  monitor_config {
+    protocol = "HTTPS"
+    port = 443
+    path = "/ready" # genuine readiness check, NOT liveness-only --
+      #/65's recurring readiness-vs-liveness lesson,
+      # now at the Traffic-Manager failover-detection layer
+    interval_in_seconds = 10
+    timeout_in_seconds = 5
+    tolerated_number_of_failures = 3
+  }
 }
 
 resource "azurerm_traffic_manager_azure_endpoint" "primary" {
- name = "east-us-primary"
- profile_id = azurerm_traffic_manager_profile.checkout_api.id
- target_resource_id = azurerm_linux_web_app.checkout_east_us.id
- priority = 1
+  name = "east-us-primary"
+  profile_id = azurerm_traffic_manager_profile.checkout_api.id
+  target_resource_id = azurerm_linux_web_app.checkout_east_us.id
+  priority = 1
 }
 
 resource "azurerm_traffic_manager_azure_endpoint" "paired_secondary" {
- name = "west-us-paired-secondary"
- profile_id = azurerm_traffic_manager_profile.checkout_api.id
- target_resource_id = azurerm_linux_web_app.checkout_west_us.id # East US's PAIRED region --
- # explicitly validated, not assumed adequate
- priority = 2
+  name = "west-us-paired-secondary"
+  profile_id = azurerm_traffic_manager_profile.checkout_api.id
+  target_resource_id = azurerm_linux_web_app.checkout_west_us.id # East US's PAIRED region --
+    # explicitly validated, not assumed adequate
+  priority = 2
 }
 ```
 **Discussion**: the health check specifically targets `/ready` (this domain's recurring readiness-not-liveness lesson, one final time at the Traffic Manager failover-detection layer) — a primary region that's technically reachable but genuinely degraded should trigger failover just as reliably as a fully unreachable one. The comment block above the Traffic Manager profile is the operative discipline this module's/§Advanced Q3 establish: the paired region (West US) is used here *because* it was explicitly validated against checkout's actual RTO/RPO and compliance requirements, not merely because it's East US's platform-assigned pair — the Terraform alone can't enforce that validation happened, which is precisely why it must be a mandatory, documented step in the deployment process itself (§Advanced Q6's governance-checklist design), not something assumed satisfied by the code's structure.

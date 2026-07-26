@@ -383,15 +383,15 @@ sequenceDiagram
 ```csharp
 public class TraceContextMiddleware
 {
- public async Task InvokeAsync(HttpContext context, RequestDelegate next)
- {
- var traceId = context.Request.Headers["traceparent"].FirstOrDefault
-?? GenerateNewRootTraceId; // gateway originates a new trace if none exists
+    public async Task InvokeAsync(HttpContext context, RequestDelegate next)
+    {
+        var traceId = context.Request.Headers["traceparent"].FirstOrDefault
+        ?? GenerateNewRootTraceId; // gateway originates a new trace if none exists
 
- context.Items["TraceId"] = traceId;
- context.Request.Headers["traceparent"] = traceId; // propagate to backend
- await next(context);
- }
+        context.Items["TraceId"] = traceId;
+        context.Request.Headers["traceparent"] = traceId; // propagate to backend
+        await next(context);
+    }
 }
 ```
 **Time complexity:** O(1) per request.
@@ -404,18 +404,18 @@ public class TraceContextMiddleware
 ```csharp
 public class PartnerCanaryGate
 {
- public async Task<GateResult> EvaluateAsync(ConfigChange change)
- {
- var affectedPartners = _partnerRouteRegistry.FindPartnersForRoutes(change.AffectedRoutes);
+    public async Task<GateResult> EvaluateAsync(ConfigChange change)
+    {
+        var affectedPartners = _partnerRouteRegistry.FindPartnersForRoutes(change.AffectedRoutes);
 
- foreach (var partner in affectedPartners)
- {
- var contractTestResult = await _contractTestRunner.RunAsync(partner.ContractTestSuiteId);
- if (!contractTestResult.Passed)
- return GateResult.Blocked($"Partner {partner.Name}'s contract test failed: {contractTestResult.FailureReason}");
- }
- return GateResult.Allowed;
- }
+        foreach (var partner in affectedPartners)
+        {
+            var contractTestResult = await _contractTestRunner.RunAsync(partner.ContractTestSuiteId);
+            if (!contractTestResult.Passed)
+                return GateResult.Blocked($"Partner {partner.Name}'s contract test failed: {contractTestResult.FailureReason}");
+        }
+        return GateResult.Allowed;
+    }
 }
 ```
 **Time complexity:** O(p) for p affected registered partners.
@@ -428,14 +428,14 @@ public class PartnerCanaryGate
 ```csharp
 public class GloballySynchronizedRateLimiter
 {
- private readonly IGlobalDistributedStore _globalStore; // low-latency, cross-region-consistent
+    private readonly IGlobalDistributedStore _globalStore; // low-latency, cross-region-consistent
 
- public async Task<bool> TryConsumeAsync(string clientKey)
- {
- // Atomic, cross-region-consistent decrement — not a batch-replicated, eventually-consistent counter
- var result = await _globalStore.TryDecrementIfPositiveAsync($"ratelimit:{clientKey}");
- return result.Success;
- }
+    public async Task<bool> TryConsumeAsync(string clientKey)
+    {
+        // Atomic, cross-region-consistent decrement — not a batch-replicated, eventually-consistent counter
+        var result = await _globalStore.TryDecrementIfPositiveAsync($"ratelimit:{clientKey}");
+        return result.Success;
+    }
 }
 ```
 **Time complexity:** O(1) per request, plus the global store's own cross-region round-trip latency.
@@ -448,22 +448,22 @@ public class GloballySynchronizedRateLimiter
 ```csharp
 public class DeprecationUsageMonitor
 {
- public async Task<DeprecationReadinessReport> AssessAsync(string apiVersion, DateTime sunsetDate)
- {
- var activeUsage = await _telemetryStore.QueryAsync(
- $"SELECT ClientId, COUNT(*) as RequestCount, MAX(Timestamp) as LastSeen " +
- $"FROM GatewayRequests WHERE ApiVersion = @Version AND Timestamp > @Since " +
- $"GROUP BY ClientId",
- new { Version = apiVersion, Since = DateTime.UtcNow.AddDays(-30) });
+    public async Task<DeprecationReadinessReport> AssessAsync(string apiVersion, DateTime sunsetDate)
+    {
+        var activeUsage = await _telemetryStore.QueryAsync(
+            $"SELECT ClientId, COUNT(*) as RequestCount, MAX(Timestamp) as LastSeen " +
+                $"FROM GatewayRequests WHERE ApiVersion = @Version AND Timestamp > @Since " +
+                $"GROUP BY ClientId",
+                new { Version = apiVersion, Since = DateTime.UtcNow.AddDays(-30) });
 
- var stillActiveClients = activeUsage.Where(c => c.RequestCount > 0).ToList;
- var daysUntilSunset = (sunsetDate - DateTime.UtcNow).TotalDays;
+        var stillActiveClients = activeUsage.Where(c => c.RequestCount > 0).ToList;
+        var daysUntilSunset = (sunsetDate - DateTime.UtcNow).TotalDays;
 
- return new DeprecationReadinessReport(
- stillActiveClients,
- isReadyForCutover: stillActiveClients.Count == 0,
- daysRemaining: daysUntilSunset);
- }
+        return new DeprecationReadinessReport(
+            stillActiveClients,
+                isReadyForCutover: stillActiveClients.Count == 0,
+                daysRemaining: daysUntilSunset);
+    }
 }
 ```
 **Time complexity:** O(c log c) for c distinct clients, driven by the underlying aggregation query.

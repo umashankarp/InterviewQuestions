@@ -385,15 +385,15 @@ sequenceDiagram
 ```csharp
 public class BackfillDerivation
 {
- public IEnumerable<DomainEvent> DeriveEvents(IEnumerable<AuditLogEntry> auditLog) =>
- auditLog.OrderBy(e => e.Timestamp)
-.Select(e => e.ChangeType switch
- {
- "Created" => new InstructionCreated(e.InstructionId, e.Timestamp),
- "Matched" => new LineItemMatched(e.InstructionId, e.Timestamp, e.Details),
- "Released" => new Released(e.InstructionId, e.Timestamp),
- _ => (DomainEvent)new LegacyStateImported(e.InstructionId, e.FinalKnownState)
- });
+    public IEnumerable<DomainEvent> DeriveEvents(IEnumerable<AuditLogEntry> auditLog) =>
+        auditLog.OrderBy(e => e.Timestamp)
+    .Select(e => e.ChangeType switch
+        {
+            "Created" => new InstructionCreated(e.InstructionId, e.Timestamp),
+                "Matched" => new LineItemMatched(e.InstructionId, e.Timestamp, e.Details),
+                "Released" => new Released(e.InstructionId, e.Timestamp),
+                _ => (DomainEvent)new LegacyStateImported(e.InstructionId, e.FinalKnownState)
+    });
 }
 ```
 **Time complexity:** O(n log n) for the ordering step, O(n) for derivation itself.
@@ -406,18 +406,18 @@ public class BackfillDerivation
 ```csharp
 public class MigrationReconciliationJob
 {
- public async Task<DivergenceReport> RunAsync
- {
- var divergences = new List<Divergence>;
- await foreach (var id in _instructionIds.StreamAllAsync)
- {
- var eventDerived = await LoadFromEventStore(id);
- var traditional = await LoadFromTraditionalStore(id);
- if (!eventDerived.Equals(traditional))
- divergences.Add(new Divergence(id, eventDerived, traditional));
- }
- return new DivergenceReport(divergences);
- }
+    public async Task<DivergenceReport> RunAsync
+    {
+        var divergences = new List<Divergence>;
+        await foreach (var id in _instructionIds.StreamAllAsync)
+        {
+            var eventDerived = await LoadFromEventStore(id);
+            var traditional = await LoadFromTraditionalStore(id);
+            if (!eventDerived.Equals(traditional))
+                divergences.Add(new Divergence(id, eventDerived, traditional));
+        }
+        return new DivergenceReport(divergences);
+    }
 }
 ```
 **Time complexity:** O(n) instructions, each O(k) for its own event-replay cost.
@@ -430,20 +430,20 @@ public class MigrationReconciliationJob
 ```csharp
 public class SettlementRepository: ISettlementRepository
 {
- private readonly IFeatureFlag _cutoverFlag;
- public async Task SaveAsync(SettlementInstruction instruction)
- {
- if (_cutoverFlag.IsEnabled("event-store-authoritative"))
- {
- await _eventStore.AppendToStream(instruction.Id, instruction.ExpectedVersion, instruction.UncommittedEvents);
- await _traditionalStore.SaveAsync(instruction); // safety-window dual-write continues
- }
- else
- {
- await _traditionalStore.SaveAsync(instruction); // traditional authoritative, pre-cutover
- await TryAppendToEventStoreAsync(instruction); // best-effort, validating
- }
- }
+    private readonly IFeatureFlag _cutoverFlag;
+    public async Task SaveAsync(SettlementInstruction instruction)
+    {
+        if (_cutoverFlag.IsEnabled("event-store-authoritative"))
+        {
+            await _eventStore.AppendToStream(instruction.Id, instruction.ExpectedVersion, instruction.UncommittedEvents);
+            await _traditionalStore.SaveAsync(instruction); // safety-window dual-write continues
+        }
+        else
+        {
+            await _traditionalStore.SaveAsync(instruction); // traditional authoritative, pre-cutover
+            await TryAppendToEventStoreAsync(instruction); // best-effort, validating
+        }
+    }
 }
 ```
 **Time complexity:** O(1) additional write per command in either mode.
@@ -456,23 +456,23 @@ public class SettlementRepository: ISettlementRepository
 ```csharp
 public class IntermediateStateSpotCheck
 {
- public async Task<SpotCheckReport> RunAsync(IEnumerable<string> sampleInstructionIds)
- {
- var findings = new List<Finding>;
- foreach (var id in sampleInstructionIds)
- {
- var backfilledHistory = await _eventStore.ReadFrom(id, fromVersion: 0);
- var nettingEvent = backfilledHistory.OfType<LineItemMatched>.LastOrDefault;
- var independentRecord = await _legacyReportingArchive.GetNettingTimestampAsync(id);
+    public async Task<SpotCheckReport> RunAsync(IEnumerable<string> sampleInstructionIds)
+    {
+        var findings = new List<Finding>;
+        foreach (var id in sampleInstructionIds)
+        {
+            var backfilledHistory = await _eventStore.ReadFrom(id, fromVersion: 0);
+            var nettingEvent = backfilledHistory.OfType<LineItemMatched>.LastOrDefault;
+            var independentRecord = await _legacyReportingArchive.GetNettingTimestampAsync(id);
 
- if (nettingEvent is not null && independentRecord is not null
- && nettingEvent.Timestamp!= independentRecord.Timestamp)
- {
- findings.Add(new Finding(id, nettingEvent.Timestamp, independentRecord.Timestamp));
- }
- }
- return new SpotCheckReport(findings);
- }
+            if (nettingEvent is not null && independentRecord is not null
+                && nettingEvent.Timestamp!= independentRecord.Timestamp)
+            {
+                findings.Add(new Finding(id, nettingEvent.Timestamp, independentRecord.Timestamp));
+            }
+        }
+        return new SpotCheckReport(findings);
+    }
 }
 ```
 **Time complexity:** O(s) for s sampled instructions, each requiring one event-replay and one independent-archive lookup.

@@ -381,22 +381,22 @@ sequenceDiagram
 ```csharp
 public class TokenBucketRateLimiter
 {
- private readonly ConcurrentDictionary<string, (double Tokens, DateTime LastRefill)> _buckets = new;
- private readonly double _capacity;
- private readonly double _refillRatePerSecond;
+    private readonly ConcurrentDictionary<string, (double Tokens, DateTime LastRefill)> _buckets = new;
+    private readonly double _capacity;
+    private readonly double _refillRatePerSecond;
 
- public bool TryConsume(string clientKey)
- {
- var now = DateTime.UtcNow;
- var (tokens, lastRefill) = _buckets.GetOrAdd(clientKey, (_capacity, now));
- var elapsed = (now - lastRefill).TotalSeconds;
- tokens = Math.Min(_capacity, tokens + elapsed * _refillRatePerSecond);
+    public bool TryConsume(string clientKey)
+    {
+        var now = DateTime.UtcNow;
+        var (tokens, lastRefill) = _buckets.GetOrAdd(clientKey, (_capacity, now));
+        var elapsed = (now - lastRefill).TotalSeconds;
+        tokens = Math.Min(_capacity, tokens + elapsed * _refillRatePerSecond);
 
- if (tokens < 1) { _buckets[clientKey] = (tokens, now); return false; }
+        if (tokens < 1) { _buckets[clientKey] = (tokens, now); return false; }
 
- _buckets[clientKey] = (tokens - 1, now);
- return true;
- }
+        _buckets[clientKey] = (tokens - 1, now);
+        return true;
+    }
 }
 ```
 **Time complexity:** O(1) per request.
@@ -409,18 +409,18 @@ public class TokenBucketRateLimiter
 ```csharp
 public class TieredRateLimitPolicy
 {
- private readonly Dictionary<ClientTier, (double Capacity, double RefillPerSecond)> _tiers = new
- {
- [ClientTier.Retail] = (capacity: 100, refillPerSecond: 10),
- [ClientTier.Institutional] = (capacity: 10_000, refillPerSecond: 1_000),
- [ClientTier.Internal] = (capacity: double.MaxValue, refillPerSecond: double.MaxValue)
- };
+    private readonly Dictionary<ClientTier, (double Capacity, double RefillPerSecond)> _tiers = new
+    {
+        [ClientTier.Retail] = (capacity: 100, refillPerSecond: 10),
+            [ClientTier.Institutional] = (capacity: 10_000, refillPerSecond: 1_000),
+            [ClientTier.Internal] = (capacity: double.MaxValue, refillPerSecond: double.MaxValue)
+    };
 
- public bool TryConsume(string clientKey, ClientTier tier)
- {
- var (capacity, refillRate) = _tiers[tier];
- return _limiterFactory.GetLimiter(capacity, refillRate).TryConsume(clientKey);
- }
+    public bool TryConsume(string clientKey, ClientTier tier)
+    {
+        var (capacity, refillRate) = _tiers[tier];
+        return _limiterFactory.GetLimiter(capacity, refillRate).TryConsume(clientKey);
+    }
 }
 ```
 **Time complexity:** O(1) tier lookup plus the underlying limiter's own O(1) check.
@@ -434,15 +434,15 @@ public class TieredRateLimitPolicy
 [Fact]
 public async Task BackendService_EnforcesAuthorization_EvenWhenGatewayBypassed
 {
- // Simulate direct backend access, bypassing the gateway's own auth entirely
- var directClient = _testHarness.CreateDirectBackendClient(skipGateway: true);
+    // Simulate direct backend access, bypassing the gateway's own auth entirely
+    var directClient = _testHarness.CreateDirectBackendClient(skipGateway: true);
 
- var response = await directClient.GetAsync($"/orders/{otherClientsOrderId}",
- identity: _testHarness.AuthenticatedAs("client-A"));
+    var response = await directClient.GetAsync($"/orders/{otherClientsOrderId}",
+        identity: _testHarness.AuthenticatedAs("client-A"));
 
- Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
- // Confirms the backend's OWN authorization check rejected this
- // independent of any gateway-level enforcement that was deliberately bypassed
+    Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    // Confirms the backend's OWN authorization check rejected this
+    // independent of any gateway-level enforcement that was deliberately bypassed
 }
 ```
 **Time complexity:** O(1) per test scenario.
@@ -455,26 +455,26 @@ public async Task BackendService_EnforcesAuthorization_EvenWhenGatewayBypassed
 ```csharp
 public class RateLimitStoreCircuitBreaker
 {
- private readonly FailureMode _failureMode; // explicit, deliberate configuration — never a library default
+    private readonly FailureMode _failureMode; // explicit, deliberate configuration — never a library default
 
- public async Task<bool> TryConsumeAsync(string clientKey)
- {
- try
- {
- return await _rateLimitStore.TryConsumeAsync(clientKey)
-.TimeoutAfter(_storeTimeout);
- }
- catch (Exception ex) when (ex is TimeoutException or StoreUnavailableException)
- {
- _alerting.RaiseAsync($"Rate-limit store unavailable — operating in {_failureMode} mode");
- return _failureMode switch
- {
- FailureMode.FailOpen => true, // allow traffic through, unrate-limited, temporarily
- FailureMode.FailClosed => false, // block traffic until store recovers
- _ => throw new InvalidOperationException("Failure mode must be explicitly configured")
- };
- }
- }
+    public async Task<bool> TryConsumeAsync(string clientKey)
+    {
+        try
+        {
+            return await _rateLimitStore.TryConsumeAsync(clientKey)
+            .TimeoutAfter(_storeTimeout);
+        }
+        catch (Exception ex) when (ex is TimeoutException or StoreUnavailableException)
+        {
+            _alerting.RaiseAsync($"Rate-limit store unavailable — operating in {_failureMode} mode");
+            return _failureMode switch
+            {
+                FailureMode.FailOpen => true, // allow traffic through, unrate-limited, temporarily
+                    FailureMode.FailClosed => false, // block traffic until store recovers
+                    _ => throw new InvalidOperationException("Failure mode must be explicitly configured")
+            };
+        }
+    }
 }
 ```
 **Time complexity:** O(1) per request, plus the store call's own latency (bounded by the explicit timeout).

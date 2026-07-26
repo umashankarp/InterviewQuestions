@@ -304,23 +304,23 @@ Rotation fails in production not at the store but at the *consumers*: the store 
 ```csharp
 public static class SecretPatternScanner
 {
- private static readonly (string Name, Regex Pattern)[] Patterns =
- {
- ("AWS Access Key", new Regex(@"AKIA[0-9A-Z]{16}")),
- ("Generic secret-like assignment", new Regex(
- @"(?i)(password|secret|token|apikey)\s*[:=]\s*[""']?[A-Za-z0-9+/=_\-]{12,}[""']?"))
- };
+    private static readonly (string Name, Regex Pattern)[] Patterns =
+    {
+        ("AWS Access Key", new Regex(@"AKIA[0-9A-Z]{16}")),
+            ("Generic secret-like assignment", new Regex(
+                @"(?i)(password|secret|token|apikey)\s*[:=]\s*[""']?[A-Za-z0-9+/=_\-]{12,}[""']?"))
+    };
 
- public static IReadOnlyList<string> Scan(string fileContent)
- {
- var findings = new List<string>;
- foreach (var (name, pattern) in Patterns)
- {
- foreach (Match match in pattern.Matches(fileContent))
- findings.Add($"{name} matched at position {match.Index}");
- }
- return findings;
- }
+    public static IReadOnlyList<string> Scan(string fileContent)
+    {
+        var findings = new List<string>;
+        foreach (var (name, pattern) in Patterns)
+        {
+            foreach (Match match in pattern.Matches(fileContent))
+                findings.Add($"{name} matched at position {match.Index}");
+        }
+        return findings;
+    }
 }
 ```
 **Time complexity:** O(n) per file, where n is file length (each regex scans linearly).
@@ -333,32 +333,32 @@ public static class SecretPatternScanner
 ```csharp
 public sealed class DualSecretOverlapValidator
 {
- private readonly Func<string, Task<bool>> _authenticate;
+    private readonly Func<string, Task<bool>> _authenticate;
 
- public DualSecretOverlapValidator(Func<string, Task<bool>> authenticate) =>
- _authenticate = authenticate;
+    public DualSecretOverlapValidator(Func<string, Task<bool>> authenticate) =>
+        _authenticate = authenticate;
 
- public async Task<OverlapValidationResult> ValidateAsync(string oldSecret, string newSecret)
- {
- var oldTask = SafeAuthenticateAsync(oldSecret);
- var newTask = SafeAuthenticateAsync(newSecret);
- await Task.WhenAll(oldTask, newTask);
+    public async Task<OverlapValidationResult> ValidateAsync(string oldSecret, string newSecret)
+    {
+        var oldTask = SafeAuthenticateAsync(oldSecret);
+        var newTask = SafeAuthenticateAsync(newSecret);
+        await Task.WhenAll(oldTask, newTask);
 
- return new OverlapValidationResult(
- OldSecretValid: oldTask.Result,
- NewSecretValid: newTask.Result);
- }
+        return new OverlapValidationResult(
+            OldSecretValid: oldTask.Result,
+                NewSecretValid: newTask.Result);
+    }
 
- private async Task<bool> SafeAuthenticateAsync(string secret)
- {
- try { return await _authenticate(secret); }
- catch { return false; }
- }
+    private async Task<bool> SafeAuthenticateAsync(string secret)
+    {
+        try { return await _authenticate(secret); }
+        catch { return false; }
+    }
 }
 
 public sealed record OverlapValidationResult(bool OldSecretValid, bool NewSecretValid)
 {
- public bool IsSafeToProceed => OldSecretValid && NewSecretValid;
+    public bool IsSafeToProceed => OldSecretValid && NewSecretValid;
 }
 ```
 **Time complexity:** O(1) — two concurrent authentication calls, bounded by the target endpoint's own latency.
@@ -375,29 +375,29 @@ public sealed record DriftFinding(string Key, DriftKind Kind, string? DeclaredVa
 
 public static class ParityDriftDetector
 {
- public static IReadOnlyList<DriftFinding> Detect(
- IReadOnlyDictionary<string, string> declared,
- IReadOnlyDictionary<string, string> running)
- {
- var findings = new List<DriftFinding>;
- var allKeys = new HashSet<string>(declared.Keys);
- allKeys.UnionWith(running.Keys);
+    public static IReadOnlyList<DriftFinding> Detect(
+        IReadOnlyDictionary<string, string> declared,
+            IReadOnlyDictionary<string, string> running)
+    {
+        var findings = new List<DriftFinding>;
+        var allKeys = new HashSet<string>(declared.Keys);
+        allKeys.UnionWith(running.Keys);
 
- foreach (var key in allKeys)
- {
- bool inDeclared = declared.TryGetValue(key, out var declaredValue);
- bool inRunning = running.TryGetValue(key, out var runningValue);
+        foreach (var key in allKeys)
+        {
+            bool inDeclared = declared.TryGetValue(key, out var declaredValue);
+            bool inRunning = running.TryGetValue(key, out var runningValue);
 
- if (inRunning &&!inDeclared)
- findings.Add(new DriftFinding(key, DriftKind.UndeclaredAddition, null, runningValue));
- else if (inDeclared &&!inRunning)
- findings.Add(new DriftFinding(key, DriftKind.NotYetApplied, declaredValue, null));
- else if (declaredValue!= runningValue)
- findings.Add(new DriftFinding(key, DriftKind.ValueMismatch, declaredValue, runningValue));
- }
+            if (inRunning &&!inDeclared)
+                findings.Add(new DriftFinding(key, DriftKind.UndeclaredAddition, null, runningValue));
+            else if (inDeclared &&!inRunning)
+                findings.Add(new DriftFinding(key, DriftKind.NotYetApplied, declaredValue, null));
+            else if (declaredValue!= runningValue)
+                findings.Add(new DriftFinding(key, DriftKind.ValueMismatch, declaredValue, runningValue));
+        }
 
- return findings;
- }
+        return findings;
+    }
 }
 ```
 **Time complexity:** O(d + r) where d and r are the sizes of the declared and running maps (single pass over the unioned key set).

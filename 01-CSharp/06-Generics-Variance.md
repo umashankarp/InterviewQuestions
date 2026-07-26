@@ -12,7 +12,7 @@ Generics let you define a type or method with a **placeholder type parameter** (
 ```csharp
 public class Box<T>
 {
- public T Value { get; set; }
+    public T Value { get; set; }
 }
 var intBox = new Box<int> { Value = 5 }; // T = int
 var stringBox = new Box<string> { Value = "x" }; // T = string
@@ -71,7 +71,7 @@ graph TB
 ```csharp
 public T Max<T>(T a, T b) where T: IComparable<T>
 {
- return a.CompareTo(b) > 0? a: b;
+    return a.CompareTo(b) > 0? a: b;
 }
 ```
 - `where T: IComparable<T>` is a **compile-time-enforced contract**: only types implementing `IComparable<T>` can be substituted for `T`, and the compiler allows calling `.CompareTo(...)` on `T`-typed values inside the method body **without boxing and without a runtime interface-dispatch cast**, because the JIT specializes the method per concrete `T` — calling an interface member on a **constrained value-type `T`** invokes it directly on the unboxed value via a specialized code path (this is exactly the point, restated in its natural home).
@@ -85,14 +85,14 @@ Variance (`in`/`out`) is declared **only on generic interface and delegate type 
 ```csharp
 public interface IProducer<out T> // covariant: T appears only in OUTPUT positions (return types)
 {
- T Produce;
- // T Consume(T item); // COMPILE ERROR if attempted -- T can't appear as an input parameter in a covariant interface
+    T Produce;
+    // T Consume(T item); // COMPILE ERROR if attempted -- T can't appear as an input parameter in a covariant interface
 }
 
 public interface IConsumer<in T> // contravariant: T appears only in INPUT positions (parameter types)
 {
- void Consume(T item);
- // T Produce; // COMPILE ERROR if attempted -- T can't appear as a return type in a contravariant interface
+    void Consume(T item);
+    // T Produce; // COMPILE ERROR if attempted -- T can't appear as a return type in a contravariant interface
 }
 ```
 
@@ -119,9 +119,9 @@ Before C# 11, you could not write a generic method constrained to "any numeric t
 ```csharp
 public static T Sum<T>(IEnumerable<T> values) where T: INumber<T>
 {
- T total = T.Zero; // T.Zero is a STATIC ABSTRACT member -- resolved per-instantiation, not via instance dispatch
- foreach (var v in values) total += v; // uses T's static + operator
- return total;
+    T total = T.Zero; // T.Zero is a STATIC ABSTRACT member -- resolved per-instantiation, not via instance dispatch
+    foreach (var v in values) total += v; // uses T's static + operator
+    return total;
 }
 // Works identically for Sum<int>, Sum<double>, Sum<MyCustomNumericType> (if it implements INumber<T>)
 ```
@@ -179,11 +179,11 @@ graph LR
 ```csharp
 public interface ICacheReader<out T>
 {
- T? Get(string key);
+    T? Get(string key);
 }
 public interface ICache<T>: ICacheReader<T>
 {
- void Set(string key, T value);
+    void Set(string key, T value);
 }
 ```
 A team building a notification service had a method accepting `ICacheReader<Notification>` for read-only access, and a caller passed a `ICache<EmailNotification>` (where `EmailNotification: Notification`) directly as an `ICacheReader<Notification>` — relying on `ICacheReader<out T>`'s covariance, which worked correctly and was the intended design. The bug arose in a **different, related** spot: a second developer, generalizing a helper method, changed a parameter type from `ICacheReader<Notification>` to the full `ICache<Notification>` (not realizing `ICache<T>` is **invariant**, since `T` appears in `Set`'s input position) — this silently broke every call site that had been passing a covariance-reliant `ICache<EmailNotification>` where an `ICache<Notification>` was now required, since `ICache<T>` cannot support that substitution at all. All such call sites failed to compile, were "fixed" under time pressure by the second developer via unsafe casts (`(ICache<Notification>)(object)theEmailCache`), and one of those casts was later invoked in a code path that called `.Set("key", someOtherNotificationSubtype)` — successfully compiling and running (since the cast bypassed the compiler's variance safety net entirely) but **corrupting the underlying `ICache<EmailNotification>`'s type invariant at runtime**, causing an `InvalidCastException` deep inside the cache's own internal storage logic when a later `.Get` call tried to hand back what it assumed was always an `EmailNotification`.
@@ -384,7 +384,7 @@ PrintAll(cats); // OK -- IEnumerable<out T> is covariant, and PrintAll only ever
 ```csharp
 public static T Max<T>(T a, T b) where T: IComparable<T>
 {
- return a.CompareTo(b) >= 0? a: b;
+    return a.CompareTo(b) >= 0? a: b;
 }
 
 // Usage:
@@ -398,22 +398,22 @@ string maxStr = Max("apple", "banana"); // T = string, shares reference-type cod
 ```csharp
 public interface IReadOnlyRepository<out T>
 {
- T? GetById(string id);
- IEnumerable<T> GetAll;
+    T? GetById(string id);
+    IEnumerable<T> GetAll;
 }
 
 public interface IRepository<T>: IReadOnlyRepository<T>
 {
- void Add(string id, T item);
+    void Add(string id, T item);
 }
 
 public sealed class InMemoryRepository<T>: IRepository<T>
 {
- private readonly Dictionary<string, T> _store = new;
+    private readonly Dictionary<string, T> _store = new;
 
- public T? GetById(string id) => _store.TryGetValue(id, out var value)? value: default;
- public IEnumerable<T> GetAll => _store.Values;
- public void Add(string id, T item) => _store[id] = item;
+    public T? GetById(string id) => _store.TryGetValue(id, out var value)? value: default;
+    public IEnumerable<T> GetAll => _store.Values;
+    public void Add(string id, T item) => _store[id] = item;
 }
 
 public abstract class Notification { }
@@ -439,27 +439,27 @@ using System.Numerics;
 
 public static class Statistics
 {
- public static T Sum<T>(ReadOnlySpan<T> values) where T: INumber<T>
- {
- T total = T.Zero;
- foreach (var v in values) total += v; // static abstract '+' operator, resolved per-instantiation
- return total;
- }
+    public static T Sum<T>(ReadOnlySpan<T> values) where T: INumber<T>
+    {
+        T total = T.Zero;
+        foreach (var v in values) total += v; // static abstract '+' operator, resolved per-instantiation
+        return total;
+    }
 
- public static T Average<T>(ReadOnlySpan<T> values) where T: INumber<T>
- {
- if (values.IsEmpty) throw new ArgumentException("Cannot average an empty span.");
- T total = Sum(values);
- T count = T.CreateChecked(values.Length); // generic math: convert an int count into T's own numeric type
- return total / count;
- }
+    public static T Average<T>(ReadOnlySpan<T> values) where T: INumber<T>
+    {
+        if (values.IsEmpty) throw new ArgumentException("Cannot average an empty span.");
+        T total = Sum(values);
+        T count = T.CreateChecked(values.Length); // generic math: convert an int count into T's own numeric type
+        return total / count;
+    }
 
- public static T Max<T>(ReadOnlySpan<T> values) where T: INumber<T>, IMinMaxValue<T>
- {
- T max = T.MinValue; // static abstract member from IMinMaxValue<T>
- foreach (var v in values) if (v > max) max = v;
- return max;
- }
+    public static T Max<T>(ReadOnlySpan<T> values) where T: INumber<T>, IMinMaxValue<T>
+    {
+        T max = T.MinValue; // static abstract member from IMinMaxValue<T>
+        foreach (var v in values) if (v > max) max = v;
+        return max;
+    }
 }
 
 // Usage -- works identically, with zero boxing, for int, double, decimal, or any custom INumber<T>:
@@ -515,32 +515,32 @@ classDiagram
 ```csharp
 public interface IResult<out T>
 {
- bool IsSuccess { get; }
- T Value { get; } // T only in an output (getter) position -- correctly covariant
- string? Error { get; }
+    bool IsSuccess { get; }
+    T Value { get; } // T only in an output (getter) position -- correctly covariant
+    string? Error { get; }
 }
 
 public readonly struct Result<T>: IResult<T>
 {
- public bool IsSuccess { get; }
- public T Value { get; }
- public string? Error { get; }
+    public bool IsSuccess { get; }
+    public T Value { get; }
+    public string? Error { get; }
 
- private Result(bool isSuccess, T value, string? error)
- {
- IsSuccess = isSuccess;
- Value = value;
- Error = error;
- }
+    private Result(bool isSuccess, T value, string? error)
+    {
+        IsSuccess = isSuccess;
+        Value = value;
+        Error = error;
+    }
 
- public static Result<T> Success(T value) => new(true, value, null);
- public static Result<T> Failure(string error) => new(false, default!, error);
+    public static Result<T> Success(T value) => new(true, value, null);
+    public static Result<T> Failure(string error) => new(false, default!, error);
 
- // Generic method with ITS OWN type parameter, distinct from the containing type's T --
- // enables transforming a Result<T> into a Result<TResult> without boxing (T, TResult both flow
- // through JIT-specialized code per their concrete instantiations).
- public Result<TResult> Map<TResult>(Func<T, TResult> mapper) =>
- IsSuccess? Result<TResult>.Success(mapper(Value)): Result<TResult>.Failure(Error!);
+    // Generic method with ITS OWN type parameter, distinct from the containing type's T --
+    // enables transforming a Result<T> into a Result<TResult> without boxing (T, TResult both flow
+    // through JIT-specialized code per their concrete instantiations).
+    public Result<TResult> Map<TResult>(Func<T, TResult> mapper) =>
+        IsSuccess? Result<TResult>.Success(mapper(Value)): Result<TResult>.Failure(Error!);
 }
 
 // Usage demonstrating covariance on the interface (note: Result<T> ITSELF, being a struct, is invariant

@@ -220,41 +220,41 @@ spec:
 ```csharp
 public class StagedRolloutComplianceChecker
 {
- // Directly the structural fix for the incident -- a rollout with only audit/warn
- // configured past its OWN declared target date is flagged, not silently trusted.
- public IEnumerable<string> CheckStalledRollouts(IEnumerable<NamespacePolicyStatus> namespaces)
- {
- foreach (var ns in namespaces)
- {
- if (ns.EnforcementMode is "audit" or "warn"
- && ns.DeclaredEnforceByDate.HasValue
- && ns.DeclaredEnforceByDate.Value < DateTime.UtcNow)
- {
- yield return $"Namespace '{ns.Name}': PSA rollout STALLED -- " +
- $"still in '{ns.EnforcementMode}' mode, " +
- $"{(DateTime.UtcNow - ns.DeclaredEnforceByDate.Value).Days} days past its " +
- $"declared enforce-by date ({ns.DeclaredEnforceByDate.Value:yyyy-MM-dd}). " +
- $"Owning team: {ns.OwningTeam} (this module/§Advanced Q1).";
- }
- }
- }
+    // Directly the structural fix for the incident -- a rollout with only audit/warn
+    // configured past its OWN declared target date is flagged, not silently trusted.
+    public IEnumerable<string> CheckStalledRollouts(IEnumerable<NamespacePolicyStatus> namespaces)
+    {
+        foreach (var ns in namespaces)
+        {
+            if (ns.EnforcementMode is "audit" or "warn"
+                && ns.DeclaredEnforceByDate.HasValue
+                && ns.DeclaredEnforceByDate.Value < DateTime.UtcNow)
+            {
+                yield return $"Namespace '{ns.Name}': PSA rollout STALLED -- " +
+                    $"still in '{ns.EnforcementMode}' mode, " +
+                    $"{(DateTime.UtcNow - ns.DeclaredEnforceByDate.Value).Days} days past its " +
+                    $"declared enforce-by date ({ns.DeclaredEnforceByDate.Value:yyyy-MM-dd}). " +
+                    $"Owning team: {ns.OwningTeam} (this module/§Advanced Q1).";
+            }
+        }
+    }
 
- // Advanced Q3's synthetic negative test -- the definitive verification, independent
- // of what the labels merely claim.
- public async Task<bool> VerifyActualEnforcementAsync(string @namespace, IKubernetesClient client)
- {
- var privilegedTestPod = BuildDeliberatelyNonCompliantPod(@namespace);
- try
- {
- await client.CreatePodAsync(privilegedTestPod);
- await client.DeletePodAsync(privilegedTestPod.Name, @namespace); // cleanup if it succeeded
- return false; // creation SUCCEEDED -- enforcement is NOT actually active, despite labels
- }
- catch (KubernetesAdmissionDeniedException)
- {
- return true; // creation was correctly REJECTED -- enforcement genuinely confirmed active
- }
- }
+    // Advanced Q3's synthetic negative test -- the definitive verification, independent
+    // of what the labels merely claim.
+    public async Task<bool> VerifyActualEnforcementAsync(string @namespace, IKubernetesClient client)
+    {
+        var privilegedTestPod = BuildDeliberatelyNonCompliantPod(@namespace);
+        try
+        {
+            await client.CreatePodAsync(privilegedTestPod);
+            await client.DeletePodAsync(privilegedTestPod.Name, @namespace); // cleanup if it succeeded
+            return false; // creation SUCCEEDED -- enforcement is NOT actually active, despite labels
+        }
+        catch (KubernetesAdmissionDeniedException)
+        {
+            return true; // creation was correctly REJECTED -- enforcement genuinely confirmed active
+        }
+    }
 }
 ```
 

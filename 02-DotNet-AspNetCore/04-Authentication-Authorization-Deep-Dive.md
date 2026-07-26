@@ -27,9 +27,9 @@ builder.Services.AddAuthentication(options => options.DefaultScheme = "Cookies")
 .AddJwtBearer("Bearer", options => { /* token validation parameters */ });
 
 builder.Services.AddAuthorization(options =>
-{
- options.AddPolicy("CanEditOrders", policy =>
- policy.RequireClaim("permission", "orders:edit"));
+    {
+        options.AddPolicy("CanEditOrders", policy =>
+            policy.RequireClaim("permission", "orders:edit"));
 });
 
 app.UseAuthentication; // populates HttpContext.User by running the matched scheme's handler
@@ -64,26 +64,26 @@ An authorization **policy** is a named collection of **requirements** (`IAuthori
 ```csharp
 public class MinimumAccountAgeRequirement: IAuthorizationRequirement
 {
- public TimeSpan MinimumAge { get; }
- public MinimumAccountAgeRequirement(TimeSpan minimumAge) => MinimumAge = minimumAge;
+    public TimeSpan MinimumAge { get; }
+    public MinimumAccountAgeRequirement(TimeSpan minimumAge) => MinimumAge = minimumAge;
 }
 
 public class MinimumAccountAgeHandler: AuthorizationHandler<MinimumAccountAgeRequirement>
 {
- protected override Task HandleRequirementAsync(
- AuthorizationHandlerContext context, MinimumAccountAgeRequirement requirement)
- {
- var createdAtClaim = context.User.FindFirst("account_created_at");
- if (createdAtClaim is not null
- && DateTimeOffset.Parse(createdAtClaim.Value) <= DateTimeOffset.UtcNow - requirement.MinimumAge)
- {
- context.Succeed(requirement); // marks THIS requirement satisfied
- }
- return Task.CompletedTask;
- // NOTE: not calling context.Succeed does NOT fail the policy immediately --
- // it simply leaves this requirement unsatisfied; the policy overall fails only if
- // ANY requirement remains unsatisfied after ALL handlers have run.
- }
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext context, MinimumAccountAgeRequirement requirement)
+    {
+        var createdAtClaim = context.User.FindFirst("account_created_at");
+        if (createdAtClaim is not null
+            && DateTimeOffset.Parse(createdAtClaim.Value) <= DateTimeOffset.UtcNow - requirement.MinimumAge)
+        {
+            context.Succeed(requirement); // marks THIS requirement satisfied
+        }
+        return Task.CompletedTask;
+        // NOTE: not calling context.Succeed does NOT fail the policy immediately --
+        // it simply leaves this requirement unsatisfied; the policy overall fails only if
+        // ANY requirement remains unsatisfied after ALL handlers have run.
+    }
 }
 ```
 **Critical, frequently-tested fact**: a policy succeeds only if **every** requirement in it is satisfied — but an individual handler **choosing not to call `context.Succeed`** does not immediately fail the whole evaluation; it simply means that specific requirement remains unsatisfied, and **other handlers for the same requirement type** (multiple handlers can register for the same requirement) get a chance to satisfy it too (an "OR" relationship **between handlers for the same requirement**, combined with an "AND" relationship **across different requirements** in the same policy) — a genuinely subtle, commonly-misunderstood evaluation semantic worth knowing precisely.
@@ -97,13 +97,13 @@ public class OrderOwnerRequirement: IAuthorizationRequirement { }
 
 public class OrderOwnerHandler: AuthorizationHandler<OrderOwnerRequirement, Order>
 {
- protected override Task HandleRequirementAsync(
- AuthorizationHandlerContext context, OrderOwnerRequirement requirement, Order resource)
- {
- var userId = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
- if (resource.CustomerId == userId) context.Succeed(requirement);
- return Task.CompletedTask;
- }
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext context, OrderOwnerRequirement requirement, Order resource)
+    {
+        var userId = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (resource.CustomerId == userId) context.Succeed(requirement);
+        return Task.CompletedTask;
+    }
 }
 
 // Usage inside an endpoint/controller (imperative, resource-based check -- NOT expressible via a
@@ -354,8 +354,8 @@ Policy succeeds ONLY IF: (RequireRoleRequirement satisfied by ANY of its handler
 **Problem**: Restrict an endpoint to users with the "Manager" role.
 ```csharp
 builder.Services.AddAuthorization(options =>
-{
- options.AddPolicy("ManagerOnly", policy => policy.RequireRole("Manager"));
+    {
+        options.AddPolicy("ManagerOnly", policy => policy.RequireRole("Manager"));
 });
 
 app.MapDelete("/orders/{id}", DeleteOrder).RequireAuthorization("ManagerOnly");
@@ -369,16 +369,16 @@ public class OrderAccessRequirement: IAuthorizationRequirement { }
 
 public class OrderOwnerOrManagerHandler: AuthorizationHandler<OrderAccessRequirement, Order>
 {
- protected override Task HandleRequirementAsync(
- AuthorizationHandlerContext context, OrderAccessRequirement requirement, Order resource)
- {
- if (context.User.IsInRole("Manager")
- || resource.CustomerId == context.User.FindFirstValue(ClaimTypes.NameIdentifier))
- {
- context.Succeed(requirement);
- }
- return Task.CompletedTask;
- }
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext context, OrderAccessRequirement requirement, Order resource)
+    {
+        if (context.User.IsInRole("Manager")
+            || resource.CustomerId == context.User.FindFirstValue(ClaimTypes.NameIdentifier))
+        {
+            context.Succeed(requirement);
+        }
+        return Task.CompletedTask;
+    }
 }
 
 // Registration:
@@ -387,14 +387,14 @@ public class OrderOwnerOrManagerHandler: AuthorizationHandler<OrderAccessRequire
 
 // Usage in the endpoint:
 app.MapGet("/orders/{id}", async (string id, IOrderRepository repo, IAuthorizationService authService, ClaimsPrincipal user) =>
-{
- var order = await repo.GetByIdAsync(id);
- if (order is null) return Results.NotFound;
+    {
+        var order = await repo.GetByIdAsync(id);
+        if (order is null) return Results.NotFound;
 
- var authResult = await authService.AuthorizeAsync(user, order, "OrderAccess");
- if (!authResult.Succeeded) return Results.Forbid;
+        var authResult = await authService.AuthorizeAsync(user, order, "OrderAccess");
+        if (!authResult.Succeeded) return Results.Forbid;
 
- return Results.Ok(order);
+        return Results.Ok(order);
 });
 ```
 **Discussion**: Note the deliberate ordering — the resource (`order`) is loaded **first** (needed regardless, for the actual business logic if access is granted), **then** the resource-based authorization check runs against it — exactly the pattern described, and impossible to express as a purely declarative `[Authorize]` attribute since the attribute has no way to reference `order` before it's been loaded inside the handler body.
@@ -404,47 +404,47 @@ app.MapGet("/orders/{id}", async (string id, IOrderRepository repo, IAuthorizati
 ```csharp
 public class PartnerTierClaimsTransformation: IClaimsTransformation
 {
- private readonly IMemoryCache _cache;
- private readonly IPartnerRepository _repository;
- private static readonly SemaphoreSlim _lock = new(1, 1); // simplistic global lock -- a production version
- // would use a per-key lock collection for finer granularity
+    private readonly IMemoryCache _cache;
+    private readonly IPartnerRepository _repository;
+    private static readonly SemaphoreSlim _lock = new(1, 1); // simplistic global lock -- a production version
+    // would use a per-key lock collection for finer granularity
 
- public PartnerTierClaimsTransformation(IMemoryCache cache, IPartnerRepository repository)
- {
- _cache = cache;
- _repository = repository;
- }
+    public PartnerTierClaimsTransformation(IMemoryCache cache, IPartnerRepository repository)
+    {
+        _cache = cache;
+        _repository = repository;
+    }
 
- public async Task<ClaimsPrincipal> TransformAsync(ClaimsPrincipal principal)
- {
- var partnerId = principal.FindFirstValue("partner_id");
- if (partnerId is null) return principal; // not a partner-scoped caller -- nothing to enrich
+    public async Task<ClaimsPrincipal> TransformAsync(ClaimsPrincipal principal)
+    {
+        var partnerId = principal.FindFirstValue("partner_id");
+        if (partnerId is null) return principal; // not a partner-scoped caller -- nothing to enrich
 
- string cacheKey = $"partner-tier:{partnerId}";
- if (!_cache.TryGetValue(cacheKey, out string? tier))
- {
- await _lock.WaitAsync;
- try
- {
- // DOUBLE-CHECK after acquiring the lock -- another concurrent request may have
- // already populated the cache while this one was waiting for the lock.
- if (!_cache.TryGetValue(cacheKey, out tier))
- {
- tier = await _repository.GetPartnerTierAsync(partnerId);
- _cache.Set(cacheKey, tier, TimeSpan.FromSeconds(30)); // SHORT TTL, per §Advanced Q4's reasoning
- }
- }
- finally { _lock.Release; }
- }
+        string cacheKey = $"partner-tier:{partnerId}";
+        if (!_cache.TryGetValue(cacheKey, out string? tier))
+        {
+            await _lock.WaitAsync;
+            try
+            {
+                // DOUBLE-CHECK after acquiring the lock -- another concurrent request may have
+                // already populated the cache while this one was waiting for the lock.
+                if (!_cache.TryGetValue(cacheKey, out tier))
+                {
+                    tier = await _repository.GetPartnerTierAsync(partnerId);
+                    _cache.Set(cacheKey, tier, TimeSpan.FromSeconds(30)); // SHORT TTL, per §Advanced Q4's reasoning
+                }
+            }
+            finally { _lock.Release; }
+        }
 
- var identity = new ClaimsIdentity;
- identity.AddClaim(new Claim("partner_tier", tier?? "unknown"));
- principal.AddIdentity(identity);
- return principal;
- }
+        var identity = new ClaimsIdentity;
+        identity.AddClaim(new Claim("partner_tier", tier?? "unknown"));
+        principal.AddIdentity(identity);
+        return principal;
+    }
 
- // Explicit invalidation hook, called by whatever administrative action changes a partner's tier:
- public void InvalidatePartner(string partnerId) => _cache.Remove($"partner-tier:{partnerId}");
+    // Explicit invalidation hook, called by whatever administrative action changes a partner's tier:
+    public void InvalidatePartner(string partnerId) => _cache.Remove($"partner-tier:{partnerId}");
 }
 ```
 **Discussion points**: The double-checked-locking pattern (checking the cache, acquiring a lock, checking **again** before doing the expensive work) is precisely what prevents the cache-stampede scenario from Advanced Q7 — without the second check inside the lock, every request that arrived while the lock was held would still redundantly perform the database lookup once it eventually acquired the lock, one at a time, rather than benefiting from the first request's now-populated cache entry. A production implementation would replace the single global `SemaphoreSlim` with a per-key locking mechanism (to avoid serializing lookups for *different* partner IDs behind one shared lock) — flagged here explicitly as a known simplification, exactly the kind of "here's what I'd improve for real production use" honesty valuable to demonstrate in an interview setting rather than presenting a simplified exercise as production-complete without qualification.
@@ -454,50 +454,50 @@ public class PartnerTierClaimsTransformation: IClaimsTransformation
 ```csharp
 public class RecentAuthenticationRequirement: IAuthorizationRequirement
 {
- public TimeSpan MaxAge { get; }
- public RecentAuthenticationRequirement(TimeSpan maxAge) => MaxAge = maxAge;
+    public TimeSpan MaxAge { get; }
+    public RecentAuthenticationRequirement(TimeSpan maxAge) => MaxAge = maxAge;
 }
 
 public class RecentAuthenticationHandler: AuthorizationHandler<RecentAuthenticationRequirement>
 {
- protected override Task HandleRequirementAsync(
- AuthorizationHandlerContext context, RecentAuthenticationRequirement requirement)
- {
- var authTimeClaim = context.User.FindFirst("auth_time");
- if (authTimeClaim is not null
- && long.TryParse(authTimeClaim.Value, out var authTimeUnix))
- {
- var authTime = DateTimeOffset.FromUnixTimeSeconds(authTimeUnix);
- if (DateTimeOffset.UtcNow - authTime <= requirement.MaxAge)
- {
- context.Succeed(requirement);
- }
- }
- // Deliberately NOT calling context.Fail -- absence of Succeed is sufficient for the
- // requirement to remain unsatisfied; explicit Fail would short-circuit ALL other
- // requirements in the policy immediately, which isn't desired here (see discussion).
- return Task.CompletedTask;
- }
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext context, RecentAuthenticationRequirement requirement)
+    {
+        var authTimeClaim = context.User.FindFirst("auth_time");
+        if (authTimeClaim is not null
+            && long.TryParse(authTimeClaim.Value, out var authTimeUnix))
+        {
+            var authTime = DateTimeOffset.FromUnixTimeSeconds(authTimeUnix);
+            if (DateTimeOffset.UtcNow - authTime <= requirement.MaxAge)
+            {
+                context.Succeed(requirement);
+            }
+        }
+        // Deliberately NOT calling context.Fail -- absence of Succeed is sufficient for the
+        // requirement to remain unsatisfied; explicit Fail would short-circuit ALL other
+        // requirements in the policy immediately, which isn't desired here (see discussion).
+        return Task.CompletedTask;
+    }
 }
 
 // Custom result handling: distinguish "step-up needed" from an ordinary 403.
 public class StepUpAuthorizationMiddlewareResultHandler: IAuthorizationMiddlewareResultHandler
 {
- private readonly AuthorizationMiddlewareResultHandler _defaultHandler = new;
+    private readonly AuthorizationMiddlewareResultHandler _defaultHandler = new;
 
- public async Task HandleAsync(
- RequestDelegate next, HttpContext context, AuthorizationPolicy policy, PolicyAuthorizationResult authorizeResult)
- {
- if (!authorizeResult.Succeeded
- && policy.Requirements.OfType<RecentAuthenticationRequirement>.Any)
- {
- context.Response.StatusCode = StatusCodes.Status401Unauthorized;
- context.Response.Headers["X-Step-Up-Auth-Required"] = "true"; // client-facing signal
- await context.Response.WriteAsJsonAsync(new { error = "step_up_authentication_required" });
- return;
- }
- await _defaultHandler.HandleAsync(next, context, policy, authorizeResult);
- }
+    public async Task HandleAsync(
+        RequestDelegate next, HttpContext context, AuthorizationPolicy policy, PolicyAuthorizationResult authorizeResult)
+    {
+        if (!authorizeResult.Succeeded
+            && policy.Requirements.OfType<RecentAuthenticationRequirement>.Any)
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            context.Response.Headers["X-Step-Up-Auth-Required"] = "true"; // client-facing signal
+            await context.Response.WriteAsJsonAsync(new { error = "step_up_authentication_required" });
+            return;
+        }
+        await _defaultHandler.HandleAsync(next, context, policy, authorizeResult);
+    }
 }
 // Registration: services.AddSingleton<IAuthorizationMiddlewareResultHandler, StepUpAuthorizationMiddlewareResultHandler>
 ```
@@ -541,34 +541,34 @@ classDiagram
 ```csharp
 public interface IResourceAuthorizationHelper
 {
- // Returns null if authorized (caller proceeds); returns a 403 IResult if denied
- // (caller returns it immediately) -- a small, deliberate convenience reducing repetitive boilerplate.
- Task<IResult?> AuthorizeOrForbidAsync<TResource>(ClaimsPrincipal user, TResource resource, string policy)
- where TResource: class;
+    // Returns null if authorized (caller proceeds); returns a 403 IResult if denied
+    // (caller returns it immediately) -- a small, deliberate convenience reducing repetitive boilerplate.
+    Task<IResult?> AuthorizeOrForbidAsync<TResource>(ClaimsPrincipal user, TResource resource, string policy)
+    where TResource: class;
 }
 
 public sealed class ResourceAuthorizationHelper: IResourceAuthorizationHelper
 {
- private readonly IAuthorizationService _authService;
- public ResourceAuthorizationHelper(IAuthorizationService authService) => _authService = authService;
+    private readonly IAuthorizationService _authService;
+    public ResourceAuthorizationHelper(IAuthorizationService authService) => _authService = authService;
 
- public async Task<IResult?> AuthorizeOrForbidAsync<TResource>(ClaimsPrincipal user, TResource resource, string policy)
- where TResource: class
- {
- var result = await _authService.AuthorizeAsync(user, resource, policy);
- return result.Succeeded? null: Results.Forbid;
- }
+    public async Task<IResult?> AuthorizeOrForbidAsync<TResource>(ClaimsPrincipal user, TResource resource, string policy)
+    where TResource: class
+    {
+        var result = await _authService.AuthorizeAsync(user, resource, policy);
+        return result.Succeeded? null: Results.Forbid;
+    }
 }
 
 // Usage -- reduces the Medium exercise's repeated 3-line pattern to one line at every call site:
 app.MapGet("/orders/{id}", async (string id, IOrderRepository repo, IResourceAuthorizationHelper authHelper, ClaimsPrincipal user) =>
-{
- var order = await repo.GetByIdAsync(id);
- if (order is null) return Results.NotFound;
+    {
+        var order = await repo.GetByIdAsync(id);
+        if (order is null) return Results.NotFound;
 
- if (await authHelper.AuthorizeOrForbidAsync(user, order, "OrderAccess") is { } forbidden) return forbidden;
+        if (await authHelper.AuthorizeOrForbidAsync(user, order, "OrderAccess") is { } forbidden) return forbidden;
 
- return Results.Ok(order);
+        return Results.Ok(order);
 });
 ```
 

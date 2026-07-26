@@ -438,14 +438,14 @@ public sealed record ElevationGrant(DateTimeOffset IssuedAt, TimeSpan Duration);
 
 public static class GrantValidator
 {
- public static bool IsValid(ElevationGrant grant, DateTimeOffset now) =>
- now < grant.IssuedAt + grant.Duration;
+    public static bool IsValid(ElevationGrant grant, DateTimeOffset now) =>
+        now < grant.IssuedAt + grant.Duration;
 
- public static TimeSpan? RemainingTime(ElevationGrant grant, DateTimeOffset now)
- {
- var expiresAt = grant.IssuedAt + grant.Duration;
- return now < expiresAt? expiresAt - now: null;
- }
+    public static TimeSpan? RemainingTime(ElevationGrant grant, DateTimeOffset now)
+    {
+        var expiresAt = grant.IssuedAt + grant.Duration;
+        return now < expiresAt? expiresAt - now: null;
+    }
 }
 ```
 **Time complexity:** O(1). **Space complexity:** O(1).
@@ -460,18 +460,18 @@ public static class GrantValidator
 ```csharp
 public static class SoDChecker
 {
- public static List<(string, string)> FindConflicts(
- HashSet<string> effectivePermissions,
- IEnumerable<(string A, string B)> conflictPairs)
- {
- var found = new List<(string, string)>;
- foreach (var (a, b) in conflictPairs)
- {
- if (effectivePermissions.Contains(a) && effectivePermissions.Contains(b))
- found.Add((a, b));
- }
- return found;
- }
+    public static List<(string, string)> FindConflicts(
+        HashSet<string> effectivePermissions,
+            IEnumerable<(string A, string B)> conflictPairs)
+    {
+        var found = new List<(string, string)>;
+        foreach (var (a, b) in conflictPairs)
+        {
+            if (effectivePermissions.Contains(a) && effectivePermissions.Contains(b))
+                found.Add((a, b));
+        }
+        return found;
+    }
 }
 ```
 **Time complexity:** O(P) where P = number of conflict pairs (each check is O(1) via hash set). **Space complexity:** O(1) beyond input.
@@ -486,40 +486,40 @@ public static class SoDChecker
 ```csharp
 public sealed class SoDGraph
 {
- private readonly Dictionary<string, HashSet<string>> _roleToPermissions = new;
- private readonly Dictionary<string, HashSet<string>> _principalToRoles = new;
- private readonly List<(string A, string B)> _conflictPairs;
+    private readonly Dictionary<string, HashSet<string>> _roleToPermissions = new;
+    private readonly Dictionary<string, HashSet<string>> _principalToRoles = new;
+    private readonly List<(string A, string B)> _conflictPairs;
 
- public SoDGraph(List<(string, string)> conflictPairs) => _conflictPairs = conflictPairs;
+    public SoDGraph(List<(string, string)> conflictPairs) => _conflictPairs = conflictPairs;
 
- public void DefineRole(string role, HashSet<string> permissions) =>
- _roleToPermissions[role] = permissions;
+    public void DefineRole(string role, HashSet<string> permissions) =>
+        _roleToPermissions[role] = permissions;
 
- public HashSet<string> EffectivePermissions(string principal)
- {
- var result = new HashSet<string>;
- if (!_principalToRoles.TryGetValue(principal, out var roles)) return result;
- foreach (var role in roles)
- if (_roleToPermissions.TryGetValue(role, out var perms))
- result.UnionWith(perms);
- return result;
- }
+    public HashSet<string> EffectivePermissions(string principal)
+    {
+        var result = new HashSet<string>;
+        if (!_principalToRoles.TryGetValue(principal, out var roles)) return result;
+        foreach (var role in roles)
+            if (_roleToPermissions.TryGetValue(role, out var perms))
+            result.UnionWith(perms);
+        return result;
+    }
 
- // Incremental check: only re-evaluates the ONE principal affected by this grant
- // not the full estate — this is what makes it viable at enterprise scale (I7).
- public List<(string, string)> GrantRoleAndCheck(string principal, string role)
- {
- if (!_principalToRoles.TryGetValue(principal, out var roles))
- _principalToRoles[principal] = roles = new HashSet<string>;
- roles.Add(role);
+    // Incremental check: only re-evaluates the ONE principal affected by this grant
+    // not the full estate — this is what makes it viable at enterprise scale (I7).
+    public List<(string, string)> GrantRoleAndCheck(string principal, string role)
+    {
+        if (!_principalToRoles.TryGetValue(principal, out var roles))
+            _principalToRoles[principal] = roles = new HashSet<string>;
+        roles.Add(role);
 
- var effective = EffectivePermissions(principal);
- var violations = new List<(string, string)>;
- foreach (var (a, b) in _conflictPairs)
- if (effective.Contains(a) && effective.Contains(b))
- violations.Add((a, b));
- return violations; // non-empty => reject/flag the grant BEFORE committing (A8)
- }
+        var effective = EffectivePermissions(principal);
+        var violations = new List<(string, string)>;
+        foreach (var (a, b) in _conflictPairs)
+            if (effective.Contains(a) && effective.Contains(b))
+            violations.Add((a, b));
+        return violations; // non-empty => reject/flag the grant BEFORE committing (A8)
+    }
 }
 ```
 **Time complexity:** Per grant: O(R × P̄ + C) where R = roles held, P̄ = avg permissions per role, C = conflict pairs — independent of total estate size, satisfying the incremental requirement from A4/I7. **Space complexity:** O(total roles × permissions + total principal-role edges).
@@ -536,44 +536,44 @@ public sealed record EntitlementChangeEvent(string Principal, string Permission,
 
 public sealed class DriftDetector
 {
- private readonly Dictionary<string, HashSet<string>> _certifiedBaseline;
- private readonly Dictionary<string, HashSet<string>> _currentState;
- private DateTimeOffset _lastProcessedEventTime = DateTimeOffset.MinValue;
- private readonly TimeSpan _maxAcceptableLag;
+    private readonly Dictionary<string, HashSet<string>> _certifiedBaseline;
+    private readonly Dictionary<string, HashSet<string>> _currentState;
+    private DateTimeOffset _lastProcessedEventTime = DateTimeOffset.MinValue;
+    private readonly TimeSpan _maxAcceptableLag;
 
- public DriftDetector(Dictionary<string, HashSet<string>> certifiedBaseline, TimeSpan maxAcceptableLag)
- {
- _certifiedBaseline = certifiedBaseline;
- _currentState = certifiedBaseline.ToDictionary(kv => kv.Key, kv => new HashSet<string>(kv.Value));
- _maxAcceptableLag = maxAcceptableLag;
- }
+    public DriftDetector(Dictionary<string, HashSet<string>> certifiedBaseline, TimeSpan maxAcceptableLag)
+    {
+        _certifiedBaseline = certifiedBaseline;
+        _currentState = certifiedBaseline.ToDictionary(kv => kv.Key, kv => new HashSet<string>(kv.Value));
+        _maxAcceptableLag = maxAcceptableLag;
+    }
 
- public IEnumerable<(string Principal, string Permission, string DriftType)> ProcessEvent(
- EntitlementChangeEvent evt, DateTimeOffset now)
- {
- if (!_currentState.TryGetValue(evt.Principal, out var perms))
- _currentState[evt.Principal] = perms = new HashSet<string>;
+    public IEnumerable<(string Principal, string Permission, string DriftType)> ProcessEvent(
+        EntitlementChangeEvent evt, DateTimeOffset now)
+    {
+        if (!_currentState.TryGetValue(evt.Principal, out var perms))
+            _currentState[evt.Principal] = perms = new HashSet<string>;
 
- if (evt.Granted) perms.Add(evt.Permission);
- else perms.Remove(evt.Permission);
+        if (evt.Granted) perms.Add(evt.Permission);
+        else perms.Remove(evt.Permission);
 
- _lastProcessedEventTime = evt.OccurredAt;
+        _lastProcessedEventTime = evt.OccurredAt;
 
- var baseline = _certifiedBaseline.TryGetValue(evt.Principal, out var b)? b: new HashSet<string>;
- var wasCertified = baseline.Contains(evt.Permission);
+        var baseline = _certifiedBaseline.TryGetValue(evt.Principal, out var b)? b: new HashSet<string>;
+        var wasCertified = baseline.Contains(evt.Permission);
 
- // Drift: this specific change was NOT reflected in the last certification decision —
- // i.e., access changed outside the governed workflow (the exact failure class).
- if (evt.Granted &&!wasCertified)
- yield return (evt.Principal, evt.Permission, "UNCERTIFIED_GRANT");
- if (!evt.Granted && wasCertified)
- yield return (evt.Principal, evt.Permission, "UNEXPECTED_REVOCATION");
- }
+        // Drift: this specific change was NOT reflected in the last certification decision —
+        // i.e., access changed outside the governed workflow (the exact failure class).
+        if (evt.Granted &&!wasCertified)
+            yield return (evt.Principal, evt.Permission, "UNCERTIFIED_GRANT");
+        if (!evt.Granted && wasCertified)
+            yield return (evt.Principal, evt.Permission, "UNEXPECTED_REVOCATION");
+    }
 
- // Self-alerting: the detector reports its OWN health, so a silently-stalled
- // event stream is itself a detectable finding, not an assumed-healthy default (E10).
- public bool IsDetectorHealthy(DateTimeOffset now) =>
- now - _lastProcessedEventTime <= _maxAcceptableLag;
+    // Self-alerting: the detector reports its OWN health, so a silently-stalled
+    // event stream is itself a detectable finding, not an assumed-healthy default (E10).
+    public bool IsDetectorHealthy(DateTimeOffset now) =>
+        now - _lastProcessedEventTime <= _maxAcceptableLag;
 }
 ```
 **Time complexity:** O(1) amortized per event. **Space complexity:** O(total principals × entitlements).

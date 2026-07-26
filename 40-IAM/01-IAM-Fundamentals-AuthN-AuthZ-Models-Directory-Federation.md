@@ -440,7 +440,7 @@ The generalizable lesson: **an automated deprovisioning process's completeness i
 ```csharp
 public bool IsAuthorized(Principal principal, string requiredRole)
 {
- return principal.Roles.Contains(requiredRole); // simple, auditable — the core RBAC mechanism
+    return principal.Roles.Contains(requiredRole); // simple, auditable — the core RBAC mechanism
 }
 ```
 **Time complexity:** O(r) for r roles held by the principal.
@@ -453,21 +453,21 @@ public bool IsAuthorized(Principal principal, string requiredRole)
 ```csharp
 public bool EvaluateAbacPolicy(Principal principal, ResourceContext context)
 {
- bool isBusinessHours = context.CurrentTime.Hour is >= 9 and < 17;
- bool isOnCallEngineer = principal.Attributes.GetValueOrDefault("role") == "OnCallEngineer";
+    bool isBusinessHours = context.CurrentTime.Hour is >= 9 and < 17;
+    bool isOnCallEngineer = principal.Attributes.GetValueOrDefault("role") == "OnCallEngineer";
 
- // correct logic: deny UNLESS business hours OR on-call — the bug inverted this comparison
- return isBusinessHours || isOnCallEngineer;
+    // correct logic: deny UNLESS business hours OR on-call — the bug inverted this comparison
+    return isBusinessHours || isOnCallEngineer;
 }
 
 // The test that would have caught the migration bug:
 [Fact]
 public void NonOnCallEmployee_AfterHours_IsDenied
 {
- var principal = new Principal(attributes: new { ["role"] = "RegularEmployee" });
- var context = new ResourceContext(currentTime: new DateTime(2026, 1, 1, 23, 0, 0)); // 11 PM, non-on-call
+    var principal = new Principal(attributes: new { ["role"] = "RegularEmployee" });
+    var context = new ResourceContext(currentTime: new DateTime(2026, 1, 1, 23, 0, 0)); // 11 PM, non-on-call
 
- Assert.False(EvaluateAbacPolicy(principal, context)); // MUST be denied — the exact case silently broke
+    Assert.False(EvaluateAbacPolicy(principal, context)); // MUST be denied — the exact case silently broke
 }
 ```
 **Time complexity:** O(1) per evaluation.
@@ -480,20 +480,20 @@ public void NonOnCallEmployee_AfterHours_IsDenied
 ```csharp
 public class SodConflictChecker
 {
- private readonly IReadOnlyDictionary<string, HashSet<string>> _conflictRules; // role -> set of roles it conflicts with
+    private readonly IReadOnlyDictionary<string, HashSet<string>> _conflictRules; // role -> set of roles it conflicts with
 
- public SodCheckResult CheckGrant(Principal principal, string proposedRole)
- {
- if (!_conflictRules.TryGetValue(proposedRole, out var conflictingRoles))
- return SodCheckResult.NoConflict;
+    public SodCheckResult CheckGrant(Principal principal, string proposedRole)
+    {
+        if (!_conflictRules.TryGetValue(proposedRole, out var conflictingRoles))
+            return SodCheckResult.NoConflict;
 
- var existingConflicts = principal.Roles.Intersect(conflictingRoles).ToList;
- if (existingConflicts.Any)
- return SodCheckResult.Blocked(// grant-time, over the COMBINATION —
- $"Granting '{proposedRole}' would conflict with existing role(s): {string.Join(", ", existingConflicts)}");
+        var existingConflicts = principal.Roles.Intersect(conflictingRoles).ToList;
+        if (existingConflicts.Any)
+            return SodCheckResult.Blocked(// grant-time, over the COMBINATION —
+            $"Granting '{proposedRole}' would conflict with existing role(s): {string.Join(", ", existingConflicts)}");
 
- return SodCheckResult.NoConflict;
- }
+        return SodCheckResult.NoConflict;
+    }
 }
 ```
 **Time complexity:** O(r) for r existing roles.
@@ -505,26 +505,26 @@ public class SodConflictChecker
 **Solution:**
 ```csharp
 public IReadOnlyList<CoverageGap> AuditJmlCoverage(
- IReadOnlyList<RegisteredSystem> systemInventory, IReadOnlyList<string> scimIntegratedSystemIds)
+    IReadOnlyList<RegisteredSystem> systemInventory, IReadOnlyList<string> scimIntegratedSystemIds)
 {
- var gaps = new List<CoverageGap>;
+    var gaps = new List<CoverageGap>;
 
- foreach (var system in systemInventory.Where(s => s.MaintainsLocalIdentityStore))
- {
- var isAutomated = scimIntegratedSystemIds.Contains(system.Id);
- var hasCompensatingControl = system.ManualDeprovisioningSlaHours is not null;
+    foreach (var system in systemInventory.Where(s => s.MaintainsLocalIdentityStore))
+    {
+        var isAutomated = scimIntegratedSystemIds.Contains(system.Id);
+        var hasCompensatingControl = system.ManualDeprovisioningSlaHours is not null;
 
- if (!isAutomated &&!hasCompensatingControl)
- gaps.Add(new CoverageGap(// exactly the original, undetected state
- system.Id,
- Severity: "Critical",
- Reason: "No automated deprovisioning AND no documented compensating control"));
- else if (!isAutomated)
- gaps.Add(new CoverageGap(
- system.Id, Severity: "Medium",
- Reason: $"Manual deprovisioning only — SLA: {system.ManualDeprovisioningSlaHours}h"));
- }
- return gaps;
+        if (!isAutomated &&!hasCompensatingControl)
+            gaps.Add(new CoverageGap(// exactly the original, undetected state
+                system.Id,
+                    Severity: "Critical",
+                    Reason: "No automated deprovisioning AND no documented compensating control"));
+        else if (!isAutomated)
+            gaps.Add(new CoverageGap(
+                system.Id, Severity: "Medium",
+                    Reason: $"Manual deprovisioning only — SLA: {system.ManualDeprovisioningSlaHours}h"));
+    }
+    return gaps;
 }
 ```
 **Time complexity:** O(s) for s systems in the inventory.

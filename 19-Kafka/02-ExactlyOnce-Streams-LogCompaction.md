@@ -155,9 +155,9 @@ graph TB
 ```csharp
 var producerConfig = new ProducerConfig
 {
- BootstrapServers = "kafka:9092",
- EnableIdempotence = true, // deduplicates THIS producer's own retried sends, per (PID, partition)
- Acks = Acks.All // required alongside idempotence for the full durability guarantee
+    BootstrapServers = "kafka:9092",
+        EnableIdempotence = true, // deduplicates THIS producer's own retried sends, per (PID, partition)
+        Acks = Acks.All // required alongside idempotence for the full durability guarantee
 };
 ```
 
@@ -168,22 +168,22 @@ producer.InitTransactions(TimeSpan.FromSeconds(10));
 
 while (!ct.IsCancellationRequested)
 {
- var consumeResult = consumer.Consume(ct);
- producer.BeginTransaction;
- try
- {
- var enriched = Transform(consumeResult.Message.Value);
- producer.Produce("enriched-orders", new Message<string, EnrichedOrder> { Value = enriched });
- producer.SendOffsetsToTransaction(
- new[] { new TopicPartitionOffset(consumeResult.TopicPartition, consumeResult.Offset + 1) },
- consumer.ConsumerGroupMetadata);
- producer.CommitTransaction; // ATOMIC: produced record + committed offset, together or not at all
- }
- catch (Exception)
- {
- producer.AbortTransaction; // input record will be redelivered, safely, on next poll
- throw;
- }
+    var consumeResult = consumer.Consume(ct);
+    producer.BeginTransaction;
+    try
+    {
+        var enriched = Transform(consumeResult.Message.Value);
+        producer.Produce("enriched-orders", new Message<string, EnrichedOrder> { Value = enriched });
+        producer.SendOffsetsToTransaction(
+            new[] { new TopicPartitionOffset(consumeResult.TopicPartition, consumeResult.Offset + 1) },
+                consumer.ConsumerGroupMetadata);
+        producer.CommitTransaction; // ATOMIC: produced record + committed offset, together or not at all
+    }
+    catch (Exception)
+    {
+        producer.AbortTransaction; // input record will be redelivered, safely, on next poll
+        throw;
+    }
 }
 ```
 
@@ -192,22 +192,22 @@ while (!ct.IsCancellationRequested)
 // customer-profiles topic configured with: cleanup.policy=compact
 public class CustomerProfileEventHandler
 {
- public async Task PublishUpdateAsync(string customerId, CustomerProfile profile)
- {
- await _producer.ProduceAsync("customer-profiles",
- new Message<string, CustomerProfile> { Key = customerId, Value = profile });
- // Compaction guarantees this LATEST value for customerId is retained INDEFINITELY
- // independent of how long ago it was published -- fixing the time-based-retention bug.
- }
+    public async Task PublishUpdateAsync(string customerId, CustomerProfile profile)
+    {
+        await _producer.ProduceAsync("customer-profiles",
+            new Message<string, CustomerProfile> { Key = customerId, Value = profile });
+        // Compaction guarantees this LATEST value for customerId is retained INDEFINITELY
+        // independent of how long ago it was published -- fixing the time-based-retention bug.
+    }
 
- public async Task PublishDeletionAsync(string customerId)
- {
- await _producer.ProduceAsync("customer-profiles",
- new Message<string, CustomerProfile> { Key = customerId, Value = null }); // TOMBSTONE
- // Without this explicit tombstone, a deleted customer's LAST profile value would be
- // retained by compaction FOREVER -- compaction alone never removes a key, only reduces
- // it to its latest value.
- }
+    public async Task PublishDeletionAsync(string customerId)
+    {
+        await _producer.ProduceAsync("customer-profiles",
+            new Message<string, CustomerProfile> { Key = customerId, Value = null }); // TOMBSTONE
+        // Without this explicit tombstone, a deleted customer's LAST profile value would be
+        // retained by compaction FOREVER -- compaction alone never removes a key, only reduces
+        // it to its latest value.
+    }
 }
 ```
 

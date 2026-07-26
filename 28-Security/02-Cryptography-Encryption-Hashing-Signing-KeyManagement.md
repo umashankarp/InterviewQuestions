@@ -335,30 +335,30 @@ using System.Security.Cryptography;
 
 public static class PasswordHasher
 {
- private const int SaltSize = 16;
- private const int HashSize = 32;
- private const int Iterations = 210_000; // deliberately slow -- tunable upward over time
+    private const int SaltSize = 16;
+    private const int HashSize = 32;
+    private const int Iterations = 210_000; // deliberately slow -- tunable upward over time
 
- public static string Hash(string password)
- {
- byte[] salt = RandomNumberGenerator.GetBytes(SaltSize);
- byte[] hash = Rfc2898DeriveBytes.Pbkdf2(password, salt, Iterations, HashAlgorithmName.SHA256, HashSize);
- return $"{Iterations}.{Convert.ToBase64String(salt)}.{Convert.ToBase64String(hash)}";
- }
+    public static string Hash(string password)
+    {
+        byte[] salt = RandomNumberGenerator.GetBytes(SaltSize);
+        byte[] hash = Rfc2898DeriveBytes.Pbkdf2(password, salt, Iterations, HashAlgorithmName.SHA256, HashSize);
+        return $"{Iterations}.{Convert.ToBase64String(salt)}.{Convert.ToBase64String(hash)}";
+    }
 
- public static bool Verify(string password, string storedHash)
- {
- var parts = storedHash.Split('.');
- int iterations = int.Parse(parts[0]);
- byte[] salt = Convert.FromBase64String(parts[1]);
- byte[] expectedHash = Convert.FromBase64String(parts[2]);
+    public static bool Verify(string password, string storedHash)
+    {
+        var parts = storedHash.Split('.');
+        int iterations = int.Parse(parts[0]);
+        byte[] salt = Convert.FromBase64String(parts[1]);
+        byte[] expectedHash = Convert.FromBase64String(parts[2]);
 
- byte[] actualHash = Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, HashAlgorithmName.SHA256, HashSize);
+        byte[] actualHash = Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, HashAlgorithmName.SHA256, HashSize);
 
- // CONSTANT-TIME comparison -- a naive == or SequenceEqual can leak timing
- // information about how many leading bytes matched, a real side-channel.
- return CryptographicOperations.FixedTimeEquals(actualHash, expectedHash);
- }
+        // CONSTANT-TIME comparison -- a naive == or SequenceEqual can leak timing
+        // information about how many leading bytes matched, a real side-channel.
+        return CryptographicOperations.FixedTimeEquals(actualHash, expectedHash);
+    }
 }
 ```
 **Time complexity:** O(iterations) per hash/verify operation — deliberately, intentionally slow (this is the entire point).
@@ -374,35 +374,35 @@ using System.Text;
 
 public static class HmacVerifier
 {
- public static string ComputeSignature(string message, byte[] key)
- {
- using var hmac = new HMACSHA256(key);
- byte[] hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(message));
- return Convert.ToBase64String(hash);
- }
+    public static string ComputeSignature(string message, byte[] key)
+    {
+        using var hmac = new HMACSHA256(key);
+        byte[] hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(message));
+        return Convert.ToBase64String(hash);
+    }
 
- public static bool Verify(string message, string providedSignature, byte[] key)
- {
- string expectedSignature = ComputeSignature(message, key);
+    public static bool Verify(string message, string providedSignature, byte[] key)
+    {
+        string expectedSignature = ComputeSignature(message, key);
 
- byte[] expectedBytes = Convert.FromBase64String(expectedSignature);
- byte[] providedBytes;
- try
- {
- providedBytes = Convert.FromBase64String(providedSignature);
- }
- catch (FormatException)
- {
- return false; // malformed input -- never let a parse error skip the constant-time check's INTENT
- }
+        byte[] expectedBytes = Convert.FromBase64String(expectedSignature);
+        byte[] providedBytes;
+        try
+        {
+            providedBytes = Convert.FromBase64String(providedSignature);
+        }
+        catch (FormatException)
+        {
+            return false; // malformed input -- never let a parse error skip the constant-time check's INTENT
+        }
 
- // Constant-time comparison is CRITICAL here -- a naive string/byte
- // comparison that short-circuits on the first mismatched byte leaks
- // timing information an attacker can exploit to forge a valid
- // signature byte-by-byte (a real, historically-exploited attack class).
- return expectedBytes.Length == providedBytes.Length &&
- CryptographicOperations.FixedTimeEquals(expectedBytes, providedBytes);
- }
+        // Constant-time comparison is CRITICAL here -- a naive string/byte
+        // comparison that short-circuits on the first mismatched byte leaks
+        // timing information an attacker can exploit to forge a valid
+        // signature byte-by-byte (a real, historically-exploited attack class).
+        return expectedBytes.Length == providedBytes.Length &&
+            CryptographicOperations.FixedTimeEquals(expectedBytes, providedBytes);
+    }
 }
 ```
 **Time complexity:** O(n) in message length for HMAC computation; O(k) for the constant-time comparison where k is the fixed hash length.
@@ -418,41 +418,41 @@ using System.Collections.Concurrent;
 
 public sealed class NonceReuseException: Exception
 {
- public NonceReuseException(string message): base(message) { }
+    public NonceReuseException(string message): base(message) { }
 }
 
 public sealed class SafeAesGcmEncryptor
 {
- private readonly byte[] _key;
- // Bounded recent-nonce tracking per key -- a real system would persist this
- // externally (Sec Intermediate Q5's centralized audit log) rather than
- // relying solely on in-memory state, which is EXACTLY Sec4's original flaw
- // if this were the ONLY safeguard; random nonce generation below is the
- // PRIMARY defense, this tracking is an additional, defense-in-depth check.
- private readonly ConcurrentDictionary<string, byte> _recentNonces = new;
+    private readonly byte[] _key;
+    // Bounded recent-nonce tracking per key -- a real system would persist this
+    // externally (Sec Intermediate Q5's centralized audit log) rather than
+    // relying solely on in-memory state, which is EXACTLY Sec4's original flaw
+    // if this were the ONLY safeguard; random nonce generation below is the
+    // PRIMARY defense, this tracking is an additional, defense-in-depth check.
+    private readonly ConcurrentDictionary<string, byte> _recentNonces = new;
 
- public SafeAesGcmEncryptor(byte[] key) => _key = key;
+    public SafeAesGcmEncryptor(byte[] key) => _key = key;
 
- // NOTE: no 'nonce' parameter exists in this public API AT ALL -- Sec Advanced
- // Q3's structural fix: the calling code CANNOT supply or influence it.
- public (byte[] Ciphertext, byte[] Nonce, byte[] Tag) Encrypt(byte[] plaintext)
- {
- byte[] nonce = RandomNumberGenerator.GetBytes(12); // 96-bit random nonce, GCM's standard size
- string nonceKey = Convert.ToBase64String(nonce);
+    // NOTE: no 'nonce' parameter exists in this public API AT ALL -- Sec Advanced
+    // Q3's structural fix: the calling code CANNOT supply or influence it.
+    public (byte[] Ciphertext, byte[] Nonce, byte[] Tag) Encrypt(byte[] plaintext)
+    {
+        byte[] nonce = RandomNumberGenerator.GetBytes(12); // 96-bit random nonce, GCM's standard size
+        string nonceKey = Convert.ToBase64String(nonce);
 
- if (!_recentNonces.TryAdd(nonceKey, 0))
- throw new NonceReuseException(
- "Nonce collision detected -- this should be astronomically rare with a " +
- "96-bit random nonce; treat as a critical, immediate-investigation alert.");
+        if (!_recentNonces.TryAdd(nonceKey, 0))
+            throw new NonceReuseException(
+            "Nonce collision detected -- this should be astronomically rare with a " +
+                "96-bit random nonce; treat as a critical, immediate-investigation alert.");
 
- byte[] ciphertext = new byte[plaintext.Length];
- byte[] tag = new byte[16];
+        byte[] ciphertext = new byte[plaintext.Length];
+        byte[] tag = new byte[16];
 
- using var aesGcm = new AesGcm(_key, tag.Length);
- aesGcm.Encrypt(nonce, plaintext, ciphertext, tag);
+        using var aesGcm = new AesGcm(_key, tag.Length);
+        aesGcm.Encrypt(nonce, plaintext, ciphertext, tag);
 
- return (ciphertext, nonce, tag);
- }
+        return (ciphertext, nonce, tag);
+    }
 }
 ```
 **Time complexity:** O(n) in plaintext length for the encryption operation itself; O(1) amortized for the nonce-collision check.
@@ -464,49 +464,49 @@ public sealed class SafeAesGcmEncryptor
 
 ```csharp
 public sealed record SimpleCertificate(
- string Subject, string Issuer, byte[] PublicKey, byte[] Signature, byte[] SignedData);
+    string Subject, string Issuer, byte[] PublicKey, byte[] Signature, byte[] SignedData);
 
 public static class ChainOfTrustValidator
 {
- public static bool ValidateChain(
- IReadOnlyList<SimpleCertificate> chainFromLeafToRoot,
- IReadOnlyDictionary<string, byte[]> trustedRootPublicKeysBySubject,
- Func<byte[], byte[], byte[], bool> verifySignature) // (signedData, signature, issuerPublicKey) -> valid?
- {
- if (chainFromLeafToRoot.Count == 0)
- return false;
+    public static bool ValidateChain(
+        IReadOnlyList<SimpleCertificate> chainFromLeafToRoot,
+            IReadOnlyDictionary<string, byte[]> trustedRootPublicKeysBySubject,
+            Func<byte[], byte[], byte[], bool> verifySignature) // (signedData, signature, issuerPublicKey) -> valid?
+    {
+        if (chainFromLeafToRoot.Count == 0)
+            return false;
 
- for (int i = 0; i < chainFromLeafToRoot.Count; i++)
- {
- var current = chainFromLeafToRoot[i];
+        for (int i = 0; i < chainFromLeafToRoot.Count; i++)
+        {
+            var current = chainFromLeafToRoot[i];
 
- // Determine the issuer's public key: either the NEXT certificate in
- // the chain, or a TRUSTED ROOT if this is the chain's final link.
- byte[]? issuerPublicKey = null;
+            // Determine the issuer's public key: either the NEXT certificate in
+            // the chain, or a TRUSTED ROOT if this is the chain's final link.
+            byte[]? issuerPublicKey = null;
 
- if (i + 1 < chainFromLeafToRoot.Count)
- {
- var issuerCert = chainFromLeafToRoot[i + 1];
- if (issuerCert.Subject!= current.Issuer)
- return false; // chain is structurally broken -- names don't line up
+            if (i + 1 < chainFromLeafToRoot.Count)
+            {
+                var issuerCert = chainFromLeafToRoot[i + 1];
+                if (issuerCert.Subject!= current.Issuer)
+                    return false; // chain is structurally broken -- names don't line up
 
- issuerPublicKey = issuerCert.PublicKey;
- }
- else if (trustedRootPublicKeysBySubject.TryGetValue(current.Issuer, out var rootKey))
- {
- issuerPublicKey = rootKey; // chain terminates at an ALREADY-TRUSTED root
- }
- else
- {
- return false; // chain ends without reaching any trusted root -- REJECT
- }
+                issuerPublicKey = issuerCert.PublicKey;
+            }
+            else if (trustedRootPublicKeysBySubject.TryGetValue(current.Issuer, out var rootKey))
+            {
+                issuerPublicKey = rootKey; // chain terminates at an ALREADY-TRUSTED root
+            }
+            else
+            {
+                return false; // chain ends without reaching any trusted root -- REJECT
+            }
 
- if (!verifySignature(current.SignedData, current.Signature, issuerPublicKey))
- return false; // a broken link ANYWHERE invalidates the ENTIRE chain
- }
+            if (!verifySignature(current.SignedData, current.Signature, issuerPublicKey))
+                return false; // a broken link ANYWHERE invalidates the ENTIRE chain
+        }
 
- return true;
- }
+        return true;
+    }
 }
 ```
 **Time complexity:** O(n) in chain length, with each link requiring one signature-verification operation (typically O(1) for a fixed-size key, dominated by the underlying cryptographic operation's own cost).
@@ -572,59 +572,59 @@ graph TB
 ```csharp
 public interface IKeyManagementService
 {
- Task<byte[]> GenerateDataEncryptionKeyAsync(string keyEncryptionKeyId, CancellationToken ct);
- Task<byte[]> UnwrapDataEncryptionKeyAsync(string keyEncryptionKeyId, byte[] wrappedDek, CancellationToken ct);
+    Task<byte[]> GenerateDataEncryptionKeyAsync(string keyEncryptionKeyId, CancellationToken ct);
+    Task<byte[]> UnwrapDataEncryptionKeyAsync(string keyEncryptionKeyId, byte[] wrappedDek, CancellationToken ct);
 }
 
 public interface ICryptoAuditLog
 {
- Task RecordOperationAsync(string keyId, byte[] nonce, DateTime timestamp, CancellationToken ct);
+    Task RecordOperationAsync(string keyId, byte[] nonce, DateTime timestamp, CancellationToken ct);
 }
 
 public sealed class EnvelopeEncryptionService
 {
- private readonly IKeyManagementService _kms;
- private readonly ICryptoAuditLog _auditLog;
+    private readonly IKeyManagementService _kms;
+    private readonly ICryptoAuditLog _auditLog;
 
- public EnvelopeEncryptionService(IKeyManagementService kms, ICryptoAuditLog auditLog)
- {
- _kms = kms;
- _auditLog = auditLog;
- }
+    public EnvelopeEncryptionService(IKeyManagementService kms, ICryptoAuditLog auditLog)
+    {
+        _kms = kms;
+        _auditLog = auditLog;
+    }
 
- // NOTE: still no nonce parameter -- Sec Advanced Q3's structural exclusion
- // is preserved even at this envelope-encryption layer.
- public async Task<EncryptedEnvelope> EncryptAsync(
- string keyEncryptionKeyId, byte[] plaintext, CancellationToken ct)
- {
- // Generate a FRESH DEK for this specific operation -- the KEK (in the
- // KMS/HSM) never directly encrypts application data itself, limiting
- // its own exposure to wrapping/unwrapping DEKs only.
- byte[] dek = await _kms.GenerateDataEncryptionKeyAsync(keyEncryptionKeyId, ct);
+    // NOTE: still no nonce parameter -- Sec Advanced Q3's structural exclusion
+    // is preserved even at this envelope-encryption layer.
+    public async Task<EncryptedEnvelope> EncryptAsync(
+        string keyEncryptionKeyId, byte[] plaintext, CancellationToken ct)
+    {
+        // Generate a FRESH DEK for this specific operation -- the KEK (in the
+        // KMS/HSM) never directly encrypts application data itself, limiting
+        // its own exposure to wrapping/unwrapping DEKs only.
+        byte[] dek = await _kms.GenerateDataEncryptionKeyAsync(keyEncryptionKeyId, ct);
 
- try
- {
- var encryptor = new SafeAesGcmEncryptor(dek); // Sec11 Hard
- var (ciphertext, nonce, tag) = encryptor.Encrypt(plaintext);
+        try
+        {
+            var encryptor = new SafeAesGcmEncryptor(dek); // Sec11 Hard
+            var (ciphertext, nonce, tag) = encryptor.Encrypt(plaintext);
 
- await _auditLog.RecordOperationAsync(keyEncryptionKeyId, nonce, DateTime.UtcNow, ct);
+            await _auditLog.RecordOperationAsync(keyEncryptionKeyId, nonce, DateTime.UtcNow, ct);
 
- byte[] wrappedDek = await WrapDekViaKmsAsync(keyEncryptionKeyId, dek, ct);
+            byte[] wrappedDek = await WrapDekViaKmsAsync(keyEncryptionKeyId, dek, ct);
 
- return new EncryptedEnvelope(ciphertext, nonce, tag, wrappedDek, keyEncryptionKeyId);
- }
- finally
- {
- Array.Clear(dek, 0, dek.Length); // zero the DEK from memory as soon as no longer needed
- }
- }
+            return new EncryptedEnvelope(ciphertext, nonce, tag, wrappedDek, keyEncryptionKeyId);
+        }
+        finally
+        {
+            Array.Clear(dek, 0, dek.Length); // zero the DEK from memory as soon as no longer needed
+        }
+    }
 
- private Task<byte[]> WrapDekViaKmsAsync(string kekId, byte[] dek, CancellationToken ct)
- => Task.FromResult(dek); // actual KMS-side wrapping call omitted for brevity
+    private Task<byte[]> WrapDekViaKmsAsync(string kekId, byte[] dek, CancellationToken ct)
+    => Task.FromResult(dek); // actual KMS-side wrapping call omitted for brevity
 }
 
 public sealed record EncryptedEnvelope(
- byte[] Ciphertext, byte[] Nonce, byte[] Tag, byte[] WrappedDek, string KeyEncryptionKeyId);
+    byte[] Ciphertext, byte[] Nonce, byte[] Tag, byte[] WrappedDek, string KeyEncryptionKeyId);
 ```
 
 **Design patterns used:** **Facade**-shaped `EnvelopeEncryptionService` (presents one simple `EncryptAsync` call to application code, internally composing KMS interaction, safe nonce generation, audit logging, and DEK lifecycle management). **Strategy** for `IKeyManagementService` (swappable KMS backend — AWS KMS, Azure Key Vault, HashiCorp Vault — with zero change to calling application code, directly this course's now-standard backend-decoupling pattern).

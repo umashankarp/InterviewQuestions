@@ -331,17 +331,17 @@ Migration 2 (CONTRACT): ALTER TABLE orders DROP COLUMN shipping_zone
 ```csharp
 public static class RollingUpdateCalculator
 {
- public static (int MaxPods, int MinPods) ComputeBounds(
- int desiredReplicas, double maxSurgePercent, double maxUnavailablePercent)
- {
- int surge = (int)Math.Ceiling(desiredReplicas * maxSurgePercent);
- int unavailable = (int)Math.Floor(desiredReplicas * maxUnavailablePercent);
+    public static (int MaxPods, int MinPods) ComputeBounds(
+        int desiredReplicas, double maxSurgePercent, double maxUnavailablePercent)
+    {
+        int surge = (int)Math.Ceiling(desiredReplicas * maxSurgePercent);
+        int unavailable = (int)Math.Floor(desiredReplicas * maxUnavailablePercent);
 
- int maxPods = desiredReplicas + surge;
- int minPods = desiredReplicas - unavailable;
+        int maxPods = desiredReplicas + surge;
+        int minPods = desiredReplicas - unavailable;
 
- return (maxPods, minPods);
- }
+        return (maxPods, minPods);
+    }
 }
 ```
 **Time complexity:** O(1).
@@ -356,30 +356,30 @@ public sealed record CanaryStepResult(int TrafficPercent, bool Passed);
 
 public sealed class CanaryRolloutSimulator
 {
- private readonly Func<int, Task<bool>> _runAnalysis;
+    private readonly Func<int, Task<bool>> _runAnalysis;
 
- public CanaryRolloutSimulator(Func<int, Task<bool>> runAnalysis) =>
- _runAnalysis = runAnalysis;
+    public CanaryRolloutSimulator(Func<int, Task<bool>> runAnalysis) =>
+        _runAnalysis = runAnalysis;
 
- public async Task<(bool Promoted, IReadOnlyList<CanaryStepResult> History)> RunAsync(
- IReadOnlyList<int> trafficSteps)
- {
- var history = new List<CanaryStepResult>;
+    public async Task<(bool Promoted, IReadOnlyList<CanaryStepResult> History)> RunAsync(
+        IReadOnlyList<int> trafficSteps)
+    {
+        var history = new List<CanaryStepResult>;
 
- foreach (var step in trafficSteps)
- {
- bool passed = await _runAnalysis(step);
- history.Add(new CanaryStepResult(step, passed));
+        foreach (var step in trafficSteps)
+        {
+            bool passed = await _runAnalysis(step);
+            history.Add(new CanaryStepResult(step, passed));
 
- if (!passed)
- {
- // Automatic rollback: revert to 0% immediately, no partial promotion.
- return (Promoted: false, History: history);
- }
- }
+            if (!passed)
+            {
+                // Automatic rollback: revert to 0% immediately, no partial promotion.
+                return (Promoted: false, History: history);
+            }
+        }
 
- return (Promoted: true, History: history);
- }
+        return (Promoted: true, History: history);
+    }
 }
 ```
 **Time complexity:** O(s) where s is the number of traffic steps (each analyzed once, sequentially).
@@ -396,40 +396,40 @@ public sealed record MigrationStep(MigrationStepKind Kind, string ColumnName);
 
 public sealed class ExpandContractValidator
 {
- public IReadOnlyList<string> Validate(IReadOnlyList<MigrationStep> steps)
- {
- var errors = new List<string>;
- var expandedColumns = new HashSet<string>;
- var confirmedColumns = new HashSet<string>;
+    public IReadOnlyList<string> Validate(IReadOnlyList<MigrationStep> steps)
+    {
+        var errors = new List<string>;
+        var expandedColumns = new HashSet<string>;
+        var confirmedColumns = new HashSet<string>;
 
- foreach (var step in steps)
- {
- switch (step.Kind)
- {
- case MigrationStepKind.Expand:
- expandedColumns.Add(step.ColumnName);
- break;
+        foreach (var step in steps)
+        {
+            switch (step.Kind)
+            {
+                case MigrationStepKind.Expand:
+                    expandedColumns.Add(step.ColumnName);
+                break;
 
- case MigrationStepKind.ConfirmFullCutover:
- if (!expandedColumns.Contains(step.ColumnName))
- errors.Add($"ConfirmFullCutover for '{step.ColumnName}' before it was ever Expanded.");
- confirmedColumns.Add(step.ColumnName);
- break;
+                case MigrationStepKind.ConfirmFullCutover:
+                    if (!expandedColumns.Contains(step.ColumnName))
+                    errors.Add($"ConfirmFullCutover for '{step.ColumnName}' before it was ever Expanded.");
+                confirmedColumns.Add(step.ColumnName);
+                break;
 
- case MigrationStepKind.Contract:
- if (!confirmedColumns.Contains(step.ColumnName))
- errors.Add(
- $"Contract for '{step.ColumnName}' occurred without a prior " +
- "ConfirmFullCutover -- old-version instances may still reference this column.");
- break;
+                case MigrationStepKind.Contract:
+                    if (!confirmedColumns.Contains(step.ColumnName))
+                    errors.Add(
+                    $"Contract for '{step.ColumnName}' occurred without a prior " +
+                        "ConfirmFullCutover -- old-version instances may still reference this column.");
+                break;
 
- // Deploy and Backfill steps don't gate ordering in this simplified model
- // but a fuller validator would also confirm Backfill occurs only after Expand.
- }
- }
+                // Deploy and Backfill steps don't gate ordering in this simplified model
+                // but a fuller validator would also confirm Backfill occurs only after Expand.
+            }
+        }
 
- return errors;
- }
+        return errors;
+    }
 }
 ```
 **Time complexity:** O(n) where n is the number of migration steps.

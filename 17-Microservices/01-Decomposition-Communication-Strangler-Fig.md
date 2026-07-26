@@ -47,36 +47,47 @@ Named after a fig species that gradually envelops and eventually replaces a host
 
 ## 3. Visual Architecture
 
-# AWS Microservices Reference Architecture
+### 3.1 AWS Microservices Reference Architecture
 
-```text
- Internet
- |
- Amazon CloudFront
- |
- AWS WAF (Security)
- |
- Amazon API Gateway
- |
- +-------------------------+
- | |
- ECS / EKS / Lambda Amazon Cognito
- |
---------------------------------------------------------------------------------
-| | | | |
-User Service Order Service Payment Service Inventory Service Notification Service
-| | | | |
-Amazon RDS DynamoDB Amazon Aurora DynamoDB DynamoDB
-| | | | |
-+---------------+---------------+----------------+---------------------------+
- |
- Amazon EventBridge / SNS / SQS
- |
- Other Microservices
+```mermaid
+flowchart TB
+    Internet([Internet])
+    CF[Amazon CloudFront<br/>CDN / edge caching]
+    WAF[AWS WAF<br/>L7 filtering]
+    APIGW[Amazon API Gateway<br/>routing · throttling · authZ enforcement]
+    Cognito[Amazon Cognito<br/>token issuance / validation]
+    Compute[Compute tier<br/>ECS · EKS · Lambda]
+
+    Internet --> CF --> WAF --> APIGW
+    APIGW -. validate token .-> Cognito
+    APIGW --> Compute
+
+    Compute --> USvc[User Service]
+    Compute --> OSvc[Order Service]
+    Compute --> PSvc[Payment Service]
+    Compute --> ISvc[Inventory Service]
+    Compute --> NSvc[Notification Service]
+
+    USvc --> UDB[("Amazon RDS<br/>PostgreSQL")]
+    OSvc --> ODB[("DynamoDB")]
+    PSvc --> PDB[("Amazon Aurora")]
+    ISvc --> IDB[("DynamoDB")]
+    NSvc --> NDB[("DynamoDB")]
+
+    USvc --> Bus
+    OSvc --> Bus
+    PSvc --> Bus
+    ISvc --> Bus
+    NSvc --> Bus
+    Bus[Amazon EventBridge / SNS / SQS<br/>asynchronous fan-out]
+    Bus --> Other[Downstream consumers<br/>analytics · fulfilment · audit]
 ```
 
+**Reading the diagram against §2.2's rule:** each service owns its own datastore — no service reads another's database directly, which is what makes the boundaries real rather than nominal. The synchronous path (solid arrows, left to right through the gateway) is deliberately shallow: one hop from the gateway into a service, because every additional synchronous hop multiplies the availability terms as §2.3 describes. Everything that does not need an immediate answer leaves via the event bus instead.
+
 ---
-# Architecture Principles Followed
+
+### Architecture Principles Followed
 
 - API Gateway Pattern
 - Database per Service
@@ -195,17 +206,17 @@ namespace OrderService;
 
 public class OrderController: ControllerBase
 {
- private readonly IOrderRepository _repository; // Order Service's OWN database, exclusively
- private readonly IPricingCalculator _pricing; // in-process business logic, same service
+    private readonly IOrderRepository _repository; // Order Service's OWN database, exclusively
+    private readonly IPricingCalculator _pricing; // in-process business logic, same service
 
- [HttpPost]
- public async Task<IActionResult> PlaceOrder(PlaceOrderRequest request)
- {
- var order = new Order(request.CustomerId, request.Items);
- order.Total = _pricing.Calculate(order); // business logic lives HERE, in the same service
- await _repository.SaveAsync(order); // persisted to THIS service's own database
- return Created($"/orders/{order.Id}", order);
- }
+    [HttpPost]
+    public async Task<IActionResult> PlaceOrder(PlaceOrderRequest request)
+    {
+        var order = new Order(request.CustomerId, request.Items);
+        order.Total = _pricing.Calculate(order); // business logic lives HERE, in the same service
+        await _repository.SaveAsync(order); // persisted to THIS service's own database
+        return Created($"/orders/{order.Id}", order);
+    }
 }
 ```
 
@@ -213,21 +224,21 @@ public class OrderController: ControllerBase
 ```csharp
 public class OrderService
 {
- private readonly HttpClient _inventoryClient; // configured with Polly resilience policies
- private readonly IAsyncPolicy _resiliencePolicy;
+    private readonly HttpClient _inventoryClient; // configured with Polly resilience policies
+    private readonly IAsyncPolicy _resiliencePolicy;
 
- public async Task<bool> CanFulfillAsync(string sku, int quantity)
- {
- return await _resiliencePolicy.ExecuteAsync(async =>
- {
- var response = await _inventoryClient.GetAsync($"/inventory/{sku}/available?qty={quantity}",
- new CancellationTokenSource(TimeSpan.FromSeconds(2)).Token); // MANDATORY timeout, never unbounded
- return response.IsSuccessStatusCode;
- });
- // _resiliencePolicy wraps a circuit breaker (the pattern) --
- // repeated Inventory-service failures trip the breaker, failing fast instead of
- // piling up slow, doomed-to-fail synchronous calls.
- }
+    public async Task<bool> CanFulfillAsync(string sku, int quantity)
+    {
+        return await _resiliencePolicy.ExecuteAsync(async =>
+            {
+                var response = await _inventoryClient.GetAsync($"/inventory/{sku}/available?qty={quantity}",
+                    new CancellationTokenSource(TimeSpan.FromSeconds(2)).Token); // MANDATORY timeout, never unbounded
+                return response.IsSuccessStatusCode;
+        });
+        // _resiliencePolicy wraps a circuit breaker (the pattern) --
+        // repeated Inventory-service failures trip the breaker, failing fast instead of
+        // piling up slow, doomed-to-fail synchronous calls.
+    }
 }
 ```
 
@@ -235,22 +246,22 @@ public class OrderService
 ```csharp
 public class OrderService
 {
- public async Task<Order> PlaceOrderAsync(PlaceOrderRequest request)
- {
- var order = await CreateAndSaveOrderAsync(request); // the Outbox pattern, co-transacted
- // Publishing "OrderPlaced" does NOT block on Shipping/Analytics/Inventory-notification
- // services being available -- their eventual processing is DECOUPLED from this response.
- return order; // caller gets an immediate response, regardless of downstream subscriber health
- }
+    public async Task<Order> PlaceOrderAsync(PlaceOrderRequest request)
+    {
+        var order = await CreateAndSaveOrderAsync(request); // the Outbox pattern, co-transacted
+        // Publishing "OrderPlaced" does NOT block on Shipping/Analytics/Inventory-notification
+        // services being available -- their eventual processing is DECOUPLED from this response.
+        return order; // caller gets an immediate response, regardless of downstream subscriber health
+    }
 }
 
 public class ShippingServiceEventHandler // a SEPARATE service, subscribing independently
 {
- public async Task HandleOrderPlacedAsync(OrderPlacedEvent evt)
- {
- await _shippingScheduler.ScheduleAsync(evt.OrderId); // processed whenever Shipping is ready
- // NEVER blocking the original order-placement call
- }
+    public async Task HandleOrderPlacedAsync(OrderPlacedEvent evt)
+    {
+        await _shippingScheduler.ScheduleAsync(evt.OrderId); // processed whenever Shipping is ready
+        // NEVER blocking the original order-placement call
+    }
 }
 ```
 
@@ -258,32 +269,32 @@ public class ShippingServiceEventHandler // a SEPARATE service, subscribing inde
 ```csharp
 public class StranglerFigRoutingMiddleware
 {
- private readonly RequestDelegate _next;
- private readonly IMigrationConfig _migrationConfig; // tracks WHICH capabilities have been migrated
+    private readonly RequestDelegate _next;
+    private readonly IMigrationConfig _migrationConfig; // tracks WHICH capabilities have been migrated
 
- public async Task InvokeAsync(HttpContext context)
- {
- string path = context.Request.Path;
+    public async Task InvokeAsync(HttpContext context)
+    {
+        string path = context.Request.Path;
 
- if (_migrationConfig.IsCapabilityMigrated("orders", path))
- {
- // Route to the NEW microservice
- await _newOrderServiceProxy.ForwardAsync(context);
- }
- else
- {
- // NOT yet migrated -- continue routing to the legacy monolith, UNCHANGED
- await _legacyMonolithProxy.ForwardAsync(context);
- }
- }
+        if (_migrationConfig.IsCapabilityMigrated("orders", path))
+        {
+            // Route to the NEW microservice
+            await _newOrderServiceProxy.ForwardAsync(context);
+        }
+        else
+        {
+            // NOT yet migrated -- continue routing to the legacy monolith, UNCHANGED
+            await _legacyMonolithProxy.ForwardAsync(context);
+        }
+    }
 }
 
 public interface IMigrationConfig
 {
- bool IsCapabilityMigrated(string capability, string path); // externally configurable
- // enabling gradual, monitored cutover
- // and INSTANT rollback (flip the config back)
- // without a code deployment
+    bool IsCapabilityMigrated(string capability, string path); // externally configurable
+    // enabling gradual, monitored cutover
+    // and INSTANT rollback (flip the config back)
+    // without a code deployment
 }
 ```
 **Discussion**: `IMigrationConfig` being externally, dynamically configurable (rather than hardcoded routing logic requiring a code deployment to change) is the key design detail enabling Advanced Q5's gradual, monitored, instantly-rollback-capable migration cutover — directly the `IOptionsMonitor`-based live-reload pattern applied specifically to migration-routing decisions, letting the team adjust which capabilities route to the new service in real time based on observed error rates/performance, without needing a new deployment for every incremental cutover step.

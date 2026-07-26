@@ -18,8 +18,8 @@ Any production MongoDB deployment (which is always a replica set, even a single-
 ### How does it work (30,000-ft view)?
 ```javascript
 db.orders.insertOne(
- { customerId, total },
- { writeConcern: { w: "majority", j: true } } // acknowledged only once a majority of replica-set members have it, durably
+  { customerId, total },
+  { writeConcern: { w: "majority", j: true } } // acknowledged only once a majority of replica-set members have it, durably
 );
 ```
 
@@ -143,8 +143,8 @@ graph TB
 ### Easy — Explicit majority write concern for a critical write
 ```javascript
 db.payments.insertOne(
- { orderId, amount, status: "completed" },
- { writeConcern: { w: "majority", j: true } }
+  { orderId, amount, status: "completed" },
+  { writeConcern: { w: "majority", j: true } }
 );
 // Explicit, deliberate durability choice -- NOT relying on the w:1 default for a financially-critical write.
 ```
@@ -152,8 +152,8 @@ db.payments.insertOne(
 ### Medium — Read preference and read concern combined correctly for a checkout-gating read
 ```javascript
 db.inventory.findOne(
- { sku: "WIDGET-1" },
- { readPreference: "primary", readConcern: { level: "majority" } }
+  { sku: "WIDGET-1" },
+  { readPreference: "primary", readConcern: { level: "majority" } }
 );
 // Freshest possible data (primary) + rollback-safety guarantee (majority) --
 // appropriate for a stock check immediately gating a payment authorization (Advanced Q6).
@@ -163,47 +163,47 @@ db.inventory.findOne(
 ```javascript
 const session = client.startSession;
 try {
- session.startTransaction({
- readConcern: { level: "majority" },
- writeConcern: { w: "majority", j: true }
- });
+  session.startTransaction({
+      readConcern: { level: "majority" },
+        writeConcern: { w: "majority", j: true }
+  });
 
- await db.warehouses.updateOne(
- { _id: sourceWarehouseId }, { $inc: { "stock.WIDGET-1": -10 } }, { session }
-);
- await db.warehouses.updateOne(
- { _id: destWarehouseId }, { $inc: { "stock.WIDGET-1": 10 } }, { session }
-);
+  await db.warehouses.updateOne(
+    { _id: sourceWarehouseId }, { $inc: { "stock.WIDGET-1": -10 } }, { session }
+  );
+  await db.warehouses.updateOne(
+    { _id: destWarehouseId }, { $inc: { "stock.WIDGET-1": 10 } }, { session }
+  );
 
- await session.commitTransaction;
+  await session.commitTransaction;
 } catch (error) {
- await session.abortTransaction;
- throw error;
+  await session.abortTransaction;
+  throw error;
 } finally {
- session.endSession;
+  session.endSession;
 }
 ```
 
 ### Expert — Resumable change-stream consumer with durable resume-token persistence (Advanced Q7)
 ```javascript
 async function runChangeStreamConsumer(db) {
- const lastToken = await db.collection("_resumeTokens").findOne({ _id: "orderEvents" });
- const changeStream = db.collection("orders").watch([], {
- resumeAfter: lastToken?.token,
- fullDocument: "updateLookup"
- });
+  const lastToken = await db.collection("_resumeTokens").findOne({ _id: "orderEvents" });
+  const changeStream = db.collection("orders").watch([], {
+      resumeAfter: lastToken?.token,
+        fullDocument: "updateLookup"
+  });
 
- for await (const change of changeStream) {
- await processOrderEvent(change); // application-specific event handling
+  for await (const change of changeStream) {
+    await processOrderEvent(change); // application-specific event handling
 
- // Persist the resume token DURABLY after each processed event, not just in-process memory --
- // survives a consumer restart without losing position or reprocessing already-handled events.
- await db.collection("_resumeTokens").updateOne(
- { _id: "orderEvents" },
- { $set: { token: change._id } },
- { upsert: true }
-);
- }
+    // Persist the resume token DURABLY after each processed event, not just in-process memory --
+    // survives a consumer restart without losing position or reprocessing already-handled events.
+    await db.collection("_resumeTokens").updateOne(
+      { _id: "orderEvents" },
+      { $set: { token: change._id } },
+      { upsert: true }
+    );
+  }
 }
 ```
 **Discussion**: Persisting the resume token to the database itself (rather than in-memory) is precisely what makes this consumer resilient to a process restart — without it, a restarted consumer would either reprocess the entire oplog from the beginning (if no resume position is available at all) or, worse, silently start from "now," skipping any events that occurred during the downtime — directly the durable-checkpoint pattern Advanced Q7 requires.

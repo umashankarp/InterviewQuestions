@@ -456,37 +456,37 @@ The generalizable lesson: **a CRDT's guarantee is real and provable for the spec
 ```csharp
 public class GCounter
 {
- private readonly Dictionary<string, long> _perReplicaCounts = new;
+    private readonly Dictionary<string, long> _perReplicaCounts = new;
 
- public void Increment(string replicaId) =>
- _perReplicaCounts[replicaId] = _perReplicaCounts.GetValueOrDefault(replicaId) + 1;
+    public void Increment(string replicaId) =>
+        _perReplicaCounts[replicaId] = _perReplicaCounts.GetValueOrDefault(replicaId) + 1;
 
- public long Value => _perReplicaCounts.Values.Sum;
+    public long Value => _perReplicaCounts.Values.Sum;
 
- public GCounter Merge(GCounter other)
- {
- var merged = new GCounter;
- foreach (var replicaId in _perReplicaCounts.Keys.Union(other._perReplicaCounts.Keys))
- merged._perReplicaCounts[replicaId] = Math.Max(
- _perReplicaCounts.GetValueOrDefault(replicaId),
- other._perReplicaCounts.GetValueOrDefault(replicaId)); // element-wise max: commutative, associative, idempotent
- return merged;
- }
+    public GCounter Merge(GCounter other)
+    {
+        var merged = new GCounter;
+        foreach (var replicaId in _perReplicaCounts.Keys.Union(other._perReplicaCounts.Keys))
+            merged._perReplicaCounts[replicaId] = Math.Max(
+            _perReplicaCounts.GetValueOrDefault(replicaId),
+                other._perReplicaCounts.GetValueOrDefault(replicaId)); // element-wise max: commutative, associative, idempotent
+        return merged;
+    }
 }
 
 public class PNCounter
 {
- private readonly GCounter _increments = new;
- private readonly GCounter _decrements = new;
+    private readonly GCounter _increments = new;
+    private readonly GCounter _decrements = new;
 
- public void Increment(string replicaId) => _increments.Increment(replicaId);
- public void Decrement(string replicaId) => _decrements.Increment(replicaId);
- public long Value => _increments.Value - _decrements.Value;
+    public void Increment(string replicaId) => _increments.Increment(replicaId);
+    public void Decrement(string replicaId) => _decrements.Increment(replicaId);
+    public long Value => _increments.Value - _decrements.Value;
 
- public PNCounter Merge(PNCounter other) => new PNCounter
- {
- // merge each underlying G-Counter independently
- };
+    public PNCounter Merge(PNCounter other) => new PNCounter
+    {
+        // merge each underlying G-Counter independently
+    };
 }
 ```
 **Time complexity:** O(r) for r known replicas, per merge.
@@ -499,32 +499,32 @@ public class PNCounter
 ```csharp
 public class OrSet<T>
 {
- private readonly HashSet<(T Element, Guid Tag)> _adds = new;
- private readonly HashSet<(T Element, Guid Tag)> _removes = new;
+    private readonly HashSet<(T Element, Guid Tag)> _adds = new;
+    private readonly HashSet<(T Element, Guid Tag)> _removes = new;
 
- public Guid Add(T element)
- {
- var tag = Guid.NewGuid; // unique per-add tag — the key OR-Set insight
- _adds.Add((element, tag));
- return tag;
- }
+    public Guid Add(T element)
+    {
+        var tag = Guid.NewGuid; // unique per-add tag — the key OR-Set insight
+        _adds.Add((element, tag));
+        return tag;
+    }
 
- public void Remove(T element)
- {
- foreach (var (e, tag) in _adds.Where(a => Equals(a.Element, element)))
- _removes.Add((e, tag)); // removes only the OBSERVED tags, not the bare element value
- }
+    public void Remove(T element)
+    {
+        foreach (var (e, tag) in _adds.Where(a => Equals(a.Element, element)))
+            _removes.Add((e, tag)); // removes only the OBSERVED tags, not the bare element value
+    }
 
- public IEnumerable<T> Elements =>
- _adds.Except(_removes).Select(a => a.Element).Distinct;
+    public IEnumerable<T> Elements =>
+        _adds.Except(_removes).Select(a => a.Element).Distinct;
 
- public OrSet<T> Merge(OrSet<T> other)
- {
- var merged = new OrSet<T>;
- merged._adds.UnionWith(_adds); merged._adds.UnionWith(other._adds);
- merged._removes.UnionWith(_removes); merged._removes.UnionWith(other._removes);
- return merged; // union is commutative, associative, idempotent
- }
+    public OrSet<T> Merge(OrSet<T> other)
+    {
+        var merged = new OrSet<T>;
+        merged._adds.UnionWith(_adds); merged._adds.UnionWith(other._adds);
+        merged._removes.UnionWith(_removes); merged._removes.UnionWith(other._removes);
+        return merged; // union is commutative, associative, idempotent
+    }
 }
 ```
 **Time complexity:** O(n) for n adds/removes per merge.
@@ -537,21 +537,21 @@ public class OrSet<T>
 ```csharp
 public class TombstonePruner
 {
- public PruneResult TryPrune(OrSet<string> set, IReadOnlyList<ReplicaAcknowledgment> acks, IReadOnlySet<string> currentlyRegisteredReplicas)
- {
- // the fix: require EXPLICIT, POSITIVE ack from every CURRENTLY REGISTERED replica —
- // never assume stability from elapsed time, and never silently ignore a missing/decommissioned replica
- var missingAcks = currentlyRegisteredReplicas
-.Except(acks.Select(a => a.ReplicaId))
-.ToList;
+    public PruneResult TryPrune(OrSet<string> set, IReadOnlyList<ReplicaAcknowledgment> acks, IReadOnlySet<string> currentlyRegisteredReplicas)
+    {
+        // the fix: require EXPLICIT, POSITIVE ack from every CURRENTLY REGISTERED replica —
+        // never assume stability from elapsed time, and never silently ignore a missing/decommissioned replica
+        var missingAcks = currentlyRegisteredReplicas
+        .Except(acks.Select(a => a.ReplicaId))
+        .ToList;
 
- if (missingAcks.Count > 0)
- return PruneResult.Blocked(
- reason: $"Replicas {string.Join(",", missingAcks)} have not confirmed causal stability — " +
- "explicitly deregister decommissioned replicas rather than pruning blindly");
+        if (missingAcks.Count > 0)
+            return PruneResult.Blocked(
+            reason: $"Replicas {string.Join(",", missingAcks)} have not confirmed causal stability — " +
+                "explicitly deregister decommissioned replicas rather than pruning blindly");
 
- return PruneResult.Safe(tombstonesEligibleForRemoval: set.Removes.Count);
- }
+        return PruneResult.Safe(tombstonesEligibleForRemoval: set.Removes.Count);
+    }
 }
 ```
 **Time complexity:** O(r) for r registered replicas.
@@ -564,20 +564,20 @@ public class TombstonePruner
 ```csharp
 public class CrossFieldInvariantCanary
 {
- public InvariantCheckResult CheckAfterMerge(
- IReadOnlyDictionary<string, decimal> mergedAllocationPercentages,
- decimal expectedSum, decimal tolerance = 0.001m)
- {
- var actualSum = mergedAllocationPercentages.Values.Sum;
- var deviation = Math.Abs(actualSum - expectedSum);
+    public InvariantCheckResult CheckAfterMerge(
+        IReadOnlyDictionary<string, decimal> mergedAllocationPercentages,
+            decimal expectedSum, decimal tolerance = 0.001m)
+    {
+        var actualSum = mergedAllocationPercentages.Values.Sum;
+        var deviation = Math.Abs(actualSum - expectedSum);
 
- if (deviation > tolerance)
- return InvariantCheckResult.Violated(// the EXACT failure signature, now caught at merge time
- actualSum, expectedSum, deviation,
- affectedFields: mergedAllocationPercentages.Keys.ToList);
+        if (deviation > tolerance)
+            return InvariantCheckResult.Violated(// the EXACT failure signature, now caught at merge time
+            actualSum, expectedSum, deviation,
+                affectedFields: mergedAllocationPercentages.Keys.ToList);
 
- return InvariantCheckResult.Satisfied(actualSum);
- }
+        return InvariantCheckResult.Satisfied(actualSum);
+    }
 }
 ```
 **Time complexity:** O(f) for f fields participating in the invariant.

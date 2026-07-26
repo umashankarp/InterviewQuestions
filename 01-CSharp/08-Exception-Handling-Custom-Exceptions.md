@@ -22,19 +22,19 @@ Before structured exception handling, error signaling relied on return codes (`i
 ```csharp
 try
 {
- ProcessOrder(order); // might throw
+    ProcessOrder(order); // might throw
 }
 catch (OrderValidationException ex) when (ex.ErrorCode == "INSUFFICIENT_STOCK")
 {
- // handle this SPECIFIC failure mode
+    // handle this SPECIFIC failure mode
 }
 catch (OrderValidationException ex)
 {
- // handle other validation failures
+    // handle other validation failures
 }
 finally
 {
- ReleaseResources; // ALWAYS runs, whether an exception occurred or not
+    ReleaseResources; // ALWAYS runs, whether an exception occurred or not
 }
 ```
 
@@ -72,15 +72,15 @@ Throwing an exception is **expensive** relative to ordinary control flow — not
 try { CallExternalApi; }
 catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.TooManyRequests)
 {
- // handle rate-limiting specifically
+    // handle rate-limiting specifically
 }
 catch (HttpRequestException ex) when (LogAndDecide(ex)) // side-effecting filter -- see caution below
 {
- //...
+    //...
 }
 catch (HttpRequestException)
 {
- // handle all OTHER HttpRequestExceptions
+    // handle all OTHER HttpRequestExceptions
 }
 ```
 An exception filter (`when (...)`) is evaluated **during the first pass**, before the stack unwinds — meaning: (a) it can inspect the exact call-stack state at the throw point (useful for rich diagnostic logging even for exceptions you don't ultimately handle at this frame), and (b) if the filter evaluates `false`, the runtime continues searching **further up the stack** for another matching handler, exactly as if this `catch` clause didn't match at all — the exception is **not** "caught and rethrown," it simply was never caught here in the first place, a subtly different (and cheaper — no unwind/rethrow cost) semantic than the older pattern of `catch (T ex) { if (!condition) throw;... }`.
@@ -93,9 +93,9 @@ An exception filter (`when (...)`) is evaluated **during the first pass**, befor
 try { DoWork; }
 catch (Exception ex)
 {
- LogError(ex);
- throw; // RETHROWS preserving the ORIGINAL stack trace (captures at DoWork's throw point)
- // throw ex; // WOULD reset the stack trace to THIS line -- loses the original throw location -- almost always wrong
+    LogError(ex);
+    throw; // RETHROWS preserving the ORIGINAL stack trace (captures at DoWork's throw point)
+    // throw ex; // WOULD reset the stack trace to THIS line -- loses the original throw location -- almost always wrong
 }
 ```
 `throw;` (no expression) rethrows the **current** exception, preserving its original `StackTrace` property exactly as captured at the original throw site. `throw ex;` (re-throwing the caught variable as a new throw statement) **resets** the stack trace to the location of this new `throw` statement — a genuine, common bug that destroys crucial debugging information (where did this actually originate?), and one of the most consistently-tested "does this candidate actually understand exceptions" interview questions.
@@ -108,19 +108,19 @@ For scenarios needing to **re-throw an exception from a different location than 
 [Serializable] // legacy attribute, still conventionally included though binary serialization is largely deprecated
 public class OrderValidationException: Exception
 {
- public string ErrorCode { get; }
+    public string ErrorCode { get; }
 
- public OrderValidationException(string message, string errorCode)
-: base(message)
- {
- ErrorCode = errorCode;
- }
+    public OrderValidationException(string message, string errorCode)
+    : base(message)
+    {
+        ErrorCode = errorCode;
+    }
 
- public OrderValidationException(string message, string errorCode, Exception innerException)
-: base(message, innerException)
- {
- ErrorCode = errorCode;
- }
+    public OrderValidationException(string message, string errorCode, Exception innerException)
+    : base(message, innerException)
+    {
+        ErrorCode = errorCode;
+    }
 }
 ```
 The standard convention: **derive from `Exception` (or a more specific existing base like `InvalidOperationException`/`ArgumentException` if genuinely appropriate — for when), provide the conventional constructor overloads** (message-only, message + inner exception, and any custom-data constructors your exception needs), and **add strongly-typed properties for structured error data** (`ErrorCode`, `ValidationErrors`, etc.) rather than encoding that data only into the free-text `Message` string, which forces callers into fragile string-parsing to programmatically react to specific failure details.
@@ -375,30 +375,30 @@ classDiagram
 ```csharp
 public T ExecuteWithLogging<T>(Func<T> operation)
 {
- try
- {
- return operation;
- }
- catch (Exception ex)
- {
- _logger.LogError(ex, "Operation failed");
- throw ex; // BUG: resets stack trace to this line
- }
+    try
+    {
+        return operation;
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "Operation failed");
+        throw ex; // BUG: resets stack trace to this line
+    }
 }
 ```
 **Solution**:
 ```csharp
 public T ExecuteWithLogging<T>(Func<T> operation)
 {
- try
- {
- return operation;
- }
- catch (Exception ex)
- {
- _logger.LogError(ex, "Operation failed");
- throw; // preserves original stack trace
- }
+    try
+    {
+        return operation;
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "Operation failed");
+        throw; // preserves original stack trace
+    }
 }
 ```
 **Discussion**: A one-word fix with an outsized production-debugging impact — this is precisely the kind of subtle, easily-overlooked bug that a code-review checklist item ("never `throw ex;`, always bare `throw;`") or a Roslyn analyzer rule (several community analyzers, and Visual Studio's own built-in suggestions, already flag this) should catch automatically rather than relying on manual review every time.
@@ -408,21 +408,21 @@ public T ExecuteWithLogging<T>(Func<T> operation)
 ```csharp
 public decimal GetDiscountRate(string customerTier)
 {
- try
- {
- return _tierDiscounts[customerTier]; // throws KeyNotFoundException for unknown tiers -- a COMMON case
- }
- catch (KeyNotFoundException)
- {
- return 0m; // default: no discount
- }
+    try
+    {
+        return _tierDiscounts[customerTier]; // throws KeyNotFoundException for unknown tiers -- a COMMON case
+    }
+    catch (KeyNotFoundException)
+    {
+        return 0m; // default: no discount
+    }
 }
 ```
 **Solution**:
 ```csharp
 public decimal GetDiscountRate(string customerTier)
 {
- return _tierDiscounts.TryGetValue(customerTier, out var rate)? rate: 0m;
+    return _tierDiscounts.TryGetValue(customerTier, out var rate)? rate: 0m;
 }
 ```
 **Discussion**: Beyond the performance win (/ — avoiding the throw path for what's evidently a routine, expected case given the simple default-value fallback), the `TryGetValue` version is also more *readable*: it makes the "unknown tier defaults to zero" logic immediately visible as ordinary control flow, rather than requiring a reader to recognize that an exception is being used here as a disguised if/else.
@@ -432,47 +432,47 @@ public decimal GetDiscountRate(string customerTier)
 ```csharp
 public abstract class HttpClientException: Exception
 {
- protected HttpClientException(string message, Exception? inner = null): base(message, inner) { }
+    protected HttpClientException(string message, Exception? inner = null): base(message, inner) { }
 }
 
 public sealed class TransientHttpException: HttpClientException
 {
- public HttpStatusCode? StatusCode { get; }
- public TransientHttpException(string message, HttpStatusCode? statusCode, Exception? inner = null)
-: base(message, inner) => StatusCode = statusCode;
+    public HttpStatusCode? StatusCode { get; }
+    public TransientHttpException(string message, HttpStatusCode? statusCode, Exception? inner = null)
+    : base(message, inner) => StatusCode = statusCode;
 }
 
 public sealed class PermanentHttpException: HttpClientException
 {
- public HttpStatusCode StatusCode { get; }
- public PermanentHttpException(string message, HttpStatusCode statusCode, Exception? inner = null)
-: base(message, inner) => StatusCode = statusCode;
+    public HttpStatusCode StatusCode { get; }
+    public PermanentHttpException(string message, HttpStatusCode statusCode, Exception? inner = null)
+    : base(message, inner) => StatusCode = statusCode;
 }
 
 public static class ResilientHttpCaller
 {
- public static async Task<HttpResponseMessage> SendWithRetryAsync(
- HttpClient client, HttpRequestMessage request, int maxAttempts, CancellationToken ct)
- {
- for (int attempt = 1;; attempt++)
- {
- try
- {
- var response = await client.SendAsync(request, ct);
- if ((int)response.StatusCode is 429 or >= 500)
- throw new TransientHttpException($"Transient failure: {response.StatusCode}", response.StatusCode);
- if (!response.IsSuccessStatusCode)
- throw new PermanentHttpException($"Permanent failure: {response.StatusCode}", response.StatusCode);
- return response;
- }
- catch (TransientHttpException) when (attempt < maxAttempts)
- {
- await Task.Delay(TimeSpan.FromMilliseconds(200 * Math.Pow(2, attempt - 1)), ct);
- // loop continues -- retry
- }
- // PermanentHttpException, or TransientHttpException on the final attempt, propagates immediately
- }
- }
+    public static async Task<HttpResponseMessage> SendWithRetryAsync(
+        HttpClient client, HttpRequestMessage request, int maxAttempts, CancellationToken ct)
+    {
+        for (int attempt = 1;; attempt++)
+        {
+            try
+            {
+                var response = await client.SendAsync(request, ct);
+                if ((int)response.StatusCode is 429 or >= 500)
+                    throw new TransientHttpException($"Transient failure: {response.StatusCode}", response.StatusCode);
+                if (!response.IsSuccessStatusCode)
+                    throw new PermanentHttpException($"Permanent failure: {response.StatusCode}", response.StatusCode);
+                return response;
+            }
+            catch (TransientHttpException) when (attempt < maxAttempts)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(200 * Math.Pow(2, attempt - 1)), ct);
+                // loop continues -- retry
+            }
+            // PermanentHttpException, or TransientHttpException on the final attempt, propagates immediately
+        }
+    }
 }
 ```
 **Discussion points**: The exception filter `when (attempt < maxAttempts)` on the `TransientHttpException` catch clause is doing real, load-bearing work — on the *final* attempt, the filter evaluates `false`, so the exception is **not caught here at all**, and propagates directly to the caller exactly as a `PermanentHttpException` would, without needing a separate "final attempt, don't retry" branch of logic — a clean, idiomatic use of exception filters rather than a manual `if (attempt >= maxAttempts) throw;` inside the catch block. Note `PermanentHttpException` is never caught by this method at all — it propagates on the very first occurrence, precisely the intended "don't waste retries on failures retrying can't fix" behavior the exception-hierarchy design (Advanced Q3) exists to enable cleanly.
@@ -482,43 +482,43 @@ public static class ResilientHttpCaller
 ```csharp
 public static class DedicatedThreadRunner
 {
- public static T Run<T>(Func<T> operation)
- {
- T result = default!;
- ExceptionDispatchInfo? capturedException = null;
+    public static T Run<T>(Func<T> operation)
+    {
+        T result = default!;
+        ExceptionDispatchInfo? capturedException = null;
 
- var thread = new Thread(=>
- {
- try
- {
- result = operation;
- }
- catch (Exception ex)
- {
- // Capture here, on the BACKGROUND thread, at the ORIGINAL throw's unwind point --
- // preserves the true stack trace for later rethrow on a DIFFERENT thread.
- capturedException = ExceptionDispatchInfo.Capture(ex);
- }
- });
+        var thread = new Thread(=>
+            {
+                try
+                {
+                    result = operation;
+                }
+                catch (Exception ex)
+                {
+                    // Capture here, on the BACKGROUND thread, at the ORIGINAL throw's unwind point --
+                    // preserves the true stack trace for later rethrow on a DIFFERENT thread.
+                    capturedException = ExceptionDispatchInfo.Capture(ex);
+                }
+        });
 
- thread.Start;
- thread.Join; // block the calling thread until the background thread completes
+        thread.Start;
+        thread.Join; // block the calling thread until the background thread completes
 
- capturedException?.Throw; // rethrows on THIS (calling) thread, with the ORIGINAL stack trace intact
- return result;
- }
+        capturedException?.Throw; // rethrows on THIS (calling) thread, with the ORIGINAL stack trace intact
+        return result;
+    }
 }
 
 // Usage:
 try
 {
- var value = DedicatedThreadRunner.Run(=> RiskyComputation);
+    var value = DedicatedThreadRunner.Run(=> RiskyComputation);
 }
 catch (InvalidOperationException ex)
 {
- // ex.StackTrace shows the ORIGINAL throw location inside RiskyComputation
- // on the background thread -- NOT just "DedicatedThreadRunner.Run" or "thread.Join".
- Console.WriteLine(ex.StackTrace);
+    // ex.StackTrace shows the ORIGINAL throw location inside RiskyComputation
+    // on the background thread -- NOT just "DedicatedThreadRunner.Run" or "thread.Join".
+    Console.WriteLine(ex.StackTrace);
 }
 ```
 **Discussion points**: Without `ExceptionDispatchInfo`, the only way to "rethrow" `capturedException` on the calling thread would be a bare `throw capturedException;`-equivalent, which (exactly like `throw ex;`, the core lesson) would reset the stack trace to point at the `Run` method's rethrow line — completely losing the fact that the exception actually originated deep inside `RiskyComputation` on a different thread entirely. `ExceptionDispatchInfo.Capture(ex).Throw` is precisely the mechanism that preserves cross-thread stack-trace fidelity, and this exercise directly demystifies what `Task`'s internal machinery is doing on your behalf every time an exception correctly propagates from an `await`-ed background operation back to your calling code with an accurate, original stack trace — a genuinely valuable "build the primitive by hand once, to fully understand the abstraction you use daily" exercise.
@@ -573,69 +573,69 @@ classDiagram
 ```csharp
 public abstract class ApiException: Exception
 {
- public abstract string ErrorCode { get; }
- public abstract int HttpStatusCode { get; }
- protected ApiException(string message, Exception? inner = null): base(message, inner) { }
+    public abstract string ErrorCode { get; }
+    public abstract int HttpStatusCode { get; }
+    protected ApiException(string message, Exception? inner = null): base(message, inner) { }
 }
 
 public sealed class ValidationApiException: ApiException
 {
- public IReadOnlyDictionary<string, string[]> FieldErrors { get; }
- public override string ErrorCode => "VALIDATION_FAILED";
- public override int HttpStatusCode => 400;
+    public IReadOnlyDictionary<string, string[]> FieldErrors { get; }
+    public override string ErrorCode => "VALIDATION_FAILED";
+    public override int HttpStatusCode => 400;
 
- public ValidationApiException(IReadOnlyDictionary<string, string[]> fieldErrors)
-: base("One or more fields failed validation.") => FieldErrors = fieldErrors;
+    public ValidationApiException(IReadOnlyDictionary<string, string[]> fieldErrors)
+    : base("One or more fields failed validation.") => FieldErrors = fieldErrors;
 }
 
 public sealed class NotFoundApiException: ApiException
 {
- public override string ErrorCode => "RESOURCE_NOT_FOUND";
- public override int HttpStatusCode => 404;
- public NotFoundApiException(string resourceType, string id)
-: base($"{resourceType} '{id}' was not found.") { }
+    public override string ErrorCode => "RESOURCE_NOT_FOUND";
+    public override int HttpStatusCode => 404;
+    public NotFoundApiException(string resourceType, string id)
+    : base($"{resourceType} '{id}' was not found.") { }
 }
 
 public sealed class ExceptionHandlingMiddleware
 {
- private readonly RequestDelegate _next;
- private readonly ILogger<ExceptionHandlingMiddleware> _logger;
+    private readonly RequestDelegate _next;
+    private readonly ILogger<ExceptionHandlingMiddleware> _logger;
 
- public ExceptionHandlingMiddleware(RequestDelegate next, ILogger<ExceptionHandlingMiddleware> logger)
- {
- _next = next; _logger = logger;
- }
+    public ExceptionHandlingMiddleware(RequestDelegate next, ILogger<ExceptionHandlingMiddleware> logger)
+    {
+        _next = next; _logger = logger;
+    }
 
- public async Task InvokeAsync(HttpContext context)
- {
- try
- {
- await _next(context);
- }
- catch (ApiException apiEx)
- {
- // EXPECTED domain-level failure -- informational logging, safe to expose ErrorCode/message
- _logger.LogInformation(apiEx, "Handled API exception: {ErrorCode}", apiEx.ErrorCode);
- context.Response.StatusCode = apiEx.HttpStatusCode;
- await context.Response.WriteAsJsonAsync(new
- {
- errorCode = apiEx.ErrorCode,
- message = apiEx.Message,
- details = (apiEx as ValidationApiException)?.FieldErrors
- });
- }
- catch (Exception ex)
- {
- // UNEXPECTED -- high-severity log, alert-worthy, NO internal detail leaked externally
- _logger.LogCritical(ex, "Unhandled exception processing request {Path}", context.Request.Path);
- context.Response.StatusCode = 500;
- await context.Response.WriteAsJsonAsync(new
- {
- errorCode = "INTERNAL_ERROR",
- message = "An unexpected error occurred. Our team has been notified."
- });
- }
- }
+    public async Task InvokeAsync(HttpContext context)
+    {
+        try
+        {
+            await _next(context);
+        }
+        catch (ApiException apiEx)
+        {
+            // EXPECTED domain-level failure -- informational logging, safe to expose ErrorCode/message
+            _logger.LogInformation(apiEx, "Handled API exception: {ErrorCode}", apiEx.ErrorCode);
+            context.Response.StatusCode = apiEx.HttpStatusCode;
+            await context.Response.WriteAsJsonAsync(new
+                {
+                    errorCode = apiEx.ErrorCode,
+                        message = apiEx.Message,
+                        details = (apiEx as ValidationApiException)?.FieldErrors
+            });
+        }
+        catch (Exception ex)
+        {
+            // UNEXPECTED -- high-severity log, alert-worthy, NO internal detail leaked externally
+            _logger.LogCritical(ex, "Unhandled exception processing request {Path}", context.Request.Path);
+            context.Response.StatusCode = 500;
+            await context.Response.WriteAsJsonAsync(new
+                {
+                    errorCode = "INTERNAL_ERROR",
+                        message = "An unexpected error occurred. Our team has been notified."
+            });
+        }
+    }
 }
 ```
 

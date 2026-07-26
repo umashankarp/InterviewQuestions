@@ -150,87 +150,87 @@ graph TB
 ### Easy — VNet with explicit public/private subnet split (mirroring)
 ```hcl
 resource "azurerm_virtual_network" "main" {
- name = "checkout-vnet"
- address_space = ["10.1.0.0/16"]
- location = azurerm_resource_group.checkout_prod.location
- resource_group_name = azurerm_resource_group.checkout_prod.name
+  name = "checkout-vnet"
+  address_space = ["10.1.0.0/16"]
+  location = azurerm_resource_group.checkout_prod.location
+  resource_group_name = azurerm_resource_group.checkout_prod.name
 }
 
 resource "azurerm_subnet" "public" {
- name = "public-subnet"
- resource_group_name = azurerm_resource_group.checkout_prod.name
- virtual_network_name = azurerm_virtual_network.main.name
- address_prefixes = ["10.1.1.0/24"]
+  name = "public-subnet"
+  resource_group_name = azurerm_resource_group.checkout_prod.name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes = ["10.1.1.0/24"]
 }
 
 resource "azurerm_subnet" "private" {
- name = "private-subnet"
- resource_group_name = azurerm_resource_group.checkout_prod.name
- virtual_network_name = azurerm_virtual_network.main.name
- address_prefixes = ["10.1.2.0/24"] # SEPARATE, non-overlapping range -- no direct internet route
+  name = "private-subnet"
+  resource_group_name = azurerm_resource_group.checkout_prod.name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes = ["10.1.2.0/24"] # SEPARATE, non-overlapping range -- no direct internet route
 }
 ```
 
 ### Medium — Dual-layer NSG association
 ```hcl
 resource "azurerm_network_security_group" "subnet_baseline" {
- name = "private-subnet-baseline-nsg"
- security_rule {
- name = "AllowFromAppGatewayOnly"; priority = 100; direction = "Inbound"; access = "Allow"
- protocol = "Tcp"; source_port_range = "*"; destination_port_range = "8080"
- source_address_prefix = "10.1.1.0/24"; destination_address_prefix = "*" # ONLY from public/AppGw subnet
- }
+  name = "private-subnet-baseline-nsg"
+  security_rule {
+    name = "AllowFromAppGatewayOnly"; priority = 100; direction = "Inbound"; access = "Allow"
+    protocol = "Tcp"; source_port_range = "*"; destination_port_range = "8080"
+    source_address_prefix = "10.1.1.0/24"; destination_address_prefix = "*" # ONLY from public/AppGw subnet
+  }
 }
 
 resource "azurerm_subnet_network_security_group_association" "private_subnet" {
- subnet_id = azurerm_subnet.private.id
- network_security_group_id = azurerm_network_security_group.subnet_baseline.id # SUBNET-level layer
+  subnet_id = azurerm_subnet.private.id
+  network_security_group_id = azurerm_network_security_group.subnet_baseline.id # SUBNET-level layer
 }
 
 resource "azurerm_network_interface_security_group_association" "checkout_vm_nic" {
- network_interface_id = azurerm_network_interface.checkout_vm.id
- network_security_group_id = azurerm_network_security_group.checkout_nic_specific.id # NIC-level layer --
- # BOTH apply
+  network_interface_id = azurerm_network_interface.checkout_vm.id
+  network_security_group_id = azurerm_network_security_group.checkout_nic_specific.id # NIC-level layer --
+    # BOTH apply
 }
 ```
 
 ### Hard — VM Scale Set with EXPLICIT Availability Zone spanning
 ```hcl
 resource "azurerm_linux_virtual_machine_scale_set" "checkout" {
- name = "checkout-vmss"
- resource_group_name = azurerm_resource_group.checkout_prod.name
- sku = "Standard_D2s_v5"
- instances = 4
+  name = "checkout-vmss"
+  resource_group_name = azurerm_resource_group.checkout_prod.name
+  sku = "Standard_D2s_v5"
+  instances = 4
 
- # EXPLICIT zone spanning -- the fix. Omitting this entirely (or using an
- # Availability Set instead) reproduces the incident's single-zone risk.
- zones = ["1", "2", "3"]
- zone_balance = true # instances spread as evenly as possible ACROSS the specified zones
+  # EXPLICIT zone spanning -- the fix. Omitting this entirely (or using an
+    # Availability Set instead) reproduces the incident's single-zone risk.
+  zones = ["1", "2", "3"]
+  zone_balance = true # instances spread as evenly as possible ACROSS the specified zones
 
- # NOT this (the anti-pattern):
- # availability_set_id = azurerm_availability_set.checkout.id # same-DATACENTER only, NOT zone-resilient
+  # NOT this (the anti-pattern):
+    # availability_set_id = azurerm_availability_set.checkout.id # same-DATACENTER only, NOT zone-resilient
 }
 ```
 
 ### Expert — Azure Policy enforcing zone-spanning at the subscription level (§Advanced Q1, §Advanced Q9)
 ```json
 {
- "properties": {
- "displayName": "Deny VMSS without explicit Availability Zone configuration in production",
- "policyType": "Custom",
- "mode": "Indexed",
- "parameters": {},
- "policyRule": {
- "if": {
- "allOf": [
- { "field": "type", "equals": "Microsoft.Compute/virtualMachineScaleSets" },
- { "field": "Microsoft.Compute/virtualMachineScaleSets/zones", "exists": "false" },
- { "field": "resourceGroup", "contains": "prod" }
- ]
- },
- "then": { "effect": "deny" }
- }
- }
+  "properties": {
+    "displayName": "Deny VMSS without explicit Availability Zone configuration in production",
+      "policyType": "Custom",
+      "mode": "Indexed",
+      "parameters": {},
+      "policyRule": {
+      "if": {
+        "allOf": [
+          { "field": "type", "equals": "Microsoft.Compute/virtualMachineScaleSets" },
+          { "field": "Microsoft.Compute/virtualMachineScaleSets/zones", "exists": "false" },
+          { "field": "resourceGroup", "contains": "prod" }
+        ]
+      },
+      "then": { "effect": "deny" }
+    }
+  }
 }
 ```
 **Discussion**: this policy structurally prevents the exact misconfiguration from ever being deployed to a production Resource Group, regardless of any individual engineer's AWS-derived assumptions about Availability Sets versus Zones — directly Advanced Q1's answer, made concrete, and the same "structural enforcement over reliance on individual knowledge" principle this entire AWS-and-now-Azure domain has established repeatedly.

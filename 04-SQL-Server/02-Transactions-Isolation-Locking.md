@@ -188,19 +188,19 @@ ALTER DATABASE OrdersDb SET READ_COMMITTED_SNAPSHOT ON; -- requires no active co
 ```csharp
 public async Task<T> ExecuteWithDbRetryAsync<T>(Func<Task<T>> operation, int maxAttempts = 3)
 {
- for (int attempt = 1;; attempt++)
- {
- try
- {
- return await operation;
- }
- catch (SqlException ex) when ((ex.Number is 1205 or 3960) && attempt < maxAttempts)
- {
- // 1205 = deadlock victim, 3960 = snapshot isolation write-write conflict --
- // both are expected, recoverable conditions under concurrency, per §Advanced Q9.
- await Task.Delay(TimeSpan.FromMilliseconds(100 * Math.Pow(2, attempt - 1) + Random.Shared.Next(0, 50)));
- }
- }
+    for (int attempt = 1;; attempt++)
+    {
+        try
+        {
+            return await operation;
+        }
+        catch (SqlException ex) when ((ex.Number is 1205 or 3960) && attempt < maxAttempts)
+        {
+            // 1205 = deadlock victim, 3960 = snapshot isolation write-write conflict --
+            // both are expected, recoverable conditions under concurrency, per §Advanced Q9.
+            await Task.Delay(TimeSpan.FromMilliseconds(100 * Math.Pow(2, attempt - 1) + Random.Shared.Next(0, 50)));
+        }
+    }
 }
 ```
 **Discussion**: This directly reuses the exception-filter-based retry-with-backoff pattern (the `when` clause on the final attempt correctly lets the exception propagate rather than retrying indefinitely), applied specifically to the two SQL Server error codes representing expected, retryable concurrency conditions rather than genuine application bugs.

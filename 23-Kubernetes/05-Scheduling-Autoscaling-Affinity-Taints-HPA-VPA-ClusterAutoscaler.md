@@ -248,32 +248,32 @@ spec:
 ```csharp
 public class AutoscalingChainLatencyTracker
 {
- // Instruments each of the three sequential stages independently, so a future
- // incident's bottleneck can be immediately localized rather than requiring ad hoc
- // investigation of an "autoscaling was slow" report with no stage-level breakdown.
- public async Task<ChainLatencyReport> MeasureFullChainAsync(
- DateTime demandSpikeDetectedAt, string deploymentName, string namespaceName)
- {
- var hpaReactedAt = await WaitForReplicaCountChangeAsync(deploymentName, namespaceName);
- var stage1Latency = hpaReactedAt - demandSpikeDetectedAt; // Stage 1: HPA reaction
+    // Instruments each of the three sequential stages independently, so a future
+    // incident's bottleneck can be immediately localized rather than requiring ad hoc
+    // investigation of an "autoscaling was slow" report with no stage-level breakdown.
+    public async Task<ChainLatencyReport> MeasureFullChainAsync(
+        DateTime demandSpikeDetectedAt, string deploymentName, string namespaceName)
+    {
+        var hpaReactedAt = await WaitForReplicaCountChangeAsync(deploymentName, namespaceName);
+        var stage1Latency = hpaReactedAt - demandSpikeDetectedAt; // Stage 1: HPA reaction
 
- var firstPodPendingAt = await WaitForPendingPodDueToCapacityAsync(deploymentName, namespaceName);
- var caTriggeredAt = firstPodPendingAt; // CA reacts to THIS event specifically
+        var firstPodPendingAt = await WaitForPendingPodDueToCapacityAsync(deploymentName, namespaceName);
+        var caTriggeredAt = firstPodPendingAt; // CA reacts to THIS event specifically
 
- var newNodeReadyAt = await WaitForNewNodeReadyAsync;
- var stage3Latency = newNodeReadyAt - caTriggeredAt; // Stage 3: CA + Node boot
+        var newNodeReadyAt = await WaitForNewNodeReadyAsync;
+        var stage3Latency = newNodeReadyAt - caTriggeredAt; // Stage 3: CA + Node boot
 
- var allPodsSchedulableAt = await WaitForAllReplicasRunningAsync(deploymentName, namespaceName);
+        var allPodsSchedulableAt = await WaitForAllReplicasRunningAsync(deploymentName, namespaceName);
 
- return new ChainLatencyReport
- {
- Stage1_HpaReaction = stage1Latency,
- Stage2_PendingToTrigger = TimeSpan.Zero, // immediate by definition --
- // Pending IS the trigger, no separate delay
- Stage3_NodeProvisioning = stage3Latency,
- TotalEndToEnd = allPodsSchedulableAt - demandSpikeDetectedAt
- };
- }
+        return new ChainLatencyReport
+        {
+            Stage1_HpaReaction = stage1Latency,
+                Stage2_PendingToTrigger = TimeSpan.Zero, // immediate by definition --
+                // Pending IS the trigger, no separate delay
+            Stage3_NodeProvisioning = stage3Latency,
+                TotalEndToEnd = allPodsSchedulableAt - demandSpikeDetectedAt
+        };
+    }
 }
 ```
 

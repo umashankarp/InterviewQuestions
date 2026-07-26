@@ -23,9 +23,9 @@ int Fib(int n) => n <= 1? n: Fib(n - 1) + Fib(n - 2);
 // DP (memoized): each subproblem computed EXACTLY ONCE -- O(n) time
 int FibMemo(int n, Dictionary<int, int> memo)
 {
- if (n <= 1) return n;
- if (memo.TryGetValue(n, out var cached)) return cached;
- return memo[n] = FibMemo(n - 1, memo) + FibMemo(n - 2, memo);
+    if (n <= 1) return n;
+    if (memo.TryGetValue(n, out var cached)) return cached;
+    return memo[n] = FibMemo(n - 1, memo) + FibMemo(n - 2, memo);
 }
 ```
 
@@ -139,13 +139,13 @@ graph TB
 ```csharp
 public class FibonacciSolver
 {
- private readonly Dictionary<int, long> _memo = new;
- public long Fib(int n)
- {
- if (n <= 1) return n;
- if (_memo.TryGetValue(n, out var cached)) return cached;
- return _memo[n] = Fib(n - 1) + Fib(n - 2); // each n computed EXACTLY ONCE across the whole call tree
- }
+    private readonly Dictionary<int, long> _memo = new;
+    public long Fib(int n)
+    {
+        if (n <= 1) return n;
+        if (_memo.TryGetValue(n, out var cached)) return cached;
+        return _memo[n] = Fib(n - 1) + Fib(n - 2); // each n computed EXACTLY ONCE across the whole call tree
+    }
 }
 ```
 
@@ -153,17 +153,17 @@ public class FibonacciSolver
 ```csharp
 public int Knapsack(int[] weights, int[] values, int capacity)
 {
- var dp = new int[capacity + 1]; // 1D array -- space-optimized from O(n * capacity) to O(capacity)
+    var dp = new int[capacity + 1]; // 1D array -- space-optimized from O(n * capacity) to O(capacity)
 
- for (int i = 0; i < weights.Length; i++)
- {
- // CRITICAL: iterate weight DESCENDING to avoid reusing item i multiple times (Advanced Q5)
- for (int w = capacity; w >= weights[i]; w--)
- {
- dp[w] = Math.Max(dp[w], dp[w - weights[i]] + values[i]);
- }
- }
- return dp[capacity];
+    for (int i = 0; i < weights.Length; i++)
+    {
+        // CRITICAL: iterate weight DESCENDING to avoid reusing item i multiple times (Advanced Q5)
+        for (int w = capacity; w >= weights[i]; w--)
+        {
+            dp[w] = Math.Max(dp[w], dp[w - weights[i]] + values[i]);
+        }
+    }
+    return dp[capacity];
 }
 ```
 
@@ -171,18 +171,18 @@ public int Knapsack(int[] weights, int[] values, int capacity)
 ```csharp
 public int LongestCommonSubsequence(string a, string b)
 {
- var dp = new int[a.Length + 1, b.Length + 1];
+    var dp = new int[a.Length + 1, b.Length + 1];
 
- for (int i = 1; i <= a.Length; i++)
- {
- for (int j = 1; j <= b.Length; j++)
- {
- dp[i, j] = a[i - 1] == b[j - 1]
-? dp[i - 1, j - 1] + 1 // characters match -- extend the subsequence
-: Math.Max(dp[i - 1, j], dp[i, j - 1]); // no match -- best of excluding either character
- }
- }
- return dp[a.Length, b.Length];
+    for (int i = 1; i <= a.Length; i++)
+    {
+        for (int j = 1; j <= b.Length; j++)
+        {
+            dp[i, j] = a[i - 1] == b[j - 1]
+            ? dp[i - 1, j - 1] + 1 // characters match -- extend the subsequence
+            : Math.Max(dp[i - 1, j], dp[i, j - 1]); // no match -- best of excluding either character
+        }
+    }
+    return dp[a.Length, b.Length];
 }
 ```
 
@@ -190,32 +190,32 @@ public int LongestCommonSubsequence(string a, string b)
 ```csharp
 public class GreedyCorrectnessVerifier<TInput, TResult> where TResult: IComparable<TResult>
 {
- private readonly Func<TInput, TResult> _greedyAlgorithm;
- private readonly Func<TInput, TResult> _bruteForceAlgorithm; // feasible only for SMALL test instances
- private readonly Func<int, TInput> _testCaseGenerator;
+    private readonly Func<TInput, TResult> _greedyAlgorithm;
+    private readonly Func<TInput, TResult> _bruteForceAlgorithm; // feasible only for SMALL test instances
+    private readonly Func<int, TInput> _testCaseGenerator;
 
- public GreedyCorrectnessVerifier(
- Func<TInput, TResult> greedy, Func<TInput, TResult> bruteForce, Func<int, TInput> generator)
- {
- _greedyAlgorithm = greedy; _bruteForceAlgorithm = bruteForce; _testCaseGenerator = generator;
- }
+    public GreedyCorrectnessVerifier(
+        Func<TInput, TResult> greedy, Func<TInput, TResult> bruteForce, Func<int, TInput> generator)
+    {
+        _greedyAlgorithm = greedy; _bruteForceAlgorithm = bruteForce; _testCaseGenerator = generator;
+    }
 
- public List<string> FindCounterexamples(int trials, int maxInputSize)
- {
- var counterexamples = new List<string>;
- var random = new Random(42); // deterministic seed for reproducible test runs
+    public List<string> FindCounterexamples(int trials, int maxInputSize)
+    {
+        var counterexamples = new List<string>;
+        var random = new Random(42); // deterministic seed for reproducible test runs
 
- for (int i = 0; i < trials; i++)
- {
- var input = _testCaseGenerator(random.Next(1, maxInputSize));
- var greedyResult = _greedyAlgorithm(input);
- var optimalResult = _bruteForceAlgorithm(input);
+        for (int i = 0; i < trials; i++)
+        {
+            var input = _testCaseGenerator(random.Next(1, maxInputSize));
+            var greedyResult = _greedyAlgorithm(input);
+            var optimalResult = _bruteForceAlgorithm(input);
 
- if (greedyResult.CompareTo(optimalResult)!= 0)
- counterexamples.Add($"Trial {i}: greedy={greedyResult}, optimal={optimalResult}");
- }
- return counterexamples;
- }
+            if (greedyResult.CompareTo(optimalResult)!= 0)
+                counterexamples.Add($"Trial {i}: greedy={greedyResult}, optimal={optimalResult}");
+        }
+        return counterexamples;
+    }
 }
 // Usage: run BEFORE committing to a greedy implementation for any novel optimization problem --
 // any non-empty result list is direct, empirical proof the greedy-choice property does NOT hold.

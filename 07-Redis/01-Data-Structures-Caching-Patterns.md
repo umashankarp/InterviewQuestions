@@ -178,30 +178,30 @@ end
 ```csharp
 public async Task<Product> GetProductAsync(string sku)
 {
- var cached = await _redis.StringGetAsync($"product:{sku}");
- if (cached.HasValue) return Deserialize<Product>(cached);
+    var cached = await _redis.StringGetAsync($"product:{sku}");
+    if (cached.HasValue) return Deserialize<Product>(cached);
 
- string lockKey = $"lock:product:{sku}";
- bool lockAcquired = await _redis.StringSetAsync(lockKey, "1", TimeSpan.FromSeconds(5), When.NotExists);
+    string lockKey = $"lock:product:{sku}";
+    bool lockAcquired = await _redis.StringSetAsync(lockKey, "1", TimeSpan.FromSeconds(5), When.NotExists);
 
- if (lockAcquired)
- {
- try
- {
- var product = await _repository.GetBySkuAsync(sku);
- await _redis.StringSetAsync($"product:{sku}", Serialize(product), TimeSpan.FromMinutes(10));
- return product;
- }
- finally
- {
- await _redis.KeyDeleteAsync(lockKey);
- }
- }
- else
- {
- await Task.Delay(50); // brief wait, then retry the cache read
- return await GetProductAsync(sku); // the populating request should have finished by now
- }
+    if (lockAcquired)
+    {
+        try
+        {
+            var product = await _repository.GetBySkuAsync(sku);
+            await _redis.StringSetAsync($"product:{sku}", Serialize(product), TimeSpan.FromMinutes(10));
+            return product;
+        }
+        finally
+        {
+            await _redis.KeyDeleteAsync(lockKey);
+        }
+    }
+    else
+    {
+        await Task.Delay(50); // brief wait, then retry the cache read
+        return await GetProductAsync(sku); // the populating request should have finished by now
+    }
 }
 ```
 
@@ -209,23 +209,23 @@ public async Task<Product> GetProductAsync(string sku)
 ```csharp
 public class FencedDistributedLock
 {
- private readonly IDatabase[] _redisInstances; // N independent Redis instances
- private readonly IDatabase _fencingTokenSource; // a durable counter, incremented per lock acquisition
+    private readonly IDatabase[] _redisInstances; // N independent Redis instances
+    private readonly IDatabase _fencingTokenSource; // a durable counter, incremented per lock acquisition
 
- public async Task<(bool Acquired, long FencingToken)> TryAcquireAsync(string resource, TimeSpan ttl)
- {
- long fencingToken = await _fencingTokenSource.StringIncrementAsync("fencing:counter");
- int successCount = 0;
+    public async Task<(bool Acquired, long FencingToken)> TryAcquireAsync(string resource, TimeSpan ttl)
+    {
+        long fencingToken = await _fencingTokenSource.StringIncrementAsync("fencing:counter");
+        int successCount = 0;
 
- foreach (var redis in _redisInstances)
- {
- bool acquired = await redis.StringSetAsync(resource, fencingToken.ToString, ttl, When.NotExists);
- if (acquired) successCount++;
- }
+        foreach (var redis in _redisInstances)
+        {
+            bool acquired = await redis.StringSetAsync(resource, fencingToken.ToString, ttl, When.NotExists);
+            if (acquired) successCount++;
+        }
 
- bool majorityAcquired = successCount > _redisInstances.Length / 2;
- return (majorityAcquired, fencingToken);
- }
+        bool majorityAcquired = successCount > _redisInstances.Length / 2;
+        return (majorityAcquired, fencingToken);
+    }
 }
 // The PROTECTED RESOURCE ITSELF (e.g., the database write the lock guards) must check that any
 // incoming fencing token is STRICTLY GREATER than the last one it accepted -- rejecting a stale

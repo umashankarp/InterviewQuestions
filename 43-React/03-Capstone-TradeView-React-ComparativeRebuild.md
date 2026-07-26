@@ -211,13 +211,13 @@ This capstone adds no new scalability finding beyond composing Modules 159-160's
 *Ideal Answer:*
 ```tsx
 function useMiniPortfolioState(accountId: string) {
- // Declared INSIDE the Hook's own function body — React scopes this to
- // whichever component instance calls useMiniPortfolioState, genuinely
- // isolated per call site, per React's own render/Fiber-node model.
- const [holdings, setHoldings] = useState<Holding[]>([]);
- //... rest of the widget's logic, all using accountId-scoped state
- // declared locally, never a module-level variable.
- return { holdings, setHoldings };
+  // Declared INSIDE the Hook's own function body — React scopes this to
+  // whichever component instance calls useMiniPortfolioState, genuinely
+  // isolated per call site, per React's own render/Fiber-node model.
+  const [holdings, setHoldings] = useState<Holding[]>([]);
+  //... rest of the widget's logic, all using accountId-scoped state
+  // declared locally, never a module-level variable.
+  return { holdings, setHoldings };
 }
 ```
 Every call site (each account's own "Mini Portfolio" widget instance) gets its own, independent `holdings` state, correctly isolated with no shared module-level variable anywhere.
@@ -352,20 +352,20 @@ Every call site (each account's own "Mini Portfolio" widget instance) gets its o
 **Solution (TSX):**
 ```tsx
 function useMiniPortfolioState(accountId: string) {
- const [holdings, setHoldings] = useState<Holding[]>([]); // instance-scoped/I1
- const addHolding = useCallback((h: Holding) => setHoldings(prev => [...prev, h]), []);
- return { holdings, addHolding, accountId };
+  const [holdings, setHoldings] = useState<Holding[]>([]); // instance-scoped/I1
+  const addHolding = useCallback((h: Holding) => setHoldings(prev => [...prev, h]), []);
+  return { holdings, addHolding, accountId };
 }
 
 // Test proving genuine cross-instance isolation (I5):
 test('two widget instances do not share state', => {
- const { result: instanceA } = renderHook(=> useMiniPortfolioState('acct-A'));
- const { result: instanceB } = renderHook(=> useMiniPortfolioState('acct-B'));
+    const { result: instanceA } = renderHook(=> useMiniPortfolioState('acct-A'));
+    const { result: instanceB } = renderHook(=> useMiniPortfolioState('acct-B'));
 
- act(=> instanceA.current.addHolding({ symbol: 'AAPL', qty: 100 }));
+    act(=> instanceA.current.addHolding({ symbol: 'AAPL', qty: 100 }));
 
- expect(instanceA.current.holdings).toHaveLength(1);
- expect(instanceB.current.holdings).toHaveLength(0); // proves isolation — would FAIL under the bug
+    expect(instanceA.current.holdings).toHaveLength(1);
+    expect(instanceB.current.holdings).toHaveLength(0); // proves isolation — would FAIL under the bug
 });
 ```
 **Time complexity:** O(1) per update. **Space complexity:** O(holdings per instance).
@@ -381,22 +381,22 @@ test('two widget instances do not share state', => {
 interface TornRenderEvent { symbol: string; formPrice: number; gridDisplayedPrice: number; }
 
 function useTornRenderCanary(
- formPriceBySymbol: Map<string, number>,
- gridDisplayedPriceBySymbol: Map<string, number>
+  formPriceBySymbol: Map<string, number>,
+    gridDisplayedPriceBySymbol: Map<string, number>
 ): void {
- useEffect(=> {
- const intervalId = setInterval(=> {
- for (const [symbol, formPrice] of formPriceBySymbol) {
- const gridPrice = gridDisplayedPriceBySymbol.get(symbol);
- if (gridPrice!== undefined && Math.abs(gridPrice - formPrice) > 0.01) {
- // A meaningful divergence between two views of the SAME instrument's
- // price, at the SAME moment — the exact torn-render signature.
- reportTornRenderEvent({ symbol, formPrice, gridDisplayedPrice: gridPrice } satisfies TornRenderEvent);
- }
- }
- }, 1_000);
- return => clearInterval(intervalId);
- }, [formPriceBySymbol, gridDisplayedPriceBySymbol]);
+  useEffect(=> {
+      const intervalId = setInterval(=> {
+          for (const [symbol, formPrice] of formPriceBySymbol) {
+            const gridPrice = gridDisplayedPriceBySymbol.get(symbol);
+            if (gridPrice!== undefined && Math.abs(gridPrice - formPrice) > 0.01) {
+              // A meaningful divergence between two views of the SAME instrument's
+              // price, at the SAME moment — the exact torn-render signature.
+              reportTornRenderEvent({ symbol, formPrice, gridDisplayedPrice: gridPrice } satisfies TornRenderEvent);
+            }
+          }
+        }, 1_000);
+      return => clearInterval(intervalId);
+    }, [formPriceBySymbol, gridDisplayedPriceBySymbol]);
 }
 ```
 **Time complexity:** O(m) per check (m = symbols currently shown in the form). **Space complexity:** O(m).
@@ -410,17 +410,17 @@ function useTornRenderCanary(
 **Solution (TSX):**
 ```tsx
 function TopMoversGrid({ currentTicks }: { currentTicks: Tick[] }) {
- const deferredTicks = useDeferredValue(currentTicks);
- const isLagging = deferredTicks!== currentTicks; // reference inequality signals an active defer
+  const deferredTicks = useDeferredValue(currentTicks);
+  const isLagging = deferredTicks!== currentTicks; // reference inequality signals an active defer
 
- return (
- <div className={isLagging? 'grid--updating': undefined}>
- {isLagging && <span role="status" aria-live="polite">Updating…</span>}
- {deferredTicks.map(tick => (
- <GridRow key={tick.symbol} position={tickToPosition(tick)} onSelect={ => {}} displayConfig={{ decimals: 2, showPercent: false }} />
-))}
- </div>
-);
+  return (
+    <div className={isLagging? 'grid--updating': undefined}>
+    {isLagging && <span role="status" aria-live="polite">Updating…</span>}
+    {deferredTicks.map(tick => (
+          <GridRow key={tick.symbol} position={tickToPosition(tick)} onSelect={ => {}} displayConfig={{ decimals: 2, showPercent: false }} />
+    ))}
+    </div>
+  );
 }
 ```
 **Time complexity:** O(1) for the lag check (reference comparison); O(n) for rendering, unchanged from the base grid. **Space complexity:** O(n).
@@ -434,35 +434,35 @@ function TopMoversGrid({ currentTicks }: { currentTicks: Tick[] }) {
 **Solution (TSX, React Testing Library + fake timers):**
 ```tsx
 test('grid intentionally lags behind form during a burst, then correctly catches up', async => {
- const { rerender, getByTestId } = render(<TradingView ticks={initialTicks} />);
+    const { rerender, getByTestId } = render(<TradingView ticks={initialTicks} />);
 
- // Rapid burst — simulates market-open volatility triggering both
- // the non-deferred form update AND a deferred grid update.
- const burstTicks = [...initialTicks, { symbol: 'AAPL', price: 999, timestamp: Date.now }];
+    // Rapid burst — simulates market-open volatility triggering both
+    // the non-deferred form update AND a deferred grid update.
+    const burstTicks = [...initialTicks, { symbol: 'AAPL', price: 999, timestamp: Date.now }];
 
- act(=> {
- rerender(<TradingView ticks={burstTicks} />);
- });
+    act(=> {
+        rerender(<TradingView ticks={burstTicks} />);
+    });
 
- // Non-deferred form: updates IMMEDIATELY.
- expect(getByTestId('form-price-AAPL').textContent).toBe('999.00');
+    // Non-deferred form: updates IMMEDIATELY.
+    expect(getByTestId('form-price-AAPL').textContent).toBe('999.00');
 
- // Deferred grid: per useDeferredValue's design, may STILL show the
- // OLD value at this exact synchronous point — proving the lag is real
- // not merely theoretical (this assertion is what the incident makes visible).
- // (Exact assertion depends on React's scheduler internals/test utilities
- // exposing this intermediate state — illustrative of the INTENT being tested.)
- expect(getByTestId('grid-updating-indicator')).toBeInTheDocument;
+    // Deferred grid: per useDeferredValue's design, may STILL show the
+    // OLD value at this exact synchronous point — proving the lag is real
+    // not merely theoretical (this assertion is what the incident makes visible).
+    // (Exact assertion depends on React's scheduler internals/test utilities
+    // exposing this intermediate state — illustrative of the INTENT being tested.)
+    expect(getByTestId('grid-updating-indicator')).toBeInTheDocument;
 
- // Flush deferred work (React's test utilities provide a mechanism to
- // advance past a Suspense/deferred boundary deterministically).
- await act(async => {
- await flushDeferredWork;
- });
+    // Flush deferred work (React's test utilities provide a mechanism to
+    // advance past a Suspense/deferred boundary deterministically).
+    await act(async => {
+        await flushDeferredWork;
+    });
 
- // NOW the grid has caught up — proving the torn state was transient, not permanent.
- expect(getByTestId('grid-price-AAPL').textContent).toBe('999.00');
- expect(getByTestId('grid-updating-indicator')).not.toBeInTheDocument;
+    // NOW the grid has caught up — proving the torn state was transient, not permanent.
+    expect(getByTestId('grid-price-AAPL').textContent).toBe('999.00');
+    expect(getByTestId('grid-updating-indicator')).not.toBeInTheDocument;
 });
 ```
 **Time complexity:** N/A (test infrastructure). **Space complexity:** N/A.

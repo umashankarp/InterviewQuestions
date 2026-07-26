@@ -157,53 +157,53 @@ graph TD
 ### Easy — ECS task definition with a dedicated, narrowly-scoped task role
 ```json
 {
- "family": "reporting-service",
- "taskRoleArn": "arn:aws:iam::222222222222:role/reporting-service-task-role",
- "executionRoleArn": "arn:aws:iam::222222222222:role/ecs-task-execution-role",
- "containerDefinitions": [
- {
- "name": "reporting-service",
- "image": "222222222222.dkr.ecr.us-east-1.amazonaws.com/reporting-service:latest",
- "healthCheck": {
- "command": ["CMD-SHELL", "curl -f http://localhost:8080/ready || exit 1"]
- "interval": 10, "timeout": 5, "retries": 3
- }
- }
- ],
- "requiresCompatibilities": ["FARGATE"],
- "cpu": "512", "memory": "1024"
+  "family": "reporting-service",
+    "taskRoleArn": "arn:aws:iam::222222222222:role/reporting-service-task-role",
+    "executionRoleArn": "arn:aws:iam::222222222222:role/ecs-task-execution-role",
+    "containerDefinitions": [
+    {
+      "name": "reporting-service",
+        "image": "222222222222.dkr.ecr.us-east-1.amazonaws.com/reporting-service:latest",
+        "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8080/ready || exit 1"]
+        "interval": 10, "timeout": 5, "retries": 3
+      }
+    }
+  ],
+  "requiresCompatibilities": ["FARGATE"],
+    "cpu": "512", "memory": "1024"
 }
 ```
 ```json
 // reporting-service-task-role's policy -- SCOPED to exactly what reporting needs (the fix)
 // NOT the broad shared role every migrated service originally used.
 {
- "Version": "2012-10-17",
- "Statement": [
- { "Effect": "Allow", "Action": ["rds-db:connect"], "Resource": "arn:aws:rds-db:*:*:dbuser:reporting-db/*" }
- ]
+  "Version": "2012-10-17",
+    "Statement": [
+    { "Effect": "Allow", "Action": ["rds-db:connect"], "Resource": "arn:aws:rds-db:*:*:dbuser:reporting-db/*" }
+  ]
 }
 ```
 
 ### Medium — ECS Service Discovery configuration
 ```hcl
 resource "aws_service_discovery_service" "inventory" {
- name = "inventory-service"
- dns_config {
- namespace_id = aws_service_discovery_private_dns_namespace.internal.id
- dns_records { type = "A"; ttl = 10 } # short TTL -- reflects task churn promptly (§Advanced Q3)
- }
- health_check_custom_config { failure_threshold = 1 }
+  name = "inventory-service"
+  dns_config {
+    namespace_id = aws_service_discovery_private_dns_namespace.internal.id
+    dns_records { type = "A"; ttl = 10 } # short TTL -- reflects task churn promptly (§Advanced Q3)
+  }
+  health_check_custom_config { failure_threshold = 1 }
 }
 
 resource "aws_ecs_service" "inventory" {
- name = "inventory-service"
- cluster = aws_ecs_cluster.main.id
- service_registries {
- registry_arn = aws_service_discovery_service.inventory.arn
- }
- # Dependent services resolve "inventory-service.internal" -- NEVER a hardcoded task IP.
-}
+  name = "inventory-service"
+  cluster = aws_ecs_cluster.main.id
+  service_registries {
+    registry_arn = aws_service_discovery_service.inventory.arn
+  }
+  # Dependent services resolve "inventory-service.internal" -- NEVER a hardcoded task IP.
+  }
 ```
 
 ### Hard — App Mesh virtual node with retry policy
@@ -230,26 +230,26 @@ spec:
 ### Expert — Fargate task with App Mesh sidecar and per-task IAM role, combined
 ```hcl
 resource "aws_ecs_task_definition" "checkout" {
- family = "checkout-service"
- requires_compatibilities = ["FARGATE"]
- network_mode = "awsvpc"
- task_role_arn = aws_iam_role.checkout_task_role.arn # NARROWLY scoped
+  family = "checkout-service"
+  requires_compatibilities = ["FARGATE"]
+  network_mode = "awsvpc"
+  task_role_arn = aws_iam_role.checkout_task_role.arn # NARROWLY scoped
 
- proxy_configuration {
- type = "APPMESH"
- container_name = "envoy" # sidecar intercepts ALL traffic -- resilience is
- # MESH-configured, not reimplemented in checkout's own code
- }
+  proxy_configuration {
+    type = "APPMESH"
+    container_name = "envoy" # sidecar intercepts ALL traffic -- resilience is
+    # MESH-configured, not reimplemented in checkout's own code
+  }
 
- container_definitions = jsonencode([
- { name = "checkout-service", image = "...checkout:latest", essential = true },
- {
- name = "envoy"
- image = "public.ecr.aws/appmesh/aws-appmesh-envoy:latest"
- user = "1337"
- environment = [{ name = "APPMESH_RESOURCE_ARN", value = aws_appmesh_virtual_node.checkout.arn }]
- }
- ])
+  container_definitions = jsonencode([
+      { name = "checkout-service", image = "...checkout:latest", essential = true },
+      {
+        name = "envoy"
+        image = "public.ecr.aws/appmesh/aws-appmesh-envoy:latest"
+        user = "1337"
+        environment = [{ name = "APPMESH_RESOURCE_ARN", value = aws_appmesh_virtual_node.checkout.arn }]
+      }
+  ])
 }
 ```
 **Discussion**: combining a narrowly-scoped task role with mesh-enforced mTLS/retries in a single task definition directly demonstrates Advanced Q5's point that these are complementary, not substitutable layers — the task role governs what `checkout-service` can do against AWS APIs if compromised; the mesh sidecar governs how it communicates with other services on the network — both configured explicitly, neither assumed to cover the other's concern.

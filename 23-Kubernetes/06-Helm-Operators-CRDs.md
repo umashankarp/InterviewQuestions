@@ -208,26 +208,26 @@ spec:
 ```csharp
 public class InternalServiceReconciler
 {
- private readonly IKubernetesClient _client;
+    private readonly IKubernetesClient _client;
 
- // the reconciliation loop, now with DOMAIN-SPECIFIC convergence logic --
- // translating a simplified InternalService CR into the full underlying resource bundle
- // a developer shouldn't need to hand-author (Deployment + Service + Ingress).
- public async Task ReconcileAsync(InternalServiceCr cr, CancellationToken ct)
- {
- var desiredDeployment = BuildDeploymentFrom(cr.Spec);
- var actualDeployment = await _client.TryGetDeploymentAsync(cr.Metadata.Name, cr.Metadata.Namespace);
+    // the reconciliation loop, now with DOMAIN-SPECIFIC convergence logic --
+    // translating a simplified InternalService CR into the full underlying resource bundle
+    // a developer shouldn't need to hand-author (Deployment + Service + Ingress).
+    public async Task ReconcileAsync(InternalServiceCr cr, CancellationToken ct)
+    {
+        var desiredDeployment = BuildDeploymentFrom(cr.Spec);
+        var actualDeployment = await _client.TryGetDeploymentAsync(cr.Metadata.Name, cr.Metadata.Namespace);
 
- if (actualDeployment is null)
- await _client.CreateDeploymentAsync(desiredDeployment);
- else if (!DeploymentsMatch(desiredDeployment, actualDeployment))
- // Directly the guarantee -- if someone manually kubectl-edits the generated
- // Deployment, THIS reconciliation pass (running continuously) reverts it back
- // to what the CR's own spec declares, unlike a plain Helm-installed resource.
- await _client.UpdateDeploymentAsync(desiredDeployment);
+        if (actualDeployment is null)
+            await _client.CreateDeploymentAsync(desiredDeployment);
+        else if (!DeploymentsMatch(desiredDeployment, actualDeployment))
+            // Directly the guarantee -- if someone manually kubectl-edits the generated
+        // Deployment, THIS reconciliation pass (running continuously) reverts it back
+        // to what the CR's own spec declares, unlike a plain Helm-installed resource.
+        await _client.UpdateDeploymentAsync(desiredDeployment);
 
- await _client.UpdateStatusAsync(cr, new InternalServiceStatus { Ready = actualDeployment?.IsReady?? false });
- }
+        await _client.UpdateStatusAsync(cr, new InternalServiceStatus { Ready = actualDeployment?.IsReady?? false });
+    }
 }
 ```
 
@@ -237,28 +237,28 @@ public class InternalServiceReconciler
 [Route("convert")]
 public class InternalServiceConversionWebhook: ControllerBase
 {
- // v1alpha1 used "replicas: int"; v1 renames it to "replicaCount: int" and adds
- // a required "minReadySeconds" field with a sensible default -- a genuinely
- // breaking change, handled via conversion rather than a disruptive big-bang
- // cutover across dozens of already-live v1alpha1 instances (§Advanced Q8).
- [HttpPost]
- public IActionResult Convert([FromBody] ConversionRequest request)
- {
- var convertedObjects = request.Objects.Select(obj =>
- {
- if (request.DesiredApiVersion == "platform.example.com/v1"
- && obj.ApiVersion == "platform.example.com/v1alpha1")
- {
- obj.Spec["replicaCount"] = obj.Spec["replicas"]; // rename
- obj.Spec.Remove("replicas");
- obj.Spec["minReadySeconds"] = obj.Spec.GetValueOrDefault("minReadySeconds", 0); // new field default
- obj.ApiVersion = "platform.example.com/v1";
- }
- return obj;
- });
+    // v1alpha1 used "replicas: int"; v1 renames it to "replicaCount: int" and adds
+    // a required "minReadySeconds" field with a sensible default -- a genuinely
+    // breaking change, handled via conversion rather than a disruptive big-bang
+    // cutover across dozens of already-live v1alpha1 instances (§Advanced Q8).
+    [HttpPost]
+    public IActionResult Convert([FromBody] ConversionRequest request)
+    {
+        var convertedObjects = request.Objects.Select(obj =>
+            {
+                if (request.DesiredApiVersion == "platform.example.com/v1"
+                    && obj.ApiVersion == "platform.example.com/v1alpha1")
+                {
+                    obj.Spec["replicaCount"] = obj.Spec["replicas"]; // rename
+                    obj.Spec.Remove("replicas");
+                    obj.Spec["minReadySeconds"] = obj.Spec.GetValueOrDefault("minReadySeconds", 0); // new field default
+                    obj.ApiVersion = "platform.example.com/v1";
+                }
+                return obj;
+        });
 
- return Ok(new ConversionResponse { ConvertedObjects = convertedObjects, Result = "Success" });
- }
+        return Ok(new ConversionResponse { ConvertedObjects = convertedObjects, Result = "Success" });
+    }
 }
 ```
 

@@ -151,65 +151,65 @@ graph TB
 ### Easy — Service Bus Topic with filtered Subscriptions replacing AWS's two-service fan-out
 ```hcl
 resource "azurerm_servicebus_topic" "order_events" {
- name = "order-events"
+  name = "order-events"
 }
 
 resource "azurerm_servicebus_subscription" "high_value_orders" {
- name = "high-value-orders-sub"
- topic_id = azurerm_servicebus_topic.order_events.id
+  name = "high-value-orders-sub"
+  topic_id = azurerm_servicebus_topic.order_events.id
 }
 
 resource "azurerm_servicebus_subscription_rule" "high_value_filter" {
- name = "high-value-filter"
- subscription_id = azurerm_servicebus_subscription.high_value_orders.id
- filter_type = "SqlFilter"
- sql_filter = "orderTotal > 1000" # native content-based routing -- ONE service, not two
+  name = "high-value-filter"
+  subscription_id = azurerm_servicebus_subscription.high_value_orders.id
+  filter_type = "SqlFilter"
+  sql_filter = "orderTotal > 1000" # native content-based routing -- ONE service, not two
 }
 ```
 
 ### Medium — Event Grid subscription with MANDATORY Dead Letter destination
 ```hcl
 resource "azurerm_eventgrid_event_subscription" "order_notification" {
- name = "order-notification-sub"
- scope = azurerm_eventgrid_topic.orders.id
+  name = "order-notification-sub"
+  scope = azurerm_eventgrid_topic.orders.id
 
- webhook_endpoint {
- url = "https://checkout-func.azurewebsites.net/api/notify"
- }
+  webhook_endpoint {
+    url = "https://checkout-func.azurewebsites.net/api/notify"
+  }
 
- # MANDATORY -- the exact fix. Omitting this means retries exhaust after the
- # configured TTL and events are PERMANENTLY, SILENTLY dropped.
- storage_blob_dead_letter_destination {
- storage_account_id = azurerm_storage_account.deadletters.id
- storage_blob_container_name = "eventgrid-deadletters"
- }
+  # MANDATORY -- the exact fix. Omitting this means retries exhaust after the
+  # configured TTL and events are PERMANENTLY, SILENTLY dropped.
+    storage_blob_dead_letter_destination {
+    storage_account_id = azurerm_storage_account.deadletters.id
+    storage_blob_container_name = "eventgrid-deadletters"
+  }
 
- retry_policy {
- max_delivery_attempts = 30
- event_time_to_live_in_minutes = 1440 # 24h -- events published near an extended
- # outage's START will still exhaust this and
- # DEAD-LETTER (not vanish) with this fix in place
- }
+  retry_policy {
+    max_delivery_attempts = 30
+    event_time_to_live_in_minutes = 1440 # 24h -- events published near an extended
+    # outage's START will still exhaust this and
+    # DEAD-LETTER (not vanish) with this fix in place
+  }
 }
 ```
 
 ### Hard — Dead Letter monitoring alarm, closing the "silently accumulating" gap (the fix, §Advanced Q2)
 ```hcl
 resource "azurerm_monitor_metric_alert" "deadletter_depth" {
- name = "eventgrid-deadletter-accumulation"
- resource_group_name = azurerm_resource_group.checkout_prod.name
- scopes = [azurerm_storage_account.deadletters.id]
+  name = "eventgrid-deadletter-accumulation"
+  resource_group_name = azurerm_resource_group.checkout_prod.name
+  scopes = [azurerm_storage_account.deadletters.id]
 
- criteria {
- metric_namespace = "Microsoft.Storage/storageAccounts/blobServices"
- metric_name = "BlobCount"
- aggregation = "Total"
- operator = "GreaterThan"
- threshold = 0 # ANY dead-lettered event triggers proactive alerting --
- # NOT a passive safety net requiring manual discovery (the lesson)
- }
+  criteria {
+    metric_namespace = "Microsoft.Storage/storageAccounts/blobServices"
+    metric_name = "BlobCount"
+    aggregation = "Total"
+    operator = "GreaterThan"
+    threshold = 0 # ANY dead-lettered event triggers proactive alerting --
+      # NOT a passive safety net requiring manual discovery (the lesson)
+  }
 
- action { action_group_id = azurerm_monitor_action_group.oncall_pagerduty.id }
+  action { action_group_id = azurerm_monitor_action_group.oncall_pagerduty.id }
 }
 ```
 
@@ -217,22 +217,22 @@ resource "azurerm_monitor_metric_alert" "deadletter_depth" {
 ```hcl
 # Subscription 1: direct push to a highly-available, latency-sensitive real-time consumer
 resource "azurerm_eventgrid_event_subscription" "realtime_notify" {
- name = "realtime-notify-sub"
- scope = azurerm_eventgrid_topic.orders.id
- webhook_endpoint { url = "https://realtime-notify-func.azurewebsites.net/api/notify" }
- storage_blob_dead_letter_destination {
- storage_account_id = azurerm_storage_account.deadletters.id
- storage_blob_container_name = "realtime-deadletters"
- }
+  name = "realtime-notify-sub"
+  scope = azurerm_eventgrid_topic.orders.id
+  webhook_endpoint { url = "https://realtime-notify-func.azurewebsites.net/api/notify" }
+  storage_blob_dead_letter_destination {
+    storage_account_id = azurerm_storage_account.deadletters.id
+    storage_blob_container_name = "realtime-deadletters"
+  }
 }
 
 # Subscription 2: routes to Service Bus -- the SLOWER, batch-oriented consumer pulls at
 # its OWN pace, inheriting patient, broker-retained durability instead of Event Grid's
 # bounded-retry-then-loss model directly (§Advanced Q5's combined-strengths pattern).
-resource "azurerm_eventgrid_event_subscription" "batch_via_servicebus" {
- name = "batch-via-servicebus-sub"
- scope = azurerm_eventgrid_topic.orders.id
- service_bus_queue_endpoint_id = azurerm_servicebus_queue.batch_processing.id
+  resource "azurerm_eventgrid_event_subscription" "batch_via_servicebus" {
+  name = "batch-via-servicebus-sub"
+  scope = azurerm_eventgrid_topic.orders.id
+  service_bus_queue_endpoint_id = azurerm_servicebus_queue.batch_processing.id
 }
 ```
 

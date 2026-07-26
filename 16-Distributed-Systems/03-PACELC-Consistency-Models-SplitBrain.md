@@ -463,16 +463,16 @@ public enum PacelcClass { PA_EL, PC_EC, PA_EC, PC_EL }
 
 public PacelcClass Classify(OperationConfig config)
 {
- var partitionChoice = config.FavorsAvailabilityDuringPartition;
- var elseChoice = config.FavorsLowLatencyWhenHealthy;
+    var partitionChoice = config.FavorsAvailabilityDuringPartition;
+    var elseChoice = config.FavorsLowLatencyWhenHealthy;
 
- return (partitionChoice, elseChoice) switch
- {
- (true, true) => PacelcClass.PA_EL,
- (false, false) => PacelcClass.PC_EC,
- (false, true) => PacelcClass.PC_EL, // unusual combination
- (true, false) => PacelcClass.PA_EC, // unusual combination
- };
+    return (partitionChoice, elseChoice) switch
+    {
+        (true, true) => PacelcClass.PA_EL,
+            (false, false) => PacelcClass.PC_EC,
+            (false, true) => PacelcClass.PC_EL, // unusual combination
+            (true, false) => PacelcClass.PA_EC, // unusual combination
+        };
 }
 ```
 **Time complexity:** O(1).
@@ -485,21 +485,21 @@ public PacelcClass Classify(OperationConfig config)
 ```csharp
 public class FencedResource
 {
- private long _highestSeenToken = 0;
- private readonly object _lock = new;
+    private long _highestSeenToken = 0;
+    private readonly object _lock = new;
 
- public WriteResult TryWrite(long fencingToken, WriteOperation operation)
- {
- lock (_lock)
- {
- if (fencingToken < _highestSeenToken)
- return WriteResult.RejectedStaleToken(fencingToken, _highestSeenToken); // the exact defense
+    public WriteResult TryWrite(long fencingToken, WriteOperation operation)
+    {
+        lock (_lock)
+        {
+            if (fencingToken < _highestSeenToken)
+                return WriteResult.RejectedStaleToken(fencingToken, _highestSeenToken); // the exact defense
 
- _highestSeenToken = fencingToken;
- operation.Apply;
- return WriteResult.Accepted(fencingToken);
- }
- }
+            _highestSeenToken = fencingToken;
+            operation.Apply;
+            return WriteResult.Accepted(fencingToken);
+        }
+    }
 }
 ```
 **Time complexity:** O(1) per write.
@@ -512,17 +512,17 @@ public class FencedResource
 ```csharp
 public class BoundedStalenessReader
 {
- public async Task<ReadResult> ReadAsync(string key, TimeSpan maxAcceptableStaleness)
- {
- var replica = await _replicaSelector.SelectAsync(key);
- var value = await replica.ReadAsync(key);
- var staleness = DateTimeOffset.UtcNow - value.LastReplicatedAt;
+    public async Task<ReadResult> ReadAsync(string key, TimeSpan maxAcceptableStaleness)
+    {
+        var replica = await _replicaSelector.SelectAsync(key);
+        var value = await replica.ReadAsync(key);
+        var staleness = DateTimeOffset.UtcNow - value.LastReplicatedAt;
 
- if (staleness > maxAcceptableStaleness)
- return ReadResult.StalenessViolation(staleness, maxAcceptableStaleness); // never silently serve unbounded staleness
+        if (staleness > maxAcceptableStaleness)
+            return ReadResult.StalenessViolation(staleness, maxAcceptableStaleness); // never silently serve unbounded staleness
 
- return ReadResult.Success(value, staleness);
- }
+        return ReadResult.Success(value, staleness);
+    }
 }
 ```
 **Time complexity:** O(1) plus the underlying replica read.
@@ -535,26 +535,26 @@ public class BoundedStalenessReader
 ```csharp
 public class ZombieLeaderExperiment
 {
- public async Task<ExperimentResult> RunAsync(
- ILeaderElectedProcess process, IPauseInjector pauseInjector,
- FencedResource protectedResource, TimeSpan pauseDuration, TimeSpan abortAfter)
- {
- using var cts = new CancellationTokenSource(abortAfter); // bounded blast radius
+    public async Task<ExperimentResult> RunAsync(
+        ILeaderElectedProcess process, IPauseInjector pauseInjector,
+            FencedResource protectedResource, TimeSpan pauseDuration, TimeSpan abortAfter)
+    {
+        using var cts = new CancellationTokenSource(abortAfter); // bounded blast radius
 
- var originalToken = process.CurrentFencingToken;
- await pauseInjector.InjectPauseAsync(process, pauseDuration, cts.Token); // real condition: a genuine pause, not a fabricated error
+        var originalToken = process.CurrentFencingToken;
+        await pauseInjector.InjectPauseAsync(process, pauseDuration, cts.Token); // real condition: a genuine pause, not a fabricated error
 
- // While paused, leadership legitimately changes:
- var newLeaderToken = await process.WaitForReelectionAsync(cts.Token);
+        // While paused, leadership legitimately changes:
+        var newLeaderToken = await process.WaitForReelectionAsync(cts.Token);
 
- await pauseInjector.ResumeAsync(process, cts.Token);
- var zombieWriteResult = await process.AttemptWriteWithTokenAsync(originalToken, protectedResource);
+        await pauseInjector.ResumeAsync(process, cts.Token);
+        var zombieWriteResult = await process.AttemptWriteWithTokenAsync(originalToken, protectedResource);
 
- return new ExperimentResult(
- ZombieWriteRejected: zombieWriteResult.WasRejected, // must be TRUE — the exact failure signature, now defended
- NewLeaderTokenHigher: newLeaderToken > originalToken,
- Passed: zombieWriteResult.WasRejected && newLeaderToken > originalToken);
- }
+        return new ExperimentResult(
+            ZombieWriteRejected: zombieWriteResult.WasRejected, // must be TRUE — the exact failure signature, now defended
+                NewLeaderTokenHigher: newLeaderToken > originalToken,
+                Passed: zombieWriteResult.WasRejected && newLeaderToken > originalToken);
+    }
 }
 ```
 **Time complexity:** O(1) orchestration overhead; dominated by the injected pause duration.

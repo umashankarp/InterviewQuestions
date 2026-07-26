@@ -382,15 +382,15 @@ graph LR
 ```csharp
 public async Task ExecuteParallelBranchesAsync(SettlementSagaState state)
 {
- var regTask = _regulatoryClient.FileReportAsync(state.InstructionId);
- var swiftTask = _swiftSubSaga.ExecuteAsync(state.InstructionId);
+    var regTask = _regulatoryClient.FileReportAsync(state.InstructionId);
+    var swiftTask = _swiftSubSaga.ExecuteAsync(state.InstructionId);
 
- await Task.WhenAll(regTask, swiftTask);
+    await Task.WhenAll(regTask, swiftTask);
 
- if (regTask.Result.Success && swiftTask.Result.Success)
- state.Advance(SagaStatus.Completed);
- else
- await CompensateAllCompletedBranchesAsync(state, regTask.Result, swiftTask.Result);
+    if (regTask.Result.Success && swiftTask.Result.Success)
+        state.Advance(SagaStatus.Completed);
+    else
+        await CompensateAllCompletedBranchesAsync(state, regTask.Result, swiftTask.Result);
 }
 ```
 **Time complexity:** O(1) coordination overhead; wall-clock latency = max(regTask, swiftTask), not their sum.
@@ -403,17 +403,17 @@ public async Task ExecuteParallelBranchesAsync(SettlementSagaState state)
 ```csharp
 public class SagaDispatcher
 {
- private readonly Dictionary<int, ISagaStepSequence> _versions = new
- {
- [1] = new SagaStepSequenceV1,
- [2] = new SagaStepSequenceV2WithSanctionsScreening
- };
+    private readonly Dictionary<int, ISagaStepSequence> _versions = new
+    {
+        [1] = new SagaStepSequenceV1,
+            [2] = new SagaStepSequenceV2WithSanctionsScreening
+    };
 
- public async Task DispatchAsync(SettlementSagaState state)
- {
- var sequence = _versions[state.DefinitionVersion]; // pinned at creation time, never re-evaluated
- await sequence.ExecuteNextStepAsync(state);
- }
+    public async Task DispatchAsync(SettlementSagaState state)
+    {
+        var sequence = _versions[state.DefinitionVersion]; // pinned at creation time, never re-evaluated
+        await sequence.ExecuteNextStepAsync(state);
+    }
 }
 ```
 **Time complexity:** O(1) dictionary lookup for version dispatch.
@@ -426,22 +426,22 @@ public class SagaDispatcher
 ```csharp
 public class SwiftConfirmationSubSaga
 {
- public async Task<SubSagaResult> ExecuteAsync(string instructionId)
- {
- var ackResult = await InitiateAndAwaitAckAsync(instructionId); // internal multi-step logic
- return ackResult.IsAck
-? SubSagaResult.Success
-: SubSagaResult.Failed(reason: ackResult.NakReason);
- }
+    public async Task<SubSagaResult> ExecuteAsync(string instructionId)
+    {
+        var ackResult = await InitiateAndAwaitAckAsync(instructionId); // internal multi-step logic
+        return ackResult.IsAck
+        ? SubSagaResult.Success
+        : SubSagaResult.Failed(reason: ackResult.NakReason);
+    }
 
- public async Task CompensateAsync(string instructionId, string compensationId)
- {
- var alreadyCompensated = await _store.ExistsCompensationAsync(compensationId);
- if (alreadyCompensated) return; // idempotent
+    public async Task CompensateAsync(string instructionId, string compensationId)
+    {
+        var alreadyCompensated = await _store.ExistsCompensationAsync(compensationId);
+        if (alreadyCompensated) return; // idempotent
 
- await _swiftClient.SendCancellationNoticeAsync(instructionId);
- await _store.RecordCompensationAsync(compensationId);
- }
+        await _swiftClient.SendCancellationNoticeAsync(instructionId);
+        await _store.RecordCompensationAsync(compensationId);
+    }
 }
 ```
 **Time complexity:** O(1) at the parent's call site; internal steps hidden and independently variable in cost.
@@ -454,18 +454,18 @@ public class SwiftConfirmationSubSaga
 ```csharp
 public class SagaDefinitionDeploymentGate
 {
- public async Task<GateResult> EvaluateAsync(int newVersion, bool isOrderingSensitive)
- {
- var inFlightCount = await _sagaStore.CountInFlightByVersionLessThanAsync(newVersion);
+    public async Task<GateResult> EvaluateAsync(int newVersion, bool isOrderingSensitive)
+    {
+        var inFlightCount = await _sagaStore.CountInFlightByVersionLessThanAsync(newVersion);
 
- if (inFlightCount > 0 && isOrderingSensitive &&!await _signOffStore.HasApprovalAsync(newVersion))
- {
- return GateResult.Blocked(
- $"{inFlightCount} in-flight instances on prior versions; " +
- "ordering-sensitive change requires explicit business/compliance sign-off before deployment.");
- }
- return GateResult.Allowed;
- }
+        if (inFlightCount > 0 && isOrderingSensitive &&!await _signOffStore.HasApprovalAsync(newVersion))
+        {
+            return GateResult.Blocked(
+                $"{inFlightCount} in-flight instances on prior versions; " +
+                    "ordering-sensitive change requires explicit business/compliance sign-off before deployment.");
+        }
+        return GateResult.Allowed;
+    }
 }
 ```
 **Time complexity:** O(1) for the count query, assuming an indexed version column.

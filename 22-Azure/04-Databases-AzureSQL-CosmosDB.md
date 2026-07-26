@@ -149,34 +149,34 @@ graph TB
 // read path explicitly overrides to Bounded Staleness, matching the actual fix.
 var requestOptions = new QueryRequestOptions
 {
- ConsistencyLevel = ConsistencyLevel.BoundedStaleness // explicit override, NOT the account-level default
+    ConsistencyLevel = ConsistencyLevel.BoundedStaleness // explicit override, NOT the account-level default
 };
 
 var inventoryCount = await _container.GetItemQueryIterator<InventoryItem>(
- "SELECT * FROM c WHERE c.sku = @sku",
- requestOptions: requestOptions
+    "SELECT * FROM c WHERE c.sku = @sku",
+        requestOptions: requestOptions
 ).ReadNextAsync;
 ```
 
 ### Medium — Elastic Pool sized for aggregate peak-coincidence, not individual average (§Advanced Q7)
 ```hcl
 resource "azurerm_mssql_elasticpool" "tenant_pool" {
- name = "tenant-shared-pool"
- resource_group_name = azurerm_resource_group.saas_prod.name
- server_name = azurerm_mssql_server.saas.name
+  name = "tenant-shared-pool"
+  resource_group_name = azurerm_resource_group.saas_prod.name
+  server_name = azurerm_mssql_server.saas.name
 
- sku {
- name = "GP_Gen5"
- tier = "GeneralPurpose"
- family = "Gen5"
- capacity = 40 # sized against MODELED peak-coincidence scenario (Advanced Q7),
- # NOT the sum of each tenant database's own individual average
- }
+  sku {
+    name = "GP_Gen5"
+    tier = "GeneralPurpose"
+    family = "Gen5"
+    capacity = 40 # sized against MODELED peak-coincidence scenario (Advanced Q7),
+      # NOT the sum of each tenant database's own individual average
+  }
 
- per_database_settings {
- min_capacity = 0.25
- max_capacity = 10 # any single noisy-neighbor tenant capped well below pool total
- }
+  per_database_settings {
+    min_capacity = 0.25
+    max_capacity = 10 # any single noisy-neighbor tenant capped well below pool total
+  }
 }
 ```
 
@@ -185,16 +185,16 @@ resource "azurerm_mssql_elasticpool" "tenant_pool" {
 // Cosmos DB conflict-resolution stored procedure -- NOT last-writer-wins (§Advanced Q5's lesson
 // directly addressing §Advanced Q7's shopping-cart data-loss scenario at the platform level).
 function resolveCartConflict(incomingItem, existingItem, isTombstone, conflictingItems) {
- if (isTombstone) { getContext.getResponse.setBody(false); return; }
+  if (isTombstone) { getContext.getResponse.setBody(false); return; }
 
- // MERGE cart line-items from both conflicting versions, rather than whole-item overwrite --
- // avoids silently losing a concurrently-added item the way pure last-writer-wins would.
- var mergedItems = mergeLineItems(incomingItem.lineItems, existingItem.lineItems);
- var resolvedCart = Object.assign({}, existingItem, { lineItems: mergedItems, _ts: Math.max(incomingItem._ts, existingItem._ts) });
+  // MERGE cart line-items from both conflicting versions, rather than whole-item overwrite --
+  // avoids silently losing a concurrently-added item the way pure last-writer-wins would.
+  var mergedItems = mergeLineItems(incomingItem.lineItems, existingItem.lineItems);
+  var resolvedCart = Object.assign({}, existingItem, { lineItems: mergedItems, _ts: Math.max(incomingItem._ts, existingItem._ts) });
 
- var collection = getContext.getCollection;
- collection.replaceDocument(collection.getSelfLink + resolvedCart._rid, resolvedCart,
- function (err) { if (err) throw err; getContext.getResponse.setBody(true); });
+  var collection = getContext.getCollection;
+  collection.replaceDocument(collection.getSelfLink + resolvedCart._rid, resolvedCart,
+    function (err) { if (err) throw err; getContext.getResponse.setBody(true); });
 }
 ```
 
@@ -203,16 +203,16 @@ function resolveCartConflict(incomingItem, existingItem, isTombstone, conflictin
 // GOOD: query scoped to a single logical partition (tenantId) -- LOW RU cost
 // directly analogous to the DynamoDB partition-key-design discipline.
 var efficientQuery = _container.GetItemQueryIterator<Order>(
- new QueryDefinition("SELECT * FROM c WHERE c.tenantId = @tenantId AND c.status = @status")
-.WithParameter("@tenantId", tenantId)
-.WithParameter("@status", "pending"),
- requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey(tenantId) } // single-partition -- cheap
+    new QueryDefinition("SELECT * FROM c WHERE c.tenantId = @tenantId AND c.status = @status")
+    .WithParameter("@tenantId", tenantId)
+    .WithParameter("@status", "pending"),
+        requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey(tenantId) } // single-partition -- cheap
 );
 
 // BAD: cross-partition fan-out query with no partition-key filter -- HIGH RU cost
 // the Cosmos DB-specific manifestation of the hot-partition/inefficient-access-pattern risk.
 var expensiveQuery = _container.GetItemQueryIterator<Order>(
- "SELECT * FROM c WHERE c.status = @status" // scans EVERY partition -- flagged in design review (§Advanced Q8)
+    "SELECT * FROM c WHERE c.status = @status" // scans EVERY partition -- flagged in design review (§Advanced Q8)
 );
 ```
 **Discussion**: the efficient query's explicit `PartitionKey` scoping directly avoids the cross-partition fan-out that would otherwise consume dramatically more RUs — this is the concrete, Cosmos-DB-specific expression of Advanced Q8's point that RU cost makes this class of design mistake immediately quantifiable and therefore catchable in design review, unlike DynamoDB's comparatively less immediately visible hot-partition failure signature.

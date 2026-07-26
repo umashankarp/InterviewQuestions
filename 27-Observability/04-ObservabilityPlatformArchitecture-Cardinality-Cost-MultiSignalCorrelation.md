@@ -337,19 +337,19 @@ public sealed record TeamCardinalityReport(string TeamName, long TotalSeries, bo
 
 public static class CardinalityAttributionCalculator
 {
- public static IReadOnlyList<TeamCardinalityReport> Attribute(
- IReadOnlyList<TeamMetric> metrics, IReadOnlyDictionary<string, long> teamBudgets)
- {
- return metrics
-.GroupBy(m => m.TeamName)
-.Select(g =>
- {
- long total = g.Sum(m => m.EstimatedSeriesCount);
- long budget = teamBudgets.TryGetValue(g.Key, out var b)? b: long.MaxValue;
- return new TeamCardinalityReport(g.Key, total, total > budget);
- })
-.ToList;
- }
+    public static IReadOnlyList<TeamCardinalityReport> Attribute(
+        IReadOnlyList<TeamMetric> metrics, IReadOnlyDictionary<string, long> teamBudgets)
+    {
+        return metrics
+        .GroupBy(m => m.TeamName)
+        .Select(g =>
+            {
+                long total = g.Sum(m => m.EstimatedSeriesCount);
+                long budget = teamBudgets.TryGetValue(g.Key, out var b)? b: long.MaxValue;
+                return new TeamCardinalityReport(g.Key, total, total > budget);
+        })
+        .ToList;
+    }
 }
 ```
 **Time complexity:** O(n) in the number of metrics, for the grouping and aggregation.
@@ -366,18 +366,18 @@ public sealed record DriftReport(IReadOnlyList<string> MissingCapabilities, bool
 
 public static class GoldenPathDriftDetector
 {
- public static DriftReport DetectDrift(CapabilitySet canonicalStandard, CapabilitySet deliveredToService)
- {
- // Missing = required by CURRENT canonical standard but not delivered --
- // a capability delivered that's no longer in the canonical standard is
- // NOT drift (the standard evolved away from requiring it), so this is
- // deliberately one-directional, not a symmetric set difference.
- var missing = canonicalStandard.Capabilities
-.Except(deliveredToService.Capabilities)
-.ToList;
+    public static DriftReport DetectDrift(CapabilitySet canonicalStandard, CapabilitySet deliveredToService)
+    {
+        // Missing = required by CURRENT canonical standard but not delivered --
+        // a capability delivered that's no longer in the canonical standard is
+        // NOT drift (the standard evolved away from requiring it), so this is
+        // deliberately one-directional, not a symmetric set difference.
+        var missing = canonicalStandard.Capabilities
+        .Except(deliveredToService.Capabilities)
+        .ToList;
 
- return new DriftReport(missing, missing.Count > 0);
- }
+        return new DriftReport(missing, missing.Count > 0);
+    }
 }
 ```
 **Time complexity:** O(n) where n is the size of the canonical standard's capability set (hash-set-based `Except`).
@@ -393,36 +393,36 @@ public sealed record DataSegment(string Id, double SizeGb, int DaysOld, bool IsC
 
 public static class TieredRetentionOptimizer
 {
- public static IReadOnlyDictionary<string, string> AssignTiers(
- IReadOnlyList<DataSegment> segments,
- IReadOnlyList<StorageTier> tiersOrderedByCostAscending, // cheapest first
- int hotTierMaxAgeDays,
- TimeSpan maxAcceptableLatencyForActiveInvestigation)
- {
- var assignments = new Dictionary<string, string>;
+    public static IReadOnlyDictionary<string, string> AssignTiers(
+        IReadOnlyList<DataSegment> segments,
+            IReadOnlyList<StorageTier> tiersOrderedByCostAscending, // cheapest first
+            int hotTierMaxAgeDays,
+            TimeSpan maxAcceptableLatencyForActiveInvestigation)
+    {
+        var assignments = new Dictionary<string, string>;
 
- foreach (var segment in segments)
- {
- // Compliance-retained data goes to the cheapest tier meeting ANY
- // latency (compliance queries are rare, latency-tolerant) --
- // Sec2.6's compliance constraint, independent of age.
- if (segment.IsComplianceRetained && segment.DaysOld > hotTierMaxAgeDays)
- {
- assignments[segment.Id] = tiersOrderedByCostAscending[0].Name;
- continue;
- }
+        foreach (var segment in segments)
+        {
+            // Compliance-retained data goes to the cheapest tier meeting ANY
+            // latency (compliance queries are rare, latency-tolerant) --
+            // Sec2.6's compliance constraint, independent of age.
+            if (segment.IsComplianceRetained && segment.DaysOld > hotTierMaxAgeDays)
+            {
+                assignments[segment.Id] = tiersOrderedByCostAscending[0].Name;
+                continue;
+            }
 
- // Recent, actively-investigatable data must meet the latency bound --
- // pick the CHEAPEST tier that still satisfies it.
- var eligibleTier = tiersOrderedByCostAscending
-.FirstOrDefault(t => t.QueryLatency <= maxAcceptableLatencyForActiveInvestigation);
+            // Recent, actively-investigatable data must meet the latency bound --
+            // pick the CHEAPEST tier that still satisfies it.
+            var eligibleTier = tiersOrderedByCostAscending
+            .FirstOrDefault(t => t.QueryLatency <= maxAcceptableLatencyForActiveInvestigation);
 
- assignments[segment.Id] = eligibleTier?.Name
-?? tiersOrderedByCostAscending.Last.Name; // fallback: no tier meets it, use cheapest anyway
- }
+            assignments[segment.Id] = eligibleTier?.Name
+            ?? tiersOrderedByCostAscending.Last.Name; // fallback: no tier meets it, use cheapest anyway
+        }
 
- return assignments;
- }
+        return assignments;
+    }
 }
 ```
 **Time complexity:** O(n × t) where n is the number of segments and t is the number of tiers (a linear scan per segment to find the first eligible tier).
@@ -434,7 +434,7 @@ public static class TieredRetentionOptimizer
 
 ```csharp
 public sealed record CorrelatedView(
- IReadOnlyList<SpanData> Spans, IReadOnlyList<StructuredLogEntry> Logs, IReadOnlyList<string> ExemplarMetricNames);
+    IReadOnlyList<SpanData> Spans, IReadOnlyList<StructuredLogEntry> Logs, IReadOnlyList<string> ExemplarMetricNames);
 
 public interface ITraceStore { Task<IReadOnlyList<SpanData>> GetSpansAsync(string traceId, CancellationToken ct); }
 public interface ILogStore { Task<IReadOnlyList<StructuredLogEntry>> GetLogsByTraceIdAsync(string traceId, CancellationToken ct); }
@@ -442,33 +442,33 @@ public interface IExemplarIndex { IReadOnlyList<string> GetMetricsReferencingTra
 
 public sealed class CorrelationQueryEngine
 {
- private readonly ITraceStore _traceStore;
- private readonly ILogStore _logStore;
- private readonly IExemplarIndex _exemplarIndex;
+    private readonly ITraceStore _traceStore;
+    private readonly ILogStore _logStore;
+    private readonly IExemplarIndex _exemplarIndex;
 
- public CorrelationQueryEngine(ITraceStore traceStore, ILogStore logStore, IExemplarIndex exemplarIndex)
- {
- _traceStore = traceStore;
- _logStore = logStore;
- _exemplarIndex = exemplarIndex;
- }
+    public CorrelationQueryEngine(ITraceStore traceStore, ILogStore logStore, IExemplarIndex exemplarIndex)
+    {
+        _traceStore = traceStore;
+        _logStore = logStore;
+        _exemplarIndex = exemplarIndex;
+    }
 
- public async Task<CorrelatedView> GetCorrelatedViewAsync(string traceId, CancellationToken ct)
- {
- // Query the two I/O-bound backends CONCURRENTLY -- they're independent
- // stores with no data dependency between them, so sequential querying
- // would needlessly double the investigator's wait time during a live incident.
- var spansTask = _traceStore.GetSpansAsync(traceId, ct);
- var logsTask = _logStore.GetLogsByTraceIdAsync(traceId, ct);
+    public async Task<CorrelatedView> GetCorrelatedViewAsync(string traceId, CancellationToken ct)
+    {
+        // Query the two I/O-bound backends CONCURRENTLY -- they're independent
+        // stores with no data dependency between them, so sequential querying
+        // would needlessly double the investigator's wait time during a live incident.
+        var spansTask = _traceStore.GetSpansAsync(traceId, ct);
+        var logsTask = _logStore.GetLogsByTraceIdAsync(traceId, ct);
 
- await Task.WhenAll(spansTask, logsTask);
+        await Task.WhenAll(spansTask, logsTask);
 
- // Exemplar lookup is a fast, in-memory index (Sec11 Expert) --
- // no need to parallelize it alongside the two I/O-bound backend calls.
- var exemplarMetrics = _exemplarIndex.GetMetricsReferencingTrace(traceId);
+        // Exemplar lookup is a fast, in-memory index (Sec11 Expert) --
+        // no need to parallelize it alongside the two I/O-bound backend calls.
+        var exemplarMetrics = _exemplarIndex.GetMetricsReferencingTrace(traceId);
 
- return new CorrelatedView(await spansTask, await logsTask, exemplarMetrics);
- }
+        return new CorrelatedView(await spansTask, await logsTask, exemplarMetrics);
+    }
 }
 ```
 **Time complexity:** O(max(S, L)) where S and L are the respective backend query latencies for spans and logs (parallelized, not summed) — a meaningful improvement over O(S + L) sequential querying.
@@ -548,78 +548,78 @@ graph TB
 ```csharp
 public interface ICanonicalStandardProvider
 {
- // ALWAYS returns the CURRENT canonical standard -- never a cached
- // point-in-time snapshot embedded at onboarding-tool build time.
- Task<CapabilitySet> GetCurrentStandardAsync(CancellationToken ct);
+    // ALWAYS returns the CURRENT canonical standard -- never a cached
+    // point-in-time snapshot embedded at onboarding-tool build time.
+    Task<CapabilitySet> GetCurrentStandardAsync(CancellationToken ct);
 }
 
 public sealed class LiveReferenceOnboardingService
 {
- private readonly ICanonicalStandardProvider _standardProvider;
- private readonly IServiceProvisioner _provisioner;
+    private readonly ICanonicalStandardProvider _standardProvider;
+    private readonly IServiceProvisioner _provisioner;
 
- public LiveReferenceOnboardingService(
- ICanonicalStandardProvider standardProvider, IServiceProvisioner provisioner)
- {
- _standardProvider = standardProvider;
- _provisioner = provisioner;
- }
+    public LiveReferenceOnboardingService(
+        ICanonicalStandardProvider standardProvider, IServiceProvisioner provisioner)
+    {
+        _standardProvider = standardProvider;
+        _provisioner = provisioner;
+    }
 
- public async Task OnboardAsync(string serviceName, CancellationToken ct)
- {
- // Fetches the CURRENT standard at the moment of onboarding -- structurally
- // cannot drift, since there is no separately-stored, potentially-stale
- // copy anywhere in this code path (Sec2.6's fix).
- var currentStandard = await _standardProvider.GetCurrentStandardAsync(ct);
- await _provisioner.ProvisionAsync(serviceName, currentStandard, ct);
- }
+    public async Task OnboardAsync(string serviceName, CancellationToken ct)
+    {
+        // Fetches the CURRENT standard at the moment of onboarding -- structurally
+        // cannot drift, since there is no separately-stored, potentially-stale
+        // copy anywhere in this code path (Sec2.6's fix).
+        var currentStandard = await _standardProvider.GetCurrentStandardAsync(ct);
+        await _provisioner.ProvisionAsync(serviceName, currentStandard, ct);
+    }
 }
 
 public interface ICanaryStatusSource
 {
- Task<bool> IsPassingAsync(string serviceName, CancellationToken ct);
+    Task<bool> IsPassingAsync(string serviceName, CancellationToken ct);
 }
 
 public sealed class PlatformCapabilityAuditor
 {
- private readonly ICanonicalStandardProvider _standardProvider;
- private readonly IReadOnlyDictionary<string, ICanaryStatusSource> _canarySourcesByLayer; // 3 layers
- private readonly IServiceCapabilityRepository _serviceCapabilities;
+    private readonly ICanonicalStandardProvider _standardProvider;
+    private readonly IReadOnlyDictionary<string, ICanaryStatusSource> _canarySourcesByLayer; // 3 layers
+    private readonly IServiceCapabilityRepository _serviceCapabilities;
 
- public PlatformCapabilityAuditor(
- ICanonicalStandardProvider standardProvider,
- IReadOnlyDictionary<string, ICanaryStatusSource> canarySourcesByLayer,
- IServiceCapabilityRepository serviceCapabilities)
- {
- _standardProvider = standardProvider;
- _canarySourcesByLayer = canarySourcesByLayer;
- _serviceCapabilities = serviceCapabilities;
- }
+    public PlatformCapabilityAuditor(
+        ICanonicalStandardProvider standardProvider,
+            IReadOnlyDictionary<string, ICanaryStatusSource> canarySourcesByLayer,
+            IServiceCapabilityRepository serviceCapabilities)
+    {
+        _standardProvider = standardProvider;
+        _canarySourcesByLayer = canarySourcesByLayer;
+        _serviceCapabilities = serviceCapabilities;
+    }
 
- public async Task<DriftReport> AuditServiceAsync(string serviceName, CancellationToken ct)
- {
- var currentStandard = await _standardProvider.GetCurrentStandardAsync(ct);
- var delivered = await _serviceCapabilities.GetDeliveredCapabilitiesAsync(serviceName, ct);
+    public async Task<DriftReport> AuditServiceAsync(string serviceName, CancellationToken ct)
+    {
+        var currentStandard = await _standardProvider.GetCurrentStandardAsync(ct);
+        var delivered = await _serviceCapabilities.GetDeliveredCapabilitiesAsync(serviceName, ct);
 
- // Sec11 Medium's one-directional drift check: only "required now but
- // missing" counts as drift.
- var driftReport = GoldenPathDriftDetector.DetectDrift(currentStandard, delivered);
+        // Sec11 Medium's one-directional drift check: only "required now but
+        // missing" counts as drift.
+        var driftReport = GoldenPathDriftDetector.DetectDrift(currentStandard, delivered);
 
- // Additionally verify each layer's canary is CURRENTLY PASSING, not
- // merely nominally present -- "delivered" alone isn't "functioning."
- foreach (var (layerName, source) in _canarySourcesByLayer)
- {
- bool passing = await source.IsPassingAsync(serviceName, ct);
- if (!passing)
- driftReport = driftReport with
- {
- MissingCapabilities = driftReport.MissingCapabilities.Append($"{layerName} (present but failing)").ToList,
- HasDrift = true
- };
- }
+        // Additionally verify each layer's canary is CURRENTLY PASSING, not
+        // merely nominally present -- "delivered" alone isn't "functioning."
+        foreach (var (layerName, source) in _canarySourcesByLayer)
+        {
+            bool passing = await source.IsPassingAsync(serviceName, ct);
+            if (!passing)
+                driftReport = driftReport with
+            {
+                MissingCapabilities = driftReport.MissingCapabilities.Append($"{layerName} (present but failing)").ToList,
+                    HasDrift = true
+            };
+        }
 
- return driftReport;
- }
+        return driftReport;
+    }
 }
 ```
 

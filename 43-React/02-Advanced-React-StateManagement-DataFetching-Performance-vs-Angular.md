@@ -370,17 +370,17 @@ React Query's automatic background refetching, deduplication of simultaneous ide
 // Shared, typed key factory — the mechanical governance control from A1/A5
 // making the CORRECT, fully-scoped key construction the path of least resistance.
 export const positionKeys = {
- all: ['positions'] as const,
- byAccount: (deskId: string, accountId: string) =>
- [...positionKeys.all, deskId, accountId] as const,
-};
+  all: ['positions'] as const,
+    byAccount: (deskId: string, accountId: string) =>
+    [...positionKeys.all, deskId, accountId] as const,
+  };
 
 function usePositions(deskId: string, accountId: string) {
- return useQuery({
- queryKey: positionKeys.byAccount(deskId, accountId), // impossible to accidentally omit accountId
- queryFn: => fetchPositions(deskId, accountId),
- staleTime: 15_000, // explicit, deliberate — never the library's own unexamined default (I9)
- });
+  return useQuery({
+      queryKey: positionKeys.byAccount(deskId, accountId), // impossible to accidentally omit accountId
+        queryFn: => fetchPositions(deskId, accountId),
+        staleTime: 15_000, // explicit, deliberate — never the library's own unexamined default (I9)
+    });
 }
 ```
 **Time complexity:** O(1) per cache lookup (React Query's internal key-hashing). **Space complexity:** O(distinct desk/account combinations cached).
@@ -394,18 +394,18 @@ function usePositions(deskId: string, accountId: string) {
 **Solution (TSX):**
 ```typescript
 function usePositionFillInvalidation(deskId: string, accountId: string) {
- const queryClient = useQueryClient;
+  const queryClient = useQueryClient;
 
- useEffect(=> {
- const ws = new WebSocket(`wss://fills.internal/${deskId}/${accountId}`)
- ws.onmessage = => {
- // A genuine fill occurred — invalidate the EXACT, correctly-scoped key
- // triggering an immediate background refetch regardless of staleTime.
- queryClient.invalidateQueries({ queryKey: positionKeys.byAccount(deskId, accountId) });
- };
- return => ws.close;
- }, [deskId, accountId, queryClient]); // exhaustive-deps compliant (I5)
-}
+  useEffect(=> {
+      const ws = new WebSocket(`wss://fills.internal/${deskId}/${accountId}`)
+        ws.onmessage = => {
+          // A genuine fill occurred — invalidate the EXACT, correctly-scoped key
+          // triggering an immediate background refetch regardless of staleTime.
+          queryClient.invalidateQueries({ queryKey: positionKeys.byAccount(deskId, accountId) });
+        };
+        return => ws.close;
+      }, [deskId, accountId, queryClient]); // exhaustive-deps compliant (I5)
+  }
 ```
 **Time complexity:** O(1) per fill event. **Space complexity:** O(1).
 
@@ -418,48 +418,48 @@ function usePositionFillInvalidation(deskId: string, accountId: string) {
 **Solution (TSX):**
 ```tsx
 interface ErrorBoundaryProps {
- fallback: (error: Error, reset: => void) => React.ReactNode;
- children: React.ReactNode;
- onError?: (error: Error, info: React.ErrorInfo) => void;
+  fallback: (error: Error, reset: => void) => React.ReactNode;
+  children: React.ReactNode;
+  onError?: (error: Error, info: React.ErrorInfo) => void;
 }
 interface ErrorBoundaryState { error: Error | null; }
 
 class ErrorBoundaryImpl extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
- state: ErrorBoundaryState = { error: null };
+  state: ErrorBoundaryState = { error: null };
 
- static getDerivedStateFromError(error: Error): ErrorBoundaryState {
- return { error };
- }
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { error };
+  }
 
- componentDidCatch(error: Error, info: React.ErrorInfo): void {
- this.props.onError?.(error, info); // route to centralized monitoring, A7's pattern
- }
+  componentDidCatch(error: Error, info: React.ErrorInfo): void {
+    this.props.onError?.(error, info); // route to centralized monitoring, A7's pattern
+  }
 
- reset =: void => this.setState({ error: null });
+  reset =: void => this.setState({ error: null });
 
- render: React.ReactNode {
- if (this.state.error) {
- return this.props.fallback(this.state.error, this.reset);
- }
- return this.props.children;
- }
+  render: React.ReactNode {
+    if (this.state.error) {
+      return this.props.fallback(this.state.error, this.reset);
+    }
+    return this.props.children;
+  }
 }
 
 // Functional-component-friendly export — most call sites never see the class directly.
 export function DeskErrorBoundary({ deskName, children }: { deskName: string; children: React.ReactNode }) {
- return (
- <ErrorBoundaryImpl
- onError={(error) => reportToMonitoring({ desk: deskName, error })}
- fallback={(error, reset) => (
- <div role="alert">
- <p>{deskName} desk failed to render: {error.message}</p>
- <button onClick={reset}>Retry</button>
- </div>
-)}
- >
- {children}
- </ErrorBoundaryImpl>
-);
+  return (
+    <ErrorBoundaryImpl
+    onError={(error) => reportToMonitoring({ desk: deskName, error })}
+    fallback={(error, reset) => (
+        <div role="alert">
+        <p>{deskName} desk failed to render: {error.message}</p>
+        <button onClick={reset}>Retry</button>
+        </div>
+    )}
+    >
+    {children}
+    </ErrorBoundaryImpl>
+  );
 }
 ```
 **Time complexity:** O(1) — error handling, not a per-render-cost concern. **Space complexity:** O(1).
@@ -473,39 +473,39 @@ export function DeskErrorBoundary({ deskName, children }: { deskName: string; ch
 **Solution (TSX):**
 ```typescript
 interface CacheConsistencyMismatch {
- displayedAccountId: string;
- cachedDataAccountId: string;
+  displayedAccountId: string;
+  cachedDataAccountId: string;
 }
 
 export function useCacheConsistencyCanary(
- currentAccountId: string,
- deskId: string
+  currentAccountId: string,
+    deskId: string
 ): void {
- const queryClient = useQueryClient;
+  const queryClient = useQueryClient;
 
- useEffect(=> {
- const intervalId = setInterval(=> {
- const cacheKey = positionKeys.byAccount(deskId, currentAccountId);
- const cachedData = queryClient.getQueryData<Position[]>(cacheKey);
+  useEffect(=> {
+      const intervalId = setInterval(=> {
+          const cacheKey = positionKeys.byAccount(deskId, currentAccountId);
+          const cachedData = queryClient.getQueryData<Position[]>(cacheKey);
 
- // Defensive check: if the data object itself carries its own accountId
- // (a server-returned field, independent of the CLIENT-side key used to
- // store it), verify the two actually agree — catching exactly's
- // failure class, where the cache KEY and the cache CONTENTS silently
- // diverge because the key was under-scoped.
- if (cachedData && cachedData.length > 0) {
- const dataAccountId = (cachedData[0] as any).accountId;
- if (dataAccountId && dataAccountId!== currentAccountId) {
- reportCacheConsistencyMismatch({
- displayedAccountId: currentAccountId,
- cachedDataAccountId: dataAccountId,
- } satisfies CacheConsistencyMismatch);
- }
- }
- }, 5_000);
+          // Defensive check: if the data object itself carries its own accountId
+          // (a server-returned field, independent of the CLIENT-side key used to
+          // store it), verify the two actually agree — catching exactly's
+          // failure class, where the cache KEY and the cache CONTENTS silently
+          // diverge because the key was under-scoped.
+          if (cachedData && cachedData.length > 0) {
+            const dataAccountId = (cachedData[0] as any).accountId;
+            if (dataAccountId && dataAccountId!== currentAccountId) {
+              reportCacheConsistencyMismatch({
+                  displayedAccountId: currentAccountId,
+                    cachedDataAccountId: dataAccountId,
+                  } satisfies CacheConsistencyMismatch);
+            }
+          }
+        }, 5_000);
 
- return => clearInterval(intervalId);
- }, [currentAccountId, deskId, queryClient]);
+      return => clearInterval(intervalId);
+    }, [currentAccountId, deskId, queryClient]);
 }
 ```
 **Time complexity:** O(1) per check (single cache-entry lookup). **Space complexity:** O(1).

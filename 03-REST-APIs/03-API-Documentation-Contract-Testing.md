@@ -151,9 +151,9 @@ graph LR
 ### Easy — Code-first OpenAPI with `TypedResults` (no drift risk)
 ```csharp
 app.MapGet("/orders/{id}", Results<Ok<OrderDto>, NotFound> (string id, IOrderRepository repo) =>
-{
- var order = repo.GetById(id);
- return order is null? TypedResults.NotFound: TypedResults.Ok(new OrderDto(order));
+    {
+        var order = repo.GetById(id);
+        return order is null? TypedResults.NotFound: TypedResults.Ok(new OrderDto(order));
 })
 .WithName("GetOrder")
 .WithOpenApi;
@@ -173,20 +173,20 @@ app.MapGet("/internal/debug/cache-stats", GetCacheStats)
 [Fact]
 public async Task Consumer_Expects_Invoice_Amount_Field_Present
 {
- _pactBuilder
-.UponReceiving("a request for an invoice")
-.Given("invoice inv-123 exists")
-.WithRequest(HttpMethod.Get, "/invoices/inv-123")
-.WillRespond
-.WithStatus(200)
-.WithJsonBody(new { id = "inv-123", amount = Match.Decimal(99.99m) }); // amount is asserted PRESENT
+    _pactBuilder
+    .UponReceiving("a request for an invoice")
+    .Given("invoice inv-123 exists")
+    .WithRequest(HttpMethod.Get, "/invoices/inv-123")
+    .WillRespond
+    .WithStatus(200)
+    .WithJsonBody(new { id = "inv-123", amount = Match.Decimal(99.99m) }); // amount is asserted PRESENT
 
- await _pactBuilder.VerifyAsync(async ctx =>
- {
- var client = new InvoiceApiClient(ctx.MockServerUri);
- var invoice = await client.GetInvoiceAsync("inv-123");
- Assert.Equal(99.99m, invoice.Amount);
- });
+    await _pactBuilder.VerifyAsync(async ctx =>
+        {
+            var client = new InvoiceApiClient(ctx.MockServerUri);
+            var invoice = await client.GetInvoiceAsync("inv-123");
+            Assert.Equal(99.99m, invoice.Amount);
+    });
 }
 // Provider-side CI: pulls this published contract and replays it against the REAL provider implementation --
 // if the provider ever removes/renames "amount", THIS test fails the provider's own build.
@@ -197,24 +197,24 @@ public async Task Consumer_Expects_Invoice_Amount_Field_Present
 ```csharp
 public class PaginationConventionAnalyzer
 {
- // Conceptual: parse the generated OpenAPI document and flag any collection-returning endpoint
- // NOT using the organization's standard cursor-pagination parameter shape.
- public IEnumerable<string> FindViolations(OpenApiDocument spec)
- {
- foreach (var (path, item) in spec.Paths)
- {
- var getOp = item.Operations.GetValueOrDefault(OperationType.Get);
- if (getOp is null) continue;
- bool looksLikeCollection = getOp.Responses.TryGetValue("200", out var resp)
- && resp.Content.Values.Any(c => c.Schema.Type == "array");
- if (!looksLikeCollection) continue;
+    // Conceptual: parse the generated OpenAPI document and flag any collection-returning endpoint
+    // NOT using the organization's standard cursor-pagination parameter shape.
+    public IEnumerable<string> FindViolations(OpenApiDocument spec)
+    {
+        foreach (var (path, item) in spec.Paths)
+        {
+            var getOp = item.Operations.GetValueOrDefault(OperationType.Get);
+            if (getOp is null) continue;
+            bool looksLikeCollection = getOp.Responses.TryGetValue("200", out var resp)
+            && resp.Content.Values.Any(c => c.Schema.Type == "array");
+            if (!looksLikeCollection) continue;
 
- bool hasCursorParam = getOp.Parameters.Any(p => p.Name == "cursor");
- bool hasOffsetParam = getOp.Parameters.Any(p => p.Name is "offset" or "page");
- if (hasOffsetParam &&!hasCursorParam)
- yield return $"{path}: uses offset/page pagination instead of the standard 'cursor' convention.";
- }
- }
+            bool hasCursorParam = getOp.Parameters.Any(p => p.Name == "cursor");
+            bool hasOffsetParam = getOp.Parameters.Any(p => p.Name is "offset" or "page");
+            if (hasOffsetParam &&!hasCursorParam)
+                yield return $"{path}: uses offset/page pagination instead of the standard 'cursor' convention.";
+        }
+    }
 }
 ```
 **Discussion**: Running this against the generated spec in CI operationalizes the Advanced Q4 design-review checklist as an automated, enforced check rather than a manual review step someone might skip — directly the same "codify hard-won governance lessons as tooling" pattern recurring throughout this course.

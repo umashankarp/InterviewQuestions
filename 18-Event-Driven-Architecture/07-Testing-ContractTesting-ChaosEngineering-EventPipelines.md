@@ -440,23 +440,23 @@ The generalizable lesson at the pipeline level: **schema-registry compatibility 
 ```csharp
 public class ContractVerificationResult
 {
- public bool Satisfied { get; init; }
- public IReadOnlyList<string> Violations { get; init; } = [];
+    public bool Satisfied { get; init; }
+    public IReadOnlyList<string> Violations { get; init; } = [];
 }
 
 public ContractVerificationResult VerifyContract(JsonElement sampleEvent, ConsumerContract contract)
 {
- var violations = new List<string>;
+    var violations = new List<string>;
 
- foreach (var requiredField in contract.RequiredFields)
- if (!sampleEvent.TryGetProperty(requiredField.Name, out var value) || value.ValueKind!= requiredField.ExpectedKind)
- violations.Add($"Missing or wrong-typed field: {requiredField.Name}");
+    foreach (var requiredField in contract.RequiredFields)
+        if (!sampleEvent.TryGetProperty(requiredField.Name, out var value) || value.ValueKind!= requiredField.ExpectedKind)
+        violations.Add($"Missing or wrong-typed field: {requiredField.Name}");
 
- foreach (var assumption in contract.StructuralAssumptions) // the lesson — beyond field-level checks
- if (!assumption.StillHolds(sampleEvent))
- violations.Add($"Structural assumption violated: {assumption.Description}");
+    foreach (var assumption in contract.StructuralAssumptions) // the lesson — beyond field-level checks
+        if (!assumption.StillHolds(sampleEvent))
+        violations.Add($"Structural assumption violated: {assumption.Description}");
 
- return new ContractVerificationResult { Satisfied = violations.Count == 0, Violations = violations };
+    return new ContractVerificationResult { Satisfied = violations.Count == 0, Violations = violations };
 }
 ```
 **Time complexity:** O(f + a) for f required fields and a structural assumptions.
@@ -468,22 +468,22 @@ public ContractVerificationResult VerifyContract(JsonElement sampleEvent, Consum
 **Solution:**
 ```csharp
 public async Task<ReplayComparisonResult> RunReplayRegressionAsync(
- IAsyncEnumerable<CapturedEvent> fixture, IEventConsumer candidateConsumer, ProcessingBaseline baseline)
+    IAsyncEnumerable<CapturedEvent> fixture, IEventConsumer candidateConsumer, ProcessingBaseline baseline)
 {
- int reprocessedCount = 0, totalCount = 0;
+    int reprocessedCount = 0, totalCount = 0;
 
- await foreach (var evt in fixture)
- {
- totalCount++;
- var result = await candidateConsumer.ProcessAsync(evt.ToEnvelope);
- if (result.WasTreatedAsNew && evt.KnownAlreadyProcessedInBaseline)
- reprocessedCount++; // the exact failure signature
- }
+    await foreach (var evt in fixture)
+    {
+        totalCount++;
+        var result = await candidateConsumer.ProcessAsync(evt.ToEnvelope);
+        if (result.WasTreatedAsNew && evt.KnownAlreadyProcessedInBaseline)
+            reprocessedCount++; // the exact failure signature
+    }
 
- var reprocessRate = totalCount == 0? 0: (double)reprocessedCount / totalCount;
- return new ReplayComparisonResult(
- reprocessRate,
- Regression: reprocessRate > baseline.AcceptableReprocessRate);
+    var reprocessRate = totalCount == 0? 0: (double)reprocessedCount / totalCount;
+    return new ReplayComparisonResult(
+        reprocessRate,
+            Regression: reprocessRate > baseline.AcceptableReprocessRate);
 }
 ```
 **Time complexity:** O(n) for n fixture events.
@@ -496,22 +496,22 @@ public async Task<ReplayComparisonResult> RunReplayRegressionAsync(
 ```csharp
 public class LagInjectionExperiment
 {
- public async Task<ExperimentResult> RunAsync(
- IConsumerLagInjector injector, ILagAlertMonitor alertMonitor, TimeSpan targetLag, TimeSpan abortAfter)
- {
- using var abortCts = new CancellationTokenSource(abortAfter); // mandatory blast-radius bound
+    public async Task<ExperimentResult> RunAsync(
+        IConsumerLagInjector injector, ILagAlertMonitor alertMonitor, TimeSpan targetLag, TimeSpan abortAfter)
+    {
+        using var abortCts = new CancellationTokenSource(abortAfter); // mandatory blast-radius bound
 
- await injector.PauseConsumptionAsync(targetLag, abortCts.Token); // real injected condition, not a symptom
- var alertsFired = await alertMonitor.CaptureAlertsDuringAsync(targetLag, abortCts.Token);
+        await injector.PauseConsumptionAsync(targetLag, abortCts.Token); // real injected condition, not a symptom
+        var alertsFired = await alertMonitor.CaptureAlertsDuringAsync(targetLag, abortCts.Token);
 
- await injector.ResumeConsumptionAsync(abortCts.Token);
- var catchUpBehavior = await injector.ObserveCatchUpRateAsync(abortCts.Token);
+        await injector.ResumeConsumptionAsync(abortCts.Token);
+        var catchUpBehavior = await injector.ObserveCatchUpRateAsync(abortCts.Token);
 
- return new ExperimentResult(
- SustainedRiseAlertFired: alertsFired.Any(a => a.Type == LagAlertType.SustainedRise),
- CatchUpWasThrottled: catchUpBehavior.MaxObservedRate <= catchUpBehavior.ConfiguredThrottleCeiling,
- DownstreamRemainedHealthy: catchUpBehavior.DownstreamErrorRateDuringCatchUp < 0.01);
- }
+        return new ExperimentResult(
+            SustainedRiseAlertFired: alertsFired.Any(a => a.Type == LagAlertType.SustainedRise),
+                CatchUpWasThrottled: catchUpBehavior.MaxObservedRate <= catchUpBehavior.ConfiguredThrottleCeiling,
+                DownstreamRemainedHealthy: catchUpBehavior.DownstreamErrorRateDuringCatchUp < 0.01);
+    }
 }
 ```
 **Time complexity:** O(1) orchestration overhead; dominated by the injected wait duration.
@@ -524,24 +524,24 @@ public class LagInjectionExperiment
 ```csharp
 public class ChoreographyLivenessTestHarness
 {
- public async Task<LivenessTestResult> VerifyStallDetectionAsync(
- string correlationId, IReadOnlyList<IChoreographyParticipant> participants,
- int stallParticipantIndex, ILivenessMonitor productionMonitor, TimeSpan expectedDetectionWindow)
- {
- var stalledParticipant = participants[stallParticipantIndex];
- stalledParticipant.SuppressReactionFor(correlationId); // deliberately simulate the stall
+    public async Task<LivenessTestResult> VerifyStallDetectionAsync(
+        string correlationId, IReadOnlyList<IChoreographyParticipant> participants,
+            int stallParticipantIndex, ILivenessMonitor productionMonitor, TimeSpan expectedDetectionWindow)
+    {
+        var stalledParticipant = participants[stallParticipantIndex];
+        stalledParticipant.SuppressReactionFor(correlationId); // deliberately simulate the stall
 
- foreach (var p in participants.Where((_, i) => i!= stallParticipantIndex))
- await p.TriggerAsync(correlationId); // every OTHER participant reacts normally
+        foreach (var p in participants.Where((_, i) => i!= stallParticipantIndex))
+            await p.TriggerAsync(correlationId); // every OTHER participant reacts normally
 
- var detected = await productionMonitor.WaitForStallDetectionAsync(
- correlationId, timeout: expectedDetectionWindow);
+        var detected = await productionMonitor.WaitForStallDetectionAsync(
+            correlationId, timeout: expectedDetectionWindow);
 
- return new LivenessTestResult(
- Detected: detected is not null,
- DetectionLatency: detected?.DetectedAt - detected?.StallStartedAt,
- FlaggedParticipant: detected?.SuspectedParticipant == stalledParticipant.Id);
- }
+        return new LivenessTestResult(
+            Detected: detected is not null,
+                DetectionLatency: detected?.DetectedAt - detected?.StallStartedAt,
+                FlaggedParticipant: detected?.SuspectedParticipant == stalledParticipant.Id);
+    }
 }
 ```
 **Time complexity:** O(p) for p participants to trigger; dominated by the detection-window wait.

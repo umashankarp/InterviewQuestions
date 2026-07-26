@@ -454,23 +454,23 @@ The generalizable lesson: **decomposing by processing stage produces services th
 ```csharp
 public IReadOnlyList<CoChangePair> Analyze(IReadOnlyList<Release> releases)
 {
- var pairCounts = new Dictionary<(string, string), int>;
- var serviceCounts = new Dictionary<string, int>;
+    var pairCounts = new Dictionary<(string, string), int>;
+    var serviceCounts = new Dictionary<string, int>;
 
- foreach (var release in releases)
- {
- foreach (var s in release.Services) serviceCounts.Increment(s);
- foreach (var (a, b) in release.Services.OrderBy(s => s).Pairs)
- pairCounts.Increment((a, b));
- }
+    foreach (var release in releases)
+    {
+        foreach (var s in release.Services) serviceCounts.Increment(s);
+        foreach (var (a, b) in release.Services.OrderBy(s => s).Pairs)
+            pairCounts.Increment((a, b));
+    }
 
- return pairCounts
-.Select(kv => new CoChangePair(
- kv.Key.Item1, kv.Key.Item2,
- Frequency: (double)kv.Value / Math.Min(serviceCounts[kv.Key.Item1], serviceCounts[kv.Key.Item2]),
- AbsoluteCount: kv.Value)) // volume matters (Intermediate Q2)
-.OrderByDescending(p => p.Frequency * Math.Log(p.AbsoluteCount + 1))
-.ToList;
+    return pairCounts
+    .Select(kv => new CoChangePair(
+            kv.Key.Item1, kv.Key.Item2,
+                Frequency: (double)kv.Value / Math.Min(serviceCounts[kv.Key.Item1], serviceCounts[kv.Key.Item2]),
+                AbsoluteCount: kv.Value)) // volume matters (Intermediate Q2)
+    .OrderByDescending(p => p.Frequency * Math.Log(p.AbsoluteCount + 1))
+    .ToList;
 }
 ```
 **Time complexity:** O(r × s²) for r releases with s services each — trivial at realistic service counts.
@@ -483,17 +483,17 @@ public IReadOnlyList<CoChangePair> Analyze(IReadOnlyList<Release> releases)
 ```csharp
 public IndependenceReport Measure(IReadOnlyList<Release> releases)
 {
- var single = releases.Count(r => r.Services.Count == 1);
- var fraction = (double)single / releases.Count;
+    var single = releases.Count(r => r.Services.Count == 1);
+    var fraction = (double)single / releases.Count;
 
- return new IndependenceReport(
- SingleServiceFraction: fraction,
- Verdict: fraction switch
- {
- < 0.2 => "Theoretical — services deploy together in practice",
- < 0.6 => "Partial — some boundaries exercised",
- _ => "Genuine — independence routinely used"
- });
+    return new IndependenceReport(
+        SingleServiceFraction: fraction,
+            Verdict: fraction switch
+        {
+            < 0.2 => "Theoretical — services deploy together in practice",
+                < 0.6 => "Partial — some boundaries exercised",
+                _ => "Genuine — independence routinely used"
+    });
 }
 ```
 **Time complexity:** O(r).
@@ -506,17 +506,17 @@ public IndependenceReport Measure(IReadOnlyList<Release> releases)
 ```csharp
 public IReadOnlyList<SplitInvariant> Detect(IReadOnlyList<SagaDefinition> sagas)
 {
- return sagas
-.Where(s => s.Steps.Select(x => x.OwningService).Distinct.Count > 1)
-.Select(s => new SplitInvariant(
- Name: s.Name,
- Services: s.Steps.Select(x => x.OwningService).Distinct.ToList,
- CompensationCount: s.Steps.Count(x => x.HasCompensation),
- Severity: s.Steps.Count(x => x.HasCompensation) > 2
-? Severity.High // many compensations = invariant badly split
-: Severity.Moderate))
-.OrderByDescending(i => i.Severity)
-.ToList;
+    return sagas
+    .Where(s => s.Steps.Select(x => x.OwningService).Distinct.Count > 1)
+    .Select(s => new SplitInvariant(
+            Name: s.Name,
+                Services: s.Steps.Select(x => x.OwningService).Distinct.ToList,
+                CompensationCount: s.Steps.Count(x => x.HasCompensation),
+                Severity: s.Steps.Count(x => x.HasCompensation) > 2
+            ? Severity.High // many compensations = invariant badly split
+            : Severity.Moderate))
+    .OrderByDescending(i => i.Severity)
+    .ToList;
 }
 ```
 **Time complexity:** O(n × k) for n sagas of k steps.
@@ -529,20 +529,20 @@ public IReadOnlyList<SplitInvariant> Detect(IReadOnlyList<SagaDefinition> sagas)
 ```csharp
 public MergeAssessment Assess(ServiceId a, ServiceId b)
 {
- var coChange = _analysis.CoChangeFrequency(a, b);
- var volume = _analysis.CombinedChangeVolume(a, b);
- var sameTeam = _ownership.Owner(a) == _ownership.Owner(b);
- var sharedSagas= _sagas.SpanningBoth(a, b).Count;
- var roadmap = _roadmap.PlannedChangesTouching(a, b); // future volume matters more
+    var coChange = _analysis.CoChangeFrequency(a, b);
+    var volume = _analysis.CombinedChangeVolume(a, b);
+    var sameTeam = _ownership.Owner(a) == _ownership.Owner(b);
+    var sharedSagas= _sagas.SpanningBoth(a, b).Count;
+    var roadmap = _roadmap.PlannedChangesTouching(a, b); // future volume matters more
 
- var benefit = coChange * (volume + roadmap * 2) + sharedSagas * _sagaCostWeight;
- var cost = _dataMergeComplexity.Estimate(a, b) + (sameTeam? 0: _orgChangeCost);
+    var benefit = coChange * (volume + roadmap * 2) + sharedSagas * _sagaCostWeight;
+    var cost = _dataMergeComplexity.Estimate(a, b) + (sameTeam? 0: _orgChangeCost);
 
- return new MergeAssessment(a, b, benefit, cost,
- Recommendation: benefit > cost * _threshold? "Merge": "Retain",
- Rationale: sameTeam
-? "Same owner — no organizational change required"
-: "Requires ownership consolidation (Intermediate Q5)");
+    return new MergeAssessment(a, b, benefit, cost,
+        Recommendation: benefit > cost * _threshold? "Merge": "Retain",
+            Rationale: sameTeam
+        ? "Same owner — no organizational change required"
+        : "Requires ownership consolidation (Intermediate Q5)");
 }
 ```
 **Time complexity:** O(1) given precomputed analyses.

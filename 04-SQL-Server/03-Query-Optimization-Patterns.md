@@ -20,7 +20,7 @@ Any loop iterating over a collection of entities and accessing a related, not-ye
 // N+1: one query for orders, then ONE ADDITIONAL QUERY PER ORDER for its customer
 var orders = await db.Orders.ToListAsync; // 1 query
 foreach (var order in orders)
- Console.WriteLine(order.Customer.Name); // triggers a lazy-load query, N times
+    Console.WriteLine(order.Customer.Name); // triggers a lazy-load query, N times
 
 // Fixed: ONE query total, via eager loading
 var orders = await db.Orders.Include(o => o.Customer).ToListAsync; // 1 query, JOIN-based
@@ -166,16 +166,16 @@ foreach (var order in orders) Console.WriteLine(order.Customer.Name); // no addi
 ```csharp
 public async Task<List<Order>> GetOrdersPageAsync(DateTime? lastSeenDate, int? lastSeenId, int pageSize)
 {
- var query = db.Orders.OrderByDescending(o => o.CreatedDate).ThenByDescending(o => o.Id).AsQueryable;
+    var query = db.Orders.OrderByDescending(o => o.CreatedDate).ThenByDescending(o => o.Id).AsQueryable;
 
- if (lastSeenDate is not null && lastSeenId is not null)
- {
- query = query.Where(o =>
- o.CreatedDate < lastSeenDate ||
- (o.CreatedDate == lastSeenDate && o.Id < lastSeenId)); // composite cursor, breaks ties via Id
- }
+    if (lastSeenDate is not null && lastSeenId is not null)
+    {
+        query = query.Where(o =>
+            o.CreatedDate < lastSeenDate ||
+                (o.CreatedDate == lastSeenDate && o.Id < lastSeenId)); // composite cursor, breaks ties via Id
+    }
 
- return await query.Take(pageSize).ToListAsync;
+    return await query.Take(pageSize).ToListAsync;
 }
 ```
 **Discussion**: The composite `(CreatedDate, Id)` comparison is exactly Advanced Q2's fix for non-unique sort keys — without the `Id` tie-breaker, rows sharing an identical `CreatedDate` could be inconsistently included/skipped across page boundaries.
@@ -187,14 +187,14 @@ public async Task<List<Order>> GetOrdersPageAsync(DateTime? lastSeenDate, int? l
 [InlineData(500)] // query count must be IDENTICAL regardless of seeded collection size
 public async Task GetCustomerOrders_Should_Use_Constant_Query_Count(int orderCount)
 {
- var customer = await SeedCustomerWithOrdersAsync(orderCount);
- var queryLog = new List<string>;
- _dbContext.Database.SetCommandInterceptor(cmd => queryLog.Add(cmd.CommandText)); // conceptual interceptor hook
+    var customer = await SeedCustomerWithOrdersAsync(orderCount);
+    var queryLog = new List<string>;
+    _dbContext.Database.SetCommandInterceptor(cmd => queryLog.Add(cmd.CommandText)); // conceptual interceptor hook
 
- var response = await _client.GetAsync($"/customers/{customer.Id}/orders");
+    var response = await _client.GetAsync($"/customers/{customer.Id}/orders");
 
- Assert.True(response.IsSuccessStatusCode);
- Assert.True(queryLog.Count <= 3, $"Expected at most 3 queries, got {queryLog.Count} for {orderCount} orders.");
+    Assert.True(response.IsSuccessStatusCode);
+    Assert.True(queryLog.Count <= 3, $"Expected at most 3 queries, got {queryLog.Count} for {orderCount} orders.");
 }
 ```
 **Discussion**: Running this with both a small (5) and large (500) seeded order count is the key design decision — a test using only a small seed size would pass even with a genuine N+1 bug present (Advanced Q7), since the round-trip count difference is negligible at small scale; asserting the *same* bound for both sizes is what actually proves the query count doesn't scale with input.
@@ -203,22 +203,22 @@ public async Task GetCustomerOrders_Should_Use_Constant_Query_Count(int orderCou
 ```csharp
 public async Task ImportOrdersAsync(IAsyncEnumerable<OrderImportRow> rows)
 {
- const int batchSize = 2000; // consistent with the lock-escalation-avoidance threshold
- int count = 0;
+    const int batchSize = 2000; // consistent with the lock-escalation-avoidance threshold
+    int count = 0;
 
- await foreach (var row in rows)
- {
- db.Orders.Add(MapToOrder(row));
- count++;
+    await foreach (var row in rows)
+    {
+        db.Orders.Add(MapToOrder(row));
+        count++;
 
- if (count % batchSize == 0)
- {
- await db.SaveChangesAsync;
- db.ChangeTracker.Clear; // release tracked entities -- prevents unbounded memory growth
- // across a very large import's full duration
- }
- }
- await db.SaveChangesAsync; // final partial batch
+        if (count % batchSize == 0)
+        {
+            await db.SaveChangesAsync;
+            db.ChangeTracker.Clear; // release tracked entities -- prevents unbounded memory growth
+            // across a very large import's full duration
+        }
+    }
+    await db.SaveChangesAsync; // final partial batch
 }
 ```
 **Discussion**: `ChangeTracker.Clear` (EF Core 7+) is specifically necessary here because, without it, every previously-saved batch's entities would remain tracked for the *entire* import's duration, accumulating unbounded memory (the allocation-growth concerns) even though they've already been persisted and have no further reason to stay tracked — a direct, practical application of Intermediate Q9/Advanced Q6's reasoning about EF Core's own change-tracking overhead becoming the bottleneck at volume.

@@ -378,19 +378,19 @@ sequenceDiagram
 ```csharp
 public class PollingRelay
 {
- public async Task RunAsync(string streamId, CancellationToken ct)
- {
- while (!ct.IsCancellationRequested)
- {
- var pending = await _outbox.QueryAsync(streamId, status: "Pending", orderBy: "SequenceNumber");
- foreach (var row in pending)
- {
- await _broker.PublishAsync(row.EventId, row.Payload);
- await _outbox.MarkProcessedAsync(row.EventId);
- }
- await Task.Delay(_pollInterval, ct);
- }
- }
+    public async Task RunAsync(string streamId, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            var pending = await _outbox.QueryAsync(streamId, status: "Pending", orderBy: "SequenceNumber");
+            foreach (var row in pending)
+            {
+                await _broker.PublishAsync(row.EventId, row.Payload);
+                await _outbox.MarkProcessedAsync(row.EventId);
+            }
+            await Task.Delay(_pollInterval, ct);
+        }
+    }
 }
 ```
 **Time complexity:** O(p) per poll cycle, where p is the pending-row count for this stream.
@@ -403,14 +403,14 @@ public class PollingRelay
 ```csharp
 public async Task InsertOutboxEventAsync(string streamId, byte[] payload, IDbTransaction tx)
 {
- var nextSeq = await tx.ExecuteScalarAsync<long>(
- "SELECT ISNULL(MAX(SequenceNumber), 0) + 1 FROM Outbox WHERE StreamId = @StreamId WITH (UPDLOCK, HOLDLOCK)",
- new { StreamId = streamId });
+    var nextSeq = await tx.ExecuteScalarAsync<long>(
+        "SELECT ISNULL(MAX(SequenceNumber), 0) + 1 FROM Outbox WHERE StreamId = @StreamId WITH (UPDLOCK, HOLDLOCK)",
+            new { StreamId = streamId });
 
- await tx.ExecuteAsync(
- "INSERT INTO Outbox (EventId, StreamId, SequenceNumber, Payload, Status, CreatedAtUtc) " +
- "VALUES (@EventId, @StreamId, @SequenceNumber, @Payload, 'Pending', SYSUTCDATETIME)",
- new { EventId = Guid.NewGuid, StreamId = streamId, SequenceNumber = nextSeq, Payload = payload });
+    await tx.ExecuteAsync(
+        "INSERT INTO Outbox (EventId, StreamId, SequenceNumber, Payload, Status, CreatedAtUtc) " +
+            "VALUES (@EventId, @StreamId, @SequenceNumber, @Payload, 'Pending', SYSUTCDATETIME)",
+            new { EventId = Guid.NewGuid, StreamId = streamId, SequenceNumber = nextSeq, Payload = payload });
 }
 ```
 **Time complexity:** O(1) with an index on `(StreamId, SequenceNumber)`; the `UPDLOCK, HOLDLOCK` hint serializes concurrent inserts for the same stream specifically.
@@ -423,22 +423,22 @@ public async Task InsertOutboxEventAsync(string streamId, byte[] payload, IDbTra
 ```csharp
 public async Task ProcessRowAsync(OutboxRow row)
 {
- try
- {
- await _broker.PublishAsync(row.EventId, row.Payload);
- await _outbox.MarkProcessedAsync(row.EventId);
- }
- catch (Exception ex)
- {
- var attempts = await _outbox.IncrementRetryCountAsync(row.EventId);
- if (attempts >= _maxRetries)
- {
- await _deadLetterStore.PreserveAsync(row, ex); // durable, never dropped
- await _alerting.RaiseAsync($"Outbox row {row.EventId} dead-lettered after {attempts} attempts");
- await _outbox.MarkDeadLetteredAsync(row.EventId); // removed from active processing queue
- }
- // else: leave Pending for next retry attempt, with backoff
- }
+    try
+    {
+        await _broker.PublishAsync(row.EventId, row.Payload);
+        await _outbox.MarkProcessedAsync(row.EventId);
+    }
+    catch (Exception ex)
+    {
+        var attempts = await _outbox.IncrementRetryCountAsync(row.EventId);
+        if (attempts >= _maxRetries)
+        {
+            await _deadLetterStore.PreserveAsync(row, ex); // durable, never dropped
+            await _alerting.RaiseAsync($"Outbox row {row.EventId} dead-lettered after {attempts} attempts");
+            await _outbox.MarkDeadLetteredAsync(row.EventId); // removed from active processing queue
+        }
+        // else: leave Pending for next retry attempt, with backoff
+    }
 }
 ```
 **Time complexity:** O(1) per attempt.
@@ -451,23 +451,23 @@ public async Task ProcessRowAsync(OutboxRow row)
 ```csharp
 public class OutboxArchivalJob
 {
- public async Task<ArchivalReport> RunAsync(TimeSpan retentionWindow)
- {
- var cutoff = DateTime.UtcNow - retentionWindow;
- var archivedCount = await _outbox.MoveProcessedRowsOlderThanAsync(cutoff, destination: _coldArchiveStore);
+    public async Task<ArchivalReport> RunAsync(TimeSpan retentionWindow)
+    {
+        var cutoff = DateTime.UtcNow - retentionWindow;
+        var archivedCount = await _outbox.MoveProcessedRowsOlderThanAsync(cutoff, destination: _coldArchiveStore);
 
- var currentTableSize = await _outbox.GetTotalRowCountAsync;
- var currentPendingCount = await _outbox.GetPendingRowCountAsync;
+        var currentTableSize = await _outbox.GetTotalRowCountAsync;
+        var currentPendingCount = await _outbox.GetPendingRowCountAsync;
 
- // Self-verification: alert if archival appears to have silently stopped working
- if (archivedCount == 0 && currentTableSize > _expectedHealthySizeThreshold)
- {
- await _alerting.RaiseAsync(
- $"Archival job ran but archived 0 rows despite table size {currentTableSize} exceeding healthy threshold — possible silent failure");
- }
+        // Self-verification: alert if archival appears to have silently stopped working
+        if (archivedCount == 0 && currentTableSize > _expectedHealthySizeThreshold)
+        {
+            await _alerting.RaiseAsync(
+                $"Archival job ran but archived 0 rows despite table size {currentTableSize} exceeding healthy threshold — possible silent failure");
+        }
 
- return new ArchivalReport(archivedCount, currentTableSize, currentPendingCount);
- }
+        return new ArchivalReport(archivedCount, currentTableSize, currentPendingCount);
+    }
 }
 ```
 **Time complexity:** O(a) for a archived rows, plus O(1) for the size/count checks (assuming indexed, efficient count queries).

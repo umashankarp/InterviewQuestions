@@ -350,31 +350,31 @@ CMD ["node", "server.js"]
 ```csharp
 public class ComprehensiveSecretScanner
 {
- private readonly ISecretDetector[] _detectors; // reused directly from the design
+    private readonly ISecretDetector[] _detectors; // reused directly from the design
 
- public async Task<ScanResult> ScanAsync(string imageTag)
- {
- var findings = new List<string>;
+    public async Task<ScanResult> ScanAsync(string imageTag)
+    {
+        var findings = new List<string>;
 
- // Mechanism 1: filesystem layer content
- findings.AddRange(await ScanFilesystemLayersAsync(imageTag));
+        // Mechanism 1: filesystem layer content
+        findings.AddRange(await ScanFilesystemLayersAsync(imageTag));
 
- // Mechanism 2 (this module): build history / metadata --
- // a GENUINELY SEPARATE artifact, requiring its own extraction and scan pass.
- var historyOutput = await RunProcessAsync("docker", $"history --no-trunc --format {{{{.CreatedBy}}}} {imageTag}");
- foreach (var line in historyOutput.Split('\n'))
- {
- foreach (var detector in _detectors)
- {
- var result = detector.Detect(fileName: "<build-history>", content: line);
- if (result.IsMatch)
- findings.Add($"Build history line matched secret pattern: '{Truncate(line)}' " +
- $"(this module/ -- NOT caught by filesystem-content scanning alone).");
- }
- }
+        // Mechanism 2 (this module): build history / metadata --
+        // a GENUINELY SEPARATE artifact, requiring its own extraction and scan pass.
+        var historyOutput = await RunProcessAsync("docker", $"history --no-trunc --format {{{{.CreatedBy}}}} {imageTag}");
+        foreach (var line in historyOutput.Split('\n'))
+        {
+            foreach (var detector in _detectors)
+            {
+                var result = detector.Detect(fileName: "<build-history>", content: line);
+                if (result.IsMatch)
+                    findings.Add($"Build history line matched secret pattern: '{Truncate(line)}' " +
+                    $"(this module/ -- NOT caught by filesystem-content scanning alone).");
+            }
+        }
 
- return new ScanResult { Passed = findings.Count == 0, Findings = findings };
- }
+        return new ScanResult { Passed = findings.Count == 0, Findings = findings };
+    }
 }
 ```
 **Time complexity:** O(L × F + H) where L×F is the filesystem-scan cost and H is the number of build-history lines — the history scan adds a small, roughly-linear-in-layer-count additional cost.
@@ -387,30 +387,30 @@ public class ComprehensiveSecretScanner
 ```csharp
 public class DockerfileSecretLinter
 {
- private static readonly Regex SecretNamePattern = new(
- @"^(ARG|ENV)\s+.*(PASSWORD|SECRET|TOKEN|API_KEY|PRIVATE_KEY|CREDENTIAL)",
- RegexOptions.IgnoreCase);
+    private static readonly Regex SecretNamePattern = new(
+        @"^(ARG|ENV)\s+.*(PASSWORD|SECRET|TOKEN|API_KEY|PRIVATE_KEY|CREDENTIAL)",
+            RegexOptions.IgnoreCase);
 
- // Fails FAST, before any docker build is even invoked -- directly this course's
- // "prevent, don't merely detect after the fact" discipline (§Advanced Q5), and
- // materially cheaper than waiting for the full build-and-scan pipeline to run.
- public LintResult Lint(string dockerfileContent)
- {
- var violations = new List<string>;
- var lines = dockerfileContent.Split('\n');
+    // Fails FAST, before any docker build is even invoked -- directly this course's
+    // "prevent, don't merely detect after the fact" discipline (§Advanced Q5), and
+    // materially cheaper than waiting for the full build-and-scan pipeline to run.
+    public LintResult Lint(string dockerfileContent)
+    {
+        var violations = new List<string>;
+        var lines = dockerfileContent.Split('\n');
 
- for (int i = 0; i < lines.Length; i++)
- {
- if (SecretNamePattern.IsMatch(lines[i].Trim))
- {
- violations.Add($"Line {i + 1}: '{lines[i].Trim}' -- ARG/ENV declarations matching " +
- $"secret-naming patterns are PROHIBITED (this module). " +
- $"Use 'RUN --mount=type=secret' instead.");
- }
- }
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (SecretNamePattern.IsMatch(lines[i].Trim))
+            {
+                violations.Add($"Line {i + 1}: '{lines[i].Trim}' -- ARG/ENV declarations matching " +
+                    $"secret-naming patterns are PROHIBITED (this module). " +
+                        $"Use 'RUN --mount=type=secret' instead.");
+            }
+        }
 
- return new LintResult { Passed = violations.Count == 0, Violations = violations };
- }
+        return new LintResult { Passed = violations.Count == 0, Violations = violations };
+    }
 }
 ```
 **Time complexity:** O(n) where n is the number of lines in the Dockerfile — a single linear pass, negligible compared to any actual build/scan step.

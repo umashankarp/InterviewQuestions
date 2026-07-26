@@ -18,13 +18,13 @@ Every externally-facing (and most internally-facing, cross-team) API needs both;
 ### How does it work (30,000-ft view)?
 ```csharp
 builder.Services.AddRateLimiter(options =>
-{
- options.AddTokenBucketLimiter("per-client", opt =>
- {
- opt.TokenLimit = 100;
- opt.TokensPerPeriod = 100;
- opt.ReplenishmentPeriod = TimeSpan.FromMinutes(1);
- });
+    {
+        options.AddTokenBucketLimiter("per-client", opt =>
+            {
+                opt.TokenLimit = 100;
+                opt.TokensPerPeriod = 100;
+                opt.ReplenishmentPeriod = TimeSpan.FromMinutes(1);
+        });
 });
 app.UseRateLimiter;
 app.MapGet("/orders", GetOrders).RequireRateLimiting("per-client");
@@ -154,36 +154,36 @@ graph LR
 ```csharp
 // BEFORE (vulnerable): only checks authentication
 app.MapGet("/invoices/{id}", async (string id, IInvoiceRepository repo) =>
-{
- var invoice = await repo.GetByIdAsync(id);
- return invoice is null? Results.NotFound: Results.Ok(invoice);
+    {
+        var invoice = await repo.GetByIdAsync(id);
+        return invoice is null? Results.NotFound: Results.Ok(invoice);
 }).RequireAuthorization;
 
 // AFTER (fixed): checks ownership too
 app.MapGet("/invoices/{id}", async (string id, IInvoiceRepository repo, ClaimsPrincipal user) =>
-{
- var invoice = await repo.GetByIdAsync(id);
- var currentPartnerId = user.FindFirstValue("partner_id");
- if (invoice is null || invoice.PartnerId!= currentPartnerId)
- return Results.NotFound; // 404, not 403 -- avoids confirming existence (Advanced Q7)
- return Results.Ok(invoice);
+    {
+        var invoice = await repo.GetByIdAsync(id);
+        var currentPartnerId = user.FindFirstValue("partner_id");
+        if (invoice is null || invoice.PartnerId!= currentPartnerId)
+            return Results.NotFound; // 404, not 403 -- avoids confirming existence (Advanced Q7)
+        return Results.Ok(invoice);
 }).RequireAuthorization;
 ```
 
 ### Medium — Token-bucket rate limiting with `Retry-After`
 ```csharp
 builder.Services.AddRateLimiter(options =>
-{
- options.OnRejected = async (context, ct) =>
- {
- context.HttpContext.Response.Headers.RetryAfter = "60";
- context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
- await context.HttpContext.Response.WriteAsJsonAsync(new { error = "rate_limit_exceeded" }, ct);
- };
- options.AddTokenBucketLimiter("api", opt =>
- {
- opt.TokenLimit = 100; opt.TokensPerPeriod = 100; opt.ReplenishmentPeriod = TimeSpan.FromMinutes(1);
- });
+    {
+        options.OnRejected = async (context, ct) =>
+        {
+            context.HttpContext.Response.Headers.RetryAfter = "60";
+            context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            await context.HttpContext.Response.WriteAsJsonAsync(new { error = "rate_limit_exceeded" }, ct);
+        };
+        options.AddTokenBucketLimiter("api", opt =>
+            {
+                opt.TokenLimit = 100; opt.TokensPerPeriod = 100; opt.ReplenishmentPeriod = TimeSpan.FromMinutes(1);
+        });
 });
 ```
 
@@ -221,12 +221,12 @@ public record InvoiceResponse(string Id, decimal Amount, DateTime DueDate); // n
 [Fact]
 public async Task GetInvoice_Should_Return_404_For_Other_Partners_Invoice
 {
- var clientA = _factory.CreateAuthenticatedClient(partnerId: "partner-a");
- var invoiceOwnedByB = await SeedInvoiceAsync(partnerId: "partner-b");
+    var clientA = _factory.CreateAuthenticatedClient(partnerId: "partner-a");
+    var invoiceOwnedByB = await SeedInvoiceAsync(partnerId: "partner-b");
 
- var response = await clientA.GetAsync($"/invoices/{invoiceOwnedByB.Id}");
+    var response = await clientA.GetAsync($"/invoices/{invoiceOwnedByB.Id}");
 
- Assert.Equal(HttpStatusCode.NotFound, response.StatusCode); // NOT the invoice data, NOT a 403
+    Assert.Equal(HttpStatusCode.NotFound, response.StatusCode); // NOT the invoice data, NOT a 403
 }
 ```
 

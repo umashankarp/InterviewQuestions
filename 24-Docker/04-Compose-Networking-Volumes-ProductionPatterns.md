@@ -368,38 +368,38 @@ networks:
 ```csharp
 public class ComposeDependsOnLinter
 {
- // Directly §Advanced Q1's structural, PREVENTIVE fix -- catches the gap BEFORE
- // it becomes a latent, timing-dependent race condition discovered only in production/CI.
- public LintResult Lint(ComposeFile composeFile)
- {
- var violations = new List<string>;
+    // Directly §Advanced Q1's structural, PREVENTIVE fix -- catches the gap BEFORE
+    // it becomes a latent, timing-dependent race condition discovered only in production/CI.
+    public LintResult Lint(ComposeFile composeFile)
+    {
+        var violations = new List<string>;
 
- foreach (var (serviceName, service) in composeFile.Services)
- {
- foreach (var dependency in service.DependsOn)
- {
- bool hasHealthyCondition = dependency.Condition == "service_healthy";
- bool dependencyHasHealthCheck = composeFile.Services
-.TryGetValue(dependency.ServiceName, out var depService)
- && depService.HealthCheck is not null;
+        foreach (var (serviceName, service) in composeFile.Services)
+        {
+            foreach (var dependency in service.DependsOn)
+            {
+                bool hasHealthyCondition = dependency.Condition == "service_healthy";
+                bool dependencyHasHealthCheck = composeFile.Services
+                .TryGetValue(dependency.ServiceName, out var depService)
+                && depService.HealthCheck is not null;
 
- if (!hasHealthyCondition)
- {
- violations.Add($"Service '{serviceName}' depends_on '{dependency.ServiceName}' " +
- $"without 'condition: service_healthy' -- only guarantees process START, " +
- $"not READINESS (this module/). Latent race condition risk.");
- }
- else if (!dependencyHasHealthCheck)
- {
- violations.Add($"Service '{serviceName}' requires 'condition: service_healthy' on " +
- $"'{dependency.ServiceName}', but '{dependency.ServiceName}' has NO " +
- $"healthcheck defined -- the condition can never actually be satisfied.");
- }
- }
- }
+                if (!hasHealthyCondition)
+                {
+                    violations.Add($"Service '{serviceName}' depends_on '{dependency.ServiceName}' " +
+                        $"without 'condition: service_healthy' -- only guarantees process START, " +
+                            $"not READINESS (this module/). Latent race condition risk.");
+                }
+                else if (!dependencyHasHealthCheck)
+                {
+                    violations.Add($"Service '{serviceName}' requires 'condition: service_healthy' on " +
+                        $"'{dependency.ServiceName}', but '{dependency.ServiceName}' has NO " +
+                            $"healthcheck defined -- the condition can never actually be satisfied.");
+                }
+            }
+        }
 
- return new LintResult { Passed = violations.Count == 0, Violations = violations };
- }
+        return new LintResult { Passed = violations.Count == 0, Violations = violations };
+    }
 }
 ```
 **Time complexity:** O(s × d) where s is the number of services and d is the average number of dependencies per service — a single linear pass.
@@ -412,46 +412,46 @@ public class ComposeDependsOnLinter
 ```csharp
 public interface IConfigurationRule
 {
- // Generalizes the ISecretDetector, the IExposureSource, and's
- // IDeviationRule into ONE shared abstraction spanning BOTH domains -- directly
- // operationalizing Advanced Q6's "this is one general pattern, not eight unrelated ones."
- string DomainScope { get; } // e.g., "docker-compose" or "kubernetes"
- IEnumerable<ConfigurationFinding> Evaluate(ConfigurationDocument document);
+    // Generalizes the ISecretDetector, the IExposureSource, and's
+    // IDeviationRule into ONE shared abstraction spanning BOTH domains -- directly
+    // operationalizing Advanced Q6's "this is one general pattern, not eight unrelated ones."
+    string DomainScope { get; } // e.g., "docker-compose" or "kubernetes"
+    IEnumerable<ConfigurationFinding> Evaluate(ConfigurationDocument document);
 }
 
 public class UnconditionedDependsOnRule: IConfigurationRule
 {
- public string DomainScope => "docker-compose";
- public IEnumerable<ConfigurationFinding> Evaluate(ConfigurationDocument document) =>
- // Wraps the ComposeDependsOnLinter logic as one pluggable rule instance.
- new ComposeDependsOnLinter.Lint((ComposeFile)document).Violations
-.Select(v => new ConfigurationFinding { Rule = nameof(UnconditionedDependsOnRule), Message = v });
+    public string DomainScope => "docker-compose";
+    public IEnumerable<ConfigurationFinding> Evaluate(ConfigurationDocument document) =>
+        // Wraps the ComposeDependsOnLinter logic as one pluggable rule instance.
+    new ComposeDependsOnLinter.Lint((ComposeFile)document).Violations
+    .Select(v => new ConfigurationFinding { Rule = nameof(UnconditionedDependsOnRule), Message = v });
 }
 
 public class UnenforcedNetworkPolicyRule: IConfigurationRule
 {
- public string DomainScope => "kubernetes";
- public IEnumerable<ConfigurationFinding> Evaluate(ConfigurationDocument document) =>
- // Directly §Advanced Q3's synthetic-test pattern, now expressed as
- // one pluggable rule alongside every other domain's rules in the SAME framework.
- RunSyntheticNetworkPolicyVerification((KubernetesManifest)document);
+    public string DomainScope => "kubernetes";
+    public IEnumerable<ConfigurationFinding> Evaluate(ConfigurationDocument document) =>
+        // Directly §Advanced Q3's synthetic-test pattern, now expressed as
+    // one pluggable rule alongside every other domain's rules in the SAME framework.
+    RunSyntheticNetworkPolicyVerification((KubernetesManifest)document);
 }
 
 public class CrossDomainConfigurationScanner
 {
- private readonly IConfigurationRule[] _rules; // spans BOTH domains simultaneously
+    private readonly IConfigurationRule[] _rules; // spans BOTH domains simultaneously
 
- public UnifiedFindingsReport ScanEstate(IEnumerable<ConfigurationDocument> allConfigs)
- {
- var findings = allConfigs
-.SelectMany(doc => _rules
-.Where(r => r.DomainScope == doc.DomainScope)
-.SelectMany(r => r.Evaluate(doc)));
+    public UnifiedFindingsReport ScanEstate(IEnumerable<ConfigurationDocument> allConfigs)
+    {
+        var findings = allConfigs
+        .SelectMany(doc => _rules
+            .Where(r => r.DomainScope == doc.DomainScope)
+            .SelectMany(r => r.Evaluate(doc)));
 
- // ONE unified report, spanning Compose AND Kubernetes findings together --
- // directly Advanced Q8's organizational-visibility argument made concrete.
- return new UnifiedFindingsReport { Findings = findings.ToList };
- }
+        // ONE unified report, spanning Compose AND Kubernetes findings together --
+        // directly Advanced Q8's organizational-visibility argument made concrete.
+        return new UnifiedFindingsReport { Findings = findings.ToList };
+    }
 }
 ```
 **Time complexity:** O(c × r) where c is the number of configuration documents across the entire estate and r is the number of applicable rules per document's domain scope.

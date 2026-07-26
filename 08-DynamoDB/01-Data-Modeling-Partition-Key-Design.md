@@ -172,13 +172,13 @@ GSI: StatusIndex
 ### Medium — Single-table design query for "customer and all orders" (Advanced Q2)
 ```csharp
 var response = await dynamoDbClient.QueryAsync(new QueryRequest
-{
- TableName = "AppTable",
- KeyConditionExpression = "PK =:pk",
- ExpressionAttributeValues = new Dictionary<string, AttributeValue>
- {
- [":pk"] = new AttributeValue { S = $"CUSTOMER#{customerId}" }
- }
+    {
+        TableName = "AppTable",
+            KeyConditionExpression = "PK =:pk",
+            ExpressionAttributeValues = new Dictionary<string, AttributeValue>
+        {
+            [":pk"] = new AttributeValue { S = $"CUSTOMER#{customerId}" }
+        }
 });
 // Returns BOTH the customer's METADATA item AND every ORDER#... item for this customer
 // in ONE request -- distinguishing item type via the SK prefix in application code afterward.
@@ -188,42 +188,42 @@ var response = await dynamoDbClient.QueryAsync(new QueryRequest
 ```csharp
 public async Task ProcessStreamRecordsAsync(IEnumerable<Record> streamRecords)
 {
- foreach (var record in streamRecords)
- {
- if (record.EventName!= OperationType.INSERT) continue;
+    foreach (var record in streamRecords)
+    {
+        if (record.EventName!= OperationType.INSERT) continue;
 
- var newImage = record.Dynamodb.NewImage;
- if (!newImage.TryGetValue("SK", out var sk) ||!sk.S.StartsWith("EVENT#")) continue; // only outbox-shaped items
+        var newImage = record.Dynamodb.NewImage;
+        if (!newImage.TryGetValue("SK", out var sk) ||!sk.S.StartsWith("EVENT#")) continue; // only outbox-shaped items
 
- var eventPayload = newImage["Payload"].S;
- await _messageBroker.PublishAsync(newImage["EventType"].S, eventPayload);
- // No need to separately delete the outbox item here -- DynamoDB Streams already
- // guarantees each record is delivered; a TTL attribute on the item handles eventual cleanup.
- }
+        var eventPayload = newImage["Payload"].S;
+        await _messageBroker.PublishAsync(newImage["EventType"].S, eventPayload);
+        // No need to separately delete the outbox item here -- DynamoDB Streams already
+        // guarantees each record is delivered; a TTL attribute on the item handles eventual cleanup.
+    }
 }
 ```
 
 ### Expert — Transactional write for atomic business-entity-plus-outbox-item creation
 ```csharp
 await dynamoDbClient.TransactWriteItemsAsync(new TransactWriteItemsRequest
-{
- TransactItems = new List<TransactWriteItem>
- {
- new { Put = new Put {
- TableName = "AppTable",
- Item = new Dictionary<string, AttributeValue> {
- ["PK"] = new { S = $"ORDER#{orderId}" }, ["SK"] = new { S = "METADATA" },
- ["Status"] = new { S = "Placed" }
- }
- }},
- new { Put = new Put {
- TableName = "AppTable",
- Item = new Dictionary<string, AttributeValue> {
- ["PK"] = new { S = $"ORDER#{orderId}" }, ["SK"] = new { S = $"EVENT#{DateTime.UtcNow:O}" },
- ["EventType"] = new { S = "OrderPlaced" }, ["Payload"] = new { S = SerializeEvent(orderId) }
- }
- }}
- }
+    {
+        TransactItems = new List<TransactWriteItem>
+        {
+            new { Put = new Put {
+                    TableName = "AppTable",
+                        Item = new Dictionary<string, AttributeValue> {
+                        ["PK"] = new { S = $"ORDER#{orderId}" }, ["SK"] = new { S = "METADATA" },
+                            ["Status"] = new { S = "Placed" }
+                    }
+            }},
+            new { Put = new Put {
+                    TableName = "AppTable",
+                        Item = new Dictionary<string, AttributeValue> {
+                        ["PK"] = new { S = $"ORDER#{orderId}" }, ["SK"] = new { S = $"EVENT#{DateTime.UtcNow:O}" },
+                            ["EventType"] = new { S = "OrderPlaced" }, ["Payload"] = new { S = SerializeEvent(orderId) }
+                    }
+            }}
+        }
 });
 ```
 **Discussion**: Both items commit atomically via `TransactWriteItems` — if either write fails, neither is persisted, guaranteeing the business-entity update and its corresponding outbox event are never inconsistent with each other, exactly the atomicity guarantee Advanced Q6/Advanced Q9's cost discussion centers on, deliberately reserved here for a genuinely necessary cross-item atomicity requirement rather than applied to every ordinary write.

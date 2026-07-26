@@ -460,13 +460,13 @@ The fix was a read model maintained from `PositionChanged` and `ValuationUpdated
 ```csharp
 public async Task<IReadOnlyList<EnrichedPosition>> EnrichAsync(IReadOnlyList<Position> positions)
 {
- var ids = positions.Select(p => p.InstrumentId).Distinct.ToList;
- var values = await _valuationClient.GetBatchAsync(ids); // one call, not N
+    var ids = positions.Select(p => p.InstrumentId).Distinct.ToList;
+    var values = await _valuationClient.GetBatchAsync(ids); // one call, not N
 
- return positions.Select(p => new EnrichedPosition(
- p,
- values.TryGetValue(p.InstrumentId, out var v)? v: null)) // explicit absence, never 0
-.ToList;
+    return positions.Select(p => new EnrichedPosition(
+            p,
+                values.TryGetValue(p.InstrumentId, out var v)? v: null)) // explicit absence, never 0
+    .ToList;
 }
 ```
 **Time complexity:** O(n) with one network round trip rather than n.
@@ -479,13 +479,13 @@ public async Task<IReadOnlyList<EnrichedPosition>> EnrichAsync(IReadOnlyList<Pos
 ```csharp
 public void ValidateQuery(QuerySpec spec)
 {
- var localFields = _ownedFields; // fields this service owns
- var sortSpansServices = spec.SortBy is not null &&!localFields.Contains(spec.SortBy);
- var filterSpansServices = spec.Filters.Any(f =>!localFields.Contains(f.Field));
+    var localFields = _ownedFields; // fields this service owns
+    var sortSpansServices = spec.SortBy is not null &&!localFields.Contains(spec.SortBy);
+    var filterSpansServices = spec.Filters.Any(f =>!localFields.Contains(f.Field));
 
- if ((sortSpansServices || filterSpansServices) && spec.IsPaginated)
- throw new UnsupportedCompositionException(
- $"Cannot paginate with sort/filter on externally-owned field. Route to read model.");
+    if ((sortSpansServices || filterSpansServices) && spec.IsPaginated)
+        throw new UnsupportedCompositionException(
+        $"Cannot paginate with sort/filter on externally-owned field. Route to read model.");
 }
 ```
 **Time complexity:** O(f) for f filter fields.
@@ -498,19 +498,19 @@ public void ValidateQuery(QuerySpec spec)
 ```csharp
 public async Task ProjectAsync(DomainEvent e)
 {
- await using var tx = await _store.BeginAsync;
- if (!await _store.TryRecordProcessedAsync(e.EventId, tx)) { await tx.CommitAsync; return; } // idempotent
+    await using var tx = await _store.BeginAsync;
+    if (!await _store.TryRecordProcessedAsync(e.EventId, tx)) { await tx.CommitAsync; return; } // idempotent
 
- switch (e)
- {
- case PositionChanged p:
- await _store.UpsertPositionAsync(p.ClientId, p.InstrumentId, p.Quantity, p.OccurredAt, tx);
- break;
- case ValuationUpdated v:
- await _store.UpdateValuationForInstrumentAsync(v.InstrumentId, v.Price, v.OccurredAt, tx);
- break; // fans out across many clients' rows
- }
- await tx.CommitAsync;
+    switch (e)
+    {
+        case PositionChanged p:
+            await _store.UpsertPositionAsync(p.ClientId, p.InstrumentId, p.Quantity, p.OccurredAt, tx);
+        break;
+        case ValuationUpdated v:
+            await _store.UpdateValuationForInstrumentAsync(v.InstrumentId, v.Price, v.OccurredAt, tx);
+        break; // fans out across many clients' rows
+    }
+    await tx.CommitAsync;
 }
 ```
 **Time complexity:** O(1) for position events; O(k) for valuation events touching k holdings of that instrument.
@@ -523,16 +523,16 @@ public async Task ProjectAsync(DomainEvent e)
 ```csharp
 public async Task<ScopeReport> ReconcileScopeAsync(DateOnly asOf)
 {
- var findings = new List<ScopeGap>;
- await foreach (var clientId in _clients.StreamAllAsync)
- {
- var authoritative = await _positionService.CountPositionsAsync(clientId, asOf);
- var projected = await _readModel.CountPositionsAsync(clientId, asOf);
+    var findings = new List<ScopeGap>;
+    await foreach (var clientId in _clients.StreamAllAsync)
+    {
+        var authoritative = await _positionService.CountPositionsAsync(clientId, asOf);
+        var projected = await _readModel.CountPositionsAsync(clientId, asOf);
 
- if (authoritative!= projected)
- findings.Add(new ScopeGap(clientId, authoritative, projected));
- }
- return new ScopeReport(findings); // a count gap is the direct signature of scope failure
+        if (authoritative!= projected)
+            findings.Add(new ScopeGap(clientId, authoritative, projected));
+    }
+    return new ScopeReport(findings); // a count gap is the direct signature of scope failure
 }
 ```
 **Time complexity:** O(c) for c clients, two counts each.

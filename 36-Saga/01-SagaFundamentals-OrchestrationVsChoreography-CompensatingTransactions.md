@@ -521,20 +521,20 @@ stateDiagram-v2
 ```csharp
 public class SettlementSaga
 {
- public async Task ExecuteAsync(SettlementSagaState state)
- {
- await _settlementClient.MarkPendingPaymentAsync(state.InstructionId);
- state.Advance(SagaStep.AwaitingPayment);
+    public async Task ExecuteAsync(SettlementSagaState state)
+    {
+        await _settlementClient.MarkPendingPaymentAsync(state.InstructionId);
+        state.Advance(SagaStep.AwaitingPayment);
 
- var debitResult = await _ledgerClient.DebitCreditAsync(state.InstructionId);
- if (!debitResult.Success)
- {
- await _settlementClient.CompensateRevertToMatchedAsync(state.InstructionId);
- state.MarkCompensated;
- return;
- }
- state.Advance(SagaStep.Completed);
- }
+        var debitResult = await _ledgerClient.DebitCreditAsync(state.InstructionId);
+        if (!debitResult.Success)
+        {
+            await _settlementClient.CompensateRevertToMatchedAsync(state.InstructionId);
+            state.MarkCompensated;
+            return;
+        }
+        state.Advance(SagaStep.Completed);
+    }
 }
 ```
 **Time complexity:** O(1) per step invocation, O(n) overall for n saga steps.
@@ -547,14 +547,14 @@ public class SettlementSaga
 ```csharp
 public class LedgerCompensationHandler
 {
- public async Task ReverseDebitAsync(string compensationId, string accountId, decimal amount)
- {
- var alreadyApplied = await _ledger.ExistsCompensationAsync(compensationId);
- if (alreadyApplied) return; // idempotent no-op
+    public async Task ReverseDebitAsync(string compensationId, string accountId, decimal amount)
+    {
+        var alreadyApplied = await _ledger.ExistsCompensationAsync(compensationId);
+        if (alreadyApplied) return; // idempotent no-op
 
- await _ledger.CreditAsync(accountId, amount, reason: "SagaCompensation");
- await _ledger.RecordCompensationAsync(compensationId);
- }
+        await _ledger.CreditAsync(accountId, amount, reason: "SagaCompensation");
+        await _ledger.RecordCompensationAsync(compensationId);
+    }
 }
 ```
 **Time complexity:** O(1), assuming an indexed lookup on `compensationId`.
@@ -567,20 +567,20 @@ public class LedgerCompensationHandler
 ```csharp
 public async Task HandleStepTimeoutAsync(SettlementSagaState state)
 {
- var actualStatus = await _ledgerClient.QueryDebitStatusAsync(state.InstructionId);
+    var actualStatus = await _ledgerClient.QueryDebitStatusAsync(state.InstructionId);
 
- switch (actualStatus)
- {
- case DebitStatus.Succeeded:
- state.Advance(SagaStep.Completed); // it actually succeeded — no compensation needed
- break;
- case DebitStatus.Failed:
- await CompensateAsync(state);
- break;
- case DebitStatus.StillInProgress:
- await ScheduleRetryTimeoutAsync(state); // extend, don't compensate yet
- break;
- }
+    switch (actualStatus)
+    {
+        case DebitStatus.Succeeded:
+            state.Advance(SagaStep.Completed); // it actually succeeded — no compensation needed
+        break;
+        case DebitStatus.Failed:
+            await CompensateAsync(state);
+        break;
+        case DebitStatus.StillInProgress:
+            await ScheduleRetryTimeoutAsync(state); // extend, don't compensate yet
+        break;
+    }
 }
 ```
 **Time complexity:** O(1) per status query.
@@ -593,22 +593,22 @@ public async Task HandleStepTimeoutAsync(SettlementSagaState state)
 ```csharp
 public class SettlementSagaState
 {
- public SagaStatus Status { get; private set; } = SagaStatus.Pending;
+    public SagaStatus Status { get; private set; } = SagaStatus.Pending;
 
- public void Advance(SagaStatus target)
- {
- var validTransitions = new Dictionary<SagaStatus, SagaStatus[]>
- {
- [SagaStatus.Pending] = new[] { SagaStatus.AwaitingPayment },
- [SagaStatus.AwaitingPayment] = new[] { SagaStatus.Completed, SagaStatus.Compensating },
- [SagaStatus.Compensating] = new[] { SagaStatus.Compensated }
- };
+    public void Advance(SagaStatus target)
+    {
+        var validTransitions = new Dictionary<SagaStatus, SagaStatus[]>
+        {
+            [SagaStatus.Pending] = new[] { SagaStatus.AwaitingPayment },
+                [SagaStatus.AwaitingPayment] = new[] { SagaStatus.Completed, SagaStatus.Compensating },
+                [SagaStatus.Compensating] = new[] { SagaStatus.Compensated }
+        };
 
- if (!validTransitions.TryGetValue(Status, out var allowed) ||!allowed.Contains(target))
- throw new InvalidSagaTransitionException(Status, target);
+        if (!validTransitions.TryGetValue(Status, out var allowed) ||!allowed.Contains(target))
+            throw new InvalidSagaTransitionException(Status, target);
 
- Status = target;
- }
+        Status = target;
+    }
 }
 ```
 **Time complexity:** O(1) per transition check.

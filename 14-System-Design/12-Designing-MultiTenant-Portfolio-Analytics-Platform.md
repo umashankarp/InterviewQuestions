@@ -467,17 +467,17 @@ The fix had three parts: (1) storage-level row-level security as a backstop, so 
 ```csharp
 public sealed class TenantContext
 {
- private static readonly AsyncLocal<TenantId?> Current = new;
+    private static readonly AsyncLocal<TenantId?> Current = new;
 
- public static TenantId Require =>
- Current.Value?? throw new MissingTenantContextException(
- "No tenant context — refusing to execute an unscoped query.");
+    public static TenantId Require =>
+        Current.Value?? throw new MissingTenantContextException(
+        "No tenant context — refusing to execute an unscoped query.");
 
- public static IDisposable Enter(TenantId tenant)
- {
- Current.Value = tenant;
- return new Scope(=> Current.Value = null);
- }
+    public static IDisposable Enter(TenantId tenant)
+    {
+        Current.Value = tenant;
+        return new Scope(=> Current.Value = null);
+    }
 }
 ```
 **Time complexity:** O(1).
@@ -492,14 +492,14 @@ public sealed class TenantContext
 [MemberData(nameof(AllRegisteredQueries))] // enumerated, not hand-listed
 public async Task Query_ReturnsNoForeignTenantRows(IQueryDescriptor query)
 {
- await _seed.TwoTenantsAsync(TenantA, TenantB);
+    await _seed.TwoTenantsAsync(TenantA, TenantB);
 
- using (TenantContext.Enter(TenantA))
- {
- var rows = await query.ExecuteAsync(_db);
- Assert.All(rows, r => Assert.Equal(TenantA, r.TenantId));
- Assert.NotEmpty(rows); // guard: a query returning nothing proves nothing
- }
+    using (TenantContext.Enter(TenantA))
+    {
+        var rows = await query.ExecuteAsync(_db);
+        Assert.All(rows, r => Assert.Equal(TenantA, r.TenantId));
+        Assert.NotEmpty(rows); // guard: a query returning nothing proves nothing
+    }
 }
 ```
 **Time complexity:** O(q × r) for q queries returning r rows.
@@ -512,20 +512,20 @@ public async Task Query_ReturnsNoForeignTenantRows(IQueryDescriptor query)
 ```csharp
 public TenantId? SelectNext(IReadOnlyDictionary<TenantId, TenantQueue> queues)
 {
- // Deficit round-robin: each tenant accrues credit proportional to weight
- // spends it when scheduled — guaranteeing share without wasting idle capacity.
- TenantId? best = null;
- double bestDeficit = double.NegativeInfinity;
+    // Deficit round-robin: each tenant accrues credit proportional to weight
+    // spends it when scheduled — guaranteeing share without wasting idle capacity.
+    TenantId? best = null;
+    double bestDeficit = double.NegativeInfinity;
 
- foreach (var (tenant, q) in queues.Where(kv => kv.Value.HasWork))
- {
- var deficit = _credit[tenant] / _weight[tenant];
- if (deficit > bestDeficit) { bestDeficit = deficit; best = tenant; }
- }
+    foreach (var (tenant, q) in queues.Where(kv => kv.Value.HasWork))
+    {
+        var deficit = _credit[tenant] / _weight[tenant];
+        if (deficit > bestDeficit) { bestDeficit = deficit; best = tenant; }
+    }
 
- if (best is not null) _credit[best] -= queues[best].PeekCost;
- foreach (var t in queues.Keys) _credit[t] += _weight[t] * _replenishRate;
- return best;
+    if (best is not null) _credit[best] -= queues[best].PeekCost;
+    foreach (var t in queues.Keys) _credit[t] += _weight[t] * _replenishRate;
+    return best;
 }
 ```
 **Time complexity:** O(t) per scheduling decision for t tenants.
@@ -538,20 +538,20 @@ public TenantId? SelectNext(IReadOnlyDictionary<TenantId, TenantQueue> queues)
 ```csharp
 public async Task<OnboardingReport> VerifyAsync(TenantId tenant, IReadOnlyList<ClientReportedFigure> expected)
 {
- var breaks = new List<Break>;
- foreach (var fig in expected)
- {
- var computed = await _analytics.ComputeAsync(tenant, fig.Metric, fig.AsOf, fig.PortfolioId);
- var relative = Math.Abs(computed - fig.Value) / Math.Max(Math.Abs(fig.Value), 1m);
+    var breaks = new List<Break>;
+    foreach (var fig in expected)
+    {
+        var computed = await _analytics.ComputeAsync(tenant, fig.Metric, fig.AsOf, fig.PortfolioId);
+        var relative = Math.Abs(computed - fig.Value) / Math.Max(Math.Abs(fig.Value), 1m);
 
- if (relative > _tolerance)
- breaks.Add(new Break(fig, computed, relative, Classify(fig, computed)));
- }
- return new OnboardingReport(tenant, breaks, expected.Count);
+        if (relative > _tolerance)
+            breaks.Add(new Break(fig, computed, relative, Classify(fig, computed)));
+    }
+    return new OnboardingReport(tenant, breaks, expected.Count);
 }
 
 private BreakCause Classify(ClientReportedFigure fig, decimal computed) =>
- _conventionDiffDetector.IsExplainedByConvention(fig, computed)
+    _conventionDiffDetector.IsExplainedByConvention(fig, computed)
 ? BreakCause.ConventionDifference // not a defect — expected and explainable
 : BreakCause.RequiresInvestigation;
 ```

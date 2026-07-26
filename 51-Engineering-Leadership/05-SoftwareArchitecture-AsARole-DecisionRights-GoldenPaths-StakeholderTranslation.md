@@ -185,109 +185,67 @@ This is worth naming precisely because it is so common and because interviewers 
 
 ### 3.1 Where the architect role sits relative to the engineering ladder
 
-```
- ENGINEERING (IC) LADDER ARCHITECTURE TRACK MANAGEMENT
- (common in banks,
- rare in product cos)
+Three parallel tracks at roughly equivalent scope. The architecture track is common in banks and rare in product companies:
 
- Distinguished ◄──────────► Chief Architect ◄────► VP Eng
- │ │ │
- Principal ◄──────────► Enterprise Architect ◄────► Director
- │ │ │
- Senior Staff ◄──────────► Domain Architect ◄────► Senior EM
- │ │ │
- Staff ◄──────────► Solution Architect ◄────► EM
- │ │
- Senior ──────────────────────────────────────────────────► │
- │
- Mid
- │
- Junior
+| Engineering (IC) ladder | Architecture track | Management |
+|---|---|---|
+| Distinguished Engineer | Chief Architect | VP Engineering |
+| Principal Engineer | Enterprise Architect | Director |
+| Senior Staff Engineer | Domain Architect | Senior EM |
+| Staff Engineer | Solution Architect | Engineering Manager |
+| Senior Engineer | *(entry into either track)* | *(entry into management)* |
 
- THE KEY DIFFERENCES:
- ┌─────────────────┬────────────────────┬──────────────────────┐
- │ │ Staff+/Principal │ Architect │
- ├─────────────────┼────────────────────┼──────────────────────┤
- │ Primary output │ Solutions, │ Constraints — │
- │ │ direction │ the shape others │
- │ │ │ build within │
- │ Builds? │ Yes — prototypes, │ Often not, which is │
- │ │ reference impls │ the role's principal │
- │ │ │ structural weakness │
- │ Accountable for │ Outcomes of the │ Coherence of the │
- │ │ problems selected │ whole │
- │ Reports into │ Engineering │ Frequently a separate│
- │ │ │ EA function — │
- │ │ │ Failure 2 │
- └─────────────────┴────────────────────┴──────────────────────┘
-```
+And the differences that actually matter day to day:
+
+| | Staff+ / Principal | Architect |
+|---|---|---|
+| **Primary output** | Solutions and direction | **Constraints** — the shape others build within |
+| **Builds?** | Yes — prototypes, reference implementations | Often not, which is the role's principal structural weakness |
+| **Accountable for** | Outcomes of the problems they selected | Coherence of the whole |
+| **Reports into** | Engineering | Frequently a *separate* EA function — the cause of §2.6's Failure 2 |
 
 ### 3.2 The drift problem, drawn
 
+```mermaid
+flowchart TB
+    subgraph DECL["DECLARED — the diagram, drawn once"]
+        direction TB
+        A1[API] --> D1[Domain] --> R1[Repository] --> DB1[(Database)]
+    end
+
+    subgraph OBS["OBSERVED — what actually runs"]
+        direction TB
+        A2[API] --> D2[Domain] --> R2[Repository] --> DB2[(Database)]
+        A2 -.->|"perf fix, 2024"| DB2
+        D2 -.->|"bypass, 2025"| C2[(Cache)]
+        C2 -.->|"nobody remembers why"| DB2
+    end
 ```
- DECLARED ARCHITECTURE OBSERVED ARCHITECTURE
- (the diagram, drawn once) (what actually runs)
 
- ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
- │ API │───►│ Domain │ │ API │───►│ Domain │
- └────────┘ └───┬────┘ └───┬────┘ └───┬────┘
- │ │ ╲ │
- ▼ │ ╲ ▼
- ┌────────┐ │ ╲ ┌────────┐
- │ Repo │ │ ╲ │ Repo │
- └───┬────┘ │ ╲ └───┬────┘
- │ │ ╲ │
- ▼ ▼ ╲ ▼
- ┌────────┐ ┌────────┐ ╲┌────────┐
- │ DB │ │ DB │◄─────┘│ Cache │
- └────────┘ └────────┘ └───────┘
- ▲ │
- └────────────────┘
+| Declared | Observed |
+|---|---|
+| Clean layering | API reads the database directly — a performance fix from 2024 |
+| Reviewed and approved | Domain writes the cache, bypassing the repository — 2025 |
+| Still on the wiki | Cache writes back to the database — nobody remembers why |
+| **Still used for decisions** | **Nobody knows.** The stale diagram is the basis of the migration plan |
 
- Clean layering. API reads DB directly (perf fix, 2024).
- Reviewed and approved. Domain writes cache (bypass, 2025).
- Still on the wiki. Cache writes DB (nobody remembers why).
- Still used for decisions. NOBODY KNOWS. The diagram is still
- the basis for the migration plan.
-
- ┌───────────────────────────────────────────────────────────────┐
- │ An architecture diagram is a CLAIM. Divergence begins the │
- │ moment it is drawn and nothing in normal work reconciles it. │
- │ The danger is not that it is wrong — it is that it is wrong │
- │ AND STILL TRUSTED. │
- └───────────────────────────────────────────────────────────────┘
-```
+> **An architecture diagram is a claim, not the system.** Divergence begins the moment it is drawn, and nothing in the ordinary course of work reconciles the two. The danger is not that it becomes wrong — it is that it is wrong *and still trusted*.
 
 ### 3.3 The instrument ladder — cost to comply versus durability
 
-```
- Durability
- of the
- constraint
- │
- High │ ● Fitness function in CI
- │ ● Template / scaffold
- │ ● Shared library
- │
- │ ● Reference implementation
- Med │
- │
- │ ● Review board approval
- │ ● Standards document
- Low │ ● Principles document
- │
- └────────────────────────────────────────────────► Cost to
- Zero Low Medium High the team
- of complying
+| Instrument | Cost to the team of complying | Durability |
+|---|---|---|
+| Fitness function in CI | **Zero** (violating it costs) | **Highest** — continuously enforced |
+| Template / scaffold | **Zero** — it is the starting point | **High** — new work compliant by construction |
+| Shared library | **Near zero** — 4 lines instead of 200 | **High** |
+| Reference implementation | Medium — copy and adapt | Medium — diverges over time |
+| Review board approval | High — queue plus rework | Low — point-in-time, no drift detection |
+| Standards document | High — must interpret and implement | Low — decays at the attrition rate |
+| Principles document | High — untestable, so unactionable | **Near zero** — decays immediately |
 
- THE DIAGONAL IS THE INSIGHT: durability is inversely related
- to compliance cost. Instruments that are expensive to honor
- are honored on paper. Instruments that are free to honor —
- because they are the starting point — are honored in fact.
+**The inverse relationship is the insight:** durability is inversely related to compliance cost. Instruments that are expensive to honour are honoured on paper; instruments that are free to honour — because they *are* the default starting point — are honoured in fact.
 
- Most architecture functions spend most of their time in the
- bottom-left corner and wonder why nothing changes.
-```
+Most architecture functions spend most of their effort at the bottom of this table and then wonder why nothing changes. An hour spent making the reference implementation genuinely excellent is worth more than ten hours of review board.
 
 ---
 
@@ -777,43 +735,43 @@ public sealed record LayerRule(string Layer, IReadOnlySet<string> MayReference);
 
 public static class ArchitectureFitness
 {
- private static readonly LayerRule[] Rules =
- [
- new("Domain", new HashSet<string>), // references nothing
- new("Application", new HashSet<string> { "Domain" }),
- new("Infrastructure", new HashSet<string> { "Domain", "Application" }),
- new("Api", new HashSet<string> { "Domain", "Application", "Infrastructure" })
- ];
+    private static readonly LayerRule[] Rules =
+    [
+        new("Domain", new HashSet<string>), // references nothing
+            new("Application", new HashSet<string> { "Domain" }),
+            new("Infrastructure", new HashSet<string> { "Domain", "Application" }),
+            new("Api", new HashSet<string> { "Domain", "Application", "Infrastructure" })
+    ];
 
- public static IReadOnlyList<string> FindViolations(
- IReadOnlyDictionary<string, IReadOnlyList<string>> assemblyReferences,
- string rootNamespace)
- {
- var violations = new List<string>;
- var ruleByLayer = Rules.ToDictionary(r => r.Layer);
+    public static IReadOnlyList<string> FindViolations(
+        IReadOnlyDictionary<string, IReadOnlyList<string>> assemblyReferences,
+            string rootNamespace)
+    {
+        var violations = new List<string>;
+        var ruleByLayer = Rules.ToDictionary(r => r.Layer);
 
- foreach (var (assembly, references) in assemblyReferences)
- {
- var layer = LayerOf(assembly, rootNamespace);
- if (layer is null ||!ruleByLayer.TryGetValue(layer, out var rule)) continue;
+        foreach (var (assembly, references) in assemblyReferences)
+        {
+            var layer = LayerOf(assembly, rootNamespace);
+            if (layer is null ||!ruleByLayer.TryGetValue(layer, out var rule)) continue;
 
- foreach (var reference in references)
- {
- var refLayer = LayerOf(reference, rootNamespace);
- if (refLayer is null) continue; // external package — not our concern
- if (refLayer == layer) continue; // same layer is fine
- if (rule.MayReference.Contains(refLayer)) continue;
+            foreach (var reference in references)
+            {
+                var refLayer = LayerOf(reference, rootNamespace);
+                if (refLayer is null) continue; // external package — not our concern
+                if (refLayer == layer) continue; // same layer is fine
+                if (rule.MayReference.Contains(refLayer)) continue;
 
- violations.Add($"{assembly} ({layer}) must not reference {reference} ({refLayer})");
- }
- }
- return violations;
- }
+                violations.Add($"{assembly} ({layer}) must not reference {reference} ({refLayer})");
+            }
+        }
+        return violations;
+    }
 
- private static string? LayerOf(string assemblyName, string root) =>
- assemblyName.StartsWith(root + ".", StringComparison.Ordinal)
-? assemblyName[(root.Length + 1)..].Split('.')[0]
-: null;
+    private static string? LayerOf(string assemblyName, string root) =>
+        assemblyName.StartsWith(root + ".", StringComparison.Ordinal)
+    ? assemblyName[(root.Length + 1)..].Split('.')[0]
+    : null;
 }
 ```
 
@@ -837,42 +795,42 @@ public sealed record Span(string Caller, string Callee, string Protocol, DateTim
 public sealed record CatalogEntry(string Service, string System, string Technology);
 
 public sealed record Relationship(
- string From, string To, string Protocol, long Volume, bool CrossesSystem);
+    string From, string To, string Protocol, long Volume, bool CrossesSystem);
 
 public static (IReadOnlyList<CatalogEntry> Containers, IReadOnlyList<Relationship> Relationships)
- DeriveContainerView(
- IEnumerable<Span> spans,
- IReadOnlyDictionary<string, CatalogEntry> catalog,
- long minVolumeThreshold)
+DeriveContainerView(
+    IEnumerable<Span> spans,
+        IReadOnlyDictionary<string, CatalogEntry> catalog,
+        long minVolumeThreshold)
 {
- // Aggregate first — the raw span volume is orders of magnitude larger
- // than the distinct-edge count, and only distinct edges matter here.
- var edges = new Dictionary<(string From, string To, string Protocol), long>;
+    // Aggregate first — the raw span volume is orders of magnitude larger
+    // than the distinct-edge count, and only distinct edges matter here.
+    var edges = new Dictionary<(string From, string To, string Protocol), long>;
 
- foreach (var span in spans)
- {
- if (span.Caller == span.Callee) continue;
- if (!catalog.ContainsKey(span.Caller) ||!catalog.ContainsKey(span.Callee)) continue;
+    foreach (var span in spans)
+    {
+        if (span.Caller == span.Callee) continue;
+        if (!catalog.ContainsKey(span.Caller) ||!catalog.ContainsKey(span.Callee)) continue;
 
- var key = (span.Caller, span.Callee, span.Protocol);
- edges[key] = edges.GetValueOrDefault(key) + 1;
- }
+        var key = (span.Caller, span.Callee, span.Protocol);
+        edges[key] = edges.GetValueOrDefault(key) + 1;
+    }
 
- var relationships = edges
-.Where(e => e.Value >= minVolumeThreshold)
-.Select(e => new Relationship(
- e.Key.From, e.Key.To, e.Key.Protocol, e.Value,
- CrossesSystem: catalog[e.Key.From].System!= catalog[e.Key.To].System))
-.OrderByDescending(r => r.Volume)
-.ToList;
+    var relationships = edges
+    .Where(e => e.Value >= minVolumeThreshold)
+    .Select(e => new Relationship(
+            e.Key.From, e.Key.To, e.Key.Protocol, e.Value,
+                CrossesSystem: catalog[e.Key.From].System!= catalog[e.Key.To].System))
+    .OrderByDescending(r => r.Volume)
+    .ToList;
 
- var containers = relationships
-.SelectMany(r => new[] { r.From, r.To })
-.Distinct
-.Select(s => catalog[s])
-.ToList;
+    var containers = relationships
+    .SelectMany(r => new[] { r.From, r.To })
+    .Distinct
+    .Select(s => catalog[s])
+    .ToList;
 
- return (containers, relationships);
+    return (containers, relationships);
 }
 ```
 
@@ -898,72 +856,72 @@ public enum DriftKind { UndeclaredPresent, DeclaredAbsent }
 public enum DriftSeverity { Informational, Review, Critical }
 
 public sealed record Drift(
- DriftKind Kind, string From, string To, string? Protocol,
- DriftSeverity Severity, string Reason);
+    DriftKind Kind, string From, string To, string? Protocol,
+        DriftSeverity Severity, string Reason);
 
 public static IReadOnlyList<Drift> ComputeDrift(
- IReadOnlyList<DeclaredRelationship> declared,
- IReadOnlyList<Relationship> observed,
- IReadOnlyDictionary<string, ServiceMetadata> metadata)
+    IReadOnlyList<DeclaredRelationship> declared,
+        IReadOnlyList<Relationship> observed,
+        IReadOnlyDictionary<string, ServiceMetadata> metadata)
 {
- var declaredSet = declared
-.Select(d => (d.From, d.To))
-.ToHashSet;
- var observedSet = observed
-.Select(o => (o.From, o.To))
-.ToHashSet;
+    var declaredSet = declared
+    .Select(d => (d.From, d.To))
+    .ToHashSet;
+    var observedSet = observed
+    .Select(o => (o.From, o.To))
+    .ToHashSet;
 
- var drifts = new List<Drift>;
+    var drifts = new List<Drift>;
 
- // 1. Present in reality, not declared — the dangerous direction.
- foreach (var o in observed.Where(o =>!declaredSet.Contains((o.From, o.To))))
- {
- var (severity, reason) = ClassifyUndeclared(o, metadata);
- drifts.Add(new(DriftKind.UndeclaredPresent, o.From, o.To, o.Protocol, severity, reason));
- }
+    // 1. Present in reality, not declared — the dangerous direction.
+    foreach (var o in observed.Where(o =>!declaredSet.Contains((o.From, o.To))))
+    {
+        var (severity, reason) = ClassifyUndeclared(o, metadata);
+        drifts.Add(new(DriftKind.UndeclaredPresent, o.From, o.To, o.Protocol, severity, reason));
+    }
 
- // 2. Declared but never observed — usually stale declaration, occasionally
- // a genuine finding that a documented failover path does not work.
- foreach (var d in declared.Where(d =>!observedSet.Contains((d.From, d.To))))
- {
- var isFailoverPath = metadata.GetValueOrDefault(d.To)?.IsFailoverOnly?? false;
- drifts.Add(new(DriftKind.DeclaredAbsent, d.From, d.To, d.Protocol,
- isFailoverPath? DriftSeverity.Review: DriftSeverity.Informational,
- isFailoverPath
-? "Declared failover path never exercised — may not work when needed"
-: "Declared but not observed; declaration is likely stale"));
- }
+    // 2. Declared but never observed — usually stale declaration, occasionally
+    // a genuine finding that a documented failover path does not work.
+    foreach (var d in declared.Where(d =>!observedSet.Contains((d.From, d.To))))
+    {
+        var isFailoverPath = metadata.GetValueOrDefault(d.To)?.IsFailoverOnly?? false;
+        drifts.Add(new(DriftKind.DeclaredAbsent, d.From, d.To, d.Protocol,
+                isFailoverPath? DriftSeverity.Review: DriftSeverity.Informational,
+                    isFailoverPath
+                ? "Declared failover path never exercised — may not work when needed"
+                : "Declared but not observed; declaration is likely stale"));
+    }
 
- return drifts.OrderByDescending(d => d.Severity).ToList;
+    return drifts.OrderByDescending(d => d.Severity).ToList;
 }
 
 private static (DriftSeverity, string) ClassifyUndeclared(
- Relationship o, IReadOnlyDictionary<string, ServiceMetadata> metadata)
+    Relationship o, IReadOnlyDictionary<string, ServiceMetadata> metadata)
 {
- var from = metadata.GetValueOrDefault(o.From);
- var to = metadata.GetValueOrDefault(o.To);
+    var from = metadata.GetValueOrDefault(o.From);
+    var to = metadata.GetValueOrDefault(o.To);
 
- // Ordered by consequence — first match wins.
- if (to?.DataClassification is DataClass.Restricted or DataClass.Confidential
- && from?.DataClassification == DataClass.Internal)
- return (DriftSeverity.Critical,
- "Undeclared flow from a lower to a higher data classification — " +
- "classification does not propagate, so controls are likely absent downstream");
+    // Ordered by consequence — first match wins.
+    if (to?.DataClassification is DataClass.Restricted or DataClass.Confidential
+        && from?.DataClassification == DataClass.Internal)
+    return (DriftSeverity.Critical,
+        "Undeclared flow from a lower to a higher data classification — " +
+            "classification does not propagate, so controls are likely absent downstream");
 
- if (from?.TrustZone!= to?.TrustZone)
- return (DriftSeverity.Critical,
- $"Undeclared call crossing a trust boundary ({from?.TrustZone} → {to?.TrustZone})");
+    if (from?.TrustZone!= to?.TrustZone)
+        return (DriftSeverity.Critical,
+        $"Undeclared call crossing a trust boundary ({from?.TrustZone} → {to?.TrustZone})");
 
- if (to?.IsRegulatoryReportingPath == true)
- return (DriftSeverity.Critical,
- "Undeclared dependency in the regulatory reporting path — lineage is incomplete");
+    if (to?.IsRegulatoryReportingPath == true)
+        return (DriftSeverity.Critical,
+        "Undeclared dependency in the regulatory reporting path — lineage is incomplete");
 
- if (o.CrossesSystem)
- return (DriftSeverity.Review,
- "Undeclared cross-system dependency — increases blast radius and coupling");
+    if (o.CrossesSystem)
+        return (DriftSeverity.Review,
+        "Undeclared cross-system dependency — increases blast radius and coupling");
 
- return (DriftSeverity.Informational,
- "Undeclared intra-system call — likely a documentation gap");
+    return (DriftSeverity.Informational,
+        "Undeclared intra-system call — likely a documentation gap");
 }
 ```
 
@@ -986,79 +944,79 @@ private static (DriftSeverity, string) ClassifyUndeclared(
 public sealed record Commit(string Id, DateTimeOffset At, IReadOnlySet<string> Components);
 
 public sealed record CouplingFinding(
- string A, string B,
- int CoChanges, int AChanges, int BChanges,
- double JaccardIndex,
- double LiftOverChance,
- string Interpretation);
+    string A, string B,
+        int CoChanges, int AChanges, int BChanges,
+        double JaccardIndex,
+        double LiftOverChance,
+        string Interpretation);
 
 public static IReadOnlyList<CouplingFinding> FindCoupledBoundaries(
- IReadOnlyList<Commit> commits,
- int minCoChanges = 5,
- double minLift = 3.0)
+    IReadOnlyList<Commit> commits,
+        int minCoChanges = 5,
+        double minLift = 3.0)
 {
- var componentCounts = new Dictionary<string, int>;
- var pairCounts = new Dictionary<(string, string), int>;
- var total = commits.Count;
+    var componentCounts = new Dictionary<string, int>;
+    var pairCounts = new Dictionary<(string, string), int>;
+    var total = commits.Count;
 
- foreach (var commit in commits)
- {
- // A commit touching very many components is usually a mechanical change
- // (dependency bump, formatting) and is pure noise for this analysis.
- if (commit.Components.Count > 10) continue;
+    foreach (var commit in commits)
+    {
+        // A commit touching very many components is usually a mechanical change
+        // (dependency bump, formatting) and is pure noise for this analysis.
+        if (commit.Components.Count > 10) continue;
 
- var ordered = commit.Components.OrderBy(c => c, StringComparer.Ordinal).ToArray;
- foreach (var c in ordered)
- componentCounts[c] = componentCounts.GetValueOrDefault(c) + 1;
+        var ordered = commit.Components.OrderBy(c => c, StringComparer.Ordinal).ToArray;
+        foreach (var c in ordered)
+            componentCounts[c] = componentCounts.GetValueOrDefault(c) + 1;
 
- for (var i = 0; i < ordered.Length; i++)
- for (var j = i + 1; j < ordered.Length; j++)
- {
- var key = (ordered[i], ordered[j]);
- pairCounts[key] = pairCounts.GetValueOrDefault(key) + 1;
- }
- }
+        for (var i = 0; i < ordered.Length; i++)
+            for (var j = i + 1; j < ordered.Length; j++)
+        {
+            var key = (ordered[i], ordered[j]);
+            pairCounts[key] = pairCounts.GetValueOrDefault(key) + 1;
+        }
+    }
 
- var findings = new List<CouplingFinding>;
+    var findings = new List<CouplingFinding>;
 
- foreach (var ((a, b), coChanges) in pairCounts)
- {
- if (coChanges < minCoChanges) continue;
+    foreach (var ((a, b), coChanges) in pairCounts)
+    {
+        if (coChanges < minCoChanges) continue;
 
- int aCount = componentCounts[a], bCount = componentCounts[b];
+        int aCount = componentCounts[a], bCount = componentCounts[b];
 
- // Jaccard: co-changes / (changes touching either). Symmetric, bounded 0-1.
- var jaccard = coChanges / (double)(aCount + bCount - coChanges);
+        // Jaccard: co-changes / (changes touching either). Symmetric, bounded 0-1.
+        var jaccard = coChanges / (double)(aCount + bCount - coChanges);
 
- // Lift: how much more often they co-change than independence would predict.
- // THIS is what stops the ranking being dominated by the most-changed
- // components — two components that each change constantly will co-change
- // often BY CHANCE, and Jaccard alone does not correct for that.
- var expectedByChance = aCount / (double)total * (bCount / (double)total) * total;
- var lift = expectedByChance > 0? coChanges / expectedByChance: 0;
+        // Lift: how much more often they co-change than independence would predict.
+        // THIS is what stops the ranking being dominated by the most-changed
+        // components — two components that each change constantly will co-change
+        // often BY CHANCE, and Jaccard alone does not correct for that.
+        var expectedByChance = aCount / (double)total * (bCount / (double)total) * total;
+        var lift = expectedByChance > 0? coChanges / expectedByChance: 0;
 
- if (lift < minLift) continue;
+        if (lift < minLift) continue;
 
- findings.Add(new(a, b, coChanges, aCount, bCount, jaccard, lift,
- Interpret(jaccard, lift, coChanges)));
- }
+        findings.Add(new(a, b, coChanges, aCount, bCount, jaccard, lift,
+                Interpret(jaccard, lift, coChanges)));
+    }
 
- return findings.OrderByDescending(f => f.Lift * f.Jaccard).ToList;
+    return findings.OrderByDescending(f => f.Lift * f.Jaccard).ToList;
 }
 
 private static string Interpret(double jaccard, double lift, int coChanges) => (jaccard, lift) switch
 {
- (>= 0.6, >= 5) =>
- "Very strong coupling. These are almost certainly one component split by an " +
- "org boundary or a historical decision. Strong candidate for merging, or for " +
- "investigating what shared structure forces the co-change.",
- (>= 0.3, >= 3) =>
- "Substantial coupling. The boundary may be misplaced, OR there is a removable " +
- "cause — usually a shared data structure, a shared contract file, or a " +
- "synchronous dependency that could be async. Investigate before concluding.",
- _ =>
- "Moderate coupling. Possibly a genuine, healthy interface relationship. " +
- "Worth a look only if the pair spans a boundary you believed was clean."
+    (>= 0.6, >= 5) =>
+        "Very strong coupling. These are almost certainly one component split by an " +
+        "org boundary or a historical decision. Strong candidate for merging, or for " +
+        "investigating what shared structure forces the co-change.",
+        (>= 0.3, >= 3) =>
+        "Substantial coupling. The boundary may be misplaced, OR there is a removable " +
+        "cause — usually a shared data structure, a shared contract file, or a " +
+        "synchronous dependency that could be async. Investigate before concluding.",
+        _ =>
+        "Moderate coupling. Possibly a genuine, healthy interface relationship. " +
+        "Worth a look only if the pair spans a boundary you believed was clean."
 };
 ```
 
@@ -1321,77 +1279,77 @@ public enum Confidence { Unknown = 0, Inferred, Observed, Instrumented }
 public enum ModelCompleteness { Degraded = 0, Partial, Complete }
 
 public sealed record ObservedEdge(
- NodeId From, NodeId To, string Protocol, EdgeSource Source,
- Confidence Confidence, DateTimeOffset FirstSeen, DateTimeOffset LastSeen, long Volume);
+    NodeId From, NodeId To, string Protocol, EdgeSource Source,
+        Confidence Confidence, DateTimeOffset FirstSeen, DateTimeOffset LastSeen, long Volume);
 
 public sealed record GuardResult(bool Allowed, string? Reason)
 {
- public static readonly GuardResult Ok = new(true, null);
- public static GuardResult Refuse(string reason) => new(false, reason);
+    public static readonly GuardResult Ok = new(true, null);
+    public static GuardResult Refuse(string reason) => new(false, reason);
 }
 
 public sealed class CompletenessGuard: IQueryGuard
 {
- // Queries whose wrong answer is worse than no answer.
- private static readonly FrozenSet<QueryKind> RequiresCompleteness =
- new[] { QueryKind.RegulatoryEstateMap, QueryKind.BlastRadius, QueryKind.ClassificationPropagation }
-.ToFrozenSet;
+    // Queries whose wrong answer is worse than no answer.
+    private static readonly FrozenSet<QueryKind> RequiresCompleteness =
+    new[] { QueryKind.RegulatoryEstateMap, QueryKind.BlastRadius, QueryKind.ClassificationPropagation }
+    .ToFrozenSet;
 
- public GuardResult CanAnswer(EstateModel model, QueryKind kind)
- {
- if (!RequiresCompleteness.Contains(kind)) return GuardResult.Ok;
- if (model.Completeness == ModelCompleteness.Complete) return GuardResult.Ok;
+    public GuardResult CanAnswer(EstateModel model, QueryKind kind)
+    {
+        if (!RequiresCompleteness.Contains(kind)) return GuardResult.Ok;
+        if (model.Completeness == ModelCompleteness.Complete) return GuardResult.Ok;
 
- var unhealthy = model.Sources.Where(s =>!s.IsHealthy).Select(s => s.SourceName);
- return GuardResult.Refuse(
- $"Model is {model.Completeness}. Unhealthy sources: {string.Join(", ", unhealthy)}. " +
- "This query requires a complete model because an understated result would be " +
- "acted upon as though complete.");
- }
+        var unhealthy = model.Sources.Where(s =>!s.IsHealthy).Select(s => s.SourceName);
+        return GuardResult.Refuse(
+            $"Model is {model.Completeness}. Unhealthy sources: {string.Join(", ", unhealthy)}. " +
+                "This query requires a complete model because an understated result would be " +
+                "acted upon as though complete.");
+    }
 }
 
 public sealed class ChainedClassifier(IReadOnlyList<IDriftClassifier> inOrder): IDriftClassifier
 {
- // Ordered by consequence — first match wins, so the most severe
- // interpretation of an edge is the one reported.
- public DriftAssessment? Classify(ObservedEdge edge, DeclaredArchitecture declared)
- {
- foreach (var classifier in inOrder)
- if (classifier.Classify(edge, declared) is { } assessment)
- // The assessment can never be more confident than the edge it rests on.
- return assessment with
- {
- AssessmentConfidence = Min(assessment.AssessmentConfidence, edge.Confidence)
- };
- return null;
- }
+    // Ordered by consequence — first match wins, so the most severe
+    // interpretation of an edge is the one reported.
+    public DriftAssessment? Classify(ObservedEdge edge, DeclaredArchitecture declared)
+    {
+        foreach (var classifier in inOrder)
+            if (classifier.Classify(edge, declared) is { } assessment)
+            // The assessment can never be more confident than the edge it rests on.
+        return assessment with
+        {
+            AssessmentConfidence = Min(assessment.AssessmentConfidence, edge.Confidence)
+        };
+        return null;
+    }
 
- private static Confidence Min(Confidence a, Confidence b) => (Confidence)Math.Min((int)a, (int)b);
+    private static Confidence Min(Confidence a, Confidence b) => (Confidence)Math.Min((int)a, (int)b);
 }
 
 public sealed class DataClassificationClassifier: IDriftClassifier
 {
- public DriftAssessment? Classify(ObservedEdge edge, DeclaredArchitecture declared)
- {
- var fromClass = declared.Classifications.GetValueOrDefault(edge.From, DataClass.Unknown);
- var toClass = declared.Classifications.GetValueOrDefault(edge.To, DataClass.Unknown);
+    public DriftAssessment? Classify(ObservedEdge edge, DeclaredArchitecture declared)
+    {
+        var fromClass = declared.Classifications.GetValueOrDefault(edge.From, DataClass.Unknown);
+        var toClass = declared.Classifications.GetValueOrDefault(edge.To, DataClass.Unknown);
 
- // Unknown classification on either end is itself a finding — we cannot
- // reason about propagation, so we must not silently conclude it is fine.
- if (fromClass == DataClass.Unknown || toClass == DataClass.Unknown)
- return new(DriftSeverity.Review,
- "Undeclared flow involving a system with no data classification — " +
- "propagation cannot be assessed",
- Confidence.Unknown);
+        // Unknown classification on either end is itself a finding — we cannot
+        // reason about propagation, so we must not silently conclude it is fine.
+        if (fromClass == DataClass.Unknown || toClass == DataClass.Unknown)
+            return new(DriftSeverity.Review,
+            "Undeclared flow involving a system with no data classification — " +
+                "propagation cannot be assessed",
+                Confidence.Unknown);
 
- if (toClass > fromClass)
- return new(DriftSeverity.Critical,
- $"Undeclared flow from {fromClass} to {toClass}: classification does not " +
- "propagate across this edge, so downstream controls are likely absent",
- Confidence.Instrumented);
+        if (toClass > fromClass)
+            return new(DriftSeverity.Critical,
+            $"Undeclared flow from {fromClass} to {toClass}: classification does not " +
+                "propagate across this edge, so downstream controls are likely absent",
+                Confidence.Instrumented);
 
- return null;
- }
+        return null;
+    }
 }
 ```
 

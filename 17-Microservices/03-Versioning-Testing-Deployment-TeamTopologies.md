@@ -169,10 +169,10 @@ graph TB
 ```csharp
 public class PricingResponse
 {
- public decimal DiscountAmount { get; set; } // KEPT, unchanged -- existing consumers unaffected
- public decimal DiscountValue { get; set; } // NEW, additive field -- old consumers simply ignore it
- [Obsolete("Use DiscountValue. Scheduled for removal 2027-01-01. See API deprecation registry.")]
- public decimal DiscountAmountLegacyAlias => DiscountAmount;
+    public decimal DiscountAmount { get; set; } // KEPT, unchanged -- existing consumers unaffected
+    public decimal DiscountValue { get; set; } // NEW, additive field -- old consumers simply ignore it
+    [Obsolete("Use DiscountValue. Scheduled for removal 2027-01-01. See API deprecation registry.")]
+    public decimal DiscountAmountLegacyAlias => DiscountAmount;
 }
 ```
 
@@ -181,25 +181,25 @@ public class PricingResponse
 [Fact]
 public async Task InventoryConsumer_ExpectsAvailabilityField
 {
- // Consumer (Order Service) defines its EXPECTATION of the Inventory API's contract --
- // this runs WITHOUT the real Inventory Service running at all.
- _pact
-.UponReceiving("a request for stock availability")
-.Given("SKU-123 has 5 units in stock")
-.WithRequest(HttpMethod.Get, "/inventory/SKU-123/availability")
-.WillRespond
-.WithStatus(200)
-.WithJsonBody(new { sku = "SKU-123", available = 5 });
+    // Consumer (Order Service) defines its EXPECTATION of the Inventory API's contract --
+    // this runs WITHOUT the real Inventory Service running at all.
+    _pact
+    .UponReceiving("a request for stock availability")
+    .Given("SKU-123 has 5 units in stock")
+    .WithRequest(HttpMethod.Get, "/inventory/SKU-123/availability")
+    .WillRespond
+    .WithStatus(200)
+    .WithJsonBody(new { sku = "SKU-123", available = 5 });
 
- await _pact.VerifyAsync(async ctx =>
- {
- var client = new InventoryClient(ctx.MockServerUri);
- var result = await client.GetAvailabilityAsync("SKU-123");
- Assert.Equal(5, result.Available);
- });
- // The PROVIDER (Inventory Service) later verifies its actual API against this same
- // published contract in its OWN build pipeline -- catching incompatibility before either
- // service reaches a shared, full integration environment.
+    await _pact.VerifyAsync(async ctx =>
+        {
+            var client = new InventoryClient(ctx.MockServerUri);
+            var result = await client.GetAvailabilityAsync("SKU-123");
+            Assert.Equal(5, result.Available);
+    });
+    // The PROVIDER (Inventory Service) later verifies its actual API against this same
+    // published contract in its OWN build pipeline -- catching incompatibility before either
+    // service reaches a shared, full integration environment.
 }
 ```
 
@@ -207,32 +207,32 @@ public async Task InventoryConsumer_ExpectsAvailabilityField
 ```csharp
 public class FeatureFlagService
 {
- private readonly IMemoryCache _localCache; // cached locally -- degrades gracefully if control plane unreachable
+    private readonly IMemoryCache _localCache; // cached locally -- degrades gracefully if control plane unreachable
 
- public bool IsEnabled(string flagName, string userId)
- {
- var config = _localCache.Get<FlagConfig>(flagName)?? _lastKnownGoodConfig[flagName];
- // Server-side evaluation ONLY -- never expose the rollout percentage or targeting logic
- // to client-side code, which would defeat the controlled-rollout guarantee.
- return config.RolloutStrategy switch
- {
- RolloutStrategy.Percentage => HashUserId(userId) % 100 < config.RolloutPercentage,
- RolloutStrategy.InternalOnly => IsInternalUser(userId),
- RolloutStrategy.FullyOn => true,
- _ => false
- };
- }
+    public bool IsEnabled(string flagName, string userId)
+    {
+        var config = _localCache.Get<FlagConfig>(flagName)?? _lastKnownGoodConfig[flagName];
+        // Server-side evaluation ONLY -- never expose the rollout percentage or targeting logic
+        // to client-side code, which would defeat the controlled-rollout guarantee.
+        return config.RolloutStrategy switch
+        {
+            RolloutStrategy.Percentage => HashUserId(userId) % 100 < config.RolloutPercentage,
+                RolloutStrategy.InternalOnly => IsInternalUser(userId),
+                RolloutStrategy.FullyOn => true,
+                _ => false
+        };
+    }
 }
 
 public class CheckoutController: ControllerBase
 {
- [HttpPost("/checkout")]
- public IActionResult Checkout(CheckoutRequest request)
- {
- if (_featureFlags.IsEnabled("new-checkout-flow", request.UserId))
- return _newCheckoutFlow.Process(request); // deployed AND released independently
- return _legacyCheckoutFlow.Process(request); // old path remains fully intact
- }
+    [HttpPost("/checkout")]
+    public IActionResult Checkout(CheckoutRequest request)
+    {
+        if (_featureFlags.IsEnabled("new-checkout-flow", request.UserId))
+            return _newCheckoutFlow.Process(request); // deployed AND released independently
+        return _legacyCheckoutFlow.Process(request); // old path remains fully intact
+    }
 }
 ```
 
@@ -240,30 +240,30 @@ public class CheckoutController: ControllerBase
 ```csharp
 public class SchemaCompatibilityChecker
 {
- public CompatibilityResult Check(ApiSchema previous, ApiSchema proposed)
- {
- var violations = new List<string>;
+    public CompatibilityResult Check(ApiSchema previous, ApiSchema proposed)
+    {
+        var violations = new List<string>;
 
- foreach (var field in previous.Fields)
- {
- var match = proposed.Fields.FirstOrDefault(f => f.Name == field.Name);
- if (match == null)
- violations.Add($"BREAKING: field '{field.Name}' removed");
- else if (match.Type!= field.Type)
- violations.Add($"BREAKING: field '{field.Name}' type changed ({field.Type} -> {match.Type})");
- }
+        foreach (var field in previous.Fields)
+        {
+            var match = proposed.Fields.FirstOrDefault(f => f.Name == field.Name);
+            if (match == null)
+                violations.Add($"BREAKING: field '{field.Name}' removed");
+            else if (match.Type!= field.Type)
+                violations.Add($"BREAKING: field '{field.Name}' type changed ({field.Type} -> {match.Type})");
+        }
 
- foreach (var newField in proposed.Fields.Except(previous.Fields, FieldNameComparer.Instance))
- {
- if (newField.IsRequired && newField.DefaultValue == null)
- violations.Add($"BREAKING: new required field '{newField.Name}' has no default -- " +
- "existing consumers cannot satisfy this without a code change");
- }
+        foreach (var newField in proposed.Fields.Except(previous.Fields, FieldNameComparer.Instance))
+        {
+            if (newField.IsRequired && newField.DefaultValue == null)
+                violations.Add($"BREAKING: new required field '{newField.Name}' has no default -- " +
+                "existing consumers cannot satisfy this without a code change");
+        }
 
- return new CompatibilityResult(IsCompatible: violations.Count == 0, violations);
- // Wired into CI: build FAILS if IsCompatible == false, unless an explicit new API version
- // is declared alongside the change -- converts human judgment into an enforced gate.
- }
+        return new CompatibilityResult(IsCompatible: violations.Count == 0, violations);
+        // Wired into CI: build FAILS if IsCompatible == false, unless an explicit new API version
+        // is declared alongside the change -- converts human judgment into an enforced gate.
+    }
 }
 ```
 **Discussion**: this automated checker is the concrete implementation of Advanced Q5's governance fix — it would have caught the `discountAmount` removal deterministically, at build time, regardless of whether any engineer on the Pricing team happened to recognize the rename as breaking under release-day time pressure.

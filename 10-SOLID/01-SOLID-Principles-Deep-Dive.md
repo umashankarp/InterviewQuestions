@@ -20,7 +20,7 @@ Every non-trivial codebase; the depth matters for applying these principles with
 // Violates SRP: OrderProcessor both computes business logic AND handles persistence AND sends email
 public class OrderProcessor
 {
- public void Process(Order order) { /* validate, save to DB, send email -- three responsibilities */ }
+    public void Process(Order order) { /* validate, save to DB, send email -- three responsibilities */ }
 }
 
 // SRP-compliant: each class has ONE reason to change
@@ -167,8 +167,8 @@ classDiagram
 // BEFORE: two independently-varying concerns (tax calculation, report formatting) in one class
 public class InvoiceProcessor
 {
- public decimal CalculateTax(Invoice invoice) => invoice.Subtotal * GetTaxRate(invoice.Region);
- public string FormatForDisplay(Invoice invoice) => $"Invoice #{invoice.Id}: ${invoice.Total:F2}";
+    public decimal CalculateTax(Invoice invoice) => invoice.Subtotal * GetTaxRate(invoice.Region);
+    public string FormatForDisplay(Invoice invoice) => $"Invoice #{invoice.Id}: ${invoice.Total:F2}";
 }
 
 // AFTER: split along "reason to change" -- tax law changes independently of display formatting
@@ -180,31 +180,31 @@ public class InvoiceFormatter { public string FormatForDisplay(Invoice invoice) 
 ```csharp
 public interface INotificationChannel
 {
- string ChannelName { get; }
- Task SendAsync(Notification notification);
+    string ChannelName { get; }
+    Task SendAsync(Notification notification);
 }
 
 public class EmailChannel: INotificationChannel
 {
- public string ChannelName => "Email";
- public Task SendAsync(Notification notification) => /* email-specific logic */ Task.CompletedTask;
+    public string ChannelName => "Email";
+    public Task SendAsync(Notification notification) => /* email-specific logic */ Task.CompletedTask;
 }
 public class SmsChannel: INotificationChannel
 {
- public string ChannelName => "SMS";
- public Task SendAsync(Notification notification) => /* SMS-specific logic, UNTOUCHED by future additions */ Task.CompletedTask;
+    public string ChannelName => "SMS";
+    public Task SendAsync(Notification notification) => /* SMS-specific logic, UNTOUCHED by future additions */ Task.CompletedTask;
 }
 
 public class NotificationDispatcher
 {
- private readonly IEnumerable<INotificationChannel> _channels; // resolved via DI
- public NotificationDispatcher(IEnumerable<INotificationChannel> channels) => _channels = channels;
+    private readonly IEnumerable<INotificationChannel> _channels; // resolved via DI
+    public NotificationDispatcher(IEnumerable<INotificationChannel> channels) => _channels = channels;
 
- public async Task DispatchAsync(Notification notification)
- {
- var channel = _channels.FirstOrDefault(c => c.ChannelName == notification.PreferredChannel);
- if (channel is not null) await channel.SendAsync(notification);
- }
+    public async Task DispatchAsync(Notification notification)
+    {
+        var channel = _channels.FirstOrDefault(c => c.ChannelName == notification.PreferredChannel);
+        if (channel is not null) await channel.SendAsync(notification);
+    }
 }
 // Adding Slack support: ONE new class (SlackChannel), ONE registration line -- ZERO modification
 // to EmailChannel or SmsChannel's existing, working code.
@@ -215,29 +215,29 @@ public class NotificationDispatcher
 // BEFORE: forces every implementation/consumer to depend on the ENTIRE surface
 public interface IRepository<T>
 {
- Task<T?> GetByIdAsync(string id);
- Task<IEnumerable<T>> GetAllAsync;
- Task AddAsync(T item);
- Task UpdateAsync(T item);
- Task DeleteAsync(string id);
- Task BulkImportAsync(IEnumerable<T> items);
+    Task<T?> GetByIdAsync(string id);
+    Task<IEnumerable<T>> GetAllAsync;
+    Task AddAsync(T item);
+    Task UpdateAsync(T item);
+    Task DeleteAsync(string id);
+    Task BulkImportAsync(IEnumerable<T> items);
 }
 
 // AFTER: segregated by actual consumer need
 public interface IReadableRepository<T>
 {
- Task<T?> GetByIdAsync(string id);
- Task<IEnumerable<T>> GetAllAsync;
+    Task<T?> GetByIdAsync(string id);
+    Task<IEnumerable<T>> GetAllAsync;
 }
 public interface IWritableRepository<T>: IReadableRepository<T>
 {
- Task AddAsync(T item);
- Task UpdateAsync(T item);
- Task DeleteAsync(string id);
+    Task AddAsync(T item);
+    Task UpdateAsync(T item);
+    Task DeleteAsync(string id);
 }
 public interface IBulkImportable<T>
 {
- Task BulkImportAsync(IEnumerable<T> items);
+    Task BulkImportAsync(IEnumerable<T> items);
 }
 // A read-only reporting service depends ONLY on IReadableRepository<T> -- never recompiled/retested
 // when BulkImportAsync's signature changes, since it doesn't even know that method exists.
@@ -252,16 +252,16 @@ public interface IPaymentGateway { Task<bool> ChargeAsync(decimal amount); }
 
 public class OrderService
 {
- private readonly IOrderRepository _repository;
- private readonly IPaymentGateway _gateway;
- public OrderService(IOrderRepository repository, IPaymentGateway gateway)
- {
- _repository = repository; _gateway = gateway;
- }
- public async Task PlaceOrderAsync(Order order)
- {
- if (await _gateway.ChargeAsync(order.Total)) await _repository.SaveAsync(order);
- }
+    private readonly IOrderRepository _repository;
+    private readonly IPaymentGateway _gateway;
+    public OrderService(IOrderRepository repository, IPaymentGateway gateway)
+    {
+        _repository = repository; _gateway = gateway;
+    }
+    public async Task PlaceOrderAsync(Order order)
+    {
+        if (await _gateway.ChargeAsync(order.Total)) await _repository.SaveAsync(order);
+    }
 }
 
 // "Poor man's DI" -- manual composition root, NO DI container library at all:

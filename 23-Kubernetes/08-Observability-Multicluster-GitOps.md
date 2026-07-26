@@ -342,29 +342,29 @@ spec:
 ```csharp
 public class MtlsEnforcementVerifier
 {
- // Directly this module's central lesson -- runs INDEPENDENTLY of, and with
- // NO regard to, GitOps sync status, since sync status provides zero evidence about
- // whether the declared configuration is itself correct or genuinely enforced.
- public async Task<VerificationResult> VerifyStrictModeAsync(string @namespace, IHttpClientFactory clientFactory)
- {
- var plaintextClient = clientFactory.CreateClient("no-mtls");
- try
- {
- var response = await plaintextClient.GetAsync($"http://target-service.{@namespace}.svc.cluster.local/health")
- // A SUCCESSFUL plaintext connection means STRICT mode is NOT actually enforced
- // regardless of what the PeerAuthentication object declares or ArgoCD's sync status shows.
- return new VerificationResult
- {
- Passed = false,
- Message = $"Namespace '{@namespace}': plaintext connection SUCCEEDED -- " +
- $"mTLS STRICT mode is NOT genuinely enforced, despite any declared configuration."
- };
- }
- catch (HttpRequestException)
- {
- return new VerificationResult { Passed = true, Message = $"Namespace '{@namespace}': plaintext correctly rejected." };
- }
- }
+    // Directly this module's central lesson -- runs INDEPENDENTLY of, and with
+    // NO regard to, GitOps sync status, since sync status provides zero evidence about
+    // whether the declared configuration is itself correct or genuinely enforced.
+    public async Task<VerificationResult> VerifyStrictModeAsync(string @namespace, IHttpClientFactory clientFactory)
+    {
+        var plaintextClient = clientFactory.CreateClient("no-mtls");
+        try
+        {
+            var response = await plaintextClient.GetAsync($"http://target-service.{@namespace}.svc.cluster.local/health")
+            // A SUCCESSFUL plaintext connection means STRICT mode is NOT actually enforced
+            // regardless of what the PeerAuthentication object declares or ArgoCD's sync status shows.
+            return new VerificationResult
+            {
+                Passed = false,
+                    Message = $"Namespace '{@namespace}': plaintext connection SUCCEEDED -- " +
+                    $"mTLS STRICT mode is NOT genuinely enforced, despite any declared configuration."
+            };
+        }
+        catch (HttpRequestException)
+        {
+            return new VerificationResult { Passed = true, Message = $"Namespace '{@namespace}': plaintext correctly rejected." };
+        }
+    }
 }
 ```
 **Time complexity:** O(1) per namespace check — a single connection attempt and its result.
@@ -377,33 +377,33 @@ public class MtlsEnforcementVerifier
 ```csharp
 public class PostSyncVerificationController
 {
- private readonly IArgoCdEventWatcher _argoCdWatcher;
- private readonly IDictionary<string, Func<string, Task<VerificationResult>>> _verifiersByResourceKind;
+    private readonly IArgoCdEventWatcher _argoCdWatcher;
+    private readonly IDictionary<string, Func<string, Task<VerificationResult>>> _verifiersByResourceKind;
 
- public async Task RunAsync(CancellationToken ct)
- {
- // Watches ArgoCD's own sync-completion events -- itself a reconciliation-loop-
- // adjacent pattern, now specifically triggered by another
- // controller's completion event rather than a fixed polling interval.
- await foreach (var syncEvent in _argoCdWatcher.WatchSyncCompletionsAsync(ct))
- {
- foreach (var changedResource in syncEvent.ChangedResources)
- {
- if (_verifiersByResourceKind.TryGetValue(changedResource.Kind, out var verifier))
- {
- var result = await verifier(changedResource.Namespace);
+    public async Task RunAsync(CancellationToken ct)
+    {
+        // Watches ArgoCD's own sync-completion events -- itself a reconciliation-loop-
+        // adjacent pattern, now specifically triggered by another
+        // controller's completion event rather than a fixed polling interval.
+        await foreach (var syncEvent in _argoCdWatcher.WatchSyncCompletionsAsync(ct))
+        {
+            foreach (var changedResource in syncEvent.ChangedResources)
+            {
+                if (_verifiersByResourceKind.TryGetValue(changedResource.Kind, out var verifier))
+                {
+                    var result = await verifier(changedResource.Namespace);
 
- // Closing the loop back to the triggering commit -- directly this
- // module's Advanced Q5/Q9 recommendation, now implemented concretely.
- await AnnotateGitCommitAsync(syncEvent.CommitSha, changedResource, result);
+                    // Closing the loop back to the triggering commit -- directly this
+                    // module's Advanced Q5/Q9 recommendation, now implemented concretely.
+                    await AnnotateGitCommitAsync(syncEvent.CommitSha, changedResource, result);
 
- if (!result.Passed)
- await RaiseVerificationFailureAlertAsync(changedResource, result); // Advanced Q9's
- // SEPARATE alert category
- }
- }
- }
- }
+                    if (!result.Passed)
+                        await RaiseVerificationFailureAlertAsync(changedResource, result); // Advanced Q9's
+                    // SEPARATE alert category
+                }
+            }
+        }
+    }
 }
 ```
 **Time complexity:** O(c) per sync event, where c is the number of changed resources with a registered verifier — each triggers one independent verification check.

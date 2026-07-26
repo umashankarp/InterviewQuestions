@@ -330,13 +330,13 @@ public sealed record RunbookStatus(bool IsStale, int? DaysOverdue);
 
 public static class RunbookStalenessChecker
 {
- public static RunbookStatus Check(DateTime lastVerifiedAt, DateTime now, int staleThresholdDays)
- {
- int daysSinceVerified = (now - lastVerifiedAt).Days;
- bool isStale = daysSinceVerified > staleThresholdDays;
- int? daysOverdue = isStale? daysSinceVerified - staleThresholdDays: null;
- return new RunbookStatus(isStale, daysOverdue);
- }
+    public static RunbookStatus Check(DateTime lastVerifiedAt, DateTime now, int staleThresholdDays)
+    {
+        int daysSinceVerified = (now - lastVerifiedAt).Days;
+        bool isStale = daysSinceVerified > staleThresholdDays;
+        int? daysOverdue = isStale? daysSinceVerified - staleThresholdDays: null;
+        return new RunbookStatus(isStale, daysOverdue);
+    }
 }
 ```
 **Time complexity:** O(1).
@@ -351,18 +351,18 @@ public sealed record ShipperWindowStats(int AttemptedCount, int DeliveredCount);
 
 public static class ShipperDropRateDetector
 {
- public static bool IsAnomalous(
- ShipperWindowStats current, double baselineDropRate, double toleranceMultiplier)
- {
- if (current.AttemptedCount == 0)
- return false; // no traffic to evaluate
+    public static bool IsAnomalous(
+        ShipperWindowStats current, double baselineDropRate, double toleranceMultiplier)
+    {
+        if (current.AttemptedCount == 0)
+            return false; // no traffic to evaluate
 
- double currentDropRate = 1.0 - (double)current.DeliveredCount / current.AttemptedCount;
+        double currentDropRate = 1.0 - (double)current.DeliveredCount / current.AttemptedCount;
 
- // Flag only if CURRENT drop rate meaningfully exceeds the established
- // baseline -- avoids false positives from ordinary, small fluctuations.
- return currentDropRate > baselineDropRate * toleranceMultiplier;
- }
+        // Flag only if CURRENT drop rate meaningfully exceeds the established
+        // baseline -- avoids false positives from ordinary, small fluctuations.
+        return currentDropRate > baselineDropRate * toleranceMultiplier;
+    }
 }
 ```
 **Time complexity:** O(1).
@@ -375,37 +375,37 @@ public static class ShipperDropRateDetector
 ```csharp
 public enum ActionItemPriority { High, Medium, Low }
 public sealed record ActionItem(string Id, ActionItemPriority Priority, string Owner,
- DateTime DueDate, bool IsComplete);
+    DateTime DueDate, bool IsComplete);
 
 public static class ActionItemTracker
 {
- private static readonly Dictionary<ActionItemPriority, int> GracePeriodDays = new
- {
- [ActionItemPriority.High] = 3,
- [ActionItemPriority.Medium] = 14,
- [ActionItemPriority.Low] = 30,
- };
+    private static readonly Dictionary<ActionItemPriority, int> GracePeriodDays = new
+    {
+        [ActionItemPriority.High] = 3,
+            [ActionItemPriority.Medium] = 14,
+            [ActionItemPriority.Low] = 30,
+        };
 
- public static IReadOnlyList<(ActionItem Item, bool ShouldEscalate)> Evaluate(
- IReadOnlyList<ActionItem> items, DateTime now)
- {
- var results = new List<(ActionItem, bool)>;
- foreach (var item in items)
- {
- if (item.IsComplete)
- {
- results.Add((item, false));
- continue;
- }
+    public static IReadOnlyList<(ActionItem Item, bool ShouldEscalate)> Evaluate(
+        IReadOnlyList<ActionItem> items, DateTime now)
+    {
+        var results = new List<(ActionItem, bool)>;
+        foreach (var item in items)
+        {
+            if (item.IsComplete)
+            {
+                results.Add((item, false));
+                continue;
+            }
 
- int daysOverdue = (now - item.DueDate).Days;
- bool overdue = daysOverdue > 0;
- bool pastGracePeriod = overdue && daysOverdue > GracePeriodDays[item.Priority];
+            int daysOverdue = (now - item.DueDate).Days;
+            bool overdue = daysOverdue > 0;
+            bool pastGracePeriod = overdue && daysOverdue > GracePeriodDays[item.Priority];
 
- results.Add((item, pastGracePeriod));
- }
- return results;
- }
+            results.Add((item, pastGracePeriod));
+        }
+        return results;
+    }
 }
 ```
 **Time complexity:** O(n) in the number of action items.
@@ -417,30 +417,30 @@ public static class ActionItemTracker
 
 ```csharp
 public sealed record RunbookRiskProfile(
- string RunbookId, int SeverityWeight, int DaysSinceLastDrill, int RelevantChangesSinceLastDrill);
+    string RunbookId, int SeverityWeight, int DaysSinceLastDrill, int RelevantChangesSinceLastDrill);
 
 public static class RunbookDrillScheduler
 {
- public static IReadOnlyList<string> ScheduleNextDrills(
- IReadOnlyList<RunbookRiskProfile> runbooks, int weeklyDrillCapacity)
- {
- // Composite risk score: severity dominates, but accumulated relevant
- // changes and elapsed time both independently raise risk -- Sec Advanced
- // Q3's multi-signal model, not elapsed time alone.
- var scored = runbooks
-.Select(r => new
- {
- Runbook = r,
- Score = r.SeverityWeight * (1 + r.RelevantChangesSinceLastDrill) * (1 + r.DaysSinceLastDrill / 30.0)
- })
-.OrderByDescending(x => x.Score)
-.ToList;
+    public static IReadOnlyList<string> ScheduleNextDrills(
+        IReadOnlyList<RunbookRiskProfile> runbooks, int weeklyDrillCapacity)
+    {
+        // Composite risk score: severity dominates, but accumulated relevant
+        // changes and elapsed time both independently raise risk -- Sec Advanced
+        // Q3's multi-signal model, not elapsed time alone.
+        var scored = runbooks
+        .Select(r => new
+            {
+                Runbook = r,
+                    Score = r.SeverityWeight * (1 + r.RelevantChangesSinceLastDrill) * (1 + r.DaysSinceLastDrill / 30.0)
+        })
+        .OrderByDescending(x => x.Score)
+        .ToList;
 
- return scored
-.Take(weeklyDrillCapacity)
-.Select(x => x.Runbook.RunbookId)
-.ToList;
- }
+        return scored
+        .Take(weeklyDrillCapacity)
+        .Select(x => x.Runbook.RunbookId)
+        .ToList;
+    }
 }
 ```
 **Time complexity:** O(n log n) for the sort, where n is the number of runbooks in the library.
@@ -507,57 +507,57 @@ graph TB
 
 ```csharp
 public sealed record Runbook(
- string Id, string Title, IReadOnlyList<string> ReferencedSystems,
- DateTime LastVerifiedAt, string OwningTeam, IncidentSeverityTier RelevantSeverity);
+    string Id, string Title, IReadOnlyList<string> ReferencedSystems,
+        DateTime LastVerifiedAt, string OwningTeam, IncidentSeverityTier RelevantSeverity);
 
 public interface IStalenessPolicy
 {
- RunbookStatus Evaluate(Runbook runbook, DateTime now);
+    RunbookStatus Evaluate(Runbook runbook, DateTime now);
 }
 
 public sealed class ThresholdStalenessPolicy: IStalenessPolicy
 {
- private readonly Dictionary<IncidentSeverityTier, int> _thresholdDaysBySeverity;
+    private readonly Dictionary<IncidentSeverityTier, int> _thresholdDaysBySeverity;
 
- public ThresholdStalenessPolicy(Dictionary<IncidentSeverityTier, int> thresholdDaysBySeverity)
- => _thresholdDaysBySeverity = thresholdDaysBySeverity;
+    public ThresholdStalenessPolicy(Dictionary<IncidentSeverityTier, int> thresholdDaysBySeverity)
+    => _thresholdDaysBySeverity = thresholdDaysBySeverity;
 
- public RunbookStatus Evaluate(Runbook runbook, DateTime now) =>
- RunbookStalenessChecker.Check(runbook.LastVerifiedAt, now,
- _thresholdDaysBySeverity[runbook.RelevantSeverity]); // Sec11 Easy
+    public RunbookStatus Evaluate(Runbook runbook, DateTime now) =>
+        RunbookStalenessChecker.Check(runbook.LastVerifiedAt, now,
+        _thresholdDaysBySeverity[runbook.RelevantSeverity]); // Sec11 Easy
 }
 
 public interface IChangeAuditGate
 {
- // Called by the infrastructure change-management pipeline whenever a
- // tool/system is modified -- returns every runbook referencing it, so the
- // migration process CANNOT complete without seeing this list (Sec4's fix).
- IReadOnlyList<Runbook> FindAffectedRunbooks(string changedSystemName);
+    // Called by the infrastructure change-management pipeline whenever a
+    // tool/system is modified -- returns every runbook referencing it, so the
+    // migration process CANNOT complete without seeing this list (Sec4's fix).
+    IReadOnlyList<Runbook> FindAffectedRunbooks(string changedSystemName);
 }
 
 public sealed class RunbookRepository: IChangeAuditGate
 {
- private readonly List<Runbook> _runbooks = new;
- private readonly IStalenessPolicy _stalenessPolicy;
+    private readonly List<Runbook> _runbooks = new;
+    private readonly IStalenessPolicy _stalenessPolicy;
 
- public RunbookRepository(IStalenessPolicy stalenessPolicy) => _stalenessPolicy = stalenessPolicy;
+    public RunbookRepository(IStalenessPolicy stalenessPolicy) => _stalenessPolicy = stalenessPolicy;
 
- public IReadOnlyList<Runbook> FindAffectedRunbooks(string changedSystemName) =>
- _runbooks.Where(r => r.ReferencedSystems.Contains(changedSystemName)).ToList;
+    public IReadOnlyList<Runbook> FindAffectedRunbooks(string changedSystemName) =>
+        _runbooks.Where(r => r.ReferencedSystems.Contains(changedSystemName)).ToList;
 
- public RunbookStatus GetStatus(string runbookId, DateTime now)
- {
- var runbook = _runbooks.Single(r => r.Id == runbookId);
- return _stalenessPolicy.Evaluate(runbook, now);
- }
+    public RunbookStatus GetStatus(string runbookId, DateTime now)
+    {
+        var runbook = _runbooks.Single(r => r.Id == runbookId);
+        return _stalenessPolicy.Evaluate(runbook, now);
+    }
 
- // Called when a drill (or a genuine, real incident execution confirmed
- // correct) succeeds -- resets the currency clock, never merely on manual review.
- public void RecordVerification(string runbookId, DateTime verifiedAt)
- {
- int index = _runbooks.FindIndex(r => r.Id == runbookId);
- _runbooks[index] = _runbooks[index] with { LastVerifiedAt = verifiedAt };
- }
+    // Called when a drill (or a genuine, real incident execution confirmed
+    // correct) succeeds -- resets the currency clock, never merely on manual review.
+    public void RecordVerification(string runbookId, DateTime verifiedAt)
+    {
+        int index = _runbooks.FindIndex(r => r.Id == runbookId);
+        _runbooks[index] = _runbooks[index] with { LastVerifiedAt = verifiedAt };
+    }
 }
 ```
 

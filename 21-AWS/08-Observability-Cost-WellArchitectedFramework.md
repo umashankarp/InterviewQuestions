@@ -154,17 +154,17 @@ graph LR
 ### Easy — CloudWatch alarm tied to a specific business-tolerance threshold
 ```hcl
 resource "aws_cloudwatch_metric_alarm" "replica_lag_checkout" {
- alarm_name = "checkout-db-replica-lag-critical"
- metric_name = "ReplicaLag"
- namespace = "AWS/RDS"
- statistic = "Maximum"
- period = 60
- evaluation_periods = 2
- # 2000ms threshold -- derived from checkout's OWN documented read-after-write tolerance,
- # NOT a generic default reused across every RDS instance in the account.
- threshold = 2000
- comparison_operator = "GreaterThanThreshold"
- alarm_actions = [aws_sns_topic.pagerduty_critical.arn]
+  alarm_name = "checkout-db-replica-lag-critical"
+  metric_name = "ReplicaLag"
+  namespace = "AWS/RDS"
+  statistic = "Maximum"
+  period = 60
+  evaluation_periods = 2
+  # 2000ms threshold -- derived from checkout's OWN documented read-after-write tolerance,
+    # NOT a generic default reused across every RDS instance in the account.
+    threshold = 2000
+  comparison_operator = "GreaterThanThreshold"
+  alarm_actions = [aws_sns_topic.pagerduty_critical.arn]
 }
 ```
 
@@ -173,21 +173,21 @@ resource "aws_cloudwatch_metric_alarm" "replica_lag_checkout" {
 [XRayTracing]
 public async Task<APIGatewayProxyResponse> HandleAsync(APIGatewayProxyRequest request)
 {
- using var subsegment = AWSXRayRecorder.Instance.BeginSubsegment("ProcessOrder");
- try
- {
- var order = await ProcessOrderAsync(request); // downstream DynamoDB calls
- // automatically traced via the AWS SDK's
- // X-Ray instrumentation -- correlated to
- // this SAME trace ID
- return Success(order);
- }
- catch (Exception ex)
- {
- subsegment.AddException(ex); // exception visible directly on the trace timeline
- throw;
- }
- finally { AWSXRayRecorder.Instance.EndSubsegment; }
+    using var subsegment = AWSXRayRecorder.Instance.BeginSubsegment("ProcessOrder");
+    try
+    {
+        var order = await ProcessOrderAsync(request); // downstream DynamoDB calls
+        // automatically traced via the AWS SDK's
+        // X-Ray instrumentation -- correlated to
+        // this SAME trace ID
+        return Success(order);
+    }
+    catch (Exception ex)
+    {
+        subsegment.AddException(ex); // exception visible directly on the trace timeline
+        throw;
+    }
+    finally { AWSXRayRecorder.Instance.EndSubsegment; }
 }
 ```
 
@@ -195,57 +195,57 @@ public async Task<APIGatewayProxyResponse> HandleAsync(APIGatewayProxyRequest re
 ```csharp
 public class PipelineGovernanceCheck
 {
- public async Task<GovernanceResult> ValidateAsync(DeploymentManifest manifest)
- {
- var findings = new List<string>;
+    public async Task<GovernanceResult> ValidateAsync(DeploymentManifest manifest)
+    {
+        var findings = new List<string>;
 
- //: Multi-AZ verification
- if (manifest.Rds is { MultiAz: false, Environment: "production" })
- findings.Add("RDS instance missing Multi-AZ in production");
+        //: Multi-AZ verification
+        if (manifest.Rds is { MultiAz: false, Environment: "production" })
+            findings.Add("RDS instance missing Multi-AZ in production");
 
- //: IAM policy linting
- if (manifest.IamPolicies.Any(p => p.HasWildcardAction || p.HasWildcardResource))
- findings.Add("Wildcard IAM policy detected -- requires explicit exception (§Advanced Q1)");
+        //: IAM policy linting
+        if (manifest.IamPolicies.Any(p => p.HasWildcardAction || p.HasWildcardResource))
+            findings.Add("Wildcard IAM policy detected -- requires explicit exception (§Advanced Q1)");
 
- ///63: shared/legacy role detection
- if (manifest.TaskRoles.Any(r => r.RoleArn.Contains("legacy-shared-role")))
- findings.Add("Deployment references legacy shared task role (/)");
+        ///63: shared/legacy role detection
+        if (manifest.TaskRoles.Any(r => r.RoleArn.Contains("legacy-shared-role")))
+            findings.Add("Deployment references legacy shared task role (/)");
 
- //: RPO validation
- if (manifest.S3Buckets.Any(b => b.LifecycleRules.Count == 0 && b.EstimatedSizeGb > 100))
- findings.Add("Large S3 bucket with no lifecycle rules");
+        //: RPO validation
+        if (manifest.S3Buckets.Any(b => b.LifecycleRules.Count == 0 && b.EstimatedSizeGb > 100))
+            findings.Add("Large S3 bucket with no lifecycle rules");
 
- return new GovernanceResult { Passed = findings.Count == 0, Findings = findings };
- }
+        return new GovernanceResult { Passed = findings.Count == 0, Findings = findings };
+    }
 }
 ```
 
 ### Expert — Multi-Region Warm Standby health-based failover
 ```hcl
 resource "aws_route53_health_check" "primary_region" {
- fqdn = "api.platform.com"
- port = 443
- type = "HTTPS"
- resource_path = "/ready" # genuine readiness check, NOT liveness-only (the lesson, recurring here)
- failure_threshold = 3
- request_interval = 10
+  fqdn = "api.platform.com"
+  port = 443
+  type = "HTTPS"
+  resource_path = "/ready" # genuine readiness check, NOT liveness-only (the lesson, recurring here)
+  failure_threshold = 3
+  request_interval = 10
 }
 
 resource "aws_route53_record" "primary" {
- name = "api.platform.com"
- type = "A"
- set_identifier = "primary"
- failover_routing_policy { type = "PRIMARY" }
- health_check_id = aws_route53_health_check.primary_region.id
- alias { name = aws_lb.primary_region_alb.dns_name; zone_id = aws_lb.primary_region_alb.zone_id; evaluate_target_health = true }
+  name = "api.platform.com"
+  type = "A"
+  set_identifier = "primary"
+  failover_routing_policy { type = "PRIMARY" }
+  health_check_id = aws_route53_health_check.primary_region.id
+  alias { name = aws_lb.primary_region_alb.dns_name; zone_id = aws_lb.primary_region_alb.zone_id; evaluate_target_health = true }
 }
 
 resource "aws_route53_record" "secondary" {
- name = "api.platform.com"
- type = "A"
- set_identifier = "secondary"
- failover_routing_policy { type = "SECONDARY" } # Warm Standby -- scaled-down but functional
- alias { name = aws_lb.secondary_region_alb.dns_name; zone_id = aws_lb.secondary_region_alb.zone_id; evaluate_target_health = true }
+  name = "api.platform.com"
+  type = "A"
+  set_identifier = "secondary"
+  failover_routing_policy { type = "SECONDARY" } # Warm Standby -- scaled-down but functional
+  alias { name = aws_lb.secondary_region_alb.dns_name; zone_id = aws_lb.secondary_region_alb.zone_id; evaluate_target_health = true }
 }
 ```
 **Discussion**: the health check specifically targets `/ready` (the readiness-not-liveness lesson recurring one final time at the Region-failover scale) — a primary Region that's technically reachable but genuinely degraded (failing dependency connectivity) should trigger failover just as reliably as a fully unreachable primary Region, since a liveness-only check here would leave DNS failover blind to exactly the "alive but broken" failure mode this domain has repeatedly identified as the most dangerous, least obvious kind.

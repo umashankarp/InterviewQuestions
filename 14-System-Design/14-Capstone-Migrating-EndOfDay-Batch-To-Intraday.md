@@ -479,8 +479,8 @@ The generalizable lesson, and the one this capstone rests on: **time-based migra
 public sealed record Timestamped<T>(T Value, DateTime AsOf);
 
 public static Timestamped<TOut> Combine<TA, TB, TOut>(
- Timestamped<TA> a, Timestamped<TB> b, Func<TA, TB, TOut> f) =>
- new(f(a.Value, b.Value), a.AsOf < b.AsOf? a.AsOf: b.AsOf); // OLDEST bounds the result
+    Timestamped<TA> a, Timestamped<TB> b, Func<TA, TB, TOut> f) =>
+new(f(a.Value, b.Value), a.AsOf < b.AsOf? a.AsOf: b.AsOf); // OLDEST bounds the result
 ```
 **Time complexity:** O(1).
 **Space complexity:** O(1).
@@ -492,16 +492,16 @@ public static Timestamped<TOut> Combine<TA, TB, TOut>(
 ```csharp
 public CutoverDecision Evaluate(MigrationJob job)
 {
- var required = _inventory.ScenariosFor(job); // derived from the batch-sequence map
- var demonstrated = _evidence.DemonstratedScenarios(job);
+    var required = _inventory.ScenariosFor(job); // derived from the batch-sequence map
+    var demonstrated = _evidence.DemonstratedScenarios(job);
 
- var missing = required.Except(demonstrated).ToList;
- if (missing.Count > 0)
- return CutoverDecision.Blocked(missing, hint: "Inject synthetically if natural occurrence is rare");
+    var missing = required.Except(demonstrated).ToList;
+    if (missing.Count > 0)
+        return CutoverDecision.Blocked(missing, hint: "Inject synthetically if natural occurrence is rare");
 
- return _reconciliation.HasSustainedAgreement(job)
-? CutoverDecision.Approved
-: CutoverDecision.Blocked([], "Scenarios covered but reconciliation not yet stable");
+    return _reconciliation.HasSustainedAgreement(job)
+    ? CutoverDecision.Approved
+    : CutoverDecision.Blocked([], "Scenarios covered but reconciliation not yet stable");
 }
 ```
 **Time complexity:** O(s) for s scenarios.
@@ -514,14 +514,14 @@ public CutoverDecision Evaluate(MigrationJob job)
 ```csharp
 public DivergenceVerdict Classify(ReconciliationItem item)
 {
- foreach (var cls in _knownClasses) // e.g. rounding accumulation, intra-day correction
- {
- if (!cls.Matches(item)) continue;
- return cls.WithinExpectedMagnitude(item)
-? DivergenceVerdict.Explained(cls.Name)
-: DivergenceVerdict.Defect($"Matches {cls.Name} but magnitude {item.Delta} exceeds expectation");
- }
- return DivergenceVerdict.Defect("No known divergence class matches"); // unexplained = defect
+    foreach (var cls in _knownClasses) // e.g. rounding accumulation, intra-day correction
+    {
+        if (!cls.Matches(item)) continue;
+        return cls.WithinExpectedMagnitude(item)
+        ? DivergenceVerdict.Explained(cls.Name)
+        : DivergenceVerdict.Defect($"Matches {cls.Name} but magnitude {item.Delta} exceeds expectation");
+    }
+    return DivergenceVerdict.Defect("No known divergence class matches"); // unexplained = defect
 }
 ```
 **Time complexity:** O(c) for c known classes.
@@ -534,16 +534,16 @@ public DivergenceVerdict Classify(ReconciliationItem item)
 ```csharp
 public async Task<Snapshot> MaterializeAsOfAsync(DateTime cutoff, IReadOnlyList<EntityId> universe)
 {
- var barrier = await _sequence.HighWaterMarkAtAsync(cutoff); // the barrier
- var values = new Dictionary<EntityId, Timestamped<decimal>>(universe.Count);
+    var barrier = await _sequence.HighWaterMarkAtAsync(cutoff); // the barrier
+    var values = new Dictionary<EntityId, Timestamped<decimal>>(universe.Count);
 
- foreach (var id in universe)
- {
- var v = await _intradayStore.LatestAtOrBeforeAsync(id, barrier);
- if (v is null) throw new IncompleteSnapshotException(id, barrier); // fail, never partial
- values[id] = v;
- }
- return Snapshot.Immutable(SnapshotId.New, cutoff, barrier, values);
+    foreach (var id in universe)
+    {
+        var v = await _intradayStore.LatestAtOrBeforeAsync(id, barrier);
+        if (v is null) throw new IncompleteSnapshotException(id, barrier); // fail, never partial
+        values[id] = v;
+    }
+    return Snapshot.Immutable(SnapshotId.New, cutoff, barrier, values);
 }
 ```
 **Time complexity:** O(n log m) for n entities over m-length histories.

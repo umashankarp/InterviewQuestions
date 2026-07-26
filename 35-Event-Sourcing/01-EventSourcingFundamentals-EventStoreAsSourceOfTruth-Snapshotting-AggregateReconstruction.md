@@ -389,25 +389,25 @@ sequenceDiagram
 ```csharp
 public class Order
 {
- public OrderStatus Status { get; private set; }
- private readonly List<LineItem> _lines = new;
+    public OrderStatus Status { get; private set; }
+    private readonly List<LineItem> _lines = new;
 
- public static Order LoadFromHistory(IEnumerable<DomainEvent> events)
- {
- var order = new Order;
- foreach (var e in events) order.Apply(e);
- return order;
- }
+    public static Order LoadFromHistory(IEnumerable<DomainEvent> events)
+    {
+        var order = new Order;
+        foreach (var e in events) order.Apply(e);
+        return order;
+    }
 
- private void Apply(DomainEvent e)
- {
- switch (e)
- {
- case OrderCreated c: Status = OrderStatus.Draft; break;
- case LineItemAdded l: _lines.Add(new LineItem(l.Sku, l.Quantity)); break;
- case OrderSubmitted: Status = OrderStatus.Submitted; break;
- }
- }
+    private void Apply(DomainEvent e)
+    {
+        switch (e)
+        {
+            case OrderCreated c: Status = OrderStatus.Draft; break;
+            case LineItemAdded l: _lines.Add(new LineItem(l.Sku, l.Quantity)); break;
+            case OrderSubmitted: Status = OrderStatus.Submitted; break;
+        }
+    }
 }
 ```
 **Time complexity:** O(n) in the number of events replayed.
@@ -420,14 +420,14 @@ public class Order
 ```csharp
 public static async Task<Order> Load(string streamId, ISnapshotStore snapshots, IEventStore events)
 {
- var snapshot = await snapshots.GetLatestAsync(streamId);
- var order = snapshot is not null? Order.FromSnapshot(snapshot.State): new Order;
- var fromVersion = snapshot?.Version?? 0;
+    var snapshot = await snapshots.GetLatestAsync(streamId);
+    var order = snapshot is not null? Order.FromSnapshot(snapshot.State): new Order;
+    var fromVersion = snapshot?.Version?? 0;
 
- await foreach (var e in events.ReadFrom(streamId, fromVersion))
- order.ApplyPublic(e); // internal Apply, exposed for replay
+    await foreach (var e in events.ReadFrom(streamId, fromVersion))
+    order.ApplyPublic(e); // internal Apply, exposed for replay
 
- return order;
+    return order;
 }
 ```
 **Time complexity:** O(k) where k = events since last snapshot, not O(n) for full history.
@@ -440,18 +440,18 @@ public static async Task<Order> Load(string streamId, ISnapshotStore snapshots, 
 ```csharp
 public async Task ExecuteCommand(string streamId, Func<Order, DomainEvent> commandLogic)
 {
- var (order, currentVersion) = await LoadWithVersion(streamId);
- var newEvent = commandLogic(order); // pure business logic, no side effects
+    var (order, currentVersion) = await LoadWithVersion(streamId);
+    var newEvent = commandLogic(order); // pure business logic, no side effects
 
- try
- {
- await _eventStore.AppendToStream(streamId, expectedVersion: currentVersion, newEvent);
- }
- catch (WrongExpectedVersionException)
- {
- // Concurrent modification detected — reload and retry, or surface conflict to caller
- throw new ConcurrencyConflictException(streamId);
- }
+    try
+    {
+        await _eventStore.AppendToStream(streamId, expectedVersion: currentVersion, newEvent);
+    }
+    catch (WrongExpectedVersionException)
+    {
+        // Concurrent modification detected — reload and retry, or surface conflict to caller
+        throw new ConcurrencyConflictException(streamId);
+    }
 }
 ```
 **Time complexity:** O(k) for the load (bounded by snapshot cadence) plus O(1) for the atomic append/version-check.
@@ -466,29 +466,29 @@ public interface IUpcaster { object Upcast(object rawEvent); }
 
 public class LineItemMatchedV1ToV2Upcaster: IUpcaster
 {
- public object Upcast(object raw) => raw is LineItemMatchedV1 v1
-? new LineItemMatchedV2(v1.OrderId, quantity: v1.Qty) // field renamed
-: raw;
+    public object Upcast(object raw) => raw is LineItemMatchedV1 v1
+    ? new LineItemMatchedV2(v1.OrderId, quantity: v1.Qty) // field renamed
+    : raw;
 }
 
 public class LineItemMatchedV2ToV3Upcaster: IUpcaster
 {
- public object Upcast(object raw) => raw is LineItemMatchedV2 v2
-? new LineItemMatchedV3(v2.OrderId, v2.Quantity, price: DerivePrice(v2)) // field added
-: raw;
+    public object Upcast(object raw) => raw is LineItemMatchedV2 v2
+    ? new LineItemMatchedV3(v2.OrderId, v2.Quantity, price: DerivePrice(v2)) // field added
+    : raw;
 }
 
 public class UpcasterChain
 {
- private readonly IReadOnlyList<IUpcaster> _chain = new IUpcaster[]
- {
- new LineItemMatchedV1ToV2Upcaster,
- new LineItemMatchedV2ToV3Upcaster
- };
+    private readonly IReadOnlyList<IUpcaster> _chain = new IUpcaster[]
+    {
+        new LineItemMatchedV1ToV2Upcaster,
+            new LineItemMatchedV2ToV3Upcaster
+    };
 
- public object UpcastToCurrent(object rawEvent) =>
- _chain.Aggregate(rawEvent, (evt, upcaster) => upcaster.Upcast(evt));
- // Apply only ever receives the fully-upcast, current-version (v3) shape
+    public object UpcastToCurrent(object rawEvent) =>
+        _chain.Aggregate(rawEvent, (evt, upcaster) => upcaster.Upcast(evt));
+    // Apply only ever receives the fully-upcast, current-version (v3) shape
 }
 ```
 **Time complexity:** O(v) per event, where v is the number of version steps between the stored version and current — negligible in practice for realistic version counts.

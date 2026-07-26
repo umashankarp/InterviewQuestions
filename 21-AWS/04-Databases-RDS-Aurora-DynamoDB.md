@@ -154,16 +154,16 @@ graph TB
 ```csharp
 public class OrderRepository
 {
- private readonly NpgsqlConnection _primaryConnection; // writes + read-your-own-writes reads
- private readonly NpgsqlConnection _replicaConnection; // eventual-consistency-tolerant reads
+    private readonly NpgsqlConnection _primaryConnection; // writes + read-your-own-writes reads
+    private readonly NpgsqlConnection _replicaConnection; // eventual-consistency-tolerant reads
 
- public async Task<Order> GetOrderConfirmationAsync(Guid orderId)
- // the fix: post-checkout confirmation MUST read from primary
- => await QueryOrderAsync(_primaryConnection, orderId);
+    public async Task<Order> GetOrderConfirmationAsync(Guid orderId)
+    // the fix: post-checkout confirmation MUST read from primary
+    => await QueryOrderAsync(_primaryConnection, orderId);
 
- public async Task<List<Order>> GetOrderHistoryAsync(Guid customerId)
- // Historical browsing tolerates eventual consistency -- safe to read-scale via replica
- => await QueryOrderHistoryAsync(_replicaConnection, customerId);
+    public async Task<List<Order>> GetOrderHistoryAsync(Guid customerId)
+    // Historical browsing tolerates eventual consistency -- safe to read-scale via replica
+    => await QueryOrderHistoryAsync(_replicaConnection, customerId);
 }
 ```
 
@@ -172,9 +172,9 @@ public class OrderRepository
 // Lambda connects to the RDS PROXY endpoint, never directly to the database endpoint --
 // the proxy pools/multiplexes connections, avoiding per-invocation connection exhaustion.
 var connectionString =
- "Host=order-db-proxy.proxy-abc123.us-east-1.rds.amazonaws.com;" +
- "Database=orders;Username=app_role;" +
- "SSL Mode=Require"; // RDS Proxy requires TLS
+"Host=order-db-proxy.proxy-abc123.us-east-1.rds.amazonaws.com;" +
+    "Database=orders;Username=app_role;" +
+    "SSL Mode=Require"; // RDS Proxy requires TLS
 ```
 
 ### Hard — DynamoDB Streams triggering a downstream event
@@ -182,20 +182,20 @@ var connectionString =
 [LambdaFunction]
 public async Task HandleDynamoDbStreamEvent(DynamoDBEvent evt)
 {
- foreach (var record in evt.Records)
- {
- if (record.EventName == "INSERT")
- {
- var newImage = record.Dynamodb.NewImage;
- // DynamoDB itself is the event PRODUCER here -- same architectural role
- // S3 event notifications played.
- await _snsClient.PublishAsync(new PublishRequest
- {
- TopicArn = "arn:aws:sns:us-east-1:222222222222:order-created",
- Message = JsonSerializer.Serialize(newImage)
- });
- }
- }
+    foreach (var record in evt.Records)
+    {
+        if (record.EventName == "INSERT")
+        {
+            var newImage = record.Dynamodb.NewImage;
+            // DynamoDB itself is the event PRODUCER here -- same architectural role
+            // S3 event notifications played.
+            await _snsClient.PublishAsync(new PublishRequest
+                {
+                    TopicArn = "arn:aws:sns:us-east-1:222222222222:order-created",
+                        Message = JsonSerializer.Serialize(newImage)
+            });
+        }
+    }
 }
 ```
 
@@ -203,25 +203,25 @@ public async Task HandleDynamoDbStreamEvent(DynamoDBEvent evt)
 ```csharp
 public async Task DebitAccountWithAuditAsync(Guid accountId, decimal amount)
 {
- await using var transaction = await _auroraConnection.BeginTransactionAsync;
- try
- {
- // 1. The actual business write, and the outbox entry, in the SAME Aurora transaction --
- // atomicity is guaranteed by Aurora itself, not by any cross-service mechanism.
- await _auroraConnection.ExecuteAsync(
- "UPDATE accounts SET balance = balance - @amount WHERE id = @accountId",
- new { amount, accountId }, transaction);
+    await using var transaction = await _auroraConnection.BeginTransactionAsync;
+    try
+    {
+        // 1. The actual business write, and the outbox entry, in the SAME Aurora transaction --
+        // atomicity is guaranteed by Aurora itself, not by any cross-service mechanism.
+        await _auroraConnection.ExecuteAsync(
+            "UPDATE accounts SET balance = balance - @amount WHERE id = @accountId",
+                new { amount, accountId }, transaction);
 
- await _auroraConnection.ExecuteAsync(
- "INSERT INTO outbox (event_type, payload, created_at) VALUES ('AccountDebited', @payload, NOW)",
- new { payload = JsonSerializer.Serialize(new { accountId, amount }) }, transaction);
+        await _auroraConnection.ExecuteAsync(
+            "INSERT INTO outbox (event_type, payload, created_at) VALUES ('AccountDebited', @payload, NOW)",
+                new { payload = JsonSerializer.Serialize(new { accountId, amount }) }, transaction);
 
- await transaction.CommitAsync;
- }
- catch { await transaction.RollbackAsync; throw; }
+        await transaction.CommitAsync;
+    }
+    catch { await transaction.RollbackAsync; throw; }
 
- // 2. A SEPARATE worker (not shown) polls the outbox table and reliably delivers
- // each entry into DynamoDB's audit-log table, with at-least-once delivery + idempotent writes.
+    // 2. A SEPARATE worker (not shown) polls the outbox table and reliably delivers
+    // each entry into DynamoDB's audit-log table, with at-least-once delivery + idempotent writes.
 }
 ```
 

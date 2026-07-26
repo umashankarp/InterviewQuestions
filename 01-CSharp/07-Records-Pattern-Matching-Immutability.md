@@ -33,10 +33,10 @@ var p3 = p1 with { X = 99 }; // non-destructive mutation: a NEW Point(99, 2), p1
 
 string Describe(object shape) => shape switch
 {
- Point { X: 0, Y: 0 } => "origin",
- Point(var x, var y) when x == y => $"on the diagonal at {x}",
- Point p => $"({p.X}, {p.Y})",
- _ => "not a point"
+    Point { X: 0, Y: 0 } => "origin",
+        Point(var x, var y) when x == y => $"on the diagonal at {x}",
+        Point p => $"({p.X}, {p.Y})",
+        _ => "not a point"
 };
 ```
 
@@ -55,27 +55,27 @@ desugars, roughly, to:
 ```csharp
 public class Point: IEquatable<Point>
 {
- public int X { get; init; }
- public int Y { get; init; }
+    public int X { get; init; }
+    public int Y { get; init; }
 
- public Point(int X, int Y) { this.X = X; this.Y = Y; }
+    public Point(int X, int Y) { this.X = X; this.Y = Y; }
 
- public override bool Equals(object? obj) => Equals(obj as Point);
- public bool Equals(Point? other) =>
- other is not null && EqualityContract == other.EqualityContract
- && X == other.X && Y == other.Y;
- public override int GetHashCode => HashCode.Combine(X, Y);
- public static bool operator ==(Point? a, Point? b) => a?.Equals(b)?? b is null;
- public static bool operator!=(Point? a, Point? b) =>!(a == b);
+    public override bool Equals(object? obj) => Equals(obj as Point);
+    public bool Equals(Point? other) =>
+        other is not null && EqualityContract == other.EqualityContract
+    && X == other.X && Y == other.Y;
+    public override int GetHashCode => HashCode.Combine(X, Y);
+    public static bool operator ==(Point? a, Point? b) => a?.Equals(b)?? b is null;
+    public static bool operator!=(Point? a, Point? b) =>!(a == b);
 
- public override string ToString => $"Point {{ X = {X}, Y = {Y} }}";
+    public override string ToString => $"Point {{ X = {X}, Y = {Y} }}";
 
- public void Deconstruct(out int X, out int Y) { X = this.X; Y = this.Y; }
+    public void Deconstruct(out int X, out int Y) { X = this.X; Y = this.Y; }
 
- protected virtual Type EqualityContract => typeof(Point); // 
+    protected virtual Type EqualityContract => typeof(Point); //
 
- public virtual Point <Clone>$ => new Point(this); // backing mechanism for `with`
- protected Point(Point original) { X = original.X; Y = original.Y; } // copy constructor
+    public virtual Point <Clone>$ => new Point(this); // backing mechanism for `with`
+    protected Point(Point original) { X = original.X; Y = original.Y; } // copy constructor
 }
 ```
 **Key facts**: `record class` (the default, `record` alone means `record class`) is a **reference type** — instances still live on the heap; only the *equality/ToString/with* semantics change, not the fundamental class-vs-struct memory model. `record struct` (C# 10+) applies the same synthesis to a value type instead, giving you a struct with generated value equality (structs already have some value-equality-like default `Equals` via `ValueType.Equals`, but it's slow — reflection-based field comparison — whereas a `record struct`'s generated `Equals` is a fast, direct field-by-field comparison, a genuine, measurable improvement over the default struct `Equals`).
@@ -87,8 +87,8 @@ public class Point: IEquatable<Point>
 ```csharp
 public class Point
 {
- public int X { get; init; }
- public int Y { get; init; }
+    public int X { get; init; }
+    public int Y { get; init; }
 }
 var p = new Point { X = 1, Y = 2 }; // OK -- during initialization
 p.X = 5; // COMPILE ERROR: init-only property can only be assigned in an object initializer or constructor
@@ -136,11 +136,11 @@ public enum TrafficLight { Red, Yellow, Green }
 
 string Instruction(TrafficLight light) => light switch
 {
- TrafficLight.Red => "Stop",
- TrafficLight.Yellow => "Caution",
- TrafficLight.Green => "Go",
- // No default arm -- if all enum values ARE covered, no warning.
- // If one were missing, the compiler emits CS8509 "the switch expression does not handle all possible values" (a WARNING, not an error, by default)
+    TrafficLight.Red => "Stop",
+        TrafficLight.Yellow => "Caution",
+        TrafficLight.Green => "Go",
+        // No default arm -- if all enum values ARE covered, no warning.
+    // If one were missing, the compiler emits CS8509 "the switch expression does not handle all possible values" (a WARNING, not an error, by default)
 };
 ```
 **Critical, commonly-mis-stated fact**: C#'s switch-expression exhaustiveness checking produces a **compiler warning** (`CS8509`), not a compile-time **error**, by default — code that doesn't handle every case still compiles and will throw a runtime `SwitchExpressionException` if an unhandled value is actually encountered. Teams wanting true compile-time-enforced exhaustiveness must enable `TreatWarningsAsErrors` (globally or for this specific warning code) — a frequently-missed nuance that separates "I've heard C# has exhaustive pattern matching" from an accurate understanding of exactly what guarantee is (and isn't) actually enforced by default.
@@ -153,10 +153,10 @@ string Instruction(TrafficLight light) => light switch
 int[] numbers = { 1, 2, 3, 4, 5 };
 string Describe(int[] arr) => arr switch
 {
- [] => "empty",
- [var single] => $"one element: {single}",
- [var first,.. var rest] => $"starts with {first}, then {rest.Length} more",
- [.., var last] => $"ends with {last}" // (unreachable here since the previous arm already covers 2+ elements, illustrating pattern ORDER matters)
+    [] => "empty",
+        [var single] => $"one element: {single}",
+        [var first,.. var rest] => $"starts with {first}, then {rest.Length} more",
+        [.., var last] => $"ends with {last}" // (unreachable here since the previous arm already covers 2+ elements, illustrating pattern ORDER matters)
 };
 ```
 The `..` (slice pattern) can appear at most once per list pattern and captures the "remaining" elements as a slice — for arrays, this is genuinely efficient (backed by `Array.Slice`-equivalent mechanics, no unnecessary copying for the check itself, though binding `var rest` does produce a new array/slice); for any type implementing an appropriate `Length`/`Count` + indexer (or `Slice` method) shape, list patterns work generically, not just for arrays — connecting directly to the `Span<T>` (which also supports list-pattern matching, since it exposes `Length` and an indexer/`Slice`).
@@ -351,18 +351,18 @@ classDiagram
 5. **Q: Describe how you would model a discriminated-union-style `PaymentResult` (Success, Declined, RequiresAdditionalVerification) using sealed records, and write the exhaustive switch expression handling all three cases plus enforce compile-time exhaustiveness.**
  **A:**
  ```csharp
- public abstract record PaymentResult;
- public sealed record Success(string TransactionId): PaymentResult;
- public sealed record Declined(string Reason): PaymentResult;
- public sealed record RequiresAdditionalVerification(string VerificationUrl): PaymentResult;
+public abstract record PaymentResult;
+public sealed record Success(string TransactionId): PaymentResult;
+public sealed record Declined(string Reason): PaymentResult;
+public sealed record RequiresAdditionalVerification(string VerificationUrl): PaymentResult;
 
- string Describe(PaymentResult result) => result switch
- {
- Success(var txId) => $"Payment succeeded: {txId}",
- Declined(var reason) => $"Payment declined: {reason}",
- RequiresAdditionalVerification(var url) => $"Verify at: {url}",
- // no discard arm -- relying on exhaustiveness checking to catch any future new derived record
- };
+string Describe(PaymentResult result) => result switch
+{
+    Success(var txId) => $"Payment succeeded: {txId}",
+        Declined(var reason) => $"Payment declined: {reason}",
+        RequiresAdditionalVerification(var url) => $"Verify at: {url}",
+        // no discard arm -- relying on exhaustiveness checking to catch any future new derived record
+};
  ```
  With `<WarningsAsErrors>CS8509</WarningsAsErrors>` (or a project-wide `TreatWarningsAsErrors`) set in the `.csproj`, adding a fourth derived record (e.g., `PartialRefund`) anywhere in the codebase without updating this (and every other) exhaustive switch over `PaymentResult` now fails the **build**, not just a runtime exception — converting a "someone forgot to update a switch statement" bug class (which could otherwise ship silently) into a compile-time-caught one, directly demonstrating the exhaustiveness-enforcement recommendation in concrete code.
 
@@ -410,13 +410,13 @@ classDiagram
 ```csharp
 public class Money
 {
- public decimal Amount { get; }
- public string Currency { get; }
- public Money(decimal amount, string currency) { Amount = amount; Currency = currency; }
- public override bool Equals(object? obj) =>
- obj is Money other && Amount == other.Amount && Currency == other.Currency;
- public override int GetHashCode => HashCode.Combine(Amount, Currency);
- public override string ToString => $"{Amount} {Currency}";
+    public decimal Amount { get; }
+    public string Currency { get; }
+    public Money(decimal amount, string currency) { Amount = amount; Currency = currency; }
+    public override bool Equals(object? obj) =>
+        obj is Money other && Amount == other.Amount && Currency == other.Currency;
+    public override int GetHashCode => HashCode.Combine(Amount, Currency);
+    public override string ToString => $"{Amount} {Currency}";
 }
 ```
 **Solution**:
@@ -460,17 +460,17 @@ public sealed record Unauthorized(string Reason): ApiResult;
 
 public static class ApiResultMapper
 {
- public static (int StatusCode, object Body) ToHttpResponse(ApiResult result) => result switch
- {
- Ok<object> ok => (200, ok.Value!),
- NotFound(var resourceType, var id) => (404, new { error = $"{resourceType} '{id}' not found" }),
- ValidationFailed(var errors) when errors.Count == 1 => (400, new { error = errors[0] }),
- ValidationFailed(var errors) => (400, new { error = "Multiple validation errors", details = errors }),
- Unauthorized(var reason) => (401, new { error = reason }),
- _ => throw new NotSupportedException($"Unhandled ApiResult type: {result.GetType.Name}")
- // The '_' arm here is a deliberate defensive fallback for the Ok<T> generic-type-matching
- // limitation below, NOT a sign the hierarchy is meant to stay open -- see discussion.
- };
+    public static (int StatusCode, object Body) ToHttpResponse(ApiResult result) => result switch
+    {
+        Ok<object> ok => (200, ok.Value!),
+            NotFound(var resourceType, var id) => (404, new { error = $"{resourceType} '{id}' not found" }),
+            ValidationFailed(var errors) when errors.Count == 1 => (400, new { error = errors[0] }),
+            ValidationFailed(var errors) => (400, new { error = "Multiple validation errors", details = errors }),
+            Unauthorized(var reason) => (401, new { error = reason }),
+            _ => throw new NotSupportedException($"Unhandled ApiResult type: {result.GetType.Name}")
+        // The '_' arm here is a deliberate defensive fallback for the Ok<T> generic-type-matching
+        // limitation below, NOT a sign the hierarchy is meant to stay open -- see discussion.
+    };
 }
 ```
 **Discussion points**: Note the `Ok<object> ok` arm — pattern matching against an open generic record like `Ok<T>` for an *arbitrary* `T` requires matching the non-generic base or using a workaround (since `case Ok<T>:` isn't directly expressible without knowing `T` at the switch site); production code would more commonly make `Ok` non-generic (`sealed record Ok(object Value)`) or use a separate non-generic marker interface (`IApiResult`) that generic `Ok<T>` implements, specifically to keep the exhaustive-switch pattern clean — this exercise deliberately surfaces that friction point as a realistic thing to discuss in an interview, not a limitation to silently paper over. The `_` fallback arm here exists specifically to defensively handle the `Ok<T>`-for-arbitrary-`T` matching gap (a real limitation, not a "the hierarchy might grow" hedge) — in a design using the non-generic `Ok` alternative, that `_` arm could be removed entirely and `CS8509`'s exhaustiveness warning would then genuinely enforce hierarchy completeness, exactly /Advanced Q5's guidance.
@@ -480,47 +480,47 @@ public static class ApiResultMapper
 ```csharp
 public readonly record struct Either<TLeft, TRight>
 {
- private readonly TLeft? _left;
- private readonly TRight? _right;
- public bool IsLeft { get; }
+    private readonly TLeft? _left;
+    private readonly TRight? _right;
+    public bool IsLeft { get; }
 
- private Either(TLeft? left, TRight? right, bool isLeft)
- {
- _left = left; _right = right; IsLeft = isLeft;
- }
+    private Either(TLeft? left, TRight? right, bool isLeft)
+    {
+        _left = left; _right = right; IsLeft = isLeft;
+    }
 
- public static Either<TLeft, TRight> Left(TLeft value) => new(value, default, true);
- public static Either<TLeft, TRight> Right(TRight value) => new(default, value, false);
+    public static Either<TLeft, TRight> Left(TLeft value) => new(value, default, true);
+    public static Either<TLeft, TRight> Right(TRight value) => new(default, value, false);
 
- public TResult Match<TResult>(Func<TLeft, TResult> onLeft, Func<TRight, TResult> onRight) =>
- IsLeft? onLeft(_left!): onRight(_right!);
+    public TResult Match<TResult>(Func<TLeft, TResult> onLeft, Func<TRight, TResult> onRight) =>
+        IsLeft? onLeft(_left!): onRight(_right!);
 
- // Enables: if (either is { IsLeft: true } left) -- a property pattern reading the discriminator
- public bool TryGetLeft(out TLeft value)
- {
- value = _left!;
- return IsLeft;
- }
- public bool TryGetRight(out TRight value)
- {
- value = _right!;
- return!IsLeft;
- }
+    // Enables: if (either is { IsLeft: true } left) -- a property pattern reading the discriminator
+    public bool TryGetLeft(out TLeft value)
+    {
+        value = _left!;
+        return IsLeft;
+    }
+    public bool TryGetRight(out TRight value)
+    {
+        value = _right!;
+        return!IsLeft;
+    }
 }
 
 // Usage:
 Either<string, int> ParseNumber(string input) =>
- int.TryParse(input, out var n)? Either<string, int>.Right(n): Either<string, int>.Left($"'{input}' is not a number");
+    int.TryParse(input, out var n)? Either<string, int>.Right(n): Either<string, int>.Left($"'{input}' is not a number");
 
 var result = ParseNumber("42");
 string message = result.Match(
- onLeft: error => $"Error: {error}",
- onRight: value => $"Parsed: {value}"
+    onLeft: error => $"Error: {error}",
+        onRight: value => $"Parsed: {value}"
 );
 
 // Pattern-matching-friendly alternative to Match, using TryGetLeft/Right with 'is' patterns:
 if (result.TryGetRight(out int parsed))
- Console.WriteLine($"Got {parsed}");
+    Console.WriteLine($"Got {parsed}");
 ```
 **Time complexity**: O(1) construction/matching. **Space**: `readonly record struct` — zero heap allocation per `Either` instance (unlike a `class`-based discriminated union, which would allocate per instance); the trade-off is that both `_left` and `_right` fields exist simultaneously in memory (only one is logically "active"), a small, bounded, and generally worthwhile space cost in exchange for avoiding heap allocation for what's often an extremely hot, frequently-constructed type (result/validation types constructed on nearly every method call in a codebase leaning on this pattern).
 **Discussion points**: This directly synthesizes the generic constraints/generics discussion (a doubly-generic `record struct`), the low-allocation guidance (value-type discriminated union avoiding heap allocation), and this module's pattern-matching/`record struct` equality mechanics — a realistic Expert-tier exercise combining three prior modules' concepts into one cohesive, production-quality utility type, exactly mirroring the kind of cross-module synthesis Staff/Principal interviews probe for.
@@ -583,26 +583,26 @@ public sealed record Cancelled(DateTime CancelledAt, string Reason): OrderState;
 
 public static class OrderStateTransitions
 {
- // Exhaustive switch encodes EVERY valid transition explicitly -- invalid transitions
- // are represented by simply not having an arm for them, falling to the final
- // exception arm, itself only reachable if a genuinely-unhandled combination occurs.
- public static OrderState Pay(OrderState current, string transactionId) => current switch
- {
- Pending => new Paid(DateTime.UtcNow, transactionId),
- Paid => throw new InvalidOperationException("Order is already paid."),
- Shipped => throw new InvalidOperationException("Cannot pay for an already-shipped order."),
- Cancelled => throw new InvalidOperationException("Cannot pay for a cancelled order."),
- _ => throw new NotSupportedException($"Unhandled state: {current.GetType.Name}")
- };
+    // Exhaustive switch encodes EVERY valid transition explicitly -- invalid transitions
+    // are represented by simply not having an arm for them, falling to the final
+    // exception arm, itself only reachable if a genuinely-unhandled combination occurs.
+    public static OrderState Pay(OrderState current, string transactionId) => current switch
+    {
+        Pending => new Paid(DateTime.UtcNow, transactionId),
+            Paid => throw new InvalidOperationException("Order is already paid."),
+            Shipped => throw new InvalidOperationException("Cannot pay for an already-shipped order."),
+            Cancelled => throw new InvalidOperationException("Cannot pay for a cancelled order."),
+            _ => throw new NotSupportedException($"Unhandled state: {current.GetType.Name}")
+    };
 
- public static OrderState Ship(OrderState current, string trackingNumber) => current switch
- {
- Paid => new Shipped(DateTime.UtcNow, trackingNumber),
- Pending => throw new InvalidOperationException("Cannot ship an unpaid order."),
- Shipped => throw new InvalidOperationException("Order is already shipped."),
- Cancelled => throw new InvalidOperationException("Cannot ship a cancelled order."),
- _ => throw new NotSupportedException($"Unhandled state: {current.GetType.Name}")
- };
+    public static OrderState Ship(OrderState current, string trackingNumber) => current switch
+    {
+        Paid => new Shipped(DateTime.UtcNow, trackingNumber),
+            Pending => throw new InvalidOperationException("Cannot ship an unpaid order."),
+            Shipped => throw new InvalidOperationException("Order is already shipped."),
+            Cancelled => throw new InvalidOperationException("Cannot ship a cancelled order."),
+            _ => throw new NotSupportedException($"Unhandled state: {current.GetType.Name}")
+    };
 }
 ```
 

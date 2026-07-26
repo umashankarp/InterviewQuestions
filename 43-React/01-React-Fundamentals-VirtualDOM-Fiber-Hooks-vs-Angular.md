@@ -353,16 +353,16 @@ Fiber's interruptible, priority-scheduled rendering is React's most distinctive 
 interface Position { symbol: string; price: number; changePercent: number; }
 
 function TopMoversList({ positions }: { positions: Position[] }) {
- return (
- <ul>
- {positions.map(position => (
- // key = stable, unique identifier — NEVER array index for a reorderable list.
- <li key={position.symbol}>
- {position.symbol}: {position.price.toFixed(2)} ({position.changePercent}%)
- </li>
-))}
- </ul>
-);
+  return (
+    <ul>
+    {positions.map(position => (
+          // key = stable, unique identifier — NEVER array index for a reorderable list.
+          <li key={position.symbol}>
+          {position.symbol}: {position.price.toFixed(2)} ({position.changePercent}%)
+          </li>
+    ))}
+    </ul>
+  );
 }
 ```
 **Time complexity:** O(n) per render (n = position count), same reconciliation cost class as the Angular equivalent. **Space complexity:** O(n).
@@ -376,31 +376,31 @@ function TopMoversList({ positions }: { positions: Position[] }) {
 **Solution (TSX):**
 ```tsx
 function OrderEntryWidget {
- const [orderPrice, setOrderPrice] = useState(0);
- const orderPriceRef = useRef(orderPrice);
+  const [orderPrice, setOrderPrice] = useState(0);
+  const orderPriceRef = useRef(orderPrice);
 
- // Keep the ref in sync with the latest render's state — this effect
- // is cheap and intentionally has NO subscription/side-effect cost
- // just a plain mutation, so re-running it on every orderPrice change is fine.
- useEffect(=> {
- orderPriceRef.current = orderPrice;
- }, [orderPrice]);
+  // Keep the ref in sync with the latest render's state — this effect
+  // is cheap and intentionally has NO subscription/side-effect cost
+  // just a plain mutation, so re-running it on every orderPrice change is fine.
+  useEffect(=> {
+      orderPriceRef.current = orderPrice;
+    }, [orderPrice]);
 
- useEffect(=> {
- const ws = new WebSocket('wss://market-data.internal/prices')
- ws.onmessage = (event) => {
- const livePrice = JSON.parse(event.data).price;
- // Reads the REF's.current — always up to date, regardless of when
- // this closure was originally created. Fixes the exact incident.
- const deviation = Math.abs(livePrice - orderPriceRef.current) / livePrice;
- if (deviation > 0.02) {
- console.warn(`Price deviation alert: order=${orderPriceRef.current}, live=${livePrice}`);
- }
- };
- return => ws.close;
- }, []); // correctly empty — subscribes exactly once, no resubscription thrashing
+  useEffect(=> {
+      const ws = new WebSocket('wss://market-data.internal/prices')
+      ws.onmessage = (event) => {
+        const livePrice = JSON.parse(event.data).price;
+        // Reads the REF's.current — always up to date, regardless of when
+        // this closure was originally created. Fixes the exact incident.
+        const deviation = Math.abs(livePrice - orderPriceRef.current) / livePrice;
+        if (deviation > 0.02) {
+          console.warn(`Price deviation alert: order=${orderPriceRef.current}, live=${livePrice}`);
+        }
+      };
+      return => ws.close;
+    }, []); // correctly empty — subscribes exactly once, no resubscription thrashing
 
- return <input value={orderPrice} onChange={e => setOrderPrice(Number(e.target.value))} />;
+  return <input value={orderPrice} onChange={e => setOrderPrice(Number(e.target.value))} />;
 }
 ```
 **Time complexity:** O(1) per message. **Space complexity:** O(1).
@@ -414,42 +414,42 @@ function OrderEntryWidget {
 **Solution (TSX):**
 ```tsx
 const GridRow = memo(function GridRow({
- position,
- onSelect,
- displayConfig
-}: {
- position: Position;
- onSelect: (symbol: string) => void;
- displayConfig: { decimals: number; showPercent: boolean };
-}) {
- return (
- <div onClick={ => onSelect(position.symbol)}>
- {position.symbol}: {position.price.toFixed(displayConfig.decimals)}
- {displayConfig.showPercent && ` (${position.changePercent}%)`}
- </div>
-);
+      position,
+        onSelect,
+        displayConfig
+    }: {
+      position: Position;
+      onSelect: (symbol: string) => void;
+      displayConfig: { decimals: number; showPercent: boolean };
+  }) {
+    return (
+      <div onClick={ => onSelect(position.symbol)}>
+      {position.symbol}: {position.price.toFixed(displayConfig.decimals)}
+      {displayConfig.showPercent && ` (${position.changePercent}%)`}
+      </div>
+    );
 });
 
 function PositionGrid({ positions }: { positions: Position[] }) {
- const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
 
- // Stabilized across renders — memo on GridRow now actually works
- // since this reference doesn't change unless setSelected itself changes
- // (which it never does, being a useState setter — stable by React's own guarantee).
- const handleSelect = useCallback((symbol: string) => setSelected(symbol), []);
+  // Stabilized across renders — memo on GridRow now actually works
+  // since this reference doesn't change unless setSelected itself changes
+  // (which it never does, being a useState setter — stable by React's own guarantee).
+  const handleSelect = useCallback((symbol: string) => setSelected(symbol), []);
 
- // Stabilized object reference — WITHOUT this, a new {decimals, showPercent}
- // object literal on every PositionGrid render would defeat memo exactly
- // as the inline-function case does (Advanced Q4's object-literal variant).
- const displayConfig = useMemo(=> ({ decimals: 2, showPercent: true }), []);
+  // Stabilized object reference — WITHOUT this, a new {decimals, showPercent}
+  // object literal on every PositionGrid render would defeat memo exactly
+  // as the inline-function case does (Advanced Q4's object-literal variant).
+  const displayConfig = useMemo(=> ({ decimals: 2, showPercent: true }), []);
 
- return (
- <>
- {positions.map(p => (
- <GridRow key={p.symbol} position={p} onSelect={handleSelect} displayConfig={displayConfig} />
-))}
- </>
-);
+  return (
+    <>
+    {positions.map(p => (
+          <GridRow key={p.symbol} position={p} onSelect={handleSelect} displayConfig={displayConfig} />
+    ))}
+    </>
+  );
 }
 ```
 **Time complexity:** O(1) per row per render when `memo` correctly skips (the common case); O(n) when a genuine data change requires re-rendering all rows. **Space complexity:** O(n) for the position list.
@@ -465,50 +465,50 @@ function PositionGrid({ positions }: { positions: Position[] }) {
 interface Tick { symbol: string; price: number; timestamp: number; }
 
 function useBufferedTicks: Tick[] {
- const [ticks, setTicks] = useState<Tick[]>([]);
- const bufferRef = useRef<Map<string, Tick>>(new Map);
+  const [ticks, setTicks] = useState<Tick[]>([]);
+  const bufferRef = useRef<Map<string, Tick>>(new Map);
 
- useEffect(=> {
- const ws = new WebSocket('wss://market-data.internal/ticks')
- ws.onmessage = (event) => {
- const tick: Tick = JSON.parse(event.data);
- bufferRef.current.set(tick.symbol, tick); // dedupe-to-latest-per-symbol, same as
- };
+  useEffect(=> {
+      const ws = new WebSocket('wss://market-data.internal/ticks')
+      ws.onmessage = (event) => {
+        const tick: Tick = JSON.parse(event.data);
+        bufferRef.current.set(tick.symbol, tick); // dedupe-to-latest-per-symbol, same as
+      };
 
- // Flush the buffer on a fixed interval — the React equivalent of
- // RxJS's bufferTime(100), bounding state-update (and therefore
- // reconciliation) FREQUENCY, independent of Fiber's scheduling.
- const flushInterval = setInterval(=> {
- if (bufferRef.current.size > 0) {
- setTicks(Array.from(bufferRef.current.values));
- bufferRef.current.clear;
- }
- }, 100);
+      // Flush the buffer on a fixed interval — the React equivalent of
+      // RxJS's bufferTime(100), bounding state-update (and therefore
+      // reconciliation) FREQUENCY, independent of Fiber's scheduling.
+      const flushInterval = setInterval(=> {
+          if (bufferRef.current.size > 0) {
+            setTicks(Array.from(bufferRef.current.values));
+            bufferRef.current.clear;
+          }
+        }, 100);
 
- return => {
- ws.close;
- clearInterval(flushInterval);
- };
- }, []);
+      return => {
+        ws.close;
+        clearInterval(flushInterval);
+      };
+    }, []);
 
- return ticks;
+  return ticks;
 }
 
 function TickGrid {
- const ticks = useBufferedTicks;
+  const ticks = useBufferedTicks;
 
- // Fiber-aware SCOPE/SCHEDULING lever, independent of the buffering-frequency
- // lever above — lets React deprioritize rendering this potentially-large
- // grid update behind more urgent work (e.g., active user input elsewhere).
- const deferredTicks = useDeferredValue(ticks);
+  // Fiber-aware SCOPE/SCHEDULING lever, independent of the buffering-frequency
+  // lever above — lets React deprioritize rendering this potentially-large
+  // grid update behind more urgent work (e.g., active user input elsewhere).
+  const deferredTicks = useDeferredValue(ticks);
 
- return (
- <div>
- {deferredTicks.map(tick => (
- <GridRow key={tick.symbol} position={tickToPosition(tick)} onSelect={ => {}} displayConfig={{ decimals: 2, showPercent: false }} />
-))}
- </div>
-);
+  return (
+    <div>
+    {deferredTicks.map(tick => (
+          <GridRow key={tick.symbol} position={tickToPosition(tick)} onSelect={ => {}} displayConfig={{ decimals: 2, showPercent: false }} />
+    ))}
+    </div>
+  );
 }
 ```
 **Time complexity:** O(k) per buffer flush (k = distinct symbols ticked within the window). **Space complexity:** O(distinct symbols) for the buffer.

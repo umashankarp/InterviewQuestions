@@ -348,25 +348,25 @@ TradeView's five-remote micro-frontend decomposition scales team independence wi
 ```typescript
 @Component({ /*... */ })
 export class TopMoversGridComponent {
- private readonly seenInDevMode = new Set<string>;
+  private readonly seenInDevMode = new Set<string>;
 
- trackBySymbol(_: number, item: Position): string {
- if (!environment.production) {
- if (this.seenInDevMode.has(item.symbol)) {
- console.error(
- `trackBy uniqueness violation: duplicate symbol "${item.symbol}" in one render pass. ` +
- `Virtual scrolling correctness depends on trackBy returning a UNIQUE value per item.`
-);
- }
- this.seenInDevMode.add(item.symbol);
- }
- return item.symbol; // stable across re-sorts — the fix
- }
+  trackBySymbol(_: number, item: Position): string {
+    if (!environment.production) {
+      if (this.seenInDevMode.has(item.symbol)) {
+        console.error(
+          `trackBy uniqueness violation: duplicate symbol "${item.symbol}" in one render pass. ` +
+            `Virtual scrolling correctness depends on trackBy returning a UNIQUE value per item.`
+        );
+      }
+      this.seenInDevMode.add(item.symbol);
+    }
+    return item.symbol; // stable across re-sorts — the fix
+  }
 
- // Called once per render pass to reset the dev-mode duplicate check.
- resetDevModeTracking: void {
- if (!environment.production) this.seenInDevMode.clear;
- }
+  // Called once per render pass to reset the dev-mode duplicate check.
+  resetDevModeTracking: void {
+    if (!environment.production) this.seenInDevMode.clear;
+  }
 }
 ```
 **Time complexity:** O(1) per item in production; O(1) amortized per item in dev mode (Set lookup/insert). **Space complexity:** O(n) in dev mode only (n = items per render pass); O(1) in production.
@@ -387,20 +387,20 @@ const STALENESS_THRESHOLD_MS = 30_000; // desk data older than this is flagged
 export const selectDeskExposures = (state: { risk: RiskState }) => state.risk.deskExposures;
 
 export const selectAggregatedExposureWithStaleness = createSelector(
- selectDeskExposures,
- (deskExposures) => {
- const now = Date.now;
- const desks = Object.values(deskExposures);
+  selectDeskExposures,
+    (deskExposures) => {
+    const now = Date.now;
+    const desks = Object.values(deskExposures);
 
- const staleDesks = desks.filter(d => now - d.lastUpdatedAt > STALENESS_THRESHOLD_MS);
- const totalExposure = desks.reduce((sum, d) => sum + d.exposure, 0);
+    const staleDesks = desks.filter(d => now - d.lastUpdatedAt > STALENESS_THRESHOLD_MS);
+    const totalExposure = desks.reduce((sum, d) => sum + d.exposure, 0);
 
- return {
- totalExposure,
- isFullyCurrent: staleDesks.length === 0,
- staleDeskIds: staleDesks.map(d => d.deskId), // A5's "which desk went silent" signal
- };
- }
+    return {
+      totalExposure,
+        isFullyCurrent: staleDesks.length === 0,
+        staleDeskIds: staleDesks.map(d => d.deskId), // A5's "which desk went silent" signal
+      };
+  }
 );
 ```
 **Time complexity:** O(d) per recomputation (d = desk count, typically small and fixed). **Space complexity:** O(d).
@@ -414,39 +414,39 @@ export const selectAggregatedExposureWithStaleness = createSelector(
 **Solution (TypeScript, Angular Testing Library-style pseudocode):**
 ```typescript
 describe('Order submission — end-to-end composition', => {
- it('reflects a submitted order in the grid after full pipeline processing', async => {
- const { fixture, store } = await renderTradingDeskComponent({
- // Real reducers, real Effects (with a MOCKED backend HTTP layer only —
- // everything else in the pipeline is genuine, not shallow-rendered).
- providers: [
- provideMockStore({ initialState: initialDeskState }),
- { provide: OrderApiService, useValue: mockOrderApiReturning(successResponse) },
- ],
- });
+    it('reflects a submitted order in the grid after full pipeline processing', async => {
+        const { fixture, store } = await renderTradingDeskComponent({
+            // Real reducers, real Effects (with a MOCKED backend HTTP layer only —
+            // everything else in the pipeline is genuine, not shallow-rendered).
+            providers: [
+              provideMockStore({ initialState: initialDeskState }),
+              { provide: OrderApiService, useValue: mockOrderApiReturning(successResponse) },
+              ],
+        });
 
- const sizeInput = fixture.debugElement.query(By.css('[data-testid=order-size]'));
- setInputValue(sizeInput, '500');
- fixture.detectChanges;
+        const sizeInput = fixture.debugElement.query(By.css('[data-testid=order-size]'));
+        setInputValue(sizeInput, '500');
+        fixture.detectChanges;
 
- // Wait for the REAL async buying-power validator (switchMap-based) to resolve —
- // not mocked away, since I3 specifically requires exercising the real validator.
- await fixture.whenStable;
+        // Wait for the REAL async buying-power validator (switchMap-based) to resolve —
+        // not mocked away, since I3 specifically requires exercising the real validator.
+        await fixture.whenStable;
 
- const submitButton = fixture.debugElement.query(By.css('[data-testid=submit-order]'));
- expect(submitButton.nativeElement.disabled).toBe(false); // validation passed
+        const submitButton = fixture.debugElement.query(By.css('[data-testid=submit-order]'));
+        expect(submitButton.nativeElement.disabled).toBe(false); // validation passed
 
- submitButton.nativeElement.click;
- fixture.detectChanges;
+        submitButton.nativeElement.click;
+        fixture.detectChanges;
 
- // Assert the dispatched Action reached the real reducer:
- const dispatchedActions = store.selectSignal(selectRecentActions);
- expect(dispatchedActions).toContain(jasmine.objectContaining({ type: '[Order] Submit Success' }));
+        // Assert the dispatched Action reached the real reducer:
+        const dispatchedActions = store.selectSignal(selectRecentActions);
+        expect(dispatchedActions).toContain(jasmine.objectContaining({ type: '[Order] Submit Success' }));
 
- // Assert the grid — rendered through the REAL OnPush + virtual-scroll +
- // trackBy pipeline, not a shallow stub — reflects the new position:
- const gridRow = fixture.debugElement.query(By.css('[data-testid="position-row-AAPL"]'));
- expect(gridRow.nativeElement.textContent).toContain('500');
- });
+        // Assert the grid — rendered through the REAL OnPush + virtual-scroll +
+        // trackBy pipeline, not a shallow stub — reflects the new position:
+        const gridRow = fixture.debugElement.query(By.css('[data-testid="position-row-AAPL"]'));
+        expect(gridRow.nativeElement.textContent).toContain('500');
+    });
 });
 ```
 **Time complexity:** N/A (test infrastructure). **Space complexity:** N/A.
@@ -463,31 +463,31 @@ interface RenderedRowSnapshot { domSymbol: string; boundDataSymbol: string; }
 
 @Injectable({ providedIn: 'root' })
 export class RowIntegrityCanaryService {
- private readonly mismatchSubject = new Subject<RenderedRowSnapshot>;
- readonly mismatches$ = this.mismatchSubject.asObservable;
+  private readonly mismatchSubject = new Subject<RenderedRowSnapshot>;
+  readonly mismatches$ = this.mismatchSubject.asObservable;
 
- // Called on a recurring interval (e.g., every 2s) against a live grid instance —
- // a production safety net independent of and complementary to CI testing (Hard exercise).
- checkGridIntegrity(gridElement: HTMLElement, currentData: readonly Position[]): void {
- const dataBySymbol = new Map(currentData.map(p => [p.symbol, p]));
- const rows = gridElement.querySelectorAll('[data-testid^="position-row-"]');
+  // Called on a recurring interval (e.g., every 2s) against a live grid instance —
+  // a production safety net independent of and complementary to CI testing (Hard exercise).
+  checkGridIntegrity(gridElement: HTMLElement, currentData: readonly Position[]): void {
+    const dataBySymbol = new Map(currentData.map(p => [p.symbol, p]));
+    const rows = gridElement.querySelectorAll('[data-testid^="position-row-"]');
 
- rows.forEach(row => {
- const domSymbol = row.getAttribute('data-symbol');
- const domPrice = row.querySelector('[data-testid=price]')?.textContent?.trim;
- if (!domSymbol) return;
+    rows.forEach(row => {
+        const domSymbol = row.getAttribute('data-symbol');
+        const domPrice = row.querySelector('[data-testid=price]')?.textContent?.trim;
+        if (!domSymbol) return;
 
- const boundData = dataBySymbol.get(domSymbol);
- if (!boundData) return; // row for a symbol no longer in the dataset — not this check's concern
+        const boundData = dataBySymbol.get(domSymbol);
+        if (!boundData) return; // row for a symbol no longer in the dataset — not this check's concern
 
- const expectedPrice = boundData.price.toFixed(2);
- if (domPrice!== expectedPrice) {
- // A DOM row's displayed price doesn't match its OWN data-symbol's current
- // price — exactly the failure signature, caught without any thrown error.
- this.mismatchSubject.next({ domSymbol, boundDataSymbol: boundData.symbol });
- }
- });
- }
+        const expectedPrice = boundData.price.toFixed(2);
+        if (domPrice!== expectedPrice) {
+          // A DOM row's displayed price doesn't match its OWN data-symbol's current
+          // price — exactly the failure signature, caught without any thrown error.
+          this.mismatchSubject.next({ domSymbol, boundDataSymbol: boundData.symbol });
+        }
+    });
+  }
 }
 ```
 **Time complexity:** O(v) per check (v = currently-visible/virtualized row count — bounded by, not total dataset size). **Space complexity:** O(v).

@@ -124,15 +124,15 @@ graph TB
 ```csharp
 public int BinarySearch(int[] sortedArray, int target)
 {
- int low = 0, high = sortedArray.Length - 1;
- while (low <= high)
- {
- int mid = low + (high - low) / 2; // overflow-safe
- if (sortedArray[mid] == target) return mid;
- if (sortedArray[mid] < target) low = mid + 1;
- else high = mid - 1;
- }
- return -1;
+    int low = 0, high = sortedArray.Length - 1;
+    while (low <= high)
+    {
+        int mid = low + (high - low) / 2; // overflow-safe
+        if (sortedArray[mid] == target) return mid;
+        if (sortedArray[mid] < target) low = mid + 1;
+        else high = mid - 1;
+    }
+    return -1;
 }
 ```
 
@@ -152,28 +152,28 @@ list = list.OrderBy(x => x.Date).ThenBy(x => x.Status).ToList;
 // (higher capacity -> fewer days needed; the predicate "can ship within D days" is monotonic in capacity).
 public int MinimumShipCapacity(int[] weights, int days)
 {
- int low = weights.Max, high = weights.Sum; // search space: capacity, not array indices
+    int low = weights.Max, high = weights.Sum; // search space: capacity, not array indices
 
- while (low < high)
- {
- int mid = low + (high - low) / 2;
- if (CanShipWithinDays(weights, mid, days))
- high = mid; // this capacity works -- try to find an even smaller one
- else
- low = mid + 1; // insufficient -- need more capacity
- }
- return low;
+    while (low < high)
+    {
+        int mid = low + (high - low) / 2;
+        if (CanShipWithinDays(weights, mid, days))
+            high = mid; // this capacity works -- try to find an even smaller one
+        else
+            low = mid + 1; // insufficient -- need more capacity
+    }
+    return low;
 }
 
 private bool CanShipWithinDays(int[] weights, int capacity, int days)
 {
- int daysNeeded = 1, currentLoad = 0;
- foreach (var w in weights)
- {
- if (currentLoad + w > capacity) { daysNeeded++; currentLoad = 0; }
- currentLoad += w;
- }
- return daysNeeded <= days;
+    int daysNeeded = 1, currentLoad = 0;
+    foreach (var w in weights)
+    {
+        if (currentLoad + w > capacity) { daysNeeded++; currentLoad = 0; }
+        currentLoad += w;
+    }
+    return daysNeeded <= days;
 }
 ```
 **Discussion**: This directly demonstrates Advanced Q9's generalization — there's no "sorted array" being searched at all; instead, binary search operates over the **space of possible capacity values**, exploiting the monotonic relationship between capacity and days-needed (higher capacity always needs ≤ as many days) to find the minimum viable capacity in O(log(sum of weights)) instead of a brute-force O(sum of weights) linear scan through every possible capacity value.
@@ -182,35 +182,35 @@ private bool CanShipWithinDays(int[] weights, int capacity, int days)
 ```csharp
 public async Task ExternalSortAsync(string inputFile, string outputFile, int chunkSizeBytes)
 {
- var runFiles = new List<string>;
+    var runFiles = new List<string>;
 
- // Phase 1: read chunks, sort each in-memory, write as a sorted "run" file.
- await foreach (var chunk in ReadChunksAsync(inputFile, chunkSizeBytes))
- {
- chunk.Sort; // in-memory sort -- Array.Sort/introsort is perfectly fine HERE, within one chunk
- var runFile = Path.GetTempFileName;
- await WriteRunAsync(runFile, chunk);
- runFiles.Add(runFile);
- }
+    // Phase 1: read chunks, sort each in-memory, write as a sorted "run" file.
+    await foreach (var chunk in ReadChunksAsync(inputFile, chunkSizeBytes))
+    {
+        chunk.Sort; // in-memory sort -- Array.Sort/introsort is perfectly fine HERE, within one chunk
+        var runFile = Path.GetTempFileName;
+        await WriteRunAsync(runFile, chunk);
+        runFiles.Add(runFile);
+    }
 
- // Phase 2: repeatedly merge pairs of sorted runs (streaming, NOT loading full runs into memory)
- while (runFiles.Count > 1)
- {
- var newRunFiles = new List<string>;
- for (int i = 0; i < runFiles.Count; i += 2)
- {
- if (i + 1 < runFiles.Count)
- {
- var merged = Path.GetTempFileName;
- await MergeTwoSortedRunsAsync(runFiles[i], runFiles[i + 1], merged); // streaming merge
- newRunFiles.Add(merged);
- }
- else newRunFiles.Add(runFiles[i]); // odd one out, carries forward unchanged
- }
- runFiles = newRunFiles;
- }
+    // Phase 2: repeatedly merge pairs of sorted runs (streaming, NOT loading full runs into memory)
+    while (runFiles.Count > 1)
+    {
+        var newRunFiles = new List<string>;
+        for (int i = 0; i < runFiles.Count; i += 2)
+        {
+            if (i + 1 < runFiles.Count)
+            {
+                var merged = Path.GetTempFileName;
+                await MergeTwoSortedRunsAsync(runFiles[i], runFiles[i + 1], merged); // streaming merge
+                newRunFiles.Add(merged);
+            }
+            else newRunFiles.Add(runFiles[i]); // odd one out, carries forward unchanged
+        }
+        runFiles = newRunFiles;
+    }
 
- File.Move(runFiles[0], outputFile);
+    File.Move(runFiles[0], outputFile);
 }
 ```
 **Discussion**: `MergeTwoSortedRunsAsync` (implementation omitted for brevity) streams both input runs sequentially, comparing their current elements and writing the smaller one to the output, advancing only the stream that "lost" the comparison — never needing either full run in memory simultaneously, exactly the mechanism Advanced Q2 describes as merge sort's natural fit for external, larger-than-memory sorting, in direct contrast to quicksort's random-access partitioning, which doesn't translate to this sequential-streaming model at all.

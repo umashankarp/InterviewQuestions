@@ -347,32 +347,32 @@ docker build --secret id=npmrc,src=$HOME/.npmrc-ci -t myapp:latest.
 ```csharp
 public class LayerSecretScanner
 {
- private readonly Regex _secretPattern; // e.g., matches common API-key/token formats
+    private readonly Regex _secretPattern; // e.g., matches common API-key/token formats
 
- public LayerSecretScanner(string secretRegexPattern) => _secretPattern = new Regex(secretRegexPattern);
+    public LayerSecretScanner(string secretRegexPattern) => _secretPattern = new Regex(secretRegexPattern);
 
- // Directly §Advanced Q3's design -- inspects EVERY layer's actual extracted
- // contents, not merely the final merged filesystem a running container would show.
- public async Task<ScanResult> ScanImageLayersAsync(string imageTarPath)
- {
- var findings = new List<string>;
- await using var tarStream = File.OpenRead(imageTarPath);
- using var reader = new TarReader(tarStream);
+    // Directly §Advanced Q3's design -- inspects EVERY layer's actual extracted
+    // contents, not merely the final merged filesystem a running container would show.
+    public async Task<ScanResult> ScanImageLayersAsync(string imageTarPath)
+    {
+        var findings = new List<string>;
+        await using var tarStream = File.OpenRead(imageTarPath);
+        using var reader = new TarReader(tarStream);
 
- await foreach (var layerEntry in EnumerateLayerTarballsAsync(reader))
- {
- await foreach (var (fileName, content) in EnumerateFilesInLayerAsync(layerEntry))
- {
- if (_secretPattern.IsMatch(content))
- {
- findings.Add($"Layer '{layerEntry.Digest}', file '{fileName}': " +
- $"matched secret pattern -- image FAILS pre-push scan (/§Advanced Q3).");
- }
- }
- }
+        await foreach (var layerEntry in EnumerateLayerTarballsAsync(reader))
+        {
+            await foreach (var (fileName, content) in EnumerateFilesInLayerAsync(layerEntry))
+            {
+                if (_secretPattern.IsMatch(content))
+                {
+                    findings.Add($"Layer '{layerEntry.Digest}', file '{fileName}': " +
+                        $"matched secret pattern -- image FAILS pre-push scan (/§Advanced Q3).");
+                }
+            }
+        }
 
- return new ScanResult { Passed = findings.Count == 0, Findings = findings };
- }
+        return new ScanResult { Passed = findings.Count == 0, Findings = findings };
+    }
 }
 ```
 **Time complexity:** O(L × F) where L is the number of layers and F is the average number of files per layer — each file's content is scanned independently once.
@@ -385,27 +385,27 @@ public class LayerSecretScanner
 ```csharp
 public class BuildCacheAnalyzer
 {
- public int ComputeCacheHitDepth(List<DockerInstruction> instructions, HashSet<string> changedFiles)
- {
- int hitDepth = 0;
- foreach (var instruction in instructions)
- {
- // A layer is cache-valid only if NONE of its relevant context files changed
- // AND every preceding layer was also cache-valid (the cumulative invalidation).
- bool layerAffected = instruction.ContextFiles.Any(changedFiles.Contains);
- if (layerAffected) break; // cumulative invalidation -- stop counting here
- hitDepth++;
- }
- return hitDepth;
- }
+    public int ComputeCacheHitDepth(List<DockerInstruction> instructions, HashSet<string> changedFiles)
+    {
+        int hitDepth = 0;
+        foreach (var instruction in instructions)
+        {
+            // A layer is cache-valid only if NONE of its relevant context files changed
+            // AND every preceding layer was also cache-valid (the cumulative invalidation).
+            bool layerAffected = instruction.ContextFiles.Any(changedFiles.Contains);
+            if (layerAffected) break; // cumulative invalidation -- stop counting here
+            hitDepth++;
+        }
+        return hitDepth;
+    }
 
- // Validates §Advanced Q2's specific finding: a "correctly ordered" Dockerfile whose
- // dependency-install layer still derives its context from a BROAD copy gains nothing.
- public bool ValidatesNarrowManifestScoping(List<DockerInstruction> instructions)
- {
- var installInstruction = instructions.FirstOrDefault(i => i.Command.Contains("install"));
- return installInstruction?.ContextFiles.All(f => f.EndsWith(".json") || f.EndsWith(".lock"))?? false;
- }
+    // Validates §Advanced Q2's specific finding: a "correctly ordered" Dockerfile whose
+    // dependency-install layer still derives its context from a BROAD copy gains nothing.
+    public bool ValidatesNarrowManifestScoping(List<DockerInstruction> instructions)
+    {
+        var installInstruction = instructions.FirstOrDefault(i => i.Command.Contains("install"));
+        return installInstruction?.ContextFiles.All(f => f.EndsWith(".json") || f.EndsWith(".lock"))?? false;
+    }
 }
 ```
 **Time complexity:** O(n) where n is the number of Dockerfile instructions — a single pass computing cumulative cache validity.

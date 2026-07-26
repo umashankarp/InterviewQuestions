@@ -330,18 +330,18 @@ public sealed record PolicyResult(bool Allowed, string Reason);
 
 public static class StoragePolicyEvaluator
 {
- public static PolicyResult Evaluate(StorageResource resource)
- {
- if (resource.PublicAccessEnabled)
- return new PolicyResult(Allowed: false,
- $"Resource '{resource.Name}' violates policy: public access must not be enabled.");
+    public static PolicyResult Evaluate(StorageResource resource)
+    {
+        if (resource.PublicAccessEnabled)
+            return new PolicyResult(Allowed: false,
+            $"Resource '{resource.Name}' violates policy: public access must not be enabled.");
 
- if (!resource.EncryptionEnabled)
- return new PolicyResult(Allowed: false,
- $"Resource '{resource.Name}' violates policy: encryption at rest must be enabled.");
+        if (!resource.EncryptionEnabled)
+            return new PolicyResult(Allowed: false,
+            $"Resource '{resource.Name}' violates policy: encryption at rest must be enabled.");
 
- return new PolicyResult(Allowed: true, "Compliant.");
- }
+        return new PolicyResult(Allowed: true, "Compliant.");
+    }
 }
 ```
 **Time complexity:** O(1) per resource.
@@ -358,34 +358,34 @@ public sealed record CoverageGap(string ResourceType, string Description);
 
 public static class PolicyCoverageAnalyzer
 {
- public static IReadOnlyList<CoverageGap> FindGaps(
- IReadOnlyDictionary<string, HashSet<EnforcementPoint>> coverageByResourceType)
- {
- var gaps = new List<CoverageGap>;
+    public static IReadOnlyList<CoverageGap> FindGaps(
+        IReadOnlyDictionary<string, HashSet<EnforcementPoint>> coverageByResourceType)
+    {
+        var gaps = new List<CoverageGap>;
 
- foreach (var (resourceType, points) in coverageByResourceType)
- {
- bool hasCiGate = points.Contains(EnforcementPoint.CIGate);
- bool hasAdmissionControl = points.Contains(EnforcementPoint.AdmissionControl);
- bool hasRuntimeScan = points.Contains(EnforcementPoint.RuntimeScan);
+        foreach (var (resourceType, points) in coverageByResourceType)
+        {
+            bool hasCiGate = points.Contains(EnforcementPoint.CIGate);
+            bool hasAdmissionControl = points.Contains(EnforcementPoint.AdmissionControl);
+            bool hasRuntimeScan = points.Contains(EnforcementPoint.RuntimeScan);
 
- if (hasCiGate &&!hasAdmissionControl)
- gaps.Add(new CoverageGap(resourceType,
- "Covered by CI gate but not admission control -- " +
- "a direct-apply bypass of CI is entirely unchecked (Sec4's exact gap)."));
+            if (hasCiGate &&!hasAdmissionControl)
+                gaps.Add(new CoverageGap(resourceType,
+                    "Covered by CI gate but not admission control -- " +
+                        "a direct-apply bypass of CI is entirely unchecked (Sec4's exact gap)."));
 
- if (!hasCiGate &&!hasAdmissionControl &&!hasRuntimeScan)
- gaps.Add(new CoverageGap(resourceType,
- "No enforcement point at all covers this resource type."));
+            if (!hasCiGate &&!hasAdmissionControl &&!hasRuntimeScan)
+                gaps.Add(new CoverageGap(resourceType,
+                    "No enforcement point at all covers this resource type."));
 
- if ((hasCiGate || hasAdmissionControl) &&!hasRuntimeScan)
- gaps.Add(new CoverageGap(resourceType,
- "No runtime posture scan backstop -- drift after initial " +
- "compliant deployment would go undetected."));
- }
+            if ((hasCiGate || hasAdmissionControl) &&!hasRuntimeScan)
+                gaps.Add(new CoverageGap(resourceType,
+                    "No runtime posture scan backstop -- drift after initial " +
+                        "compliant deployment would go undetected."));
+        }
 
- return gaps;
- }
+        return gaps;
+    }
 }
 ```
 **Time complexity:** O(r) where r is the number of resource types.
@@ -402,33 +402,33 @@ public sealed record VulnerableRange(string ComponentName, Version MinInclusive,
 
 public static class SbomCveImpactAnalyzer
 {
- public static IReadOnlyList<string> FindAffectedServices(
- IReadOnlyList<ServiceSbom> allSboms, VulnerableRange vulnerability)
- {
- var affected = new List<string>;
+    public static IReadOnlyList<string> FindAffectedServices(
+        IReadOnlyList<ServiceSbom> allSboms, VulnerableRange vulnerability)
+    {
+        var affected = new List<string>;
 
- foreach (var sbom in allSboms)
- {
- foreach (var component in sbom.Components)
- {
- if (!string.Equals(component.Name, vulnerability.ComponentName,
- StringComparison.OrdinalIgnoreCase))
- continue;
+        foreach (var sbom in allSboms)
+        {
+            foreach (var component in sbom.Components)
+            {
+                if (!string.Equals(component.Name, vulnerability.ComponentName,
+                        StringComparison.OrdinalIgnoreCase))
+                continue;
 
- if (!Version.TryParse(component.Version, out var parsedVersion))
- continue; // Non-semver version strings need a fallback matcher in production.
+                if (!Version.TryParse(component.Version, out var parsedVersion))
+                    continue; // Non-semver version strings need a fallback matcher in production.
 
- if (parsedVersion >= vulnerability.MinInclusive &&
- parsedVersion < vulnerability.MaxExclusive)
- {
- affected.Add(sbom.ServiceName);
- break; // Found the vulnerable component in this service; no need to scan further.
- }
- }
- }
+                if (parsedVersion >= vulnerability.MinInclusive &&
+                    parsedVersion < vulnerability.MaxExclusive)
+                {
+                    affected.Add(sbom.ServiceName);
+                    break; // Found the vulnerable component in this service; no need to scan further.
+                }
+            }
+        }
 
- return affected;
- }
+        return affected;
+    }
 }
 ```
 **Time complexity:** O(s × c) where s is the number of services and c is the average component count per SBOM — a full linear scan; acceptable for periodic/on-demand queries but not for a large estate needing sub-second interactive response.

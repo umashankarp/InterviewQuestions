@@ -461,15 +461,15 @@ The fix: a bounded queue rejecting when full; deadline propagation so abandoned 
 ```csharp
 public sealed class BoundedWorkQueue
 {
- private readonly Channel<WorkItem> _channel;
+    private readonly Channel<WorkItem> _channel;
 
- public BoundedWorkQueue(int capacity) =>
- _channel = Channel.CreateBounded<WorkItem>(new BoundedChannelOptions(capacity)
- {
- FullMode = BoundedChannelFullMode.DropWrite // reject, never block the producer
- });
+    public BoundedWorkQueue(int capacity) =>
+        _channel = Channel.CreateBounded<WorkItem>(new BoundedChannelOptions(capacity)
+        {
+            FullMode = BoundedChannelFullMode.DropWrite // reject, never block the producer
+    });
 
- public bool TryEnqueue(WorkItem item) => _channel.Writer.TryWrite(item); // false = shed
+    public bool TryEnqueue(WorkItem item) => _channel.Writer.TryWrite(item); // false = shed
 }
 ```
 **Time complexity:** O(1) enqueue.
@@ -482,18 +482,18 @@ public sealed class BoundedWorkQueue
 ```csharp
 public async Task<Result> HandleAsync(Request req, CancellationToken ct)
 {
- var deadline = req.Headers.Deadline; // absolute timestamp, not a duration
- if (DateTimeOffset.UtcNow >= deadline)
- return Result.DeadlineExceeded; // don't start work already expired
+    var deadline = req.Headers.Deadline; // absolute timestamp, not a duration
+    if (DateTimeOffset.UtcNow >= deadline)
+        return Result.DeadlineExceeded; // don't start work already expired
 
- var remaining = deadline - DateTimeOffset.UtcNow;
- if (remaining < _estimatedServiceTime)
- return Result.DeadlineExceeded; // won't finish in time — don't try
+    var remaining = deadline - DateTimeOffset.UtcNow;
+    if (remaining < _estimatedServiceTime)
+        return Result.DeadlineExceeded; // won't finish in time — don't try
 
- using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
- linked.CancelAfter(remaining);
+    using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+    linked.CancelAfter(remaining);
 
- return await _downstream.CallAsync(req.WithDeadline(deadline), linked.Token); // pass unchanged
+    return await _downstream.CallAsync(req.WithDeadline(deadline), linked.Token); // pass unchanged
 }
 ```
 **Time complexity:** O(1).
@@ -506,20 +506,20 @@ public async Task<Result> HandleAsync(Request req, CancellationToken ct)
 ```csharp
 public sealed class RetryBudget
 {
- private readonly double _ratio; // e.g. 0.1 = retries may be 10% of requests
- private long _requests, _retries;
+    private readonly double _ratio; // e.g. 0.1 = retries may be 10% of requests
+    private long _requests, _retries;
 
- public void RecordRequest => Interlocked.Increment(ref _requests);
+    public void RecordRequest => Interlocked.Increment(ref _requests);
 
- public bool TryConsumeRetry
- {
- var requests = Interlocked.Read(ref _requests);
- var retries = Interlocked.Read(ref _retries);
+    public bool TryConsumeRetry
+    {
+        var requests = Interlocked.Read(ref _requests);
+        var retries = Interlocked.Read(ref _retries);
 
- if (retries >= requests * _ratio) return false; // budget exhausted — fail fast
- Interlocked.Increment(ref _retries);
- return true;
- }
+        if (retries >= requests * _ratio) return false; // budget exhausted — fail fast
+        Interlocked.Increment(ref _retries);
+        return true;
+    }
 }
 ```
 **Time complexity:** O(1) per check.
@@ -532,19 +532,19 @@ public sealed class RetryBudget
 ```csharp
 public async Task<Result> ExecuteInstrumentedAsync(Request req)
 {
- var enqueuedAt = DateTimeOffset.UtcNow;
- var result = await _inner.HandleAsync(req);
- var completedAt = DateTimeOffset.UtcNow;
+    var enqueuedAt = DateTimeOffset.UtcNow;
+    var result = await _inner.HandleAsync(req);
+    var completedAt = DateTimeOffset.UtcNow;
 
- _metrics.RecordQueueTime(req.DequeuedAt - enqueuedAt); // separate from processing
- _metrics.RecordProcessingTime(completedAt - req.DequeuedAt);
+    _metrics.RecordQueueTime(req.DequeuedAt - enqueuedAt); // separate from processing
+    _metrics.RecordProcessingTime(completedAt - req.DequeuedAt);
 
- if (completedAt <= req.Headers.Deadline)
- _metrics.IncrementUsefulThroughput; // the only metric that fell 
- else
- _metrics.IncrementWastedWork; // computed, then discarded
+    if (completedAt <= req.Headers.Deadline)
+        _metrics.IncrementUsefulThroughput; // the only metric that fell
+    else
+        _metrics.IncrementWastedWork; // computed, then discarded
 
- return result;
+    return result;
 }
 ```
 **Time complexity:** O(1) per request.

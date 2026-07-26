@@ -156,105 +156,105 @@ graph LR
 ### Easy — Public/private subnet split
 ```hcl
 resource "aws_subnet" "public_a" {
- vpc_id = aws_vpc.main.id
- cidr_block = "10.0.1.0/24"
- availability_zone = "us-east-1a"
- map_public_ip_on_launch = true # public: instances get a public IP
+  vpc_id = aws_vpc.main.id
+  cidr_block = "10.0.1.0/24"
+  availability_zone = "us-east-1a"
+  map_public_ip_on_launch = true # public: instances get a public IP
 }
 
 resource "aws_subnet" "private_a" {
- vpc_id = aws_vpc.main.id
- cidr_block = "10.0.11.0/24" # SEPARATE, non-overlapping CIDR range
- availability_zone = "us-east-1a"
- # NO map_public_ip_on_launch -- private: no direct internet reachability
+  vpc_id = aws_vpc.main.id
+  cidr_block = "10.0.11.0/24" # SEPARATE, non-overlapping CIDR range
+  availability_zone = "us-east-1a"
+  # NO map_public_ip_on_launch -- private: no direct internet reachability
 }
 
 resource "aws_route" "private_nat" {
- route_table_id = aws_route_table.private.id
- destination_cidr_block = "0.0.0.0/0"
- nat_gateway_id = aws_nat_gateway.main.id # OUTBOUND only, via NAT -- not a direct internet route
+  route_table_id = aws_route_table.private.id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id = aws_nat_gateway.main.id # OUTBOUND only, via NAT -- not a direct internet route
 }
 ```
 
 ### Medium — Readiness-based ALB health check
 ```hcl
 resource "aws_lb_target_group" "checkout" {
- name = "checkout-tg"
- port = 80
- protocol = "HTTP"
- vpc_id = aws_vpc.main.id
+  name = "checkout-tg"
+  port = 80
+  protocol = "HTTP"
+  vpc_id = aws_vpc.main.id
 
- health_check {
- path = "/ready" # READINESS endpoint -- checks DB/cache connectivity, NOT just "/health" liveness
- interval = 10
- healthy_threshold = 2
- unhealthy_threshold = 3
- timeout = 5
- matcher = "200"
- }
+  health_check {
+    path = "/ready" # READINESS endpoint -- checks DB/cache connectivity, NOT just "/health" liveness
+    interval = 10
+    healthy_threshold = 2
+    unhealthy_threshold = 3
+    timeout = 5
+    matcher = "200"
+  }
 }
 ```
 ```csharp
 [HttpGet("/ready")]
 public async Task<IActionResult> Ready
 {
- // Genuine readiness -- NOT just "is this process alive" (the original, insufficient check)
- if (!await _dbConnectionPool.CanConnectAsync) return StatusCode(503);
- if (!_cacheWarmupComplete) return StatusCode(503);
- if (!await _paymentGatewayClient.IsReachableAsync) return StatusCode(503);
- return Ok;
+    // Genuine readiness -- NOT just "is this process alive" (the original, insufficient check)
+    if (!await _dbConnectionPool.CanConnectAsync) return StatusCode(503);
+    if (!_cacheWarmupComplete) return StatusCode(503);
+    if (!await _paymentGatewayClient.IsReachableAsync) return StatusCode(503);
+    return Ok;
 }
 ```
 
 ### Hard — Auto Scaling policy with connection draining (§Advanced Q8)
 ```hcl
 resource "aws_autoscaling_group" "checkout" {
- min_size = 4
- max_size = 20
- vpc_zone_identifier = [aws_subnet.private_a.id, aws_subnet.private_b.id] # multi-AZ, ALWAYS
- target_group_arns = [aws_lb_target_group.checkout.arn]
- health_check_type = "ELB" # use the ALB's readiness check, NOT just EC2 status checks
- health_check_grace_period = 120 # matches realistic instance warm-up time (the lesson)
+  min_size = 4
+  max_size = 20
+  vpc_zone_identifier = [aws_subnet.private_a.id, aws_subnet.private_b.id] # multi-AZ, ALWAYS
+  target_group_arns = [aws_lb_target_group.checkout.arn]
+  health_check_type = "ELB" # use the ALB's readiness check, NOT just EC2 status checks
+  health_check_grace_period = 120 # matches realistic instance warm-up time (the lesson)
 
- instance_refresh {
- strategy = "Rolling"
- preferences {
- instance_warmup = 120
- min_healthy_percentage = 90
- }
- }
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      instance_warmup = 120
+      min_healthy_percentage = 90
+    }
+  }
 }
 
 resource "aws_lb_target_group" "checkout" {
- #... (as above)...
- deregistration_delay = 60 # CONNECTION DRAINING: 60s grace period before terminating a
- # deregistering instance, letting in-flight requests finish (§Advanced Q8)
+  #... (as above)...
+    deregistration_delay = 60 # CONNECTION DRAINING: 60s grace period before terminating a
+  # deregistering instance, letting in-flight requests finish (§Advanced Q8)
 }
 ```
 
 ### Expert — Security Group least-privilege configuration with defense-in-depth (§Advanced Q6)
 ```hcl
 resource "aws_security_group" "checkout_app" {
- vpc_id = aws_vpc.main.id
+  vpc_id = aws_vpc.main.id
 
- ingress {
- description = "ALB to app instances ONLY -- NOT 0.0.0.0/0"
- from_port = 80
- to_port = 80
- protocol = "tcp"
- security_groups = [aws_security_group.alb.id] # scoped to the ALB's OWN security group, not a broad CIDR
- }
+  ingress {
+    description = "ALB to app instances ONLY -- NOT 0.0.0.0/0"
+    from_port = 80
+    to_port = 80
+    protocol = "tcp"
+    security_groups = [aws_security_group.alb.id] # scoped to the ALB's OWN security group, not a broad CIDR
+  }
 
- egress {
- description = "Outbound to RDS ONLY, on the DB port -- not unrestricted egress"
- from_port = 5432
- to_port = 5432
- protocol = "tcp"
- security_groups = [aws_security_group.database.id]
- }
- # NO broad 0.0.0.0/0 rules in either direction -- defense-in-depth alongside the
- # private-subnet placement, NOT relying on subnet placement alone.
-}
+  egress {
+    description = "Outbound to RDS ONLY, on the DB port -- not unrestricted egress"
+    from_port = 5432
+    to_port = 5432
+    protocol = "tcp"
+    security_groups = [aws_security_group.database.id]
+  }
+  # NO broad 0.0.0.0/0 rules in either direction -- defense-in-depth alongside the
+  # private-subnet placement, NOT relying on subnet placement alone.
+  }
 ```
 **Discussion**: scoping both ingress and egress to specific security-group references (rather than broad CIDR ranges) directly implements Advanced Q6's least-privilege audit target — an automated Security Group audit checking for `0.0.0.0/0` rules would find none here, and the security-group-to-security-group reference pattern means access is tied to a resource's actual role (being the ALB, being the database) rather than a potentially-overbroad IP range that could inadvertently include unintended sources.
 

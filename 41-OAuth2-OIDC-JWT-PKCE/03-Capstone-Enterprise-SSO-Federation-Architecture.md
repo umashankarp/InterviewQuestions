@@ -358,15 +358,15 @@ The broker/hub pattern's N+M trust-relationship scaling versus point-to-point's 
 ```csharp
 public static class FederationTopologyCalculator
 {
- public static int PointToPointRelationships(int relyingParties, int identityProviders) =>
- relyingParties * identityProviders;
+    public static int PointToPointRelationships(int relyingParties, int identityProviders) =>
+        relyingParties * identityProviders;
 
- public static int BrokerHubRelationships(int relyingParties, int identityProviders) =>
- relyingParties + identityProviders;
+    public static int BrokerHubRelationships(int relyingParties, int identityProviders) =>
+        relyingParties + identityProviders;
 
- public static double ReductionFactor(int relyingParties, int identityProviders) =>
- (double)PointToPointRelationships(relyingParties, identityProviders) /
- BrokerHubRelationships(relyingParties, identityProviders);
+    public static double ReductionFactor(int relyingParties, int identityProviders) =>
+        (double)PointToPointRelationships(relyingParties, identityProviders) /
+    BrokerHubRelationships(relyingParties, identityProviders);
 }
 ```
 **Time complexity:** O(1). **Space complexity:** O(1).
@@ -380,19 +380,19 @@ public static class FederationTopologyCalculator
 **Solution (C#):**
 ```csharp
 public sealed record ClaimsMappingEntry(
- string PartnerId, string PartnerClaimValue, string InternalEntitlement,
- DateTimeOffset LastAttestedAt, TimeSpan AttestationCadence);
+    string PartnerId, string PartnerClaimValue, string InternalEntitlement,
+        DateTimeOffset LastAttestedAt, TimeSpan AttestationCadence);
 
 public static class ClaimsMappingGovernance
 {
- public static IEnumerable<ClaimsMappingEntry> FindStaleMappings(
- IEnumerable<ClaimsMappingEntry> mappings, DateTimeOffset now) =>
- mappings.Where(m => now - m.LastAttestedAt > m.AttestationCadence);
+    public static IEnumerable<ClaimsMappingEntry> FindStaleMappings(
+        IEnumerable<ClaimsMappingEntry> mappings, DateTimeOffset now) =>
+    mappings.Where(m => now - m.LastAttestedAt > m.AttestationCadence);
 
- // A mapping past its attestation window should not silently continue granting
- // access — this is the technical enforcement half of the organizational fix.
- public static bool IsMappingCurrentlyTrusted(ClaimsMappingEntry mapping, DateTimeOffset now) =>
- now - mapping.LastAttestedAt <= mapping.AttestationCadence;
+    // A mapping past its attestation window should not silently continue granting
+    // access — this is the technical enforcement half of the organizational fix.
+    public static bool IsMappingCurrentlyTrusted(ClaimsMappingEntry mapping, DateTimeOffset now) =>
+        now - mapping.LastAttestedAt <= mapping.AttestationCadence;
 }
 ```
 **Time complexity:** O(N) for `FindStaleMappings` over N entries. **Space complexity:** O(N) for the result set.
@@ -406,49 +406,49 @@ public static class ClaimsMappingGovernance
 **Solution (C#):**
 ```csharp
 public sealed record ExchangeRequest(
- string CallingServiceId, HashSet<string> CallingServiceOwnScopes,
- string OriginalUserSub, HashSet<string> OriginalTokenScopes,
- string TargetAudience, HashSet<string> RequestedScopes, IReadOnlyList<string> ExistingActChain);
+    string CallingServiceId, HashSet<string> CallingServiceOwnScopes,
+        string OriginalUserSub, HashSet<string> OriginalTokenScopes,
+        string TargetAudience, HashSet<string> RequestedScopes, IReadOnlyList<string> ExistingActChain);
 
 public sealed record ExchangedToken(
- string Sub, string Aud, HashSet<string> GrantedScopes, IReadOnlyList<string> ActChain);
+    string Sub, string Aud, HashSet<string> GrantedScopes, IReadOnlyList<string> ActChain);
 
 public static class TokenExchangeService
 {
- public static (bool Success, ExchangedToken? Token, string? Reason) Exchange(ExchangeRequest request)
- {
- // Scope-narrowing invariant (Advanced Q3): granted scope can NEVER exceed
- // the intersection of what the calling service itself holds AND what the
- // original user's own token authorized — never simply "whatever was requested."
- var maxAllowedScope = new HashSet<string>(request.CallingServiceOwnScopes);
- maxAllowedScope.IntersectWith(request.OriginalTokenScopes);
+    public static (bool Success, ExchangedToken? Token, string? Reason) Exchange(ExchangeRequest request)
+    {
+        // Scope-narrowing invariant (Advanced Q3): granted scope can NEVER exceed
+        // the intersection of what the calling service itself holds AND what the
+        // original user's own token authorized — never simply "whatever was requested."
+        var maxAllowedScope = new HashSet<string>(request.CallingServiceOwnScopes);
+        maxAllowedScope.IntersectWith(request.OriginalTokenScopes);
 
- var grantedScope = new HashSet<string>(request.RequestedScopes);
- grantedScope.IntersectWith(maxAllowedScope);
+        var grantedScope = new HashSet<string>(request.RequestedScopes);
+        grantedScope.IntersectWith(maxAllowedScope);
 
- if (grantedScope.Count == 0)
- return (false, null, "no overlap between requested scope and permitted scope");
+        if (grantedScope.Count == 0)
+            return (false, null, "no overlap between requested scope and permitted scope");
 
- if (!grantedScope.SetEquals(request.RequestedScopes))
- {
- // Requested more than permitted — narrow silently is one policy choice
- // rejecting outright and forcing an explicit, narrower request is another
- // more auditable one. Reject here, favoring explicit over implicit narrowing.
- return (false, null,
- $"requested scope exceeds permitted scope; permitted subset was: {string.Join(",", grantedScope)}");
- }
+        if (!grantedScope.SetEquals(request.RequestedScopes))
+        {
+            // Requested more than permitted — narrow silently is one policy choice
+            // rejecting outright and forcing an explicit, narrower request is another
+            // more auditable one. Reject here, favoring explicit over implicit narrowing.
+            return (false, null,
+                $"requested scope exceeds permitted scope; permitted subset was: {string.Join(",", grantedScope)}");
+        }
 
- var newActChain = request.ExistingActChain.Append(request.CallingServiceId).ToList;
+        var newActChain = request.ExistingActChain.Append(request.CallingServiceId).ToList;
 
- if (newActChain.Count > 5) // I5/A4's chain-depth anomaly threshold, illustrative
- return (false, null, "delegation chain exceeds maximum expected depth");
+        if (newActChain.Count > 5) // I5/A4's chain-depth anomaly threshold, illustrative
+            return (false, null, "delegation chain exceeds maximum expected depth");
 
- return (true, new ExchangedToken(
- Sub: request.OriginalUserSub,
- Aud: request.TargetAudience,
- GrantedScopes: grantedScope,
- ActChain: newActChain), null);
- }
+        return (true, new ExchangedToken(
+                Sub: request.OriginalUserSub,
+                    Aud: request.TargetAudience,
+                    GrantedScopes: grantedScope,
+                    ActChain: newActChain), null);
+    }
 }
 ```
 **Time complexity:** O(S) where S = scope-set size. **Space complexity:** O(S + chain depth).
@@ -467,49 +467,49 @@ public sealed record RelyingPartyLogoutResult(string RelyingPartyId, LogoutStatu
 
 public sealed class FederatedLogoutOrchestrator
 {
- private readonly Func<string, Task<bool>> _callRpLogoutEndpoint; // returns true on RP-confirmed termination
- private readonly Action<string, LogoutStatus> _alertOnUnconfirmed;
- private const int MaxRetries = 3;
+    private readonly Func<string, Task<bool>> _callRpLogoutEndpoint; // returns true on RP-confirmed termination
+    private readonly Action<string, LogoutStatus> _alertOnUnconfirmed;
+    private const int MaxRetries = 3;
 
- public FederatedLogoutOrchestrator(
- Func<string, Task<bool>> callRpLogoutEndpoint, Action<string, LogoutStatus> alertOnUnconfirmed)
- {
- _callRpLogoutEndpoint = callRpLogoutEndpoint;
- _alertOnUnconfirmed = alertOnUnconfirmed;
- }
+    public FederatedLogoutOrchestrator(
+        Func<string, Task<bool>> callRpLogoutEndpoint, Action<string, LogoutStatus> alertOnUnconfirmed)
+    {
+        _callRpLogoutEndpoint = callRpLogoutEndpoint;
+        _alertOnUnconfirmed = alertOnUnconfirmed;
+    }
 
- public async Task<IReadOnlyList<RelyingPartyLogoutResult>> SignOutEverywhereAsync(
- IEnumerable<string> relyingPartyIds)
- {
- // Fan out in parallel — back-channel logout is independent per RP and should
- // not serialize behind a single slow relying party (the scalability point).
- var tasks = relyingPartyIds.Select(async rpId =>
- {
- for (int attempt = 1; attempt <= MaxRetries; attempt++)
- {
- try
- {
- var confirmed = await _callRpLogoutEndpoint(rpId);
- if (confirmed)
- return new RelyingPartyLogoutResult(rpId, LogoutStatus.Confirmed, attempt);
- }
- catch
- {
- // transient failure — retry
- }
- }
- // Exhausted retries: this is NOT the same as "confirmed still logged out,"
- // and must never be silently treated as success (Advanced Q7's exact gap).
- return new RelyingPartyLogoutResult(rpId, LogoutStatus.Failed, MaxRetries);
- });
+    public async Task<IReadOnlyList<RelyingPartyLogoutResult>> SignOutEverywhereAsync(
+        IEnumerable<string> relyingPartyIds)
+    {
+        // Fan out in parallel — back-channel logout is independent per RP and should
+        // not serialize behind a single slow relying party (the scalability point).
+        var tasks = relyingPartyIds.Select(async rpId =>
+            {
+                for (int attempt = 1; attempt <= MaxRetries; attempt++)
+                {
+                    try
+                    {
+                        var confirmed = await _callRpLogoutEndpoint(rpId);
+                        if (confirmed)
+                            return new RelyingPartyLogoutResult(rpId, LogoutStatus.Confirmed, attempt);
+                    }
+                    catch
+                    {
+                        // transient failure — retry
+                    }
+                }
+                // Exhausted retries: this is NOT the same as "confirmed still logged out,"
+                // and must never be silently treated as success (Advanced Q7's exact gap).
+                return new RelyingPartyLogoutResult(rpId, LogoutStatus.Failed, MaxRetries);
+        });
 
- var results = await Task.WhenAll(tasks);
+        var results = await Task.WhenAll(tasks);
 
- foreach (var result in results.Where(r => r.Status!= LogoutStatus.Confirmed))
- _alertOnUnconfirmed(result.RelyingPartyId, result.Status);
+        foreach (var result in results.Where(r => r.Status!= LogoutStatus.Confirmed))
+            _alertOnUnconfirmed(result.RelyingPartyId, result.Status);
 
- return results;
- }
+        return results;
+    }
 }
 ```
 **Time complexity:** O(N) parallel calls, wall-clock bounded by the slowest individual RP call rather than their sum. **Space complexity:** O(N).

@@ -159,22 +159,22 @@ graph TB
 ```csharp
 public class LamportClock
 {
- private long _counter = 0;
- private readonly object _lock = new;
+    private long _counter = 0;
+    private readonly object _lock = new;
 
- public long Tick // local event
- {
- lock (_lock) { return ++_counter; }
- }
+    public long Tick // local event
+    {
+        lock (_lock) { return ++_counter; }
+    }
 
- public long ReceiveMessage(long receivedTimestamp) // synchronizing on a received message
- {
- lock (_lock)
- {
- _counter = Math.Max(_counter, receivedTimestamp) + 1;
- return _counter;
- }
- }
+    public long ReceiveMessage(long receivedTimestamp) // synchronizing on a received message
+    {
+        lock (_lock)
+        {
+            _counter = Math.Max(_counter, receivedTimestamp) + 1;
+            return _counter;
+        }
+    }
 }
 ```
 
@@ -182,18 +182,18 @@ public class LamportClock
 ```csharp
 public class RaftNode
 {
- private readonly int _totalNodes;
- private int _votesReceived = 1; // votes for self
+    private readonly int _totalNodes;
+    private int _votesReceived = 1; // votes for self
 
- public RaftNode(int totalNodes) => _totalNodes = totalNodes;
+    public RaftNode(int totalNodes) => _totalNodes = totalNodes;
 
- public bool ReceiveVote
- {
- _votesReceived++;
- return HasMajority;
- }
+    public bool ReceiveVote
+    {
+        _votesReceived++;
+        return HasMajority;
+    }
 
- private bool HasMajority => _votesReceived > _totalNodes / 2; // the core quorum check,/
+    private bool HasMajority => _votesReceived > _totalNodes / 2; // the core quorum check,/
 }
 ```
 
@@ -203,25 +203,25 @@ public class RaftNode
 [InlineData(1)] [InlineData(2)] [InlineData(3)] // fail at EACH step, not just the happy path
 public async Task Saga_Should_Correctly_Compensate_Regardless_Of_Which_Step_Fails(int failAtStep)
 {
- var testGateway = new FailingAtStepPaymentService(failAtStep == 1);
- var testInventory = new FailingAtStepInventoryService(failAtStep == 2);
- var testWarehouse = new FailingAtStepWarehouseService(failAtStep == 3);
+    var testGateway = new FailingAtStepPaymentService(failAtStep == 1);
+    var testInventory = new FailingAtStepInventoryService(failAtStep == 2);
+    var testWarehouse = new FailingAtStepWarehouseService(failAtStep == 3);
 
- var saga = new OrderFulfillmentSaga(testGateway, testInventory, testWarehouse); //
- var order = CreateTestOrder;
+    var saga = new OrderFulfillmentSaga(testGateway, testInventory, testWarehouse); //
+    var order = CreateTestOrder;
 
- await saga.ExecuteAsync(order);
+    await saga.ExecuteAsync(order);
 
- // Assert ONLY the steps that actually completed before the failure were compensated
- // and in the CORRECT reverse order (the discipline).
- var expectedCompensations = failAtStep switch
- {
- 1 => new string[] { }, // nothing completed yet, nothing to compensate
- 2 => new[] { "RefundPayment" },
- 3 => new[] { "ReleaseInventoryReservation", "RefundPayment" }, // reverse order
- _ => throw new ArgumentOutOfRangeException
- };
- Assert.Equal(expectedCompensations, testGateway.CompensationLog.Concat(testInventory.CompensationLog));
+    // Assert ONLY the steps that actually completed before the failure were compensated
+    // and in the CORRECT reverse order (the discipline).
+    var expectedCompensations = failAtStep switch
+    {
+        1 => new string[] { }, // nothing completed yet, nothing to compensate
+            2 => new[] { "RefundPayment" },
+            3 => new[] { "ReleaseInventoryReservation", "RefundPayment" }, // reverse order
+            _ => throw new ArgumentOutOfRangeException
+    };
+    Assert.Equal(expectedCompensations, testGateway.CompensationLog.Concat(testInventory.CompensationLog));
 }
 ```
 
@@ -229,24 +229,24 @@ public async Task Saga_Should_Correctly_Compensate_Regardless_Of_Which_Step_Fail
 ```csharp
 public class QuorumStore
 {
- private readonly List<IDatabase> _nodes; // N total nodes
- private readonly int _writeQuorum, _readQuorum; // W, R -- caller-configured per the W+R>N guarantee
+    private readonly List<IDatabase> _nodes; // N total nodes
+    private readonly int _writeQuorum, _readQuorum; // W, R -- caller-configured per the W+R>N guarantee
 
- public async Task<bool> WriteAsync(string key, string value)
- {
- var tasks = _nodes.Select(n => n.StringSetAsync(key, value));
- var results = await Task.WhenAll(tasks.Select(async t => { try { await t; return true; } catch { return false; } }));
- return results.Count(success => success) >= _writeQuorum; // W acknowledgments required
- }
+    public async Task<bool> WriteAsync(string key, string value)
+    {
+        var tasks = _nodes.Select(n => n.StringSetAsync(key, value));
+        var results = await Task.WhenAll(tasks.Select(async t => { try { await t; return true; } catch { return false; } }));
+        return results.Count(success => success) >= _writeQuorum; // W acknowledgments required
+    }
 
- public async Task<string?> ReadAsync(string key)
- {
- var tasks = _nodes.Take(_readQuorum).Select(n => n.StringGetAsync(key)); // consult R nodes
- var results = await Task.WhenAll(tasks);
- // Return the value with the HIGHEST logical/vector-clock timestamp among the R responses --
- // guaranteed (by W+R>N) to include at least one node reflecting the most recent write.
- return results.OrderByDescending(r => r.Timestamp).FirstOrDefault?.Value;
- }
+    public async Task<string?> ReadAsync(string key)
+    {
+        var tasks = _nodes.Take(_readQuorum).Select(n => n.StringGetAsync(key)); // consult R nodes
+        var results = await Task.WhenAll(tasks);
+        // Return the value with the HIGHEST logical/vector-clock timestamp among the R responses --
+        // guaranteed (by W+R>N) to include at least one node reflecting the most recent write.
+        return results.OrderByDescending(r => r.Timestamp).FirstOrDefault?.Value;
+    }
 }
 ```
 **Discussion**: This directly makes concrete the W+R>N formula — the `ReadAsync` method's guarantee of observing the most recent write depends entirely on the caller having configured `_writeQuorum + _readQuorum > _nodes.Count`, exactly the same underlying mathematical guarantee that DynamoDB's, MongoDB's, and Cassandra's tunable consistency parameters all rest upon, now implemented directly and explicitly rather than hidden behind an engine-specific configuration setting.

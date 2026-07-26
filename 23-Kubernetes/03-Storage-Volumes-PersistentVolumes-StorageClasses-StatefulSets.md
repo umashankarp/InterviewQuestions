@@ -223,27 +223,27 @@ spec:
 ```csharp
 public class StorageGovernanceCheck
 {
- public GovernanceResult Validate(IEnumerable<PersistentVolumeInfo> pvs)
- {
- var findings = new List<string>;
+    public GovernanceResult Validate(IEnumerable<PersistentVolumeInfo> pvs)
+    {
+        var findings = new List<string>;
 
- foreach (var pv in pvs)
- {
- ///the exact incident -- a critical-classified PV with the Delete
- // default is one accidental PVC deletion away from irreversible data loss.
- if (pv.DataCriticality == "critical" && pv.ReclaimPolicy == "Delete")
- findings.Add($"PV '{pv.Name}' backs critical data but uses Delete reclaim policy " +
- $"(this module/) -- change to Retain or provide an explicit exception.");
+        foreach (var pv in pvs)
+        {
+            ///the exact incident -- a critical-classified PV with the Delete
+            // default is one accidental PVC deletion away from irreversible data loss.
+            if (pv.DataCriticality == "critical" && pv.ReclaimPolicy == "Delete")
+                findings.Add($"PV '{pv.Name}' backs critical data but uses Delete reclaim policy " +
+                $"(this module/) -- change to Retain or provide an explicit exception.");
 
- // Advanced Q4 -- flag RWX where RWO would suffice, or vice versa, based on
- // declared workload access pattern (surfaced via namespace/PVC annotation).
- if (pv.DeclaredAccessPattern == "single-writer-per-replica" && pv.AccessMode == "ReadWriteMany")
- findings.Add($"PV '{pv.Name}' uses RWX for a single-writer-per-replica workload " +
- $"(§Advanced Q7) -- confirm RWX is genuinely required, or simplify to RWO.");
- }
+            // Advanced Q4 -- flag RWX where RWO would suffice, or vice versa, based on
+            // declared workload access pattern (surfaced via namespace/PVC annotation).
+            if (pv.DeclaredAccessPattern == "single-writer-per-replica" && pv.AccessMode == "ReadWriteMany")
+                findings.Add($"PV '{pv.Name}' uses RWX for a single-writer-per-replica workload " +
+                $"(§Advanced Q7) -- confirm RWX is genuinely required, or simplify to RWO.");
+        }
 
- return new GovernanceResult { Passed = findings.Count == 0, Findings = findings };
- }
+        return new GovernanceResult { Passed = findings.Count == 0, Findings = findings };
+    }
 }
 ```
 

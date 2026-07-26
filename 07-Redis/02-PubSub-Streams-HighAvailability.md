@@ -153,11 +153,11 @@ XACK orders:events analytics-group <message-id>
 ```csharp
 public async Task PublishOrderEventAsync(OrderEvent evt)
 {
- // Transition period: write to BOTH mechanisms.
- await _redis.PublishAsync("orders:pubsub", Serialize(evt)); // legacy consumers, unchanged
- await _redis.StreamAddAsync("orders:stream", new[] {
- new NameValueEntry("payload", Serialize(evt))
- }); // new, durable path
+    // Transition period: write to BOTH mechanisms.
+    await _redis.PublishAsync("orders:pubsub", Serialize(evt)); // legacy consumers, unchanged
+    await _redis.StreamAddAsync("orders:stream", new[] {
+            new NameValueEntry("payload", Serialize(evt))
+    }); // new, durable path
 }
 // Once the Stream-based consumer is validated and reliable, remove the PublishAsync call entirely.
 ```
@@ -166,22 +166,22 @@ public async Task PublishOrderEventAsync(OrderEvent evt)
 ```csharp
 public async Task ProcessPendingWithDeadLetterAsync(string stream, string group, string consumer, int maxRetries)
 {
- var pending = await _redis.StreamPendingMessagesAsync(stream, group, 100, consumer);
+    var pending = await _redis.StreamPendingMessagesAsync(stream, group, 100, consumer);
 
- foreach (var entry in pending)
- {
- if (entry.DeliveryCount > maxRetries)
- {
- var messages = await _redis.StreamRangeAsync(stream, entry.MessageId, entry.MessageId);
- await _redis.StreamAddAsync($"{stream}:deadletter", messages[0].Values);
- await _redis.StreamAcknowledgeAsync(stream, group, entry.MessageId); // stop it from being reclaimed forever
- }
- else
- {
- var claimed = await _redis.StreamClaimAsync(stream, group, consumer, minIdleTimeInMs: 30000, messageIds: new[] { entry.MessageId });
- foreach (var msg in claimed) await ProcessMessageAsync(msg); // retry
- }
- }
+    foreach (var entry in pending)
+    {
+        if (entry.DeliveryCount > maxRetries)
+        {
+            var messages = await _redis.StreamRangeAsync(stream, entry.MessageId, entry.MessageId);
+            await _redis.StreamAddAsync($"{stream}:deadletter", messages[0].Values);
+            await _redis.StreamAcknowledgeAsync(stream, group, entry.MessageId); // stop it from being reclaimed forever
+        }
+        else
+        {
+            var claimed = await _redis.StreamClaimAsync(stream, group, consumer, minIdleTimeInMs: 30000, messageIds: new[] { entry.MessageId });
+            foreach (var msg in claimed) await ProcessMessageAsync(msg); // retry
+        }
+    }
 }
 ```
 
@@ -189,17 +189,17 @@ public async Task ProcessPendingWithDeadLetterAsync(string stream, string group,
 ```csharp
 public async Task<bool> WriteCriticalDataAsync(string key, string value)
 {
- var db = await _sentinelConnection.GetDatabaseAsync; // resolves current primary via Sentinel
- await db.StringSetAsync(key, value);
+    var db = await _sentinelConnection.GetDatabaseAsync; // resolves current primary via Sentinel
+    await db.StringSetAsync(key, value);
 
- var replicaAckCount = await db.ExecuteAsync("WAIT", "1", "1000"); // wait for 1 replica, up to 1s
- if ((long)replicaAckCount < 1)
- {
- // Durability NOT confirmed within the timeout -- caller must decide: retry, alert, or accept the risk explicitly.
- _logger.LogWarning("WAIT did not confirm replication for key {Key} within timeout.", key);
- return false;
- }
- return true;
+    var replicaAckCount = await db.ExecuteAsync("WAIT", "1", "1000"); // wait for 1 replica, up to 1s
+    if ((long)replicaAckCount < 1)
+    {
+        // Durability NOT confirmed within the timeout -- caller must decide: retry, alert, or accept the risk explicitly.
+        _logger.LogWarning("WAIT did not confirm replication for key {Key} within timeout.", key);
+        return false;
+    }
+    return true;
 }
 ```
 **Discussion**: This directly implements Advanced Q3's fix — `WAIT` closes the exact same failover data-loss window the MongoDB incident demonstrated, here made explicit and deliberate for a specific "critical" write path rather than left to Redis's default asynchronous-replication behavior.

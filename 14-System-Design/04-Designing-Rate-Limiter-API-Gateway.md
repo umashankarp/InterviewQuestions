@@ -264,10 +264,10 @@ public record RateLimitTier(string Name, int Capacity, double RefillRatePerSecon
 
 public class MultiTierRateLimitConfig
 {
- public RateLimitTier Global { get; init; } = new("global", 50_000, 45_000 / 1.0); // the fix
- public Dictionary<string, RateLimitTier> PerTenant { get; init; } = new; // contractual limits
- public RateLimitTier PerUserDefault { get; init; } = new("user-default", 100, 100 / 60.0);
- public Dictionary<string, RateLimitTier> PerEndpoint { get; init; } = new; // e.g., stricter for /reports
+    public RateLimitTier Global { get; init; } = new("global", 50_000, 45_000 / 1.0); // the fix
+    public Dictionary<string, RateLimitTier> PerTenant { get; init; } = new; // contractual limits
+    public RateLimitTier PerUserDefault { get; init; } = new("user-default", 100, 100 / 60.0);
+    public Dictionary<string, RateLimitTier> PerEndpoint { get; init; } = new; // e.g., stricter for /reports
 }
 ```
 
@@ -275,24 +275,24 @@ public class MultiTierRateLimitConfig
 ```csharp
 public class ResilientRateLimiter
 {
- private readonly IDistributedRateLimiter _redisLimiter;
- private readonly CircuitBreaker _circuitBreaker; // e.g., Polly's CircuitBreakerPolicy
+    private readonly IDistributedRateLimiter _redisLimiter;
+    private readonly CircuitBreaker _circuitBreaker; // e.g., Polly's CircuitBreakerPolicy
 
- public async Task<bool> ShouldAllowAsync(string key)
- {
- try
- {
- return await _circuitBreaker.ExecuteAsync(=> _redisLimiter.CheckAsync(key));
- }
- catch (BrokenCircuitException)
- {
- // Redis is degraded/unavailable -- FAIL OPEN for this gateway, per the deliberate
- // documented choice §Advanced Q8 (most APIs prefer availability
- // over strict enforcement during a rate-limiter-infrastructure outage).
- _logger.LogWarning("Rate limiter circuit OPEN -- failing open for key {Key}", key);
- return true;
- }
- }
+    public async Task<bool> ShouldAllowAsync(string key)
+    {
+        try
+        {
+            return await _circuitBreaker.ExecuteAsync(=> _redisLimiter.CheckAsync(key));
+        }
+        catch (BrokenCircuitException)
+        {
+            // Redis is degraded/unavailable -- FAIL OPEN for this gateway, per the deliberate
+            // documented choice §Advanced Q8 (most APIs prefer availability
+            // over strict enforcement during a rate-limiter-infrastructure outage).
+            _logger.LogWarning("Rate limiter circuit OPEN -- failing open for key {Key}", key);
+            return true;
+        }
+    }
 }
 ```
 
@@ -300,30 +300,30 @@ public class ResilientRateLimiter
 ```csharp
 public class GatewayPipeline
 {
- public async Task<HttpResponseMessage> HandleAsync(HttpRequest request)
- {
- // 1. Reject malformed/oversized requests EARLIEST
- if (!IsValidRequestShape(request)) return Reject(400);
+    public async Task<HttpResponseMessage> HandleAsync(HttpRequest request)
+    {
+        // 1. Reject malformed/oversized requests EARLIEST
+        if (!IsValidRequestShape(request)) return Reject(400);
 
- // 2. Authenticate -- establishes caller identity for subsequent tiers
- var principal = await _authenticator.AuthenticateAsync(request);
- if (principal is null) return Reject(401);
+        // 2. Authenticate -- establishes caller identity for subsequent tiers
+        var principal = await _authenticator.AuthenticateAsync(request);
+        if (principal is null) return Reject(401);
 
- // 3. Multi-tier rate limiting, ALL must pass (Advanced Q2's single atomic check)
- string tenantId = principal.GetTenantId;
- bool allowed = await _rateLimiter.ShouldAllowAsync(
- globalKey: "global", tenantKey: $"tenant:{tenantId}",
- userKey: $"user:{principal.UserId}", endpointKey: $"endpoint:{request.Path}");
- if (!allowed) return Reject(429, retryAfter: "60");
+        // 3. Multi-tier rate limiting, ALL must pass (Advanced Q2's single atomic check)
+        string tenantId = principal.GetTenantId;
+        bool allowed = await _rateLimiter.ShouldAllowAsync(
+            globalKey: "global", tenantKey: $"tenant:{tenantId}",
+                userKey: $"user:{principal.UserId}", endpointKey: $"endpoint:{request.Path}");
+        if (!allowed) return Reject(429, retryAfter: "60");
 
- // 4. Route to the correct, healthy backend
- var backend = await _serviceDiscovery.ResolveHealthyInstanceAsync(request.Path);
- if (backend is null) return Reject(503);
+        // 4. Route to the correct, healthy backend
+        var backend = await _serviceDiscovery.ResolveHealthyInstanceAsync(request.Path);
+        if (backend is null) return Reject(503);
 
- // 5. Attach signed internal trust assertion (Advanced Q3) and forward
- var internalToken = _internalTokenSigner.Sign(principal);
- return await _httpClient.ForwardAsync(backend, request, internalToken);
- }
+        // 5. Attach signed internal trust assertion (Advanced Q3) and forward
+        var internalToken = _internalTokenSigner.Sign(principal);
+        return await _httpClient.ForwardAsync(backend, request, internalToken);
+    }
 }
 ```
 **Discussion**: The explicit, numbered ordering here is itself the key design artifact — directly mirroring the middleware-ordering discipline (validation/rejection as early and cheap as possible, expensive operations gated behind cheaper checks) now expressed at the full-system-gateway level, synthesizing input validation, authentication, multi-tier rate limiting (this module's core topic), service discovery, and secure internal trust propagation (Advanced Q3) into one cohesive, correctly-sequenced pipeline.

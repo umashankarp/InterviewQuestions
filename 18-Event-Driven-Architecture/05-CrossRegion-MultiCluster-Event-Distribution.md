@@ -454,10 +454,10 @@ The generalizable lesson: **RPO measured during steady state describes a conditi
 **Solution:**
 ```csharp
 public DateTimeOffset ComputeResumeTimestamp(
- DateTimeOffset failoverDetectedAt,
- TimeSpan worstCaseReplicationLag) // measured under correlated failure, not steady-state
+    DateTimeOffset failoverDetectedAt,
+        TimeSpan worstCaseReplicationLag) // measured under correlated failure, not steady-state
 {
- return failoverDetectedAt - worstCaseReplicationLag - _safetyMargin;
+    return failoverDetectedAt - worstCaseReplicationLag - _safetyMargin;
 }
 ```
 **Time complexity:** O(1).
@@ -470,14 +470,14 @@ public DateTimeOffset ComputeResumeTimestamp(
 ```csharp
 public bool ShouldReplicate(ReplicatedEvent evt, string localClusterId)
 {
- if (evt.OriginClusterId == localClusterId)
- return false; // don't re-mirror what originated here
+    if (evt.OriginClusterId == localClusterId)
+        return false; // don't re-mirror what originated here
 
- return true;
+    return true;
 }
 
 public ReplicatedEvent TagForReplication(RawEvent evt, string producingClusterId)
- => new ReplicatedEvent(evt, originClusterId: producingClusterId);
+=> new ReplicatedEvent(evt, originClusterId: producingClusterId);
 ```
 **Time complexity:** O(1) per event.
 **Space complexity:** O(1).
@@ -489,27 +489,27 @@ public ReplicatedEvent TagForReplication(RawEvent evt, string producingClusterId
 ```csharp
 public class OwnershipRouter
 {
- private readonly IOwnershipDirectory _directory; // key -> owning region, itself replicated
+    private readonly IOwnershipDirectory _directory; // key -> owning region, itself replicated
 
- public async Task<string> ResolveWriteRegionAsync(string entityKey)
- {
- var owner = await _directory.GetOwnerAsync(entityKey);
- if (owner is null)
- throw new UnownedEntityException(entityKey); // fail closed — never guess an owner
+    public async Task<string> ResolveWriteRegionAsync(string entityKey)
+    {
+        var owner = await _directory.GetOwnerAsync(entityKey);
+        if (owner is null)
+            throw new UnownedEntityException(entityKey); // fail closed — never guess an owner
 
- return owner.RegionId;
- }
+        return owner.RegionId;
+    }
 
- public async Task RouteWriteAsync(string entityKey, EventEnvelope evt, IRegionClients clients)
- {
- var region = await ResolveWriteRegionAsync(entityKey);
- if (region!= clients.LocalRegionId)
- {
- await clients.ForwardAsync(region, evt); // cross-region forward to the owner, not a direct local write
- return;
- }
- await clients.LocalProduceAsync(evt);
- }
+    public async Task RouteWriteAsync(string entityKey, EventEnvelope evt, IRegionClients clients)
+    {
+        var region = await ResolveWriteRegionAsync(entityKey);
+        if (region!= clients.LocalRegionId)
+        {
+            await clients.ForwardAsync(region, evt); // cross-region forward to the owner, not a direct local write
+            return;
+        }
+        await clients.LocalProduceAsync(evt);
+    }
 }
 ```
 **Time complexity:** O(1) plus one directory lookup and, on the non-owning path, one cross-region hop.
@@ -521,23 +521,23 @@ public class OwnershipRouter
 **Solution:**
 ```csharp
 public async Task<ConsistencyReport> RunConsistencyCanaryAsync(
- IEnumerable<string> sampledKeys, IRegionClients clients, TimeSpan maxExpectedReplicationLag)
+    IEnumerable<string> sampledKeys, IRegionClients clients, TimeSpan maxExpectedReplicationLag)
 {
- var mismatches = new List<KeyMismatch>;
+    var mismatches = new List<KeyMismatch>;
 
- foreach (var key in sampledKeys)
- {
- var local = await clients.LocalStateAsync(key);
- var remote = await clients.RemoteStateAsync(key);
+    foreach (var key in sampledKeys)
+    {
+        var local = await clients.LocalStateAsync(key);
+        var remote = await clients.RemoteStateAsync(key);
 
- if (local is null || remote is null) continue; // not yet replicated either direction — expected
+        if (local is null || remote is null) continue; // not yet replicated either direction — expected
 
- var ageDelta = (local.LastUpdated - remote.LastUpdated).Duration;
- if (local.Checksum!= remote.Checksum && ageDelta > maxExpectedReplicationLag)
- mismatches.Add(new KeyMismatch(key, local, remote, ageDelta)); // divergence beyond expected lag
- }
+        var ageDelta = (local.LastUpdated - remote.LastUpdated).Duration;
+        if (local.Checksum!= remote.Checksum && ageDelta > maxExpectedReplicationLag)
+            mismatches.Add(new KeyMismatch(key, local, remote, ageDelta)); // divergence beyond expected lag
+    }
 
- return new ConsistencyReport(mismatches, sampledAt: DateTimeOffset.UtcNow);
+    return new ConsistencyReport(mismatches, sampledAt: DateTimeOffset.UtcNow);
 }
 ```
 **Time complexity:** O(k) for k sampled keys.

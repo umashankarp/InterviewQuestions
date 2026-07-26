@@ -150,12 +150,12 @@ graph TB
 ```csharp
 var putRequest = new PutObjectRequest
 {
- BucketName = "user-uploads",
- Key = $"uploads/{userId}/{fileName}",
- FilePath = localFilePath,
- StorageClass = S3StorageClass.Standard, // hot path: recently uploaded, frequently accessed
- ServerSideEncryptionMethod = ServerSideEncryptionMethod.AWSKMS,
- ServerSideEncryptionKeyManagementServiceKeyId = kmsKeyId // -- encryption at rest
+    BucketName = "user-uploads",
+        Key = $"uploads/{userId}/{fileName}",
+        FilePath = localFilePath,
+        StorageClass = S3StorageClass.Standard, // hot path: recently uploaded, frequently accessed
+        ServerSideEncryptionMethod = ServerSideEncryptionMethod.AWSKMS,
+        ServerSideEncryptionKeyManagementServiceKeyId = kmsKeyId // -- encryption at rest
 };
 await s3Client.PutObjectAsync(putRequest);
 ```
@@ -163,17 +163,17 @@ await s3Client.PutObjectAsync(putRequest);
 ### Medium — Lifecycle rule transitioning storage class automatically
 ```json
 {
- "Rules": [
- {
- "ID": "transition-old-uploads-to-ia-then-glacier",
- "Status": "Enabled",
- "Filter": { "Prefix": "uploads/" },
- "Transitions": [
- { "Days": 30, "StorageClass": "STANDARD_IA" },
- { "Days": 90, "StorageClass": "GLACIER" }
- ]
- }
- ]
+  "Rules": [
+    {
+      "ID": "transition-old-uploads-to-ia-then-glacier",
+        "Status": "Enabled",
+        "Filter": { "Prefix": "uploads/" },
+        "Transitions": [
+        { "Days": 30, "StorageClass": "STANDARD_IA" },
+        { "Days": 90, "StorageClass": "GLACIER" }
+      ]
+    }
+  ]
 }
 ```
 
@@ -181,56 +181,56 @@ await s3Client.PutObjectAsync(putRequest);
 ```csharp
 public class VideoUploadPipeline
 {
- public async Task<string> HandleUploadAsync(Stream videoStream, string fileName)
- {
- // 1. Authoritative copy lands in S3 FIRST -- inherits 11-nines, Region-spanning durability immediately.
- var s3Key = $"raw-uploads/{Guid.NewGuid}/{fileName}";
- await _s3Client.PutObjectAsync(new PutObjectRequest
- {
- BucketName = "raw-uploads-authoritative",
- Key = s3Key,
- InputStream = videoStream
- });
+    public async Task<string> HandleUploadAsync(Stream videoStream, string fileName)
+    {
+        // 1. Authoritative copy lands in S3 FIRST -- inherits 11-nines, Region-spanning durability immediately.
+        var s3Key = $"raw-uploads/{Guid.NewGuid}/{fileName}";
+        await _s3Client.PutObjectAsync(new PutObjectRequest
+            {
+                BucketName = "raw-uploads-authoritative",
+                    Key = s3Key,
+                    InputStream = videoStream
+        });
 
- // 2. Only AFTER the authoritative copy is durably stored, download a DISPOSABLE
- // working copy to local/EBS storage for low-latency transcoding.
- var localWorkingPath = Path.Combine("/mnt/ebs-scratch", fileName);
- await DownloadToLocalAsync(s3Key, localWorkingPath);
+        // 2. Only AFTER the authoritative copy is durably stored, download a DISPOSABLE
+        // working copy to local/EBS storage for low-latency transcoding.
+        var localWorkingPath = Path.Combine("/mnt/ebs-scratch", fileName);
+        await DownloadToLocalAsync(s3Key, localWorkingPath);
 
- // 3. If the transcoding instance or its EBS volume is lost mid-processing
- // the authoritative S3 copy is untouched -- simply re-run from step 2 on a new instance.
- return s3Key;
- }
+        // 3. If the transcoding instance or its EBS volume is lost mid-processing
+        // the authoritative S3 copy is untouched -- simply re-run from step 2 on a new instance.
+        return s3Key;
+    }
 }
 ```
 
 ### Expert — S3 event-driven pipeline with EventBridge fan-out (§Visual Architecture)
 ```json
 {
- "source": ["aws.s3"],
- "detail-type": ["Object Created"],
- "detail": {
- "bucket": { "name": ["raw-uploads-authoritative"] }
- }
+  "source": ["aws.s3"],
+    "detail-type": ["Object Created"],
+    "detail": {
+    "bucket": { "name": ["raw-uploads-authoritative"] }
+  }
 }
 ```
 ```csharp
 [LambdaFunction]
 public async Task HandleS3Event(EventBridgeEvent<S3ObjectCreatedDetail> evt)
 {
- var bucket = evt.Detail.Bucket.Name;
- var key = evt.Detail.Object.Key;
+    var bucket = evt.Detail.Bucket.Name;
+    var key = evt.Detail.Object.Key;
 
- // Generate thumbnail -- writes to a SEPARATE bucket, which itself emits its own event (§Visual Architecture)
- var thumbnail = await GenerateThumbnailAsync(bucket, key);
- await _s3Client.PutObjectAsync(new PutObjectRequest
- {
- BucketName = "thumbnails",
- Key = key,
- InputStream = thumbnail
- });
- // No polling anywhere in this pipeline -- every stage is triggered purely by the
- // preceding stage's S3 write, directly the choreography pattern.
+    // Generate thumbnail -- writes to a SEPARATE bucket, which itself emits its own event (§Visual Architecture)
+    var thumbnail = await GenerateThumbnailAsync(bucket, key);
+    await _s3Client.PutObjectAsync(new PutObjectRequest
+        {
+            BucketName = "thumbnails",
+                Key = key,
+                InputStream = thumbnail
+    });
+    // No polling anywhere in this pipeline -- every stage is triggered purely by the
+    // preceding stage's S3 write, directly the choreography pattern.
 }
 ```
 **Discussion**: chaining S3 buckets via event notifications (upload → thumbnail bucket → downstream notify/search-index consumers) builds a fully event-driven pipeline with no custom polling infrastructure anywhere — each stage's only responsibility is to correctly process its own input and write its own output, with S3 itself handling the "notify the next stage" responsibility natively, directly reusing the choreography-vs-orchestration trade-offs already established (this remains choreography — no central orchestrator — so the same debuggability trade-offs identified apply here too).

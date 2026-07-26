@@ -259,12 +259,12 @@ graph TB
 ```csharp
 public async Task CreateStoryAsync(string userId, string mediaUrl)
 {
- string storyId = Guid.NewGuid.ToString;
- var storyData = JsonSerializer.Serialize(new { userId, mediaUrl, createdAt = DateTimeOffset.UtcNow });
+    string storyId = Guid.NewGuid.ToString;
+    var storyData = JsonSerializer.Serialize(new { userId, mediaUrl, createdAt = DateTimeOffset.UtcNow });
 
- // Native TTL -- expiration is a STRUCTURAL property of the storage layer, no separate cleanup job needed.
- await _redis.StringSetAsync($"story:{storyId}", storyData, TimeSpan.FromHours(24));
- await _redis.SetAddAsync($"active-stories:{userId}", storyId, TimeSpan.FromHours(24)); // Intermediate Q5's dedicated set
+    // Native TTL -- expiration is a STRUCTURAL property of the storage layer, no separate cleanup job needed.
+    await _redis.StringSetAsync($"story:{storyId}", storyData, TimeSpan.FromHours(24));
+    await _redis.SetAddAsync($"active-stories:{userId}", storyId, TimeSpan.FromHours(24)); // Intermediate Q5's dedicated set
 }
 ```
 
@@ -274,10 +274,10 @@ public enum RenditionPriority { Thumbnail = 0, FeedDisplay = 1, FullResolution =
 
 public async Task ProcessUploadedImageAsync(string imageId, byte[] rawImageBytes)
 {
- // Thumbnail FIRST -- needed immediately for feed display; full-res last, needed only on-demand.
- await _jobQueue.EnqueueAsync(new ResizeJob(imageId, RenditionPriority.Thumbnail, rawImageBytes));
- await _jobQueue.EnqueueAsync(new ResizeJob(imageId, RenditionPriority.FeedDisplay, rawImageBytes));
- await _jobQueue.EnqueueAsync(new ResizeJob(imageId, RenditionPriority.FullResolution, rawImageBytes));
+    // Thumbnail FIRST -- needed immediately for feed display; full-res last, needed only on-demand.
+    await _jobQueue.EnqueueAsync(new ResizeJob(imageId, RenditionPriority.Thumbnail, rawImageBytes));
+    await _jobQueue.EnqueueAsync(new ResizeJob(imageId, RenditionPriority.FeedDisplay, rawImageBytes));
+    await _jobQueue.EnqueueAsync(new ResizeJob(imageId, RenditionPriority.FullResolution, rawImageBytes));
 }
 ```
 
@@ -285,17 +285,17 @@ public async Task ProcessUploadedImageAsync(string imageId, byte[] rawImageBytes
 ```csharp
 public async Task PublishCloseFriendsStoryAsync(string authorId, string mediaUrl)
 {
- // Resolve the audience ONCE, at creation time -- re-validated as CURRENT, not a stale cached list.
- var closeFriends = await _followGraph.GetCurrentCloseFriendsAsync(authorId);
- string storyId = await CreateStoryAsync(authorId, mediaUrl); // Easy exercise's TTL-native creation
+    // Resolve the audience ONCE, at creation time -- re-validated as CURRENT, not a stale cached list.
+    var closeFriends = await _followGraph.GetCurrentCloseFriendsAsync(authorId);
+    string storyId = await CreateStoryAsync(authorId, mediaUrl); // Easy exercise's TTL-native creation
 
- foreach (var friendId in closeFriends)
- {
- await _redis.SetAddAsync($"visible-close-friends-stories:{friendId}", storyId, TimeSpan.FromHours(24));
- }
- // A friend REMOVED from Close Friends after this point simply never received this specific
- // story in their visibility set in the first place -- no stale-authorization risk requires
- // a separate revocation step, since fan-out only ever targeted the audience CURRENT at creation time.
+    foreach (var friendId in closeFriends)
+    {
+        await _redis.SetAddAsync($"visible-close-friends-stories:{friendId}", storyId, TimeSpan.FromHours(24));
+    }
+    // A friend REMOVED from Close Friends after this point simply never received this specific
+    // story in their visibility set in the first place -- no stale-authorization risk requires
+    // a separate revocation step, since fan-out only ever targeted the audience CURRENT at creation time.
 }
 ```
 
@@ -303,16 +303,16 @@ public async Task PublishCloseFriendsStoryAsync(string authorId, string mediaUrl
 ```csharp
 public async Task<List<RankedPost>> GetExploreCandidatesAsync(string userId, int count)
 {
- var offlineScored = await _recommendationModel.GetTopCandidatesAsync(userId, count * 2); // offline-trained base scores
+    var offlineScored = await _recommendationModel.GetTopCandidatesAsync(userId, count * 2); // offline-trained base scores
 
- var trendingBoosts = await Task.WhenAll(
- offlineScored.Select(c => _engagementVelocityTracker.GetRecentVelocityAsync(c.PostId))); //-style
- // batched real-time counter
+    var trendingBoosts = await Task.WhenAll(
+        offlineScored.Select(c => _engagementVelocityTracker.GetRecentVelocityAsync(c.PostId))); //-style
+    // batched real-time counter
 
- var combined = offlineScored.Zip(trendingBoosts, (candidate, velocity) =>
- new RankedPost(candidate.PostId, candidate.OfflineScore * 0.7 + velocity * 0.3)); // weighted blend
+    var combined = offlineScored.Zip(trendingBoosts, (candidate, velocity) =>
+        new RankedPost(candidate.PostId, candidate.OfflineScore * 0.7 + velocity * 0.3)); // weighted blend
 
- return combined.OrderByDescending(p => p.CombinedScore).Take(count).ToList;
+    return combined.OrderByDescending(p => p.CombinedScore).Take(count).ToList;
 }
 ```
 **Discussion**: The 0.7/0.3 weighting is illustrative — a real system would tune this blend empirically via A/B testing (Advanced Q5's earlier feed-ranking A/B-testing pattern, directly reused here), but the structural point is the key design artifact: combining a slower-updating, more sophisticated offline signal with a fast-updating, simpler real-time signal at serving time, rather than requiring either a full model retrain for every trending shift or ignoring recent virality entirely.

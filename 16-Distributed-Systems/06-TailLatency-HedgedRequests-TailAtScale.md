@@ -447,7 +447,7 @@ The generalizable lesson: **hedging trades extra, unconditional load for reduced
 ```csharp
 public double AggregateTailProbability(double individualTailProbability, int fanOutWidth)
 {
- return 1 - Math.Pow(1 - individualTailProbability, fanOutWidth); // the formula, directly
+    return 1 - Math.Pow(1 - individualTailProbability, fanOutWidth); // the formula, directly
 }
 ```
 **Time complexity:** O(1).
@@ -459,24 +459,24 @@ public double AggregateTailProbability(double individualTailProbability, int fan
 **Solution:**
 ```csharp
 public async Task<TResponse> ExecuteWithHedgeAsync<TResponse>(
- Func<CancellationToken, Task<TResponse>> primaryCall,
- Func<CancellationToken, Task<TResponse>> hedgeCall,
- ILatencyPercentileTracker tracker)
+    Func<CancellationToken, Task<TResponse>> primaryCall,
+        Func<CancellationToken, Task<TResponse>> hedgeCall,
+        ILatencyPercentileTracker tracker)
 {
- using var cts = new CancellationTokenSource;
- var primaryTask = primaryCall(cts.Token);
+    using var cts = new CancellationTokenSource;
+    var primaryTask = primaryCall(cts.Token);
 
- var delay = tracker.CurrentP95; // ADAPTIVE, not a fixed constant (Intermediate Q2)
- var completedFirst = await Task.WhenAny(primaryTask, Task.Delay(delay, cts.Token));
+    var delay = tracker.CurrentP95; // ADAPTIVE, not a fixed constant (Intermediate Q2)
+    var completedFirst = await Task.WhenAny(primaryTask, Task.Delay(delay, cts.Token));
 
- if (completedFirst == primaryTask)
- return await primaryTask; // fast path — no hedge needed at all
+    if (completedFirst == primaryTask)
+        return await primaryTask; // fast path — no hedge needed at all
 
- // primary is trending into the tail — NOW fire the hedge (the delayed dispatch)
- var hedgeTask = hedgeCall(cts.Token);
- var winner = await Task.WhenAny(primaryTask, hedgeTask);
- cts.Cancel; // cancel whichever loses
- return await winner;
+    // primary is trending into the tail — NOW fire the hedge (the delayed dispatch)
+    var hedgeTask = hedgeCall(cts.Token);
+    var winner = await Task.WhenAny(primaryTask, hedgeTask);
+    cts.Cancel; // cancel whichever loses
+    return await winner;
 }
 ```
 **Time complexity:** O(1) orchestration overhead beyond the underlying calls.
@@ -489,23 +489,23 @@ public async Task<TResponse> ExecuteWithHedgeAsync<TResponse>(
 ```csharp
 public class HedgeBudget
 {
- private readonly double _maxHedgeFraction;
- private int _totalRequests, _hedgedRequests;
- private readonly object _lock = new;
+    private readonly double _maxHedgeFraction;
+    private int _totalRequests, _hedgedRequests;
+    private readonly object _lock = new;
 
- public bool TryReserveHedge
- {
- lock (_lock)
- {
- _totalRequests++;
- var currentFraction = _totalRequests == 0? 0: (double)_hedgedRequests / _totalRequests;
- if (currentFraction >= _maxHedgeFraction)
- return false; // budget exhausted — do NOT hedge (the fix)
+    public bool TryReserveHedge
+    {
+        lock (_lock)
+        {
+            _totalRequests++;
+            var currentFraction = _totalRequests == 0? 0: (double)_hedgedRequests / _totalRequests;
+            if (currentFraction >= _maxHedgeFraction)
+                return false; // budget exhausted — do NOT hedge (the fix)
 
- _hedgedRequests++;
- return true;
- }
- }
+            _hedgedRequests++;
+            return true;
+        }
+    }
 }
 ```
 **Time complexity:** O(1) per request.
@@ -518,22 +518,22 @@ public class HedgeBudget
 ```csharp
 public class LoadAwareHedgeGate
 {
- private readonly ICapacityMonitor _capacityMonitor;
- private readonly double _disableThreshold;
+    private readonly ICapacityMonitor _capacityMonitor;
+    private readonly double _disableThreshold;
 
- public bool ShouldHedge
- {
- var utilization = _capacityMonitor.CurrentAggregateUtilization;
- return utilization < _disableThreshold; // hedging OFF precisely when it's most dangerous
- }
+    public bool ShouldHedge
+    {
+        var utilization = _capacityMonitor.CurrentAggregateUtilization;
+        return utilization < _disableThreshold; // hedging OFF precisely when it's most dangerous
+    }
 
- // Meta-verification (Advanced Q7): periodically confirm this gate ACTUALLY trips, not just that it exists
- public async Task<CanaryResult> RunDisablingCanaryAsync(ISyntheticLoadInjector injector)
- {
- await injector.InjectLoadToAsync(_disableThreshold + 0.05, TimeSpan.FromSeconds(30));
- var gateTrippedCorrectly =!ShouldHedge;
- return new CanaryResult(gateTrippedCorrectly, measuredAt: DateTimeOffset.UtcNow);
- }
+    // Meta-verification (Advanced Q7): periodically confirm this gate ACTUALLY trips, not just that it exists
+    public async Task<CanaryResult> RunDisablingCanaryAsync(ISyntheticLoadInjector injector)
+    {
+        await injector.InjectLoadToAsync(_disableThreshold + 0.05, TimeSpan.FromSeconds(30));
+        var gateTrippedCorrectly =!ShouldHedge;
+        return new CanaryResult(gateTrippedCorrectly, measuredAt: DateTimeOffset.UtcNow);
+    }
 }
 ```
 **Time complexity:** O(1) per hedge decision.

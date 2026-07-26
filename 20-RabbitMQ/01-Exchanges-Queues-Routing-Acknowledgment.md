@@ -175,7 +175,7 @@ properties.Persistent = true; // message: ALSO explicitly persistent -- BOTH req
 properties.DeliveryMode = 2; // (2 = persistent, in the raw AMQP protocol)
 
 channel.BasicPublish(exchange: "notifications-exchange", routingKey: "payment.confirmed",
- basicProperties: properties, body: messageBody);
+    basicProperties: properties, body: messageBody);
 ```
 
 ### Hard — Manual acknowledgment with retry-count tracking and Dead Letter Exchange (§Advanced Q5)
@@ -189,20 +189,20 @@ channel.QueueDeclare("payment-notifications", durable: true, exclusive: false, a
 
 consumer.Received += async (model, ea) =>
 {
- int retryCount = ea.BasicProperties.Headers?.TryGetValue("x-retry-count", out var rc) == true? (int)rc: 0;
- try
- {
- await _idempotentHandler.HandleAsync(ea.Body.ToArray, ea.BasicProperties.MessageId);
- channel.BasicAck(ea.DeliveryTag, multiple: false);
- }
- catch (Exception) when (retryCount < 3)
- {
- channel.BasicNack(ea.DeliveryTag, multiple: false, requeue: true); // transient -- retry
- }
- catch (Exception)
- {
- channel.BasicNack(ea.DeliveryTag, multiple: false, requeue: false); // exhausted retries -- routes to DLX
- }
+    int retryCount = ea.BasicProperties.Headers?.TryGetValue("x-retry-count", out var rc) == true? (int)rc: 0;
+    try
+    {
+        await _idempotentHandler.HandleAsync(ea.Body.ToArray, ea.BasicProperties.MessageId);
+        channel.BasicAck(ea.DeliveryTag, multiple: false);
+    }
+    catch (Exception) when (retryCount < 3)
+    {
+        channel.BasicNack(ea.DeliveryTag, multiple: false, requeue: true); // transient -- retry
+    }
+    catch (Exception)
+    {
+        channel.BasicNack(ea.DeliveryTag, multiple: false, requeue: false); // exhausted retries -- routes to DLX
+    }
 };
 ```
 
@@ -210,28 +210,28 @@ consumer.Received += async (model, ea) =>
 ```csharp
 public class BatchAckConsumer
 {
- private readonly List<ulong> _pendingDeliveryTags = new;
- private readonly int _batchSize = 20;
+    private readonly List<ulong> _pendingDeliveryTags = new;
+    private readonly int _batchSize = 20;
 
- public async Task HandleAsync(BasicDeliverEventArgs ea, IModel channel)
- {
- // Idempotency check is PER-MESSAGE, regardless of batch-level acknowledgment (§Advanced Q4) --
- // a redelivered batch may contain a MIX of already-processed and not-yet-processed messages.
- if (!await _idempotencyStore.HasProcessedAsync(ea.BasicProperties.MessageId))
- {
- await _businessHandler.ProcessAsync(ea.Body.ToArray);
- await _idempotencyStore.MarkProcessedAsync(ea.BasicProperties.MessageId);
- }
+    public async Task HandleAsync(BasicDeliverEventArgs ea, IModel channel)
+    {
+        // Idempotency check is PER-MESSAGE, regardless of batch-level acknowledgment (§Advanced Q4) --
+        // a redelivered batch may contain a MIX of already-processed and not-yet-processed messages.
+        if (!await _idempotencyStore.HasProcessedAsync(ea.BasicProperties.MessageId))
+        {
+            await _businessHandler.ProcessAsync(ea.Body.ToArray);
+            await _idempotencyStore.MarkProcessedAsync(ea.BasicProperties.MessageId);
+        }
 
- _pendingDeliveryTags.Add(ea.DeliveryTag);
- if (_pendingDeliveryTags.Count >= _batchSize)
- {
- channel.BasicAck(_pendingDeliveryTags.Last, multiple: true); // ACKs the WHOLE batch up to this tag
- _pendingDeliveryTags.Clear;
- // Reduced acknowledgment network overhead -- at the cost of redelivering the
- // FULL unacknowledged batch on a crash, safely handled by the per-message idempotency check above.
- }
- }
+        _pendingDeliveryTags.Add(ea.DeliveryTag);
+        if (_pendingDeliveryTags.Count >= _batchSize)
+        {
+            channel.BasicAck(_pendingDeliveryTags.Last, multiple: true); // ACKs the WHOLE batch up to this tag
+            _pendingDeliveryTags.Clear;
+            // Reduced acknowledgment network overhead -- at the cost of redelivering the
+            // FULL unacknowledged batch on a crash, safely handled by the per-message idempotency check above.
+        }
+    }
 }
 ```
 **Discussion**: the per-message idempotency check inside a batch-acknowledgment consumer is the concrete resolution of Advanced Q4's subtlety — even though acknowledgment happens at the batch level (reducing overhead), correctness still depends on treating each individual message's processed/unprocessed state independently, since a crash mid-batch can leave the batch in a genuinely mixed state that a batch-level idempotency assumption would handle incorrectly.

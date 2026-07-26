@@ -444,10 +444,10 @@ The generalizable lesson: **a dedup store's retention window is a boundary exact
 ```csharp
 public string DeriveIdempotencyKey(SettlementInstruction instruction)
 {
- var stableContent = $"{instruction.TradeId}|{instruction.SettlementDate:O}|{instruction.Amount}|{instruction.Currency}";
- using var sha256 = SHA256.Create;
- var hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(stableContent));
- return Convert.ToHexString(hash); // reconstructable by any party from the instruction's own content
+    var stableContent = $"{instruction.TradeId}|{instruction.SettlementDate:O}|{instruction.Amount}|{instruction.Currency}";
+    using var sha256 = SHA256.Create;
+    var hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(stableContent));
+    return Convert.ToHexString(hash); // reconstructable by any party from the instruction's own content
 }
 ```
 **Time complexity:** O(1) per operation.
@@ -460,24 +460,24 @@ public string DeriveIdempotencyKey(SettlementInstruction instruction)
 ```csharp
 public async Task<ProcessResult> ProcessIdempotentlyAsync(string idempotencyKey, LedgerEntry entry)
 {
- await using var tx = await _db.BeginTransactionAsync;
+    await using var tx = await _db.BeginTransactionAsync;
 
- var existing = await _db.QuerySingleOrDefaultAsync<LedgerEntry>(
- "SELECT * FROM ledger_entries WHERE idempotency_key = @Key FOR UPDATE",
- new { Key = idempotencyKey }, tx);
+    var existing = await _db.QuerySingleOrDefaultAsync<LedgerEntry>(
+        "SELECT * FROM ledger_entries WHERE idempotency_key = @Key FOR UPDATE",
+            new { Key = idempotencyKey }, tx);
 
- if (existing is not null)
- {
- await tx.CommitAsync;
- return ProcessResult.AlreadyProcessed(existing); // duplicate — no re-application
- }
+    if (existing is not null)
+    {
+        await tx.CommitAsync;
+        return ProcessResult.AlreadyProcessed(existing); // duplicate — no re-application
+    }
 
- await _db.ExecuteAsync(
- "INSERT INTO ledger_entries (idempotency_key,...) VALUES (@Key,...)",
- new { Key = idempotencyKey, entry }, tx); // effect + key in ONE transaction
+    await _db.ExecuteAsync(
+        "INSERT INTO ledger_entries (idempotency_key,...) VALUES (@Key,...)",
+            new { Key = idempotencyKey, entry }, tx); // effect + key in ONE transaction
 
- await tx.CommitAsync;
- return ProcessResult.Applied(entry);
+    await tx.CommitAsync;
+    return ProcessResult.Applied(entry);
 }
 ```
 **Time complexity:** O(1) per operation (indexed lookup plus insert).
@@ -490,29 +490,29 @@ public async Task<ProcessResult> ProcessIdempotentlyAsync(string idempotencyKey,
 ```csharp
 public class DedupCoverageValidator
 {
- public CoverageResult ValidateReplayWindow(DateTimeOffset replayFrom, TimeSpan dedupRetention)
- {
- var coverageBoundary = DateTimeOffset.UtcNow - dedupRetention;
- if (replayFrom < coverageBoundary)
- {
- return CoverageResult.Insufficient(
- gap: coverageBoundary - replayFrom,
- recommendation: "Rely on structural uniqueness constraint, not dedup-store coverage, for this range");
- }
- return CoverageResult.Sufficient;
- }
+    public CoverageResult ValidateReplayWindow(DateTimeOffset replayFrom, TimeSpan dedupRetention)
+    {
+        var coverageBoundary = DateTimeOffset.UtcNow - dedupRetention;
+        if (replayFrom < coverageBoundary)
+        {
+            return CoverageResult.Insufficient(
+                gap: coverageBoundary - replayFrom,
+                    recommendation: "Rely on structural uniqueness constraint, not dedup-store coverage, for this range");
+        }
+        return CoverageResult.Sufficient;
+    }
 }
 
 public async Task RunGatedReplayAsync(DateTimeOffset replayFrom, TimeSpan dedupRetention, IReplaySource source)
 {
- var coverage = new DedupCoverageValidator.ValidateReplayWindow(replayFrom, dedupRetention);
- if (!coverage.IsSufficient)
- _logger.LogWarning(
- "Replay from {From} exceeds dedup-store coverage by {Gap} — relying on structural constraint only",
- replayFrom, coverage.Gap); // proceed only because the structural backstop still protects
+    var coverage = new DedupCoverageValidator.ValidateReplayWindow(replayFrom, dedupRetention);
+    if (!coverage.IsSufficient)
+        _logger.LogWarning(
+        "Replay from {From} exceeds dedup-store coverage by {Gap} — relying on structural constraint only",
+            replayFrom, coverage.Gap); // proceed only because the structural backstop still protects
 
- await foreach (var evt in source.ReadFromAsync(replayFrom))
- await ProcessIdempotentlyAsync(DeriveIdempotencyKey(evt.Instruction), evt.ToLedgerEntry);
+    await foreach (var evt in source.ReadFromAsync(replayFrom))
+    await ProcessIdempotentlyAsync(DeriveIdempotencyKey(evt.Instruction), evt.ToLedgerEntry);
 }
 ```
 **Time complexity:** O(1) for validation; O(n) for the replay itself.
@@ -524,22 +524,22 @@ public async Task RunGatedReplayAsync(DateTimeOffset replayFrom, TimeSpan dedupR
 **Solution:**
 ```csharp
 public async Task<ReconciliationReport> ReconcileExternalChargesAsync(
- IEnumerable<InternalChargeAttempt> internalAttempts, IPaymentGatewayClient gateway, DateTimeOffset windowStart)
+    IEnumerable<InternalChargeAttempt> internalAttempts, IPaymentGatewayClient gateway, DateTimeOffset windowStart)
 {
- var gatewayRecords = await gateway.GetTransactionsAsync(windowStart); // gateway's own authoritative record
- var report = new List<ChargeDiscrepancy>;
+    var gatewayRecords = await gateway.GetTransactionsAsync(windowStart); // gateway's own authoritative record
+    var report = new List<ChargeDiscrepancy>;
 
- foreach (var attempt in internalAttempts)
- {
- var matches = gatewayRecords.Where(g => g.ClientReference == attempt.ReferenceId).ToList;
+    foreach (var attempt in internalAttempts)
+    {
+        var matches = gatewayRecords.Where(g => g.ClientReference == attempt.ReferenceId).ToList;
 
- if (matches.Count > 1)
- report.Add(ChargeDiscrepancy.Duplicate(attempt.ReferenceId, matches)); // the failure mode, caught here
- else if (matches.Count == 0 && attempt.Outcome == AttemptOutcome.Ambiguous)
- report.Add(ChargeDiscrepancy.UnknownOutcome(attempt.ReferenceId)); // never resolved — needs manual review
- }
+        if (matches.Count > 1)
+            report.Add(ChargeDiscrepancy.Duplicate(attempt.ReferenceId, matches)); // the failure mode, caught here
+        else if (matches.Count == 0 && attempt.Outcome == AttemptOutcome.Ambiguous)
+            report.Add(ChargeDiscrepancy.UnknownOutcome(attempt.ReferenceId)); // never resolved — needs manual review
+    }
 
- return new ReconciliationReport(report, windowStart, DateTimeOffset.UtcNow);
+    return new ReconciliationReport(report, windowStart, DateTimeOffset.UtcNow);
 }
 ```
 **Time complexity:** O(n × m) naive matching for n internal attempts and m gateway records; O(n + m) with reference-ID indexing.

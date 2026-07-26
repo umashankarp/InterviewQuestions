@@ -143,18 +143,18 @@ stateDiagram-v2
 2. **Q: Design the `IElevatorSchedulingStrategy` interface and at least two concrete implementations, addressing the "two simultaneous, conflicting floor calls" scenario explicitly.**
  **A:**
  ```csharp
- public interface IElevatorSchedulingStrategy
- {
- Elevator SelectElevator(IReadOnlyList<Elevator> elevators, FloorRequest request);
- }
+public interface IElevatorSchedulingStrategy
+{
+    Elevator SelectElevator(IReadOnlyList<Elevator> elevators, FloorRequest request);
+}
 
- public class NearestElevatorStrategy: IElevatorSchedulingStrategy
- {
- public Elevator SelectElevator(IReadOnlyList<Elevator> elevators, FloorRequest request) =>
- elevators.Where(e => e.CanServiceWithoutReversing(request))
-.OrderBy(e => Math.Abs(e.CurrentFloor - request.OriginFloor))
-.FirstOrDefault?? elevators.OrderBy(e => Math.Abs(e.CurrentFloor - request.OriginFloor)).First;
- }
+public class NearestElevatorStrategy: IElevatorSchedulingStrategy
+{
+    public Elevator SelectElevator(IReadOnlyList<Elevator> elevators, FloorRequest request) =>
+        elevators.Where(e => e.CanServiceWithoutReversing(request))
+    .OrderBy(e => Math.Abs(e.CurrentFloor - request.OriginFloor))
+    .FirstOrDefault?? elevators.OrderBy(e => Math.Abs(e.CurrentFloor - request.OriginFloor)).First;
+}
  ```
  For the conflicting-calls scenario (two floor calls in opposite directions arriving near-simultaneously), the `ElevatorController` queues both requests and the scheduling strategy evaluates them independently — the "conflict" is resolved not by the strategy picking one over the other, but by potentially assigning **different elevators** to each request (the actual purpose of having multiple elevators and a dispatcher), with the strategy's `CanServiceWithoutReversing` check ensuring an elevator already committed to one direction isn't assigned a request requiring it to reverse mid-transit, a genuine, concrete detail a class-diagram-only answer would miss.
 3. **Q: Explain how you would extend the Parking Lot design to support a "reserved/VIP spot" feature without modifying `ParkingSpot`, `Vehicle`, or the core `ParkingLot` coordination logic.**
@@ -164,16 +164,16 @@ stateDiagram-v2
 5. **Q: Design the `Ticket` validity-check logic precisely, addressing what happens if a ticket is presented twice (a potential double-exit attempt or a forged duplicate).**
  **A:**
  ```csharp
- public async Task<Payment> ProcessExitAsync(Ticket ticket)
- {
- var currentState = await _ticketStore.GetCurrentStateAsync(ticket.Id);
- if (currentState is not TicketState.Active)
- throw new InvalidOperationException("This ticket has already been processed or is invalid.");
+public async Task<Payment> ProcessExitAsync(Ticket ticket)
+{
+    var currentState = await _ticketStore.GetCurrentStateAsync(ticket.Id);
+    if (currentState is not TicketState.Active)
+        throw new InvalidOperationException("This ticket has already been processed or is invalid.");
 
- var payment = _pricingStrategy.CalculatePrice(ticket);
- await _ticketStore.MarkProcessedAsync(ticket.Id); // atomic state transition -- prevents a race on double-exit
- return payment;
- }
+    var payment = _pricingStrategy.CalculatePrice(ticket);
+    await _ticketStore.MarkProcessedAsync(ticket.Id); // atomic state transition -- prevents a race on double-exit
+    return payment;
+}
  ```
  The atomic state-check-and-transition (directly the optimistic-concurrency discipline, applied here to prevent a double-exit race rather than an inventory-overselling race) ensures a ticket can only be successfully processed once, even under concurrent attempts — a detail a purely conceptual class diagram wouldn't surface without explicitly walking through this specific "what if presented twice" scenario (the discipline).
 6. **Q: Explain how you would redesign the Parking Lot's pricing to support "the first 15 minutes are free" as a common, real-world requirement, and where this logic belongs.**
@@ -199,34 +199,34 @@ public enum VehicleSize { Motorcycle, Compact, Large }
 
 public class Vehicle
 {
- public string LicensePlate { get; init; } = "";
- public VehicleSize Size { get; init; }
- public bool RequiresCharging { get; init; } // the fix: an INDEPENDENT property, not a hierarchy branch
+    public string LicensePlate { get; init; } = "";
+    public VehicleSize Size { get; init; }
+    public bool RequiresCharging { get; init; } // the fix: an INDEPENDENT property, not a hierarchy branch
 }
 
 public class ParkingSpot
 {
- public string Id { get; init; } = "";
- public VehicleSize Size { get; init; }
- public bool HasChargingCapability { get; init; } // orthogonal to Size, per the lesson
- public bool IsOccupied { get; set; }
+    public string Id { get; init; } = "";
+    public VehicleSize Size { get; init; }
+    public bool HasChargingCapability { get; init; } // orthogonal to Size, per the lesson
+    public bool IsOccupied { get; set; }
 }
 
 public interface IPricingStrategy
 {
- decimal CalculatePrice(TimeSpan duration, VehicleSize size);
+    decimal CalculatePrice(TimeSpan duration, VehicleSize size);
 }
 
 public class TieredPricingStrategy: IPricingStrategy
 {
- public decimal CalculatePrice(TimeSpan duration, VehicleSize size) =>
- size switch
- {
- VehicleSize.Motorcycle => (decimal)duration.TotalHours * 1.0m,
- VehicleSize.Compact => (decimal)duration.TotalHours * 2.0m,
- VehicleSize.Large => (decimal)duration.TotalHours * 3.5m,
- _ => throw new ArgumentOutOfRangeException(nameof(size))
- };
+    public decimal CalculatePrice(TimeSpan duration, VehicleSize size) =>
+        size switch
+    {
+        VehicleSize.Motorcycle => (decimal)duration.TotalHours * 1.0m,
+            VehicleSize.Compact => (decimal)duration.TotalHours * 2.0m,
+            VehicleSize.Large => (decimal)duration.TotalHours * 3.5m,
+            _ => throw new ArgumentOutOfRangeException(nameof(size))
+    };
 }
 ```
 
@@ -234,22 +234,22 @@ public class TieredPricingStrategy: IPricingStrategy
 ```csharp
 public class ParkingLot
 {
- private readonly Dictionary<VehicleSize, Queue<ParkingSpot>> _availableSpotsBySize = new;
+    private readonly Dictionary<VehicleSize, Queue<ParkingSpot>> _availableSpotsBySize = new;
 
- public ParkingSpot? FindAvailableSpot(Vehicle vehicle)
- {
- if (_availableSpotsBySize.TryGetValue(vehicle.Size, out var queue) && queue.Count > 0)
- {
- var spot = queue.Dequeue; // O(1), not an O(n) scan over ALL spots
- if (vehicle.RequiresCharging &&!spot.HasChargingCapability)
- {
- queue.Enqueue(spot); // put it back -- doesn't meet the charging requirement, try elsewhere
- return null; // simplified: a real implementation would search a size-and-charging-indexed structure
- }
- return spot;
- }
- return null;
- }
+    public ParkingSpot? FindAvailableSpot(Vehicle vehicle)
+    {
+        if (_availableSpotsBySize.TryGetValue(vehicle.Size, out var queue) && queue.Count > 0)
+        {
+            var spot = queue.Dequeue; // O(1), not an O(n) scan over ALL spots
+            if (vehicle.RequiresCharging &&!spot.HasChargingCapability)
+            {
+                queue.Enqueue(spot); // put it back -- doesn't meet the charging requirement, try elsewhere
+                return null; // simplified: a real implementation would search a size-and-charging-indexed structure
+            }
+            return spot;
+        }
+        return null;
+    }
 }
 ```
 
@@ -257,16 +257,16 @@ public class ParkingLot
 ```csharp
 public class GracePeriodPricingDecorator: IPricingStrategy
 {
- private readonly IPricingStrategy _inner;
- private readonly TimeSpan _gracePeriod;
+    private readonly IPricingStrategy _inner;
+    private readonly TimeSpan _gracePeriod;
 
- public GracePeriodPricingDecorator(IPricingStrategy inner, TimeSpan gracePeriod)
- {
- _inner = inner; _gracePeriod = gracePeriod;
- }
+    public GracePeriodPricingDecorator(IPricingStrategy inner, TimeSpan gracePeriod)
+    {
+        _inner = inner; _gracePeriod = gracePeriod;
+    }
 
- public decimal CalculatePrice(TimeSpan duration, VehicleSize size) =>
- duration <= _gracePeriod? 0m: _inner.CalculatePrice(duration, size);
+    public decimal CalculatePrice(TimeSpan duration, VehicleSize size) =>
+        duration <= _gracePeriod? 0m: _inner.CalculatePrice(duration, size);
 }
 // Usage: new GracePeriodPricingDecorator(new TieredPricingStrategy, TimeSpan.FromMinutes(15))
 // -- "first 15 minutes free" composed with the underlying tiered rate, NO modification
@@ -277,23 +277,23 @@ public class GracePeriodPricingDecorator: IPricingStrategy
 ```csharp
 public class ElevatorController
 {
- private readonly List<Elevator> _elevators;
- private readonly IElevatorSchedulingStrategy _strategy;
- private readonly List<FloorRequest> _pendingReassignment = new;
+    private readonly List<Elevator> _elevators;
+    private readonly IElevatorSchedulingStrategy _strategy;
+    private readonly List<FloorRequest> _pendingReassignment = new;
 
- public void HandleElevatorFault(Elevator faultedElevator)
- {
- faultedElevator.MarkOutOfService;
- var affectedRequests = faultedElevator.GetUnfulfilledRequests;
- faultedElevator.ClearRequests;
+    public void HandleElevatorFault(Elevator faultedElevator)
+    {
+        faultedElevator.MarkOutOfService;
+        var affectedRequests = faultedElevator.GetUnfulfilledRequests;
+        faultedElevator.ClearRequests;
 
- foreach (var request in affectedRequests)
- {
- var availableElevators = _elevators.Where(e => e.IsInService && e!= faultedElevator).ToList;
- var newAssignment = _strategy.SelectElevator(availableElevators, request);
- newAssignment.AddRequest(request); // re-dispatched to a different, healthy elevator
- }
- }
+        foreach (var request in affectedRequests)
+        {
+            var availableElevators = _elevators.Where(e => e.IsInService && e!= faultedElevator).ToList;
+            var newAssignment = _strategy.SelectElevator(availableElevators, request);
+            newAssignment.AddRequest(request); // re-dispatched to a different, healthy elevator
+        }
+    }
 }
 ```
 

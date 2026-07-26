@@ -18,10 +18,10 @@ Every DynamoDB read operation implicitly makes a consistency choice (even if by 
 ### How does it work (30,000-ft view)?
 ```csharp
 var response = await client.GetItemAsync(new GetItemRequest
-{
- TableName = "Orders",
- Key = key,
- ConsistentRead = true // opt into strong consistency for THIS specific read
+    {
+        TableName = "Orders",
+            Key = key,
+            ConsistentRead = true // opt into strong consistency for THIS specific read
 });
 ```
 
@@ -143,10 +143,10 @@ graph LR
 await client.PutItemAsync(new PutItemRequest { TableName = "Orders", Item = orderItem });
 
 var readBack = await client.GetItemAsync(new GetItemRequest
-{
- TableName = "Orders",
- Key = key,
- ConsistentRead = true // explicit, deliberate -- guarantees this reflects the write just performed
+    {
+        TableName = "Orders",
+            Key = key,
+            ConsistentRead = true // explicit, deliberate -- guarantees this reflects the write just performed
 });
 ```
 
@@ -154,11 +154,11 @@ var readBack = await client.GetItemAsync(new GetItemRequest
 ```csharp
 public async Task<OrderDto> CreateOrderAsync(CreateOrderRequest request)
 {
- var order = new Order { Id = Guid.NewGuid.ToString, CustomerId = request.CustomerId, Total = request.Total };
- await _dynamoDb.PutItemAsync(new PutItemRequest { TableName = "Orders", Item = ToAttributeMap(order) });
+    var order = new Order { Id = Guid.NewGuid.ToString, CustomerId = request.CustomerId, Total = request.Total };
+    await _dynamoDb.PutItemAsync(new PutItemRequest { TableName = "Orders", Item = ToAttributeMap(order) });
 
- // No read-back needed at all -- we already have every value we just wrote, in memory.
- return new OrderDto(order.Id, order.CustomerId, order.Total);
+    // No read-back needed at all -- we already have every value we just wrote, in memory.
+    return new OrderDto(order.Id, order.CustomerId, order.Total);
 }
 ```
 **Discussion**: This is deliberately the preferred fix over merely adding `ConsistentRead: true` — it removes both the correctness risk and the doubled-read-capacity cost entirely, since the "read" was never actually necessary once recognized that the just-written values are already known in application code.
@@ -167,18 +167,18 @@ public async Task<OrderDto> CreateOrderAsync(CreateOrderRequest request)
 ```csharp
 public async Task<T> ExecuteWithThrottleRetryAsync<T>(Func<Task<T>> operation, int maxAttempts = 5)
 {
- for (int attempt = 1;; attempt++)
- {
- try
- {
- return await operation;
- }
- catch (ProvisionedThroughputExceededException) when (attempt < maxAttempts)
- {
- var delay = TimeSpan.FromMilliseconds(50 * Math.Pow(2, attempt - 1) + Random.Shared.Next(0, 50));
- await Task.Delay(delay); // exactly the retry-with-backoff pattern, applied to DynamoDB throttling
- }
- }
+    for (int attempt = 1;; attempt++)
+    {
+        try
+        {
+            return await operation;
+        }
+        catch (ProvisionedThroughputExceededException) when (attempt < maxAttempts)
+        {
+            var delay = TimeSpan.FromMilliseconds(50 * Math.Pow(2, attempt - 1) + Random.Shared.Next(0, 50));
+            await Task.Delay(delay); // exactly the retry-with-backoff pattern, applied to DynamoDB throttling
+        }
+    }
 }
 ```
 
@@ -186,22 +186,22 @@ public async Task<T> ExecuteWithThrottleRetryAsync<T>(Func<Task<T>> operation, i
 ```csharp
 public class ResilientDaxClient
 {
- private readonly AmazonDaxClient _dax;
- private readonly AmazonDynamoDBClient _dynamoDb;
+    private readonly AmazonDaxClient _dax;
+    private readonly AmazonDynamoDBClient _dynamoDb;
 
- public async Task<GetItemResponse> GetItemAsync(GetItemRequest request)
- {
- try
- {
- return await _dax.GetItemAsync(request); // fast path: cache hit or DAX-mediated fetch
- }
- catch (Exception ex) when (ex is AmazonServiceException or TimeoutException)
- {
- // DAX cluster itself is unavailable/degraded -- fall back to DynamoDB directly
- // at higher latency but WITHOUT taking the whole read path down.
- return await _dynamoDb.GetItemAsync(request);
- }
- }
+    public async Task<GetItemResponse> GetItemAsync(GetItemRequest request)
+    {
+        try
+        {
+            return await _dax.GetItemAsync(request); // fast path: cache hit or DAX-mediated fetch
+        }
+        catch (Exception ex) when (ex is AmazonServiceException or TimeoutException)
+        {
+            // DAX cluster itself is unavailable/degraded -- fall back to DynamoDB directly
+            // at higher latency but WITHOUT taking the whole read path down.
+            return await _dynamoDb.GetItemAsync(request);
+        }
+    }
 }
 ```
 

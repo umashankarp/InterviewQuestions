@@ -152,28 +152,28 @@ graph TB
 ### Easy — Container App with explicit KEDA HTTP scale rule
 ```hcl
 resource "azurerm_container_app" "internal_tool" {
- name = "internal-reporting-tool"
- container_app_environment_id = azurerm_container_app_environment.main.id
- revision_mode = "Single"
+  name = "internal-reporting-tool"
+  container_app_environment_id = azurerm_container_app_environment.main.id
+  revision_mode = "Single"
 
- template {
- min_replicas = 0 # TRUE scale-to-zero -- no AWS Fargate/ECS equivalent
- max_replicas = 10
+  template {
+    min_replicas = 0 # TRUE scale-to-zero -- no AWS Fargate/ECS equivalent
+    max_replicas = 10
 
- container {
- name = "reporting-tool"
- image = "acr.azurecr.io/reporting-tool:latest"
- cpu = 0.5
- memory = "1Gi"
- }
+    container {
+      name = "reporting-tool"
+      image = "acr.azurecr.io/reporting-tool:latest"
+      cpu = 0.5
+      memory = "1Gi"
+    }
 
- custom_scale_rule {
- name = "http-scale"
- custom_rule_type = "http"
- metadata = { concurrentRequests = "20" } # KEDA scaler -- event-driven, not just CPU/memory
- }
- }
- # NOT AKS -- this internal, bursty, low-traffic tool never needed the K8s API (the exact lesson)
+    custom_scale_rule {
+      name = "http-scale"
+      custom_rule_type = "http"
+      metadata = { concurrentRequests = "20" } # KEDA scaler -- event-driven, not just CPU/memory
+    }
+  }
+  # NOT AKS -- this internal, bursty, low-traffic tool never needed the K8s API (the exact lesson)
 }
 ```
 
@@ -201,16 +201,16 @@ spec:
 [HttpPost("orders/{orderId}/status")]
 public async Task<IActionResult> UpdateOrderStatus(string orderId, [FromBody] OrderStatus status)
 {
- // Uniform Dapr API call -- backing store (Cosmos DB today, could be Redis/Postgres
- // via config change alone) is NOT hardcoded into this application code.
- await _daprClient.SaveStateAsync("order-state-store", orderId, status);
+    // Uniform Dapr API call -- backing store (Cosmos DB today, could be Redis/Postgres
+    // via config change alone) is NOT hardcoded into this application code.
+    await _daprClient.SaveStateAsync("order-state-store", orderId, status);
 
- // Dapr pub/sub -- broker-agnostic (Service Bus today) --
- // NO Service-Bus-specific SDK code here at all.
- await _daprClient.PublishEventAsync("order-pubsub", "order-status-changed",
- new { orderId, status });
+    // Dapr pub/sub -- broker-agnostic (Service Bus today) --
+    // NO Service-Bus-specific SDK code here at all.
+    await _daprClient.PublishEventAsync("order-pubsub", "order-status-changed",
+        new { orderId, status });
 
- return Ok;
+    return Ok;
 }
 ```
 ```yaml
@@ -231,29 +231,29 @@ spec:
 ```csharp
 public class OrderNotificationPublisher
 {
- private readonly DaprClient _dapr;
- private readonly ServiceBusClient _directServiceBusClient; // deliberate, DOCUMENTED exception
+    private readonly DaprClient _dapr;
+    private readonly ServiceBusClient _directServiceBusClient; // deliberate, DOCUMENTED exception
 
- public async Task PublishAsync(OrderEvent evt, bool requiresStrictSessionOrdering)
- {
- if (requiresStrictSessionOrdering)
- {
- // Session-based ordering NOT cleanly exposed through Dapr's
- // generic pub/sub abstraction for this scenario -- explicit, targeted escape
- // hatch (§Advanced Q4), forfeiting portability ONLY for this specific code path.
- var sender = _directServiceBusClient.CreateSender("order-events");
- var message = new ServiceBusMessage(JsonSerializer.Serialize(evt))
- {
- SessionId = evt.CustomerId.ToString
- };
- await sender.SendMessageAsync(message);
- }
- else
- {
- // Everything else stays on Dapr's portable, broker-agnostic API.
- await _dapr.PublishEventAsync("order-pubsub", "order-event", evt);
- }
- }
+    public async Task PublishAsync(OrderEvent evt, bool requiresStrictSessionOrdering)
+    {
+        if (requiresStrictSessionOrdering)
+        {
+            // Session-based ordering NOT cleanly exposed through Dapr's
+            // generic pub/sub abstraction for this scenario -- explicit, targeted escape
+            // hatch (§Advanced Q4), forfeiting portability ONLY for this specific code path.
+            var sender = _directServiceBusClient.CreateSender("order-events");
+            var message = new ServiceBusMessage(JsonSerializer.Serialize(evt))
+            {
+                SessionId = evt.CustomerId.ToString
+            };
+            await sender.SendMessageAsync(message);
+        }
+        else
+        {
+            // Everything else stays on Dapr's portable, broker-agnostic API.
+            await _dapr.PublishEventAsync("order-pubsub", "order-event", evt);
+        }
+    }
 }
 ```
 

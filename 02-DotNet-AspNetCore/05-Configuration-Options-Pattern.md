@@ -21,9 +21,9 @@ builder.Services.Configure<SmtpOptions>(builder.Configuration.GetSection("Smtp")
 
 public class EmailSender
 {
- private readonly IOptionsMonitor<SmtpOptions> _options; // always current
- public EmailSender(IOptionsMonitor<SmtpOptions> options) => _options = options;
- public void Send => Connect(_options.CurrentValue.Host);
+    private readonly IOptionsMonitor<SmtpOptions> _options; // always current
+    public EmailSender(IOptionsMonitor<SmtpOptions> options) => _options = options;
+    public void Send => Connect(_options.CurrentValue.Host);
 }
 ```
 
@@ -206,8 +206,8 @@ graph LR
 ```csharp
 public class SmtpOptions
 {
- [Required] public string Host { get; set; } = "";
- [Range(1, 65535)] public int Port { get; set; }
+    [Required] public string Host { get; set; } = "";
+    [Range(1, 65535)] public int Port { get; set; }
 }
 
 builder.Services.AddOptions<SmtpOptions>
@@ -221,18 +221,18 @@ builder.Services.AddOptions<SmtpOptions>
 ```csharp
 foreach (var tenant in builder.Configuration.GetSection("Tenants").GetChildren)
 {
- builder.Services.Configure<SmtpOptions>(tenant.Key, tenant.GetSection("Smtp"));
+    builder.Services.Configure<SmtpOptions>(tenant.Key, tenant.GetSection("Smtp"));
 }
 
 public class TenantEmailSender
 {
- private readonly IOptionsMonitor<SmtpOptions> _options;
- private readonly ITenantContext _tenantContext;
- public TenantEmailSender(IOptionsMonitor<SmtpOptions> options, ITenantContext tenantContext)
- {
- _options = options; _tenantContext = tenantContext;
- }
- public void Send => Connect(_options.Get(_tenantContext.TenantId).Host);
+    private readonly IOptionsMonitor<SmtpOptions> _options;
+    private readonly ITenantContext _tenantContext;
+    public TenantEmailSender(IOptionsMonitor<SmtpOptions> options, ITenantContext tenantContext)
+    {
+        _options = options; _tenantContext = tenantContext;
+    }
+    public void Send => Connect(_options.Get(_tenantContext.TenantId).Host);
 }
 ```
 **Discussion**: `.Get(name)` — not `.CurrentValue` — is what resolves the named instance; forgetting this and using `.CurrentValue` silently returns the unnamed default configuration instead of the tenant-specific one, a realistic, easy-to-make mistake.
@@ -243,12 +243,12 @@ public class RangeOptions { public int MinValue { get; set; } public int MaxValu
 
 public class RangeOptionsValidator: IValidateOptions<RangeOptions>
 {
- public ValidateOptionsResult Validate(string? name, RangeOptions options)
- {
- if (options.MinValue >= options.MaxValue)
- return ValidateOptionsResult.Fail("MinValue must be less than MaxValue.");
- return ValidateOptionsResult.Success;
- }
+    public ValidateOptionsResult Validate(string? name, RangeOptions options)
+    {
+        if (options.MinValue >= options.MaxValue)
+            return ValidateOptionsResult.Fail("MinValue must be less than MaxValue.");
+        return ValidateOptionsResult.Success;
+    }
 }
 // Registration: builder.Services.AddSingleton<IValidateOptions<RangeOptions>, RangeOptionsValidator>
 ```
@@ -258,12 +258,12 @@ public class RangeOptionsValidator: IValidateOptions<RangeOptions>
 ```csharp
 public class FeatureFlagCache
 {
- private readonly IMemoryCache _cache;
- public FeatureFlagCache(IOptionsMonitor<FeatureFlags> monitor, IMemoryCache cache)
- {
- _cache = cache;
- monitor.OnChange(flags => _cache.Remove("computed-feature-state")); // invalidate on ANY change
- }
+    private readonly IMemoryCache _cache;
+    public FeatureFlagCache(IOptionsMonitor<FeatureFlags> monitor, IMemoryCache cache)
+    {
+        _cache = cache;
+        monitor.OnChange(flags => _cache.Remove("computed-feature-state")); // invalidate on ANY change
+    }
 }
 ```
 **Discussion**: `OnChange` fires on every reload regardless of whether the *specific* flag a given cache entry depends on actually changed — a coarse but simple and safe invalidation strategy; a more surgical version would diff old vs. new values and invalidate only affected cache keys, a worthwhile refinement to mention if asked to extend this further in an interview.

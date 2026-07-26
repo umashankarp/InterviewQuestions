@@ -328,27 +328,27 @@ public sealed record PipelineStage(string Name, TimeSpan EstimatedDuration, int 
 
 public static class StageOrderingValidator
 {
- public static IReadOnlyList<string> FindOrderingViolations(IReadOnlyList<PipelineStage> stages)
- {
- var violations = new List<string>;
+    public static IReadOnlyList<string> FindOrderingViolations(IReadOnlyList<PipelineStage> stages)
+    {
+        var violations = new List<string>;
 
- for (int i = 1; i < stages.Count; i++)
- {
- var previous = stages[i - 1];
- var current = stages[i];
+        for (int i = 1; i < stages.Count; i++)
+        {
+            var previous = stages[i - 1];
+            var current = stages[i];
 
- if (current.CostTier < previous.CostTier ||
- (current.CostTier == previous.CostTier && current.EstimatedDuration < previous.EstimatedDuration))
- {
- violations.Add(
- $"Stage '{current.Name}' (tier {current.CostTier}, {current.EstimatedDuration}) " +
- $"is cheaper/faster than preceding stage '{previous.Name}' " +
- $"(tier {previous.CostTier}, {previous.EstimatedDuration}) -- consider reordering.");
- }
- }
+            if (current.CostTier < previous.CostTier ||
+                (current.CostTier == previous.CostTier && current.EstimatedDuration < previous.EstimatedDuration))
+            {
+                violations.Add(
+                    $"Stage '{current.Name}' (tier {current.CostTier}, {current.EstimatedDuration}) " +
+                        $"is cheaper/faster than preceding stage '{previous.Name}' " +
+                        $"(tier {previous.CostTier}, {previous.EstimatedDuration}) -- consider reordering.");
+            }
+        }
 
- return violations;
- }
+        return violations;
+    }
 }
 ```
 **Time complexity:** O(n) where n is the number of stages.
@@ -361,23 +361,23 @@ public static class StageOrderingValidator
 ```csharp
 public sealed class CacheKeyCompletenessChecker
 {
- public IReadOnlyList<string> FindMissingInputs(
- IReadOnlySet<string> declaredCacheKeyInputs,
- IReadOnlySet<string> actualBuildScriptReads)
- {
- // Any input the build script genuinely reads but the cache key doesn't
- // account for is a completeness gap -- a change to that input could
- // silently change build output without changing the cache key.
- var missing = new List<string>;
+    public IReadOnlyList<string> FindMissingInputs(
+        IReadOnlySet<string> declaredCacheKeyInputs,
+            IReadOnlySet<string> actualBuildScriptReads)
+    {
+        // Any input the build script genuinely reads but the cache key doesn't
+        // account for is a completeness gap -- a change to that input could
+        // silently change build output without changing the cache key.
+        var missing = new List<string>;
 
- foreach (var actualInput in actualBuildScriptReads)
- {
- if (!declaredCacheKeyInputs.Contains(actualInput))
- missing.Add(actualInput);
- }
+        foreach (var actualInput in actualBuildScriptReads)
+        {
+            if (!declaredCacheKeyInputs.Contains(actualInput))
+                missing.Add(actualInput);
+        }
 
- return missing;
- }
+        return missing;
+    }
 }
 ```
 **Time complexity:** O(a) where a is the number of actual build-script reads (each checked once against the declared set, itself an O(1) hash-set lookup).
@@ -390,45 +390,45 @@ public sealed class CacheKeyCompletenessChecker
 ```csharp
 public sealed class MonorepoAffectedProjectCalculator
 {
- private readonly Dictionary<string, HashSet<string>> _staticDependents; // project -> projects that statically depend on it
- private readonly Dictionary<string, HashSet<string>> _dynamicDependents; // project -> projects with a manually-annotated reflection/dynamic dependency
+    private readonly Dictionary<string, HashSet<string>> _staticDependents; // project -> projects that statically depend on it
+    private readonly Dictionary<string, HashSet<string>> _dynamicDependents; // project -> projects with a manually-annotated reflection/dynamic dependency
 
- public MonorepoAffectedProjectCalculator(
- Dictionary<string, HashSet<string>> staticDependents,
- Dictionary<string, HashSet<string>> dynamicDependents)
- {
- _staticDependents = staticDependents;
- _dynamicDependents = dynamicDependents;
- }
+    public MonorepoAffectedProjectCalculator(
+        Dictionary<string, HashSet<string>> staticDependents,
+            Dictionary<string, HashSet<string>> dynamicDependents)
+    {
+        _staticDependents = staticDependents;
+        _dynamicDependents = dynamicDependents;
+    }
 
- public IReadOnlySet<string> ComputeAffectedProjects(string changedProject)
- {
- var affected = new HashSet<string> { changedProject };
- var queue = new Queue<string>;
- queue.Enqueue(changedProject);
+    public IReadOnlySet<string> ComputeAffectedProjects(string changedProject)
+    {
+        var affected = new HashSet<string> { changedProject };
+        var queue = new Queue<string>;
+        queue.Enqueue(changedProject);
 
- while (queue.Count > 0)
- {
- var current = queue.Dequeue;
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue;
 
- // Combine BOTH static (import-analysis-derived) and dynamic
- // (manually-annotated, closing Sec4's reflection blind spot) edges --
- // missing either source reproduces the incident's exact gap.
- var allDependents = new HashSet<string>;
- if (_staticDependents.TryGetValue(current, out var staticDeps))
- allDependents.UnionWith(staticDeps);
- if (_dynamicDependents.TryGetValue(current, out var dynamicDeps))
- allDependents.UnionWith(dynamicDeps);
+            // Combine BOTH static (import-analysis-derived) and dynamic
+            // (manually-annotated, closing Sec4's reflection blind spot) edges --
+            // missing either source reproduces the incident's exact gap.
+            var allDependents = new HashSet<string>;
+            if (_staticDependents.TryGetValue(current, out var staticDeps))
+                allDependents.UnionWith(staticDeps);
+            if (_dynamicDependents.TryGetValue(current, out var dynamicDeps))
+                allDependents.UnionWith(dynamicDeps);
 
- foreach (var dependent in allDependents)
- {
- if (affected.Add(dependent)) // only enqueue newly-discovered projects
- queue.Enqueue(dependent);
- }
- }
+            foreach (var dependent in allDependents)
+            {
+                if (affected.Add(dependent)) // only enqueue newly-discovered projects
+                    queue.Enqueue(dependent);
+            }
+        }
 
- return affected;
- }
+        return affected;
+    }
 }
 ```
 **Time complexity:** O(p + e) where p is the number of transitively-affected projects and e is the number of dependency edges traversed (a standard BFS over the combined dependency graph).

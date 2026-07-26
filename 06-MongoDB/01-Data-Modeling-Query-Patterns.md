@@ -19,13 +19,13 @@ Any MongoDB schema-design decision; the depth matters for avoiding both over-emb
 ```javascript
 // Embedding: order and its line items are frequently read/written TOGETHER, rarely independently
 {
- _id: ObjectId("..."),
- customerId: ObjectId("..."),
- lineItems: [
- { sku: "WIDGET-1", qty: 2, price: 9.99 },
- { sku: "GADGET-2", qty: 1, price: 19.99 }
- ],
- total: 39.97
+  _id: ObjectId("..."),
+    customerId: ObjectId("..."),
+    lineItems: [
+    { sku: "WIDGET-1", qty: 2, price: 9.99 },
+    { sku: "GADGET-2", qty: 1, price: 19.99 }
+  ],
+  total: 39.97
 }
 ```
 
@@ -128,11 +128,11 @@ graph TB
 8. **Q: Design an aggregation pipeline computing each customer's total lifetime order value, optimizing stage order for performance.**
  **A:**
  ```javascript
- db.orders.aggregate([
- { $match: { status: "completed" } }, // filter FIRST -- reduces documents before grouping
- { $group: { _id: "$customerId", total: { $sum: "$total" } } },
- { $sort: { total: -1 } }
- ]);
+db.orders.aggregate([
+    { $match: { status: "completed" } }, // filter FIRST -- reduces documents before grouping
+    { $group: { _id: "$customerId", total: { $sum: "$total" } } },
+    { $sort: { total: -1 } }
+]);
  ```
  Placing `$match` before `$group` (rather than filtering post-aggregation) ensures the (likely much smaller) filtered subset, not the entire orders collection, is what actually gets grouped — directly Advanced Q on `$match` placement, made concrete.
 9. **Q: Explain how you would detect, in code review, whether a proposed MongoDB schema change risks reintroducing the unbounded-embedding failure mode, beyond just "does it look like it could grow large."**
@@ -169,12 +169,12 @@ graph TB
 // Order line items: bounded cardinality (a realistic order has few dozen items at most)
 // always read/written together with the order -- correct to embed.
 db.orders.insertOne({
- customerId: ObjectId("..."),
- lineItems: [
- { sku: "WIDGET-1", qty: 2, price: 9.99 },
- { sku: "GADGET-2", qty: 1, price: 19.99 }
- ],
- total: 39.97
+    customerId: ObjectId("..."),
+      lineItems: [
+      { sku: "WIDGET-1", qty: 2, price: 9.99 },
+      { sku: "GADGET-2", qty: 1, price: 19.99 }
+    ],
+    total: 39.97
 });
 ```
 
@@ -195,11 +195,11 @@ db.comments.find({ postId }).sort({ createdAt: -1 }).limit(20);
 ### Hard — Aggregation pipeline with `$match` correctly placed early
 ```javascript
 db.orders.aggregate([
- { $match: { orderDate: { $gte: ISODate("2024-01-01") }, status: "completed" } }, // FIRST: filter early
- { $unwind: "$lineItems" },
- { $group: { _id: "$lineItems.sku", totalQty: { $sum: "$lineItems.qty" }, revenue: { $sum: { $multiply: ["$lineItems.qty", "$lineItems.price"] } } } },
- { $sort: { revenue: -1 } },
- { $limit: 10 }
+    { $match: { orderDate: { $gte: ISODate("2024-01-01") }, status: "completed" } }, // FIRST: filter early
+    { $unwind: "$lineItems" },
+    { $group: { _id: "$lineItems.sku", totalQty: { $sum: "$lineItems.qty" }, revenue: { $sum: { $multiply: ["$lineItems.qty", "$lineItems.price"] } } } },
+    { $sort: { revenue: -1 } },
+    { $limit: 10 }
 ]);
 ```
 

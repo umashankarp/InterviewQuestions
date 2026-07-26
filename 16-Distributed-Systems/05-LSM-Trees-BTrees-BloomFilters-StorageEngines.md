@@ -447,31 +447,31 @@ The fix had three parts. **First**, compaction capacity was re-provisioned again
 ```csharp
 public class BloomFilter
 {
- private readonly BitArray _bits;
- private readonly int _hashCount;
- private readonly int _size;
+    private readonly BitArray _bits;
+    private readonly int _hashCount;
+    private readonly int _size;
 
- public BloomFilter(int expectedEntries, double targetFalsePositiveRate)
- {
- _size = (int)Math.Ceiling(-expectedEntries * Math.Log(targetFalsePositiveRate) / Math.Pow(Math.Log(2), 2));
- _hashCount = (int)Math.Round((_size / (double)expectedEntries) * Math.Log(2));
- _bits = new BitArray(_size);
- }
+    public BloomFilter(int expectedEntries, double targetFalsePositiveRate)
+    {
+        _size = (int)Math.Ceiling(-expectedEntries * Math.Log(targetFalsePositiveRate) / Math.Pow(Math.Log(2), 2));
+        _hashCount = (int)Math.Round((_size / (double)expectedEntries) * Math.Log(2));
+        _bits = new BitArray(_size);
+    }
 
- public void Add(string key)
- {
- foreach (var position in HashPositions(key))
- _bits[position] = true; // set ALL k positions
- }
+    public void Add(string key)
+    {
+        foreach (var position in HashPositions(key))
+            _bits[position] = true; // set ALL k positions
+    }
 
- public bool MightContain(string key) =>
- HashPositions(key).All(p => _bits[p]); // ANY zero bit => definitely absent
+    public bool MightContain(string key) =>
+        HashPositions(key).All(p => _bits[p]); // ANY zero bit => definitely absent
 
- private IEnumerable<int> HashPositions(string key)
- {
- for (int i = 0; i < _hashCount; i++)
- yield return Math.Abs((key.GetHashCode ^ (i * 0x9E3779B9)) % _size); // k independent-ish hash positions
- }
+    private IEnumerable<int> HashPositions(string key)
+    {
+        for (int i = 0; i < _hashCount; i++)
+            yield return Math.Abs((key.GetHashCode ^ (i * 0x9E3779B9)) % _size); // k independent-ish hash positions
+    }
 }
 ```
 **Time complexity:** O(k) per add/check for k hash functions.
@@ -484,20 +484,20 @@ public class BloomFilter
 ```csharp
 public IReadOnlyList<CompactionAlert> EvaluateCompactionHealth(CompactionState state, CompactionPolicy policy)
 {
- var alerts = new List<CompactionAlert>;
+    var alerts = new List<CompactionAlert>;
 
- if (state.SustainedRiseMinutes > policy.RiseWindow)
- alerts.Add(CompactionAlert.FallingBehind("Pending SSTables rising and not draining"));
+    if (state.SustainedRiseMinutes > policy.RiseWindow)
+        alerts.Add(CompactionAlert.FallingBehind("Pending SSTables rising and not draining"));
 
- if (state.PendingBytes > policy.ReadLatencyRiskThresholdBytes)
- alerts.Add(CompactionAlert.ReadLatencyRisk($"Pending {state.PendingBytes} bytes — read amplification elevated"));
+    if (state.PendingBytes > policy.ReadLatencyRiskThresholdBytes)
+        alerts.Add(CompactionAlert.ReadLatencyRisk($"Pending {state.PendingBytes} bytes — read amplification elevated"));
 
- var timeToClear = state.PendingBytes / Math.Max(state.CurrentCompactionThroughputBytesPerSec, 1);
- if (timeToClear > policy.MaxAcceptableCatchUpSeconds)
- alerts.Add(CompactionAlert.WontCatchUp(// mirrors the third boundary
- $"At current compaction rate, backlog clears in {timeToClear}s — exceeds acceptable window"));
+    var timeToClear = state.PendingBytes / Math.Max(state.CurrentCompactionThroughputBytesPerSec, 1);
+    if (timeToClear > policy.MaxAcceptableCatchUpSeconds)
+        alerts.Add(CompactionAlert.WontCatchUp(// mirrors the third boundary
+            $"At current compaction rate, backlog clears in {timeToClear}s — exceeds acceptable window"));
 
- return alerts;
+    return alerts;
 }
 ```
 **Time complexity:** O(1).
@@ -510,13 +510,13 @@ public IReadOnlyList<CompactionAlert> EvaluateCompactionHealth(CompactionState s
 ```csharp
 public CompactionCapacityPlan PlanCapacity(IReadOnlyList<WriteThroughputSample> historicalSamples, double safetyMargin = 1.3)
 {
- var peakThroughput = historicalSamples.Max(s => s.BytesPerSecond); // NOT average — the exact gap corrected
- var requiredCompactionThroughput = peakThroughput * safetyMargin; // headroom, quantified not arbitrary
+    var peakThroughput = historicalSamples.Max(s => s.BytesPerSecond); // NOT average — the exact gap corrected
+    var requiredCompactionThroughput = peakThroughput * safetyMargin; // headroom, quantified not arbitrary
 
- return new CompactionCapacityPlan(
- ProvisionedThroughputBytesPerSec: requiredCompactionThroughput,
- BasedOnPeakSample: historicalSamples.First(s => s.BytesPerSecond == peakThroughput),
- SafetyMargin: safetyMargin);
+    return new CompactionCapacityPlan(
+        ProvisionedThroughputBytesPerSec: requiredCompactionThroughput,
+            BasedOnPeakSample: historicalSamples.First(s => s.BytesPerSecond == peakThroughput),
+            SafetyMargin: safetyMargin);
 }
 ```
 **Time complexity:** O(n) for n historical samples.
@@ -529,26 +529,26 @@ public CompactionCapacityPlan PlanCapacity(IReadOnlyList<WriteThroughputSample> 
 ```csharp
 public async Task<ReadResult> ReadAsync(string key, IReadOnlyList<SSTable> sstables)
 {
- int filesSkippedByBloom = 0, filesActuallyRead = 0;
+    int filesSkippedByBloom = 0, filesActuallyRead = 0;
 
- // check memtable first — most recent data
- if (_memtable.TryGet(key, out var memValue)) return ReadResult.Found(memValue, filesActuallyRead);
+    // check memtable first — most recent data
+    if (_memtable.TryGet(key, out var memValue)) return ReadResult.Found(memValue, filesActuallyRead);
 
- // check SSTables newest-to-oldest — must check ALL non-skipped tables since any could hold the latest version
- foreach (var table in sstables.OrderByDescending(t => t.CreatedAt))
- {
- if (!table.BloomFilter.MightContain(key))
- {
- filesSkippedByBloom++;
- continue; // provably absent — zero disk cost
- }
+    // check SSTables newest-to-oldest — must check ALL non-skipped tables since any could hold the latest version
+    foreach (var table in sstables.OrderByDescending(t => t.CreatedAt))
+    {
+        if (!table.BloomFilter.MightContain(key))
+        {
+            filesSkippedByBloom++;
+            continue; // provably absent — zero disk cost
+        }
 
- filesActuallyRead++; // the incident: this count grows with SSTable proliferation
- var value = await table.ReadAsync(key);
- if (value is not null) return ReadResult.Found(value, filesActuallyRead);
- }
+        filesActuallyRead++; // the incident: this count grows with SSTable proliferation
+        var value = await table.ReadAsync(key);
+        if (value is not null) return ReadResult.Found(value, filesActuallyRead);
+    }
 
- return ReadResult.NotFound(filesActuallyRead);
+    return ReadResult.NotFound(filesActuallyRead);
 }
 ```
 **Time complexity:** O(n) Bloom-filter checks plus O(m) actual disk reads, where m ≤ n grows directly with SSTable proliferation under compaction debt — the exact mechanism demonstrates.

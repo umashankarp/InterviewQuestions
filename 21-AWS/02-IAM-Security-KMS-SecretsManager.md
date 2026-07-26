@@ -152,49 +152,49 @@ graph TB
 ### Easy — Scoped, least-privilege S3 policy (the fix)
 ```json
 {
- "Version": "2012-10-17",
- "Statement": [
- {
- "Effect": "Allow",
- "Action": ["s3:GetObject", "s3:PutObject"],
- "Resource": "arn:aws:s3:::checkout-orders-bucket/orders/*"
- }
- ]
+  "Version": "2012-10-17",
+    "Statement": [
+    {
+      "Effect": "Allow",
+        "Action": ["s3:GetObject", "s3:PutObject"],
+        "Resource": "arn:aws:s3:::checkout-orders-bucket/orders/*"
+    }
+  ]
 }
 ```
 ```hcl
 # NOT this -- the anti-pattern:
-# resource "aws_iam_role_policy_attachment" "bad" {
-# policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess" # s3:* on EVERY bucket
-# }
+  # resource "aws_iam_role_policy_attachment" "bad" {
+  # policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess" # s3:* on EVERY bucket
+  # }
 ```
 
 ### Medium — Cross-account role with scoped trust policy (§Advanced Q3)
 ```json
 {
- "Version": "2012-10-17",
- "Statement": [
- {
- "Effect": "Allow",
- "Principal": {
- "AWS": "arn:aws:iam::111111111111:role/CICD-Pipeline-Role"
- },
- "Action": "sts:AssumeRole",
- "Condition": {
- "StringEquals": { "sts:ExternalId": "prod-deploy-2026" }
- }
- }
- ]
+  "Version": "2012-10-17",
+    "Statement": [
+    {
+      "Effect": "Allow",
+        "Principal": {
+        "AWS": "arn:aws:iam::111111111111:role/CICD-Pipeline-Role"
+      },
+      "Action": "sts:AssumeRole",
+        "Condition": {
+        "StringEquals": { "sts:ExternalId": "prod-deploy-2026" }
+      }
+    }
+  ]
 }
 ```
 ```csharp
 var stsClient = new AmazonSecurityTokenServiceClient;
 var response = await stsClient.AssumeRoleAsync(new AssumeRoleRequest
-{
- RoleArn = "arn:aws:iam::222222222222:role/ProdDeployRole",
- RoleSessionName = "cicd-deploy-session",
- ExternalId = "prod-deploy-2026",
- DurationSeconds = 900 // short-lived -- only as long as the deploy actually needs
+    {
+        RoleArn = "arn:aws:iam::222222222222:role/ProdDeployRole",
+            RoleSessionName = "cicd-deploy-session",
+            ExternalId = "prod-deploy-2026",
+            DurationSeconds = 900 // short-lived -- only as long as the deploy actually needs
 });
 // response.Credentials -- temporary, auto-expiring -- NEVER a long-lived shared secret
 ```
@@ -203,20 +203,20 @@ var response = await stsClient.AssumeRoleAsync(new AssumeRoleRequest
 ```csharp
 public class CachedSecretProvider
 {
- private readonly IAmazonSecretsManager _client;
- private readonly ConcurrentDictionary<string, (string Value, DateTime ExpiresAt)> _cache = new;
+    private readonly IAmazonSecretsManager _client;
+    private readonly ConcurrentDictionary<string, (string Value, DateTime ExpiresAt)> _cache = new;
 
- public async Task<string> GetSecretAsync(string secretName)
- {
- if (_cache.TryGetValue(secretName, out var cached) && cached.ExpiresAt > DateTime.UtcNow)
- return cached.Value; // avoid a Secrets Manager API call on every request
+    public async Task<string> GetSecretAsync(string secretName)
+    {
+        if (_cache.TryGetValue(secretName, out var cached) && cached.ExpiresAt > DateTime.UtcNow)
+            return cached.Value; // avoid a Secrets Manager API call on every request
 
- var response = await _client.GetSecretValueAsync(new GetSecretValueRequest { SecretId = secretName });
- // Cache for a bounded window -- short enough to pick up rotation reasonably promptly
- // long enough to avoid hammering the Secrets Manager API under load.
- _cache[secretName] = (response.SecretString, DateTime.UtcNow.AddMinutes(5));
- return response.SecretString;
- }
+        var response = await _client.GetSecretValueAsync(new GetSecretValueRequest { SecretId = secretName });
+        // Cache for a bounded window -- short enough to pick up rotation reasonably promptly
+        // long enough to avoid hammering the Secrets Manager API under load.
+        _cache[secretName] = (response.SecretString, DateTime.UtcNow.AddMinutes(5));
+        return response.SecretString;
+    }
 }
 ```
 
@@ -224,35 +224,35 @@ public class CachedSecretProvider
 ```csharp
 public class EnvelopeEncryptionService
 {
- private readonly IAmazonKeyManagementService _kms;
- private const string KmsKeyId = "arn:aws:kms:us-east-1:222222222222:key/order-data-key";
+    private readonly IAmazonKeyManagementService _kms;
+    private const string KmsKeyId = "arn:aws:kms:us-east-1:222222222222:key/order-data-key";
 
- public async Task<(byte[] Ciphertext, byte[] EncryptedDataKey)> EncryptAsync(byte[] plaintext)
- {
- // ONE KMS call generates a local data key -- NOT a KMS call per record (the rate-limit lesson)
- var dataKeyResponse = await _kms.GenerateDataKeyAsync(new GenerateDataKeyRequest
- {
- KeyId = KmsKeyId,
- KeySpec = DataKeySpec.AES_256
- });
+    public async Task<(byte[] Ciphertext, byte[] EncryptedDataKey)> EncryptAsync(byte[] plaintext)
+    {
+        // ONE KMS call generates a local data key -- NOT a KMS call per record (the rate-limit lesson)
+        var dataKeyResponse = await _kms.GenerateDataKeyAsync(new GenerateDataKeyRequest
+            {
+                KeyId = KmsKeyId,
+                    KeySpec = DataKeySpec.AES_256
+        });
 
- using var aes = Aes.Create;
- aes.Key = dataKeyResponse.Plaintext.ToArray; // used LOCALLY, never sent back to KMS
- //... encrypt plaintext locally with aes.Key...
- byte[] ciphertext = EncryptLocally(plaintext, aes.Key);
+        using var aes = Aes.Create;
+        aes.Key = dataKeyResponse.Plaintext.ToArray; // used LOCALLY, never sent back to KMS
+        //... encrypt plaintext locally with aes.Key...
+        byte[] ciphertext = EncryptLocally(plaintext, aes.Key);
 
- return (ciphertext, dataKeyResponse.CiphertextBlob.ToArray); // store the ENCRYPTED data key alongside the ciphertext
- }
+        return (ciphertext, dataKeyResponse.CiphertextBlob.ToArray); // store the ENCRYPTED data key alongside the ciphertext
+    }
 
- public async Task<byte[]> DecryptAsync(byte[] ciphertext, byte[] encryptedDataKey)
- {
- // Only THIS call requires kms:Decrypt permission on the key (the two-factor check)
- var decryptResponse = await _kms.DecryptAsync(new DecryptRequest
- {
- CiphertextBlob = new MemoryStream(encryptedDataKey)
- });
- return DecryptLocally(ciphertext, decryptResponse.Plaintext.ToArray);
- }
+    public async Task<byte[]> DecryptAsync(byte[] ciphertext, byte[] encryptedDataKey)
+    {
+        // Only THIS call requires kms:Decrypt permission on the key (the two-factor check)
+        var decryptResponse = await _kms.DecryptAsync(new DecryptRequest
+            {
+                CiphertextBlob = new MemoryStream(encryptedDataKey)
+        });
+        return DecryptLocally(ciphertext, decryptResponse.Plaintext.ToArray);
+    }
 }
 ```
 **Discussion**: the data key is used locally for the actual bulk encryption/decryption work, and only the (small) encrypted data key itself requires a KMS API call to unwrap — this is what makes envelope encryption scale to high-throughput workloads without hitting KMS's per-call rate limits, while still requiring `kms:Decrypt` permission on the master key (the two-factor access control) for anyone attempting to actually recover the data.

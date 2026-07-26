@@ -464,7 +464,7 @@ It was caught by the reconciliation job flagging divergence — 4 hours later. T
 **Solution:**
 ```csharp
 public decimal AggregateDeterministically(IEnumerable<PartialResult> partials) =>
- partials
+    partials
 .OrderBy(p => p.TaskKey, StringComparer.Ordinal) // stable, arrival-order-independent
 .Aggregate(0m, (sum, p) => sum + p.Value);
 ```
@@ -480,14 +480,14 @@ public sealed record RiskRun(Guid RunId, SnapshotId Snapshot, ModelVersion Model
 
 public sealed class RiskTask
 {
- public RiskTask(RiskRun run, PositionBlock positions) // snapshot only obtainable from the run
- {
- Run = run; Positions = positions;
- }
- public RiskRun Run { get; }
- public PositionBlock Positions { get; }
- // No API surface exists to resolve "latest" — the market data accessor
- // requires a SnapshotId, and the only SnapshotId reachable is Run.Snapshot.
+    public RiskTask(RiskRun run, PositionBlock positions) // snapshot only obtainable from the run
+    {
+        Run = run; Positions = positions;
+    }
+    public RiskRun Run { get; }
+    public PositionBlock Positions { get; }
+    // No API surface exists to resolve "latest" — the market data accessor
+    // requires a SnapshotId, and the only SnapshotId reachable is Run.Snapshot.
 }
 ```
 **Time complexity:** O(1).
@@ -500,19 +500,19 @@ public sealed class RiskTask
 ```csharp
 public IReadOnlySet<PositionId> ResolveAffected(RiskFactorId moved, DependencyGraph graph)
 {
- var affected = new HashSet<PositionId>;
- var queue = new Queue<RiskFactorId>;
- queue.Enqueue(moved);
- var seenFactors = new HashSet<RiskFactorId> { moved };
+    var affected = new HashSet<PositionId>;
+    var queue = new Queue<RiskFactorId>;
+    queue.Enqueue(moved);
+    var seenFactors = new HashSet<RiskFactorId> { moved };
 
- while (queue.Count > 0)
- {
- var factor = queue.Dequeue;
- foreach (var p in graph.PositionsDependingOn(factor)) affected.Add(p);
- foreach (var derived in graph.FactorsDerivedFrom(factor)) // e.g. curve → forward rates
- if (seenFactors.Add(derived)) queue.Enqueue(derived);
- }
- return affected;
+    while (queue.Count > 0)
+    {
+        var factor = queue.Dequeue;
+        foreach (var p in graph.PositionsDependingOn(factor)) affected.Add(p);
+        foreach (var derived in graph.FactorsDerivedFrom(factor)) // e.g. curve → forward rates
+            if (seenFactors.Add(derived)) queue.Enqueue(derived);
+    }
+    return affected;
 }
 ```
 **Time complexity:** O(V + E) over the reachable subgraph, not the whole graph.
@@ -525,21 +525,21 @@ public IReadOnlySet<PositionId> ResolveAffected(RiskFactorId moved, DependencyGr
 ```csharp
 public async Task<ReconciliationReport> ReconcileAsync(DateOnly asOf)
 {
- var always = _portfolios.Where(p => p.Notional > _materialityThreshold
- || p.UsesRecentlyChangedModel(_lookback));
- var sampled = _portfolios.Except(always).RandomSample(_baselineSampleSize);
+    var always = _portfolios.Where(p => p.Notional > _materialityThreshold
+        || p.UsesRecentlyChangedModel(_lookback));
+    var sampled = _portfolios.Except(always).RandomSample(_baselineSampleSize);
 
- var findings = new List<Divergence>;
- foreach (var p in always.Concat(sampled))
- {
- var incremental = await _riskStore.GetCurrentAsync(p.Id, asOf);
- var full = await _engine.FullRecomputeAsync(p.Id, incremental.Snapshot, incremental.Model);
+    var findings = new List<Divergence>;
+    foreach (var p in always.Concat(sampled))
+    {
+        var incremental = await _riskStore.GetCurrentAsync(p.Id, asOf);
+        var full = await _engine.FullRecomputeAsync(p.Id, incremental.Snapshot, incremental.Model);
 
- var relative = Math.Abs(full.Var - incremental.Var) / Math.Max(Math.Abs(full.Var), 1m);
- if (relative > _tolerance)
- findings.Add(new Divergence(p.Id, incremental.Var, full.Var, relative));
- }
- return new ReconciliationReport(findings, checkedCount: always.Count + sampled.Count);
+        var relative = Math.Abs(full.Var - incremental.Var) / Math.Max(Math.Abs(full.Var), 1m);
+        if (relative > _tolerance)
+            findings.Add(new Divergence(p.Id, incremental.Var, full.Var, relative));
+    }
+    return new ReconciliationReport(findings, checkedCount: always.Count + sampled.Count);
 }
 ```
 **Time complexity:** O(s × full-recompute cost) for s sampled portfolios — the dominant cost, driving sample-size calibration.

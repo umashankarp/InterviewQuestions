@@ -358,21 +358,21 @@ Micro-frontend decomposition via Module Federation is this module's primary orga
 **Solution (TypeScript):**
 ```typescript
 export interface AppState {
- positions: Position[];
- filterText: string;
- unrelatedCounter: number; // changing this should NOT trigger recomputation
+  positions: Position[];
+  filterText: string;
+  unrelatedCounter: number; // changing this should NOT trigger recomputation
 }
 
 export const selectPositions = (state: AppState) => state.positions;
 export const selectFilterText = (state: AppState) => state.filterText;
 
 export const selectFilteredPositions = createSelector(
- selectPositions,
- selectFilterText,
- (positions, filterText) =>
- positions.filter(p => p.symbol.toLowerCase.includes(filterText.toLowerCase))
- // Only recomputes when `positions` or `filterText` REFERENCES change —
- // `unrelatedCounter` changing elsewhere in the Store has zero effect here.
+  selectPositions,
+    selectFilterText,
+    (positions, filterText) =>
+    positions.filter(p => p.symbol.toLowerCase.includes(filterText.toLowerCase))
+  // Only recomputes when `positions` or `filterText` REFERENCES change —
+  // `unrelatedCounter` changing elsewhere in the Store has zero effect here.
 );
 ```
 **Time complexity:** O(n) per actual recomputation (n = position count); O(1) when memoization hits. **Space complexity:** O(1) beyond the memoized result cache.
@@ -389,32 +389,32 @@ interface PositionPnl { symbol: string; pnl: number; }
 
 @Injectable({ providedIn: 'root' })
 export class PnlStateService {
- private readonly positionsSignal = signal<PositionPnl[]>([]);
+  private readonly positionsSignal = signal<PositionPnl[]>([]);
 
- readonly totalPnl = computed(=>
- // PURE — no side effects here, per Advanced Q8's purity requirement.
- this.positionsSignal.reduce((sum, p) => sum + p.pnl, 0)
-);
+  readonly totalPnl = computed(=>
+    // PURE — no side effects here, per Advanced Q8's purity requirement.
+    this.positionsSignal.reduce((sum, p) => sum + p.pnl, 0)
+  );
 
- constructor {
- // Side effect (logging) lives in effect, NOT in the computed above.
- effect(=> {
- const total = this.totalPnl;
- if (total < -1_000_000) {
- console.warn(`Risk threshold breached: total P&L = ${total}`);
- }
- });
- }
+  constructor {
+    // Side effect (logging) lives in effect, NOT in the computed above.
+    effect(=> {
+        const total = this.totalPnl;
+        if (total < -1_000_000) {
+          console.warn(`Risk threshold breached: total P&L = ${total}`);
+        }
+    });
+  }
 
- updatePosition(symbol: string, pnl: number): void {
- this.positionsSignal.update(current => {
- const idx = current.findIndex(p => p.symbol === symbol);
- if (idx === -1) return [...current, { symbol, pnl }];
- const updated = [...current];
- updated[idx] = { symbol, pnl };
- return updated; // new array reference — consistent with the immutability discipline
- });
- }
+  updatePosition(symbol: string, pnl: number): void {
+    this.positionsSignal.update(current => {
+        const idx = current.findIndex(p => p.symbol === symbol);
+        if (idx === -1) return [...current, { symbol, pnl }];
+        const updated = [...current];
+        updated[idx] = { symbol, pnl };
+        return updated; // new array reference — consistent with the immutability discipline
+    });
+  }
 }
 ```
 **Time complexity:** O(n) per `updatePosition` call (n = position count, for the find + copy). **Space complexity:** O(n).
@@ -428,31 +428,31 @@ export class PnlStateService {
 **Solution (TypeScript):**
 ```typescript
 export function buyingPowerValidator(
- buyingPowerService: BuyingPowerService
+  buyingPowerService: BuyingPowerService
 ): AsyncValidatorFn {
- return (control: AbstractControl): Observable<ValidationErrors | null> => {
- const proposedSize = control.value;
- if (proposedSize == null || proposedSize <= 0) return of(null);
+  return (control: AbstractControl): Observable<ValidationErrors | null> => {
+    const proposedSize = control.value;
+    if (proposedSize == null || proposedSize <= 0) return of(null);
 
- return control.valueChanges.pipe(
- startWith(proposedSize), // evaluate the current value immediately
- switchMap(size => // cancels any prior in-flight check — the race-condition fix
- buyingPowerService.checkAvailability(size).pipe(
- map(available => (available? null: { insufficientBuyingPower: true })),
- catchError(=> of({ buyingPowerCheckFailed: true }))
-)
-),
- first // AsyncValidatorFn expects a single emission per validation run
-);
- };
+    return control.valueChanges.pipe(
+      startWith(proposedSize), // evaluate the current value immediately
+        switchMap(size => // cancels any prior in-flight check — the race-condition fix
+        buyingPowerService.checkAvailability(size).pipe(
+          map(available => (available? null: { insufficientBuyingPower: true })),
+            catchError(=> of({ buyingPowerCheckFailed: true }))
+        )
+      ),
+      first // AsyncValidatorFn expects a single emission per validation run
+    );
+  };
 }
 
 // Usage:
 const orderForm = new FormGroup({
- size: new FormControl(0, {
- asyncValidators: [buyingPowerValidator(injectedBuyingPowerService)],
- updateOn: 'blur' // reduces validation-trigger frequency, complementing switchMap's race safety
- })
+    size: new FormControl(0, {
+        asyncValidators: [buyingPowerValidator(injectedBuyingPowerService)],
+          updateOn: 'blur' // reduces validation-trigger frequency, complementing switchMap's race safety
+    })
 });
 ```
 **Time complexity:** O(1) per validation trigger, excluding the network call itself. **Space complexity:** O(1).
@@ -471,46 +471,46 @@ export const SHARED_INSTANCE_MARKER = new InjectionToken<{ instanceId: string }>
 
 @Injectable({ providedIn: 'root' })
 export class SharedNotificationService {
- readonly instanceId = crypto.randomUUID; // unique per actual instantiation
- private readonly alertsSubject = new Subject<Alert>;
- readonly alerts$ = this.alertsSubject.asObservable;
+  readonly instanceId = crypto.randomUUID; // unique per actual instantiation
+  private readonly alertsSubject = new Subject<Alert>;
+  readonly alerts$ = this.alertsSubject.asObservable;
 
- publish(alert: Alert): void {
- this.alertsSubject.next(alert);
- }
+  publish(alert: Alert): void {
+    this.alertsSubject.next(alert);
+  }
 }
 
 export class FederationIntegrityChecker {
- // Called by the shell AFTER loading a remote, before trusting it to
- // participate in shared state — closes exactly the undetected-until-production gap.
- static verifySharedInstance(
- shellService: SharedNotificationService,
- remoteServiceFactory: => SharedNotificationService
-): { ok: boolean; reason?: string } {
- const remoteService = remoteServiceFactory;
+  // Called by the shell AFTER loading a remote, before trusting it to
+  // participate in shared state — closes exactly the undetected-until-production gap.
+  static verifySharedInstance(
+    shellService: SharedNotificationService,
+      remoteServiceFactory: => SharedNotificationService
+  ): { ok: boolean; reason?: string } {
+    const remoteService = remoteServiceFactory;
 
- if (remoteService.instanceId!== shellService.instanceId) {
- return {
- ok: false,
- reason:
- `Shared-dependency singleton violation: shell instance ${shellService.instanceId} ` +
- `!= remote instance ${remoteService.instanceId}. Module Federation likely loaded ` +
- `a duplicate dependency instance instead of sharing (/).`
- };
- }
- return { ok: true };
- }
+    if (remoteService.instanceId!== shellService.instanceId) {
+      return {
+        ok: false,
+          reason:
+          `Shared-dependency singleton violation: shell instance ${shellService.instanceId} ` +
+          `!= remote instance ${remoteService.instanceId}. Module Federation likely loaded ` +
+          `a duplicate dependency instance instead of sharing (/).`
+      };
+    }
+    return { ok: true };
+  }
 }
 
 // Shell bootstrap, after loading a remote:
 const result = FederationIntegrityChecker.verifySharedInstance(
- shellInjector.get(SharedNotificationService),
- => remoteInjector.get(SharedNotificationService)
+  shellInjector.get(SharedNotificationService),
+    => remoteInjector.get(SharedNotificationService)
 );
 if (!result.ok) {
- // Fail LOUDLY — surface to monitoring immediately, per the fix, rather
- // than allowing the remote to silently run with a split, broken singleton.
- throw new Error(result.reason);
+  // Fail LOUDLY — surface to monitoring immediately, per the fix, rather
+  // than allowing the remote to silently run with a split, broken singleton.
+  throw new Error(result.reason);
 }
 ```
 **Time complexity:** O(1) per check. **Space complexity:** O(1).

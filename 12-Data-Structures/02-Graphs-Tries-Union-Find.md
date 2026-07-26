@@ -134,22 +134,22 @@ graph LR
 ```csharp
 public int ShortestPath(Dictionary<int, List<int>> graph, int start, int target)
 {
- var visited = new HashSet<int> { start };
- var queue = new Queue<(int Node, int Distance)>;
- queue.Enqueue((start, 0));
+    var visited = new HashSet<int> { start };
+    var queue = new Queue<(int Node, int Distance)>;
+    queue.Enqueue((start, 0));
 
- while (queue.Count > 0)
- {
- var (node, distance) = queue.Dequeue;
- if (node == target) return distance;
+    while (queue.Count > 0)
+    {
+        var (node, distance) = queue.Dequeue;
+        if (node == target) return distance;
 
- foreach (var neighbor in graph.GetValueOrDefault(node, new List<int>))
- {
- if (visited.Add(neighbor)) // returns false if already present -- O(1) check-and-add
- queue.Enqueue((neighbor, distance + 1));
- }
- }
- return -1; // unreachable
+        foreach (var neighbor in graph.GetValueOrDefault(node, new List<int>))
+        {
+            if (visited.Add(neighbor)) // returns false if already present -- O(1) check-and-add
+                queue.Enqueue((neighbor, distance + 1));
+        }
+    }
+    return -1; // unreachable
 }
 ```
 
@@ -157,36 +157,36 @@ public int ShortestPath(Dictionary<int, List<int>> graph, int start, int target)
 ```csharp
 public class TrieNode
 {
- public Dictionary<char, TrieNode> Children { get; } = new;
- public bool IsEndOfWord { get; set; }
+    public Dictionary<char, TrieNode> Children { get; } = new;
+    public bool IsEndOfWord { get; set; }
 }
 
 public class Trie
 {
- private readonly TrieNode _root = new;
+    private readonly TrieNode _root = new;
 
- public void Insert(string word)
- {
- var node = _root;
- foreach (char c in word)
- {
- if (!node.Children.TryGetValue(c, out var child))
- node.Children[c] = child = new TrieNode;
- node = child;
- }
- node.IsEndOfWord = true;
- }
+    public void Insert(string word)
+    {
+        var node = _root;
+        foreach (char c in word)
+        {
+            if (!node.Children.TryGetValue(c, out var child))
+                node.Children[c] = child = new TrieNode;
+            node = child;
+        }
+        node.IsEndOfWord = true;
+    }
 
- public bool StartsWith(string prefix)
- {
- var node = _root;
- foreach (char c in prefix)
- {
- if (!node.Children.TryGetValue(c, out var child)) return false;
- node = child;
- }
- return true; // prefix exists in SOME stored word, regardless of how many total words are stored
- }
+    public bool StartsWith(string prefix)
+    {
+        var node = _root;
+        foreach (char c in prefix)
+        {
+            if (!node.Children.TryGetValue(c, out var child)) return false;
+            node = child;
+        }
+        return true; // prefix exists in SOME stored word, regardless of how many total words are stored
+    }
 }
 ```
 
@@ -194,34 +194,34 @@ public class Trie
 ```csharp
 public class UnionFind
 {
- private readonly int[] _parent;
- private readonly int[] _rank;
+    private readonly int[] _parent;
+    private readonly int[] _rank;
 
- public UnionFind(int size)
- {
- _parent = Enumerable.Range(0, size).ToArray; // each element starts as its own root
- _rank = new int[size];
- }
+    public UnionFind(int size)
+    {
+        _parent = Enumerable.Range(0, size).ToArray; // each element starts as its own root
+        _rank = new int[size];
+    }
 
- public int Find(int x)
- {
- if (_parent[x]!= x)
- _parent[x] = Find(_parent[x]); // PATH COMPRESSION: re-point directly to root
- return _parent[x];
- }
+    public int Find(int x)
+    {
+        if (_parent[x]!= x)
+            _parent[x] = Find(_parent[x]); // PATH COMPRESSION: re-point directly to root
+        return _parent[x];
+    }
 
- public void Union(int a, int b)
- {
- int rootA = Find(a), rootB = Find(b);
- if (rootA == rootB) return;
+    public void Union(int a, int b)
+    {
+        int rootA = Find(a), rootB = Find(b);
+        if (rootA == rootB) return;
 
- // UNION BY RANK: attach the smaller tree under the larger one's root
- if (_rank[rootA] < _rank[rootB]) (rootA, rootB) = (rootB, rootA);
- _parent[rootB] = rootA;
- if (_rank[rootA] == _rank[rootB]) _rank[rootA]++;
- }
+        // UNION BY RANK: attach the smaller tree under the larger one's root
+        if (_rank[rootA] < _rank[rootB]) (rootA, rootB) = (rootB, rootA);
+        _parent[rootB] = rootA;
+        if (_rank[rootA] == _rank[rootB]) _rank[rootA]++;
+    }
 
- public bool AreConnected(int a, int b) => Find(a) == Find(b);
+    public bool AreConnected(int a, int b) => Find(a) == Find(b);
 }
 ```
 
@@ -229,26 +229,26 @@ public class UnionFind
 ```csharp
 public (bool IsAcyclic, List<int> Order) TopologicalSort(Dictionary<int, List<int>> graph, IEnumerable<int> allNodes)
 {
- var inDegree = allNodes.ToDictionary(n => n, _ => 0);
- foreach (var (_, neighbors) in graph)
- foreach (var neighbor in neighbors)
- inDegree[neighbor] = inDegree.GetValueOrDefault(neighbor) + 1;
+    var inDegree = allNodes.ToDictionary(n => n, _ => 0);
+    foreach (var (_, neighbors) in graph)
+        foreach (var neighbor in neighbors)
+        inDegree[neighbor] = inDegree.GetValueOrDefault(neighbor) + 1;
 
- var queue = new Queue<int>(inDegree.Where(kv => kv.Value == 0).Select(kv => kv.Key));
- var order = new List<int>;
+    var queue = new Queue<int>(inDegree.Where(kv => kv.Value == 0).Select(kv => kv.Key));
+    var order = new List<int>;
 
- while (queue.Count > 0)
- {
- var node = queue.Dequeue;
- order.Add(node);
- foreach (var neighbor in graph.GetValueOrDefault(node, new List<int>))
- {
- if (--inDegree[neighbor] == 0) queue.Enqueue(neighbor);
- }
- }
+    while (queue.Count > 0)
+    {
+        var node = queue.Dequeue;
+        order.Add(node);
+        foreach (var neighbor in graph.GetValueOrDefault(node, new List<int>))
+        {
+            if (--inDegree[neighbor] == 0) queue.Enqueue(neighbor);
+        }
+    }
 
- bool isAcyclic = order.Count == inDegree.Count; // if not every node was processed, a cycle exists
- return (isAcyclic, order); // 'order' IS a valid build order when isAcyclic is true
+    bool isAcyclic = order.Count == inDegree.Count; // if not every node was processed, a cycle exists
+    return (isAcyclic, order); // 'order' IS a valid build order when isAcyclic is true
 }
 ```
 **Discussion**: This single O(V+E) pass, per Advanced Q2, answers both "is this graph acyclic" and "what's a valid processing order" simultaneously — precisely the fix that replaced the O(V×(V+E)) repeated-per-module DFS approach, directly demonstrating the whole-graph-algorithm principle this module's central lesson establishes.

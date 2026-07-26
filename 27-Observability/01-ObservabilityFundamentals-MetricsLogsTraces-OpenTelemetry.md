@@ -322,21 +322,21 @@ public sealed record MetricLabel(string Name, int? BoundedValueCount); // null =
 
 public static class CardinalityEstimator
 {
- public static (long EstimatedSeries, bool ExceedsBudget, string? UnboundedLabel) Estimate(
- IReadOnlyList<MetricLabel> labels, long budget)
- {
- long total = 1;
- foreach (var label in labels)
- {
- if (label.BoundedValueCount is null)
- return (long.MaxValue, true, label.Name); // unbounded label is an automatic budget violation
+    public static (long EstimatedSeries, bool ExceedsBudget, string? UnboundedLabel) Estimate(
+        IReadOnlyList<MetricLabel> labels, long budget)
+    {
+        long total = 1;
+        foreach (var label in labels)
+        {
+            if (label.BoundedValueCount is null)
+                return (long.MaxValue, true, label.Name); // unbounded label is an automatic budget violation
 
- total *= label.BoundedValueCount.Value;
- if (total > budget)
- return (total, true, null);
- }
- return (total, false, null);
- }
+            total *= label.BoundedValueCount.Value;
+            if (total > budget)
+                return (total, true, null);
+        }
+        return (total, false, null);
+    }
 }
 ```
 **Time complexity:** O(n) in the number of labels.
@@ -351,26 +351,26 @@ public sealed record TraceContext(string TraceId, string SpanId, byte Flags);
 
 public static class TraceParentHeader
 {
- public static string Generate(TraceContext context) =>
- $"00-{context.TraceId}-{context.SpanId}-{context.Flags:x2}";
+    public static string Generate(TraceContext context) =>
+        $"00-{context.TraceId}-{context.SpanId}-{context.Flags:x2}";
 
- public static bool TryParse(string header, out TraceContext? context)
- {
- context = null;
- var parts = header.Split('-');
- if (parts.Length!= 4) return false;
- if (parts[0]!= "00") return false; // only version 00 supported
- if (parts[1].Length!= 32 ||!IsHex(parts[1])) return false; // 128-bit trace ID
- if (parts[2].Length!= 16 ||!IsHex(parts[2])) return false; // 64-bit span ID
- if (!byte.TryParse(parts[3], System.Globalization.NumberStyles.HexNumber, null, out var flags))
- return false;
+    public static bool TryParse(string header, out TraceContext? context)
+    {
+        context = null;
+        var parts = header.Split('-');
+        if (parts.Length!= 4) return false;
+        if (parts[0]!= "00") return false; // only version 00 supported
+        if (parts[1].Length!= 32 ||!IsHex(parts[1])) return false; // 128-bit trace ID
+        if (parts[2].Length!= 16 ||!IsHex(parts[2])) return false; // 64-bit span ID
+        if (!byte.TryParse(parts[3], System.Globalization.NumberStyles.HexNumber, null, out var flags))
+            return false;
 
- context = new TraceContext(parts[1], parts[2], flags);
- return true;
- }
+        context = new TraceContext(parts[1], parts[2], flags);
+        return true;
+    }
 
- private static bool IsHex(string s) =>
- s.Length > 0 && s.All(c => Uri.IsHexDigit(c));
+    private static bool IsHex(string s) =>
+        s.Length > 0 && s.All(c => Uri.IsHexDigit(c));
 }
 ```
 **Time complexity:** O(n) in header string length for parsing/validation; O(1) for generation.
@@ -382,54 +382,54 @@ public static class TraceParentHeader
 
 ```csharp
 public sealed record IncomingSpan(string TraceId, string SpanId, DateTime ReceivedAt,
- DateTime StartTime, DateTime EndTime, bool IsError);
+    DateTime StartTime, DateTime EndTime, bool IsError);
 
 public sealed class TailSamplingBuffer
 {
- private readonly Dictionary<string, List<IncomingSpan>> _buffers = new;
- private readonly Dictionary<string, DateTime> _lastSeen = new;
- private readonly TimeSpan _inactivityTimeout;
- private readonly TimeSpan _latencyThreshold;
+    private readonly Dictionary<string, List<IncomingSpan>> _buffers = new;
+    private readonly Dictionary<string, DateTime> _lastSeen = new;
+    private readonly TimeSpan _inactivityTimeout;
+    private readonly TimeSpan _latencyThreshold;
 
- public TailSamplingBuffer(TimeSpan inactivityTimeout, TimeSpan latencyThreshold)
- {
- _inactivityTimeout = inactivityTimeout;
- _latencyThreshold = latencyThreshold;
- }
+    public TailSamplingBuffer(TimeSpan inactivityTimeout, TimeSpan latencyThreshold)
+    {
+        _inactivityTimeout = inactivityTimeout;
+        _latencyThreshold = latencyThreshold;
+    }
 
- public void Ingest(IncomingSpan span)
- {
- if (!_buffers.TryGetValue(span.TraceId, out var list))
- _buffers[span.TraceId] = list = new List<IncomingSpan>;
- list.Add(span);
- _lastSeen[span.TraceId] = span.ReceivedAt;
- }
+    public void Ingest(IncomingSpan span)
+    {
+        if (!_buffers.TryGetValue(span.TraceId, out var list))
+            _buffers[span.TraceId] = list = new List<IncomingSpan>;
+        list.Add(span);
+        _lastSeen[span.TraceId] = span.ReceivedAt;
+    }
 
- // Called periodically; 'now' drives the inactivity check so this is testable
- // without wall-clock sleeps.
- public IReadOnlyList<(string TraceId, bool Retain)> FlushCompletedTraces(DateTime now)
- {
- var results = new List<(string, bool)>;
- var completedTraceIds = _lastSeen
-.Where(kv => now - kv.Value >= _inactivityTimeout)
-.Select(kv => kv.Key)
-.ToList;
+    // Called periodically; 'now' drives the inactivity check so this is testable
+    // without wall-clock sleeps.
+    public IReadOnlyList<(string TraceId, bool Retain)> FlushCompletedTraces(DateTime now)
+    {
+        var results = new List<(string, bool)>;
+        var completedTraceIds = _lastSeen
+        .Where(kv => now - kv.Value >= _inactivityTimeout)
+        .Select(kv => kv.Key)
+        .ToList;
 
- foreach (var traceId in completedTraceIds)
- {
- var spans = _buffers[traceId];
- bool hasError = spans.Any(s => s.IsError);
- var traceStart = spans.Min(s => s.StartTime);
- var traceEnd = spans.Max(s => s.EndTime);
- bool exceedsLatency = (traceEnd - traceStart) >= _latencyThreshold;
+        foreach (var traceId in completedTraceIds)
+        {
+            var spans = _buffers[traceId];
+            bool hasError = spans.Any(s => s.IsError);
+            var traceStart = spans.Min(s => s.StartTime);
+            var traceEnd = spans.Max(s => s.EndTime);
+            bool exceedsLatency = (traceEnd - traceStart) >= _latencyThreshold;
 
- results.Add((traceId, hasError || exceedsLatency));
+            results.Add((traceId, hasError || exceedsLatency));
 
- _buffers.Remove(traceId);
- _lastSeen.Remove(traceId);
- }
- return results;
- }
+            _buffers.Remove(traceId);
+            _lastSeen.Remove(traceId);
+        }
+        return results;
+    }
 }
 ```
 **Time complexity:** `Ingest` is O(1) amortized. `FlushCompletedTraces` is O(t + s) where t is the number of traces checked for inactivity and s is the total span count across completed traces being finalized.
@@ -442,37 +442,37 @@ public sealed class TailSamplingBuffer
 ```csharp
 public sealed class ExemplarIndex
 {
- private readonly int _maxExemplarsPerBucket;
- private readonly Dictionary<string, LinkedList<(string TraceId, DateTime ObservedAt)>> _index = new;
- private readonly object _lock = new;
+    private readonly int _maxExemplarsPerBucket;
+    private readonly Dictionary<string, LinkedList<(string TraceId, DateTime ObservedAt)>> _index = new;
+    private readonly object _lock = new;
 
- public ExemplarIndex(int maxExemplarsPerBucket) => _maxExemplarsPerBucket = maxExemplarsPerBucket;
+    public ExemplarIndex(int maxExemplarsPerBucket) => _maxExemplarsPerBucket = maxExemplarsPerBucket;
 
- public void Record(string bucketKey, string traceId, DateTime observedAt)
- {
- lock (_lock)
- {
- if (!_index.TryGetValue(bucketKey, out var list))
- _index[bucketKey] = list = new LinkedList<(string, DateTime)>;
+    public void Record(string bucketKey, string traceId, DateTime observedAt)
+    {
+        lock (_lock)
+        {
+            if (!_index.TryGetValue(bucketKey, out var list))
+                _index[bucketKey] = list = new LinkedList<(string, DateTime)>;
 
- list.AddFirst((traceId, observedAt)); // most recent exemplar first
+            list.AddFirst((traceId, observedAt)); // most recent exemplar first
 
- // Bound memory per bucket -- evict the oldest exemplar once over budget
- // rather than retaining every sample ever observed for a hot bucket.
- while (list.Count > _maxExemplarsPerBucket)
- list.RemoveLast;
- }
- }
+            // Bound memory per bucket -- evict the oldest exemplar once over budget
+            // rather than retaining every sample ever observed for a hot bucket.
+            while (list.Count > _maxExemplarsPerBucket)
+                list.RemoveLast;
+        }
+    }
 
- public IReadOnlyList<string> GetExemplars(string bucketKey)
- {
- lock (_lock)
- {
- return _index.TryGetValue(bucketKey, out var list)
-? list.Select(e => e.TraceId).ToList
-: Array.Empty<string>;
- }
- }
+    public IReadOnlyList<string> GetExemplars(string bucketKey)
+    {
+        lock (_lock)
+        {
+            return _index.TryGetValue(bucketKey, out var list)
+            ? list.Select(e => e.TraceId).ToList
+            : Array.Empty<string>;
+        }
+    }
 }
 ```
 **Time complexity:** O(1) amortized for both `Record` and `GetExemplars` (the eviction loop runs at most once per call, bounded by `_maxExemplarsPerBucket`, a fixed constant).
@@ -544,8 +544,8 @@ graph TB
 ```csharp
 public interface ITelemetryExporter
 {
- Task ExportSpanAsync(SpanData span, CancellationToken ct);
- Task ExportMetricAsync(MetricData metric, CancellationToken ct);
+    Task ExportSpanAsync(SpanData span, CancellationToken ct);
+    Task ExportMetricAsync(MetricData metric, CancellationToken ct);
 }
 
 public sealed class OtlpExporter: ITelemetryExporter { /* exports via OTLP to a Collector */ }
@@ -555,44 +555,44 @@ public sealed record MetricLabelSchema(string Name, int? BoundedValueCount);
 
 public sealed class MetricRegistry
 {
- private readonly long _cardinalityBudget;
- private readonly List<(string MetricName, IReadOnlyList<MetricLabelSchema> Labels)> _registered = new;
+    private readonly long _cardinalityBudget;
+    private readonly List<(string MetricName, IReadOnlyList<MetricLabelSchema> Labels)> _registered = new;
 
- public MetricRegistry(long cardinalityBudget) => _cardinalityBudget = cardinalityBudget;
+    public MetricRegistry(long cardinalityBudget) => _cardinalityBudget = cardinalityBudget;
 
- public void Register(string metricName, IReadOnlyList<MetricLabelSchema> labels)
- {
- // Sec11 Easy's estimator, enforced at REGISTRATION time -- before a single
- // data point is ever emitted, not discovered later via backend degradation.
- var (estimated, exceeds, unboundedLabel) = CardinalityEstimator.Estimate(
- labels.Select(l => new MetricLabel(l.Name, l.BoundedValueCount)).ToList,
- _cardinalityBudget);
+    public void Register(string metricName, IReadOnlyList<MetricLabelSchema> labels)
+    {
+        // Sec11 Easy's estimator, enforced at REGISTRATION time -- before a single
+        // data point is ever emitted, not discovered later via backend degradation.
+        var (estimated, exceeds, unboundedLabel) = CardinalityEstimator.Estimate(
+            labels.Select(l => new MetricLabel(l.Name, l.BoundedValueCount)).ToList,
+                _cardinalityBudget);
 
- if (exceeds)
- throw new InvalidOperationException(
- $"Metric '{metricName}' exceeds cardinality budget " +
- $"(estimated {estimated}, unbounded label: {unboundedLabel?? "none"}).");
+        if (exceeds)
+            throw new InvalidOperationException(
+            $"Metric '{metricName}' exceeds cardinality budget " +
+                $"(estimated {estimated}, unbounded label: {unboundedLabel?? "none"}).");
 
- _registered.Add((metricName, labels));
- }
+        _registered.Add((metricName, labels));
+    }
 }
 
 public sealed class CorrelatedLogger
 {
- private readonly ITelemetryExporter _exporter;
- private readonly IActiveSpanAccessor _activeSpan; // abstraction over OTel's ambient context
+    private readonly ITelemetryExporter _exporter;
+    private readonly IActiveSpanAccessor _activeSpan; // abstraction over OTel's ambient context
 
- public void Log(string message, LogLevel level)
- {
- var span = _activeSpan.Current;
- // Automatic correlation injection -- Sec2.4's fix baked into the logging
- // call itself, so no call site can forget to correlate.
- var entry = new StructuredLogEntry(message, level, DateTime.UtcNow,
- TraceId: span?.TraceId, SpanId: span?.SpanId);
- WriteToSink(entry);
- }
+    public void Log(string message, LogLevel level)
+    {
+        var span = _activeSpan.Current;
+        // Automatic correlation injection -- Sec2.4's fix baked into the logging
+        // call itself, so no call site can forget to correlate.
+        var entry = new StructuredLogEntry(message, level, DateTime.UtcNow,
+            TraceId: span?.TraceId, SpanId: span?.SpanId);
+        WriteToSink(entry);
+    }
 
- private void WriteToSink(StructuredLogEntry entry) { /*... */ }
+    private void WriteToSink(StructuredLogEntry entry) { /*... */ }
 }
 ```
 

@@ -330,31 +330,31 @@ public sealed record ShapeDriftResult(bool IsDrifted, string Description);
 
 public static class TestPyramidShapeAnalyzer
 {
- // Target: unit tests should be the clear majority; E2E tests the smallest minority.
- private const double MinUnitRatio = 0.60;
- private const double MaxE2ERatio = 0.15;
+    // Target: unit tests should be the clear majority; E2E tests the smallest minority.
+    private const double MinUnitRatio = 0.60;
+    private const double MaxE2ERatio = 0.15;
 
- public static ShapeDriftResult AnalyzeDrift(PyramidShape shape)
- {
- int total = shape.UnitCount + shape.IntegrationCount + shape.E2ECount;
- if (total == 0)
- return new ShapeDriftResult(false, "No tests to analyze.");
+    public static ShapeDriftResult AnalyzeDrift(PyramidShape shape)
+    {
+        int total = shape.UnitCount + shape.IntegrationCount + shape.E2ECount;
+        if (total == 0)
+            return new ShapeDriftResult(false, "No tests to analyze.");
 
- double unitRatio = (double)shape.UnitCount / total;
- double e2eRatio = (double)shape.E2ECount / total;
+        double unitRatio = (double)shape.UnitCount / total;
+        double e2eRatio = (double)shape.E2ECount / total;
 
- if (unitRatio < MinUnitRatio)
- return new ShapeDriftResult(true,
- $"Unit test ratio ({unitRatio:P0}) below minimum ({MinUnitRatio:P0}) -- " +
- "suite is drifting away from the pyramid's fast, reliable base.");
+        if (unitRatio < MinUnitRatio)
+            return new ShapeDriftResult(true,
+            $"Unit test ratio ({unitRatio:P0}) below minimum ({MinUnitRatio:P0}) -- " +
+                "suite is drifting away from the pyramid's fast, reliable base.");
 
- if (e2eRatio > MaxE2ERatio)
- return new ShapeDriftResult(true,
- $"E2E test ratio ({e2eRatio:P0}) above maximum ({MaxE2ERatio:P0}) -- " +
- "suite is drifting toward the 'ice cream cone' anti-pattern.");
+        if (e2eRatio > MaxE2ERatio)
+            return new ShapeDriftResult(true,
+            $"E2E test ratio ({e2eRatio:P0}) above maximum ({MaxE2ERatio:P0}) -- " +
+                "suite is drifting toward the 'ice cream cone' anti-pattern.");
 
- return new ShapeDriftResult(false, "Pyramid shape within acceptable range.");
- }
+        return new ShapeDriftResult(false, "Pyramid shape within acceptable range.");
+    }
 }
 ```
 **Time complexity:** O(1).
@@ -372,31 +372,31 @@ public enum FailureClassification { LikelyRegression, LikelyFlaky, InsufficientD
 
 public static class FlakyTestClassifier
 {
- public static FailureClassification Classify(
- IReadOnlyList<TestRunResult> recentRuns,
- IReadOnlyList<CodeChange> recentChanges,
- IReadOnlySet<string> testExercisedFiles,
- TimeSpan correlationWindow)
- {
- var failures = recentRuns.Where(r =>!r.Passed).ToList;
- if (failures.Count < 2)
- return FailureClassification.InsufficientData;
+    public static FailureClassification Classify(
+        IReadOnlyList<TestRunResult> recentRuns,
+            IReadOnlyList<CodeChange> recentChanges,
+            IReadOnlySet<string> testExercisedFiles,
+            TimeSpan correlationWindow)
+    {
+        var failures = recentRuns.Where(r =>!r.Passed).ToList;
+        if (failures.Count < 2)
+            return FailureClassification.InsufficientData;
 
- foreach (var failure in failures)
- {
- bool correlatedChangeFound = recentChanges.Any(change =>
- change.Timestamp <= failure.Timestamp &&
- failure.Timestamp - change.Timestamp <= correlationWindow &&
- change.FilesTouched.Overlaps(testExercisedFiles));
+        foreach (var failure in failures)
+        {
+            bool correlatedChangeFound = recentChanges.Any(change =>
+                change.Timestamp <= failure.Timestamp &&
+                    failure.Timestamp - change.Timestamp <= correlationWindow &&
+                    change.FilesTouched.Overlaps(testExercisedFiles));
 
- if (correlatedChangeFound)
- return FailureClassification.LikelyRegression;
- }
+            if (correlatedChangeFound)
+                return FailureClassification.LikelyRegression;
+        }
 
- // Multiple failures, none correlated with a recent, relevant code change --
- // strong signal of genuine flakiness rather than a masked regression.
- return FailureClassification.LikelyFlaky;
- }
+        // Multiple failures, none correlated with a recent, relevant code change --
+        // strong signal of genuine flakiness rather than a masked regression.
+        return FailureClassification.LikelyFlaky;
+    }
 }
 ```
 **Time complexity:** O(f × c) where f is the number of recent failures and c is the number of recent code changes (each failure checked against each change).
@@ -412,38 +412,38 @@ public sealed record ShardAssignment(int ShardIndex, IReadOnlyList<string> TestN
 
 public static class TestShardBalancer
 {
- public static IReadOnlyList<ShardAssignment> BalanceShards(
- IReadOnlyList<TestDuration> tests, int shardCount)
- {
- // Greedy longest-processing-time-first heuristic: sort tests longest-first
- // always assign the next test to the currently-least-loaded shard.
- var sortedDescending = tests.OrderByDescending(t => t.HistoricalDuration).ToList;
- var shards = Enumerable.Range(0, shardCount)
-.Select(i => new List<string>)
-.ToArray;
- var shardTotals = new TimeSpan[shardCount];
+    public static IReadOnlyList<ShardAssignment> BalanceShards(
+        IReadOnlyList<TestDuration> tests, int shardCount)
+    {
+        // Greedy longest-processing-time-first heuristic: sort tests longest-first
+        // always assign the next test to the currently-least-loaded shard.
+        var sortedDescending = tests.OrderByDescending(t => t.HistoricalDuration).ToList;
+        var shards = Enumerable.Range(0, shardCount)
+        .Select(i => new List<string>)
+        .ToArray;
+        var shardTotals = new TimeSpan[shardCount];
 
- foreach (var test in sortedDescending)
- {
- int leastLoadedShard = Array.IndexOf(shardTotals, shardTotals.Min);
- shards[leastLoadedShard].Add(test.TestName);
- shardTotals[leastLoadedShard] += test.HistoricalDuration;
- }
+        foreach (var test in sortedDescending)
+        {
+            int leastLoadedShard = Array.IndexOf(shardTotals, shardTotals.Min);
+            shards[leastLoadedShard].Add(test.TestName);
+            shardTotals[leastLoadedShard] += test.HistoricalDuration;
+        }
 
- return Enumerable.Range(0, shardCount)
-.Select(i => new ShardAssignment(i, shards[i], shardTotals[i]))
-.ToList;
- }
+        return Enumerable.Range(0, shardCount)
+        .Select(i => new ShardAssignment(i, shards[i], shardTotals[i]))
+        .ToList;
+    }
 
- public static bool RequiresRecalibration(
- IReadOnlyList<TestDuration> currentTests,
- IReadOnlySet<string> previouslyAssignedTestNames)
- {
- // Recalibration trigger: suite composition changed (Sec Intermediate Q7) --
- // a new test was added, a test was removed/quarantined, or restored.
- var currentTestNames = currentTests.Select(t => t.TestName).ToHashSet;
- return!currentTestNames.SetEquals(previouslyAssignedTestNames);
- }
+    public static bool RequiresRecalibration(
+        IReadOnlyList<TestDuration> currentTests,
+            IReadOnlySet<string> previouslyAssignedTestNames)
+    {
+        // Recalibration trigger: suite composition changed (Sec Intermediate Q7) --
+        // a new test was added, a test was removed/quarantined, or restored.
+        var currentTestNames = currentTests.Select(t => t.TestName).ToHashSet;
+        return!currentTestNames.SetEquals(previouslyAssignedTestNames);
+    }
 }
 ```
 **Time complexity:** `BalanceShards` is O(n log n) for the sort plus O(n × s) for shard assignment (n tests, s shards) — since s is typically small and fixed, this is effectively O(n log n). `RequiresRecalibration` is O(n) for the set comparison.

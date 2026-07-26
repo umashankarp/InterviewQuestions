@@ -390,16 +390,16 @@ var riskConsumer = new ConsumerConfig { GroupId = "risk-analytics", BootstrapSer
 ```csharp
 public class RetentionMarginMonitor
 {
- public RetentionRisk Evaluate(TimeSpan consumerLag, TimeSpan topicRetention)
- {
- var ratio = consumerLag.TotalSeconds / topicRetention.TotalSeconds;
- return ratio switch
- {
- >= 0.7 => RetentionRisk.Critical,
- >= 0.5 => RetentionRisk.Warning,
- _ => RetentionRisk.Healthy
- };
- }
+    public RetentionRisk Evaluate(TimeSpan consumerLag, TimeSpan topicRetention)
+    {
+        var ratio = consumerLag.TotalSeconds / topicRetention.TotalSeconds;
+        return ratio switch
+        {
+            >= 0.7 => RetentionRisk.Critical,
+                >= 0.5 => RetentionRisk.Warning,
+                _ => RetentionRisk.Healthy
+        };
+    }
 }
 ```
 **Time complexity:** O(1) per evaluation.
@@ -412,18 +412,18 @@ public class RetentionMarginMonitor
 ```csharp
 public class SnapshotAcceleratedRebuilder
 {
- public async Task RebuildAsync(IReadModelStore store, ISnapshotStore snapshots, IEventStore events)
- {
- var snapshot = await snapshots.GetLatestAsync;
- if (snapshot is not null)
- await store.RestoreFromSnapshotAsync(snapshot.State);
+    public async Task RebuildAsync(IReadModelStore store, ISnapshotStore snapshots, IEventStore events)
+    {
+        var snapshot = await snapshots.GetLatestAsync;
+        if (snapshot is not null)
+            await store.RestoreFromSnapshotAsync(snapshot.State);
 
- var fromSeq = snapshot?.LastProcessedSequence?? 0;
- await foreach (var evt in events.StreamFrom(fromSeq))
- {
- await store.Apply(evt); // idempotent
- }
- }
+        var fromSeq = snapshot?.LastProcessedSequence?? 0;
+        await foreach (var evt in events.StreamFrom(fromSeq))
+        {
+            await store.Apply(evt); // idempotent
+        }
+    }
 }
 ```
 **Time complexity:** O(k) where k is events since the last snapshot, not O(n) for full history — the entire point of snapshotting.
@@ -436,20 +436,20 @@ public class SnapshotAcceleratedRebuilder
 ```csharp
 public abstract class ProjectorSchemaMigrationContractTests
 {
- protected abstract IProjector CreateProjector;
+    protected abstract IProjector CreateProjector;
 
- [Theory]
- [InlineData("v1")] [InlineData("v2")]
- public async Task Projector_HandlesBothSchemaVersions_DuringMigrationWindow(string schemaVersion)
- {
- var projector = CreateProjector;
- var evt = OrderExecutedEventBuilder.ForSchemaVersion(schemaVersion).Build;
+    [Theory]
+    [InlineData("v1")] [InlineData("v2")]
+    public async Task Projector_HandlesBothSchemaVersions_DuringMigrationWindow(string schemaVersion)
+    {
+        var projector = CreateProjector;
+        var evt = OrderExecutedEventBuilder.ForSchemaVersion(schemaVersion).Build;
 
- await projector.Apply(evt);
+        await projector.Apply(evt);
 
- var result = await projector.GetProjectedState(evt.OrderId);
- Assert.Equal(evt.ExpectedFilledQuantity, result.FilledQuantity); // correct regardless of version
- }
+        var result = await projector.GetProjectedState(evt.OrderId);
+        Assert.Equal(evt.ExpectedFilledQuantity, result.FilledQuantity); // correct regardless of version
+    }
 }
 ```
 **Time complexity:** O(1) per schema-version scenario.

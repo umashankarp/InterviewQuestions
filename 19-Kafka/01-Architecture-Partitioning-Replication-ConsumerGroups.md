@@ -316,9 +316,9 @@ var producerConfig = new ProducerConfig { BootstrapServers = "kafka:9092", Acks 
 using var producer = new ProducerBuilder<string, ShipmentStatusChangedEvent>(producerConfig).Build;
 
 await producer.ProduceAsync("shipment-status-changed", new Message<string, ShipmentStatusChangedEvent>
-{
- Key = evt.ShipmentId, // CORRECT partition key -- ensures same-shipment events land in one partition
- Value = evt
+    {
+        Key = evt.ShipmentId, // CORRECT partition key -- ensures same-shipment events land in one partition
+            Value = evt
 });
 ```
 
@@ -330,9 +330,9 @@ var criticalProducerConfig = new ProducerConfig { Acks = Acks.All, EnableIdempot
 // High-volume, loss-tolerant: clickstream analytics -- throughput prioritized over durability
 var analyticsProducerConfig = new ProducerConfig
 {
- Acks = Acks.Leader, // acks=1 -- moderate durability, lower latency than acks=all
- LingerMs = 20, // batch aggressively -- throughput-optimized, not latency-sensitive
- BatchSize = 65536
+    Acks = Acks.Leader, // acks=1 -- moderate durability, lower latency than acks=all
+        LingerMs = 20, // batch aggressively -- throughput-optimized, not latency-sensitive
+        BatchSize = 65536
 };
 ```
 
@@ -340,24 +340,24 @@ var analyticsProducerConfig = new ProducerConfig
 ```csharp
 public class OrderEventConsumer
 {
- public async Task ConsumeLoopAsync(CancellationToken ct)
- {
- _consumer.Subscribe("order-events");
- while (!ct.IsCancellationRequested)
- {
- var result = _consumer.Consume(ct);
- try
- {
- await _idempotentHandler.HandleAsync(result.Message.Value, result.Message.Key);
- _consumer.Commit(result); // COMMIT AFTER processing completes -- at-least-once
- // requires idempotent handler (already established)
- }
- catch (Exception ex)
- {
- await _resilientRetryHandler.HandleFailureAsync(result, ex); // routes to DLQ after N retries
- }
- }
- }
+    public async Task ConsumeLoopAsync(CancellationToken ct)
+    {
+        _consumer.Subscribe("order-events");
+        while (!ct.IsCancellationRequested)
+        {
+            var result = _consumer.Consume(ct);
+            try
+            {
+                await _idempotentHandler.HandleAsync(result.Message.Value, result.Message.Key);
+                _consumer.Commit(result); // COMMIT AFTER processing completes -- at-least-once
+                // requires idempotent handler (already established)
+            }
+            catch (Exception ex)
+            {
+                await _resilientRetryHandler.HandleFailureAsync(result, ex); // routes to DLQ after N retries
+            }
+        }
+    }
 }
 ```
 
@@ -365,25 +365,25 @@ public class OrderEventConsumer
 ```csharp
 var consumerConfig = new ConsumerConfig
 {
- GroupId = "geo-enrichment-group",
- // Tuned to comfortably exceed the geolocation API's observed WORST-CASE latency (2s)
- // plus processing overhead, with meaningful headroom -- NOT left at an unvalidated default.
- MaxPollIntervalMs = 30000,
- PartitionAssignmentStrategy = PartitionAssignmentStrategy.CooperativeSticky // incremental rebalancing
+    GroupId = "geo-enrichment-group",
+        // Tuned to comfortably exceed the geolocation API's observed WORST-CASE latency (2s)
+    // plus processing overhead, with meaningful headroom -- NOT left at an unvalidated default.
+    MaxPollIntervalMs = 30000,
+        PartitionAssignmentStrategy = PartitionAssignmentStrategy.CooperativeSticky // incremental rebalancing
 };
 
 public class EnrichmentHandler
 {
- private readonly DependencyClient _geoApiClient; // the bulkhead + circuit-breaker-protected client
+    private readonly DependencyClient _geoApiClient; // the bulkhead + circuit-breaker-protected client
 
- public async Task HandleAsync(ClickstreamEvent evt)
- {
- var geoData = await _geoApiClient.CallAsync(
- operation: client => client.GetGeoDataAsync(evt.IpAddress),
- fallback: GeoData.Unknown); // circuit breaker trips fast on API degradation --
- // NEVER risks exceeding MaxPollIntervalMs waiting on a failing dependency
- await _enrichmentRepository.SaveAsync(evt, geoData);
- }
+    public async Task HandleAsync(ClickstreamEvent evt)
+    {
+        var geoData = await _geoApiClient.CallAsync(
+            operation: client => client.GetGeoDataAsync(evt.IpAddress),
+                fallback: GeoData.Unknown); // circuit breaker trips fast on API degradation --
+        // NEVER risks exceeding MaxPollIntervalMs waiting on a failing dependency
+        await _enrichmentRepository.SaveAsync(evt, geoData);
+    }
 }
 ```
 **Discussion**: pairing `CooperativeSticky` assignment with a circuit-breaker-protected external call is precisely the two-layer fix — the Kafka-level configuration (cooperative rebalancing, a generous but justified `MaxPollIntervalMs`) limits the blast radius *if* a rebalance does occur, while the application-level circuit breaker prevents the external dependency's degradation from ever threatening to exceed the poll interval in the first place — neither layer alone would have fully resolved the incident.

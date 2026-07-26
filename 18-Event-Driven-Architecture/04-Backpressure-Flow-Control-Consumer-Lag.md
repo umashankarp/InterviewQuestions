@@ -456,11 +456,11 @@ The generalizable lesson: **the danger of lag is not usually the lag itself but 
 ```csharp
 public TimeSpan LagAsTime(ConsumerPosition pos, IReadOnlyList<EventRecord> recent)
 {
- if (pos.MessagesBehind == 0) return TimeSpan.Zero;
+    if (pos.MessagesBehind == 0) return TimeSpan.Zero;
 
- var latestProducedTime = recent.Max(r => r.EventTime);
- var lastConsumedTime = pos.LastConsumedEventTime;
- return latestProducedTime - lastConsumedTime; // interpretable, comparable to retention
+    var latestProducedTime = recent.Max(r => r.EventTime);
+    var lastConsumedTime = pos.LastConsumedEventTime;
+    return latestProducedTime - lastConsumedTime; // interpretable, comparable to retention
 }
 ```
 **Time complexity:** O(n) over the recent sample.
@@ -473,20 +473,20 @@ public TimeSpan LagAsTime(ConsumerPosition pos, IReadOnlyList<EventRecord> recen
 ```csharp
 public IReadOnlyList<LagAlert> Evaluate(LagState state, ConsumerPolicy policy)
 {
- var alerts = new List<LagAlert>;
+    var alerts = new List<LagAlert>;
 
- if (state.SustainedRiseMinutes > policy.RiseWindow)
- alerts.Add(LagAlert.Degrading("Lag rising and not draining — consumer slower than producer"));
+    if (state.SustainedRiseMinutes > policy.RiseWindow)
+        alerts.Add(LagAlert.Degrading("Lag rising and not draining — consumer slower than producer"));
 
- if (state.Lag > policy.Retention * policy.RetentionFraction)
- alerts.Add(LagAlert.DataLossRisk($"Lag {state.Lag} approaching retention {policy.Retention}"));
+    if (state.Lag > policy.Retention * policy.RetentionFraction)
+        alerts.Add(LagAlert.DataLossRisk($"Lag {state.Lag} approaching retention {policy.Retention}"));
 
- var catchUpLoad = state.Lag.TotalSeconds * state.ConsumeRatePerSecond;
- if (catchUpLoad > policy.DownstreamBurstCapacity)
- alerts.Add(LagAlert.RecoveryRisk(// the alert lacked
- $"Catch-up would generate {catchUpLoad} requests vs capacity {policy.DownstreamBurstCapacity}"));
+    var catchUpLoad = state.Lag.TotalSeconds * state.ConsumeRatePerSecond;
+    if (catchUpLoad > policy.DownstreamBurstCapacity)
+        alerts.Add(LagAlert.RecoveryRisk(// the alert lacked
+            $"Catch-up would generate {catchUpLoad} requests vs capacity {policy.DownstreamBurstCapacity}"));
 
- return alerts;
+    return alerts;
 }
 ```
 **Time complexity:** O(1).
@@ -499,20 +499,20 @@ public IReadOnlyList<LagAlert> Evaluate(LagState state, ConsumerPolicy policy)
 ```csharp
 public async Task ConsumeWithCatchUpControlAsync(CancellationToken ct)
 {
- while (!ct.IsCancellationRequested)
- {
- var lag = await _position.CurrentLagAsync;
- var rate = lag > _catchUpThreshold
-? _downstreamCapacity.CurrentSafeRate // conservative after restart (Intermediate Q7)
-: _normalRate;
+    while (!ct.IsCancellationRequested)
+    {
+        var lag = await _position.CurrentLagAsync;
+        var rate = lag > _catchUpThreshold
+        ? _downstreamCapacity.CurrentSafeRate // conservative after restart (Intermediate Q7)
+        : _normalRate;
 
- _catchUpState.Publish(lag, throttled: lag > _catchUpThreshold, rate); // downstream attribution
+        _catchUpState.Publish(lag, throttled: lag > _catchUpThreshold, rate); // downstream attribution
 
- var batch = await _consumer.FetchAsync(maxRecords: rate, ct);
- foreach (var record in batch) await _processor.HandleAsync(record, ct);
+        var batch = await _consumer.FetchAsync(maxRecords: rate, ct);
+        foreach (var record in batch) await _processor.HandleAsync(record, ct);
 
- await _limiter.WaitForNextWindowAsync(rate, ct);
- }
+        await _limiter.WaitForNextWindowAsync(rate, ct);
+    }
 }
 ```
 **Time complexity:** O(b) per batch of size b.
@@ -525,18 +525,18 @@ public async Task ConsumeWithCatchUpControlAsync(CancellationToken ct)
 ```csharp
 public LagDiagnosis Diagnose(IReadOnlyDictionary<PartitionId, PartitionLag> partitions)
 {
- var lagging = partitions.Where(p => p.Value.Lag > _threshold).ToList;
- if (lagging.Count == 0) return LagDiagnosis.Healthy;
+    var lagging = partitions.Where(p => p.Value.Lag > _threshold).ToList;
+    if (lagging.Count == 0) return LagDiagnosis.Healthy;
 
- if (lagging.Count == partitions.Count)
- return partitions.Values.Average(p => p.ProcessingTimeMs) > _normalProcessingMs
-? LagDiagnosis.SlowProcessing("Uniform lag, elevated processing time")
-: LagDiagnosis.InsufficientParallelism("Uniform lag, normal processing time");
+    if (lagging.Count == partitions.Count)
+        return partitions.Values.Average(p => p.ProcessingTimeMs) > _normalProcessingMs
+    ? LagDiagnosis.SlowProcessing("Uniform lag, elevated processing time")
+    : LagDiagnosis.InsufficientParallelism("Uniform lag, normal processing time");
 
- var stalled = lagging.Where(p => p.Value.CommittedOffsetUnchangedFor > _stallWindow).ToList;
- return stalled.Count > 0
-? LagDiagnosis.PoisonMessage(stalled.Select(s => s.Key).ToList) // no progress at all
-: LagDiagnosis.PartitionSkew(lagging.Select(l => l.Key).ToList); // progressing, overloaded
+    var stalled = lagging.Where(p => p.Value.CommittedOffsetUnchangedFor > _stallWindow).ToList;
+    return stalled.Count > 0
+    ? LagDiagnosis.PoisonMessage(stalled.Select(s => s.Key).ToList) // no progress at all
+    : LagDiagnosis.PartitionSkew(lagging.Select(l => l.Key).ToList); // progressing, overloaded
 }
 ```
 **Time complexity:** O(p) for p partitions.

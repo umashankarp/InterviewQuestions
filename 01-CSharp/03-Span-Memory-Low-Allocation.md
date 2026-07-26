@@ -86,12 +86,12 @@ No new array is allocated; no elements are copied. Indexing `span[i]` computes `
 byte[] buffer = ArrayPool<byte>.Shared.Rent(4096); // may return a LARGER array than requested
 try
 {
- int written = FillBuffer(buffer.AsSpan(0, 4096)); // must respect requested size, not buffer.Length
- Process(buffer.AsSpan(0, written));
+    int written = FillBuffer(buffer.AsSpan(0, 4096)); // must respect requested size, not buffer.Length
+    Process(buffer.AsSpan(0, written));
 }
 finally
 {
- ArrayPool<byte>.Shared.Return(buffer, clearArray: true); // clearArray matters if it held sensitive data
+    ArrayPool<byte>.Shared.Return(buffer, clearArray: true); // clearArray matters if it held sensitive data
 }
 ```
 - `Rent` may return an array **larger** than requested (pool buckets are sized in powers of two internally) — always slice to the size you actually asked for, don't assume `buffer.Length == requested size`.
@@ -363,16 +363,16 @@ sequenceDiagram
 // Before: allocates 2 new strings every call
 (string Key, string Value) ParseKvp(string input)
 {
- int idx = input.IndexOf('=');
- return (input.Substring(0, idx), input.Substring(idx + 1));
+    int idx = input.IndexOf('=');
+    return (input.Substring(0, idx), input.Substring(idx + 1));
 }
 ```
 **Solution**:
 ```csharp
 (ReadOnlySpan<char> Key, ReadOnlySpan<char> Value) ParseKvp(ReadOnlySpan<char> input)
 {
- int idx = input.IndexOf('=');
- return (input[..idx], input[(idx + 1)..]);
+    int idx = input.IndexOf('=');
+    return (input[..idx], input[(idx + 1)..]);
 }
 // Caller materializes to string ONLY if/when it truly needs to persist the value:
 var (keySpan, valueSpan) = ParseKvp("timeout=30".AsSpan);
@@ -386,23 +386,23 @@ if (int.TryParse(valueSpan, out int timeoutSeconds)) { /* zero-allocation numeri
 ```csharp
 public static class CsvTokenizer
 {
- // Caller supplies a buffer to receive field boundaries -- avoids allocating a List<Range> internally.
- public static int Tokenize(ReadOnlySpan<char> line, Span<Range> fieldRanges)
- {
- int fieldCount = 0;
- int start = 0;
- for (int i = 0; i <= line.Length; i++)
- {
- if (i == line.Length || line[i] == ',')
- {
- if (fieldCount >= fieldRanges.Length)
- throw new ArgumentException("fieldRanges too small for this line");
- fieldRanges[fieldCount++] = new Range(start, i);
- start = i + 1;
- }
- }
- return fieldCount;
- }
+    // Caller supplies a buffer to receive field boundaries -- avoids allocating a List<Range> internally.
+    public static int Tokenize(ReadOnlySpan<char> line, Span<Range> fieldRanges)
+    {
+        int fieldCount = 0;
+        int start = 0;
+        for (int i = 0; i <= line.Length; i++)
+        {
+            if (i == line.Length || line[i] == ',')
+            {
+                if (fieldCount >= fieldRanges.Length)
+                    throw new ArgumentException("fieldRanges too small for this line");
+                fieldRanges[fieldCount++] = new Range(start, i);
+                start = i + 1;
+            }
+        }
+        return fieldCount;
+    }
 }
 
 // Usage:
@@ -411,8 +411,8 @@ Span<Range> ranges = stackalloc Range[16]; // capped, small, safe stackalloc (fi
 int count = CsvTokenizer.Tokenize(line, ranges);
 for (int i = 0; i < count; i++)
 {
- ReadOnlySpan<char> field = line[ranges[i]];
- Console.WriteLine(field.ToString); // materialize only for display; real callers could parse in-place
+    ReadOnlySpan<char> field = line[ranges[i]];
+    Console.WriteLine(field.ToString); // materialize only for display; real callers could parse in-place
 }
 ```
 **Time complexity**: O(n) (n = line length), single pass. **Space**: O(1) beyond the caller-supplied `Span<Range>` — no per-field string allocation, no internal `List<T>`/array allocation.
@@ -423,41 +423,41 @@ for (int i = 0; i < count; i++)
 ```csharp
 public sealed class PooledBufferWriter: IBufferWriter<byte>, IDisposable
 {
- private byte[] _buffer;
- private int _written;
+    private byte[] _buffer;
+    private int _written;
 
- public PooledBufferWriter(int initialCapacity = 4096)
- {
- _buffer = ArrayPool<byte>.Shared.Rent(initialCapacity);
- }
+    public PooledBufferWriter(int initialCapacity = 4096)
+    {
+        _buffer = ArrayPool<byte>.Shared.Rent(initialCapacity);
+    }
 
- public ReadOnlySpan<byte> WrittenSpan => _buffer.AsSpan(0, _written);
+    public ReadOnlySpan<byte> WrittenSpan => _buffer.AsSpan(0, _written);
 
- public void Advance(int count)
- {
- if (count < 0 || _written + count > _buffer.Length)
- throw new ArgumentOutOfRangeException(nameof(count));
- _written += count;
- }
+    public void Advance(int count)
+    {
+        if (count < 0 || _written + count > _buffer.Length)
+            throw new ArgumentOutOfRangeException(nameof(count));
+        _written += count;
+    }
 
- public Memory<byte> GetMemory(int sizeHint = 0) => EnsureCapacity(sizeHint).AsMemory(_written);
- public Span<byte> GetSpan(int sizeHint = 0) => EnsureCapacity(sizeHint).AsSpan(_written);
+    public Memory<byte> GetMemory(int sizeHint = 0) => EnsureCapacity(sizeHint).AsMemory(_written);
+    public Span<byte> GetSpan(int sizeHint = 0) => EnsureCapacity(sizeHint).AsSpan(_written);
 
- private byte[] EnsureCapacity(int sizeHint)
- {
- int needed = Math.Max(sizeHint, 1);
- if (_buffer.Length - _written < needed)
- {
- int newSize = Math.Max(_buffer.Length * 2, _written + needed);
- byte[] newBuffer = ArrayPool<byte>.Shared.Rent(newSize);
- _buffer.AsSpan(0, _written).CopyTo(newBuffer); // one copy, only on actual growth
- ArrayPool<byte>.Shared.Return(_buffer);
- _buffer = newBuffer;
- }
- return _buffer;
- }
+    private byte[] EnsureCapacity(int sizeHint)
+    {
+        int needed = Math.Max(sizeHint, 1);
+        if (_buffer.Length - _written < needed)
+        {
+            int newSize = Math.Max(_buffer.Length * 2, _written + needed);
+            byte[] newBuffer = ArrayPool<byte>.Shared.Rent(newSize);
+            _buffer.AsSpan(0, _written).CopyTo(newBuffer); // one copy, only on actual growth
+            ArrayPool<byte>.Shared.Return(_buffer);
+            _buffer = newBuffer;
+        }
+        return _buffer;
+    }
 
- public void Dispose => ArrayPool<byte>.Shared.Return(_buffer, clearArray: true);
+    public void Dispose => ArrayPool<byte>.Shared.Return(_buffer, clearArray: true);
 }
 ```
 **Time complexity**: O(1) amortized per write (doubling strategy → amortized O(1) across the buffer's lifetime, same analysis as `List<T>`/`StringBuilder` growth). **Space**: O(final size), with at most one "wasted" intermediate array briefly alive during each growth step (returned to the pool immediately after copy, not garbage for the GC).
@@ -467,40 +467,40 @@ public sealed class PooledBufferWriter: IBufferWriter<byte>, IDisposable
 **Problem**: Given a `PipeReader` receiving a stream of newline-delimited messages (which may arrive split across multiple physical reads/segments), implement an `async IAsyncEnumerable<ReadOnlyMemory<byte>>` that yields each complete line without ever holding more than one message's worth of data in a materialized copy.
 ```csharp
 public static async IAsyncEnumerable<ReadOnlyMemory<byte>> ReadLinesAsync(
- PipeReader reader,
- [EnumeratorCancellation] CancellationToken ct = default)
+    PipeReader reader,
+        [EnumeratorCancellation] CancellationToken ct = default)
 {
- while (true)
- {
- ReadResult result = await reader.ReadAsync(ct);
- ReadOnlySequence<byte> buffer = result.Buffer;
+    while (true)
+    {
+        ReadResult result = await reader.ReadAsync(ct);
+        ReadOnlySequence<byte> buffer = result.Buffer;
 
- while (TryReadLine(ref buffer, out ReadOnlySequence<byte> line))
- {
- // Materialize exactly one message's worth -- Memory<T> so it can safely
- // cross the 'yield return' (an async-enumerable suspension point).
- yield return line.ToArray; // implicit conversion: byte[] -> ReadOnlyMemory<byte>
- }
+        while (TryReadLine(ref buffer, out ReadOnlySequence<byte> line))
+        {
+            // Materialize exactly one message's worth -- Memory<T> so it can safely
+            // cross the 'yield return' (an async-enumerable suspension point).
+            yield return line.ToArray; // implicit conversion: byte[] -> ReadOnlyMemory<byte>
+        }
 
- reader.AdvanceTo(buffer.Start, buffer.End); // consumed up to buffer.Start, examined through buffer.End
+        reader.AdvanceTo(buffer.Start, buffer.End); // consumed up to buffer.Start, examined through buffer.End
 
- if (result.IsCompleted)
- {
- if (buffer.Length > 0)
- yield return buffer.ToArray; // trailing partial line with no terminator, if any
- yield break;
- }
- }
+        if (result.IsCompleted)
+        {
+            if (buffer.Length > 0)
+                yield return buffer.ToArray; // trailing partial line with no terminator, if any
+            yield break;
+        }
+    }
 }
 
 private static bool TryReadLine(ref ReadOnlySequence<byte> buffer, out ReadOnlySequence<byte> line)
 {
- SequencePosition? pos = buffer.PositionOf((byte)'\n');
- if (pos == null) { line = default; return false; }
+    SequencePosition? pos = buffer.PositionOf((byte)'\n');
+    if (pos == null) { line = default; return false; }
 
- line = buffer.Slice(0, pos.Value); // zero-copy slice -- may itself be multi-segment, that's fine
- buffer = buffer.Slice(buffer.GetPosition(1, pos.Value)); // advance past the newline
- return true;
+    line = buffer.Slice(0, pos.Value); // zero-copy slice -- may itself be multi-segment, that's fine
+    buffer = buffer.Slice(buffer.GetPosition(1, pos.Value)); // advance past the newline
+    return true;
 }
 ```
 **Time complexity**: O(total bytes) amortized across the whole stream — each byte is scanned by `PositionOf` at most a small constant number of times across resumptions (not re-scanned from the start on every partial read, since `buffer` is re-sliced forward each time). **Space**: O(one message) materialized at a time via `yield return`, plus whatever `PipeReader`'s internal pooled segments hold for not-yet-fully-consumed data — no unbounded buffering of the entire stream.
@@ -555,55 +555,55 @@ classDiagram
 ```csharp
 public interface ILogFieldWriter
 {
- int WriteField(Span<byte> destination, ReadOnlySpan<byte> key, long value);
- int WriteField(Span<byte> destination, ReadOnlySpan<byte> key, ReadOnlySpan<char> value);
+    int WriteField(Span<byte> destination, ReadOnlySpan<byte> key, long value);
+    int WriteField(Span<byte> destination, ReadOnlySpan<byte> key, ReadOnlySpan<char> value);
 }
 
 public sealed class Utf8LogFieldWriter: ILogFieldWriter
 {
- public int WriteField(Span<byte> destination, ReadOnlySpan<byte> key, long value)
- {
- int pos = 0;
- key.CopyTo(destination); pos += key.Length;
- destination[pos++] = (byte)'=';
- Utf8Formatter.TryFormat(value, destination[pos..], out int written);
- pos += written;
- destination[pos++] = (byte)' ';
- return pos;
- }
+    public int WriteField(Span<byte> destination, ReadOnlySpan<byte> key, long value)
+    {
+        int pos = 0;
+        key.CopyTo(destination); pos += key.Length;
+        destination[pos++] = (byte)'=';
+        Utf8Formatter.TryFormat(value, destination[pos..], out int written);
+        pos += written;
+        destination[pos++] = (byte)' ';
+        return pos;
+    }
 
- public int WriteField(Span<byte> destination, ReadOnlySpan<byte> key, ReadOnlySpan<char> value)
- {
- int pos = 0;
- key.CopyTo(destination); pos += key.Length;
- destination[pos++] = (byte)'=';
- pos += Encoding.UTF8.GetBytes(value, destination[pos..]);
- destination[pos++] = (byte)' ';
- return pos;
- }
+    public int WriteField(Span<byte> destination, ReadOnlySpan<byte> key, ReadOnlySpan<char> value)
+    {
+        int pos = 0;
+        key.CopyTo(destination); pos += key.Length;
+        destination[pos++] = (byte)'=';
+        pos += Encoding.UTF8.GetBytes(value, destination[pos..]);
+        destination[pos++] = (byte)' ';
+        return pos;
+    }
 }
 
 public sealed class PooledLogLineBuilder: IDisposable
 {
- private byte[] _buffer;
- private int _position;
- private readonly ILogFieldWriter _writer;
+    private byte[] _buffer;
+    private int _position;
+    private readonly ILogFieldWriter _writer;
 
- public PooledLogLineBuilder(ILogFieldWriter writer, int initialCapacity = 256)
- {
- _writer = writer;
- _buffer = ArrayPool<byte>.Shared.Rent(initialCapacity);
- }
+    public PooledLogLineBuilder(ILogFieldWriter writer, int initialCapacity = 256)
+    {
+        _writer = writer;
+        _buffer = ArrayPool<byte>.Shared.Rent(initialCapacity);
+    }
 
- public void Append(ReadOnlySpan<byte> key, long value) =>
- _position += _writer.WriteField(_buffer.AsSpan(_position), key, value);
+    public void Append(ReadOnlySpan<byte> key, long value) =>
+        _position += _writer.WriteField(_buffer.AsSpan(_position), key, value);
 
- public void Append(ReadOnlySpan<byte> key, ReadOnlySpan<char> value) =>
- _position += _writer.WriteField(_buffer.AsSpan(_position), key, value);
+    public void Append(ReadOnlySpan<byte> key, ReadOnlySpan<char> value) =>
+        _position += _writer.WriteField(_buffer.AsSpan(_position), key, value);
 
- public ReadOnlySpan<byte> WrittenSpan => _buffer.AsSpan(0, _position);
+    public ReadOnlySpan<byte> WrittenSpan => _buffer.AsSpan(0, _position);
 
- public void Dispose => ArrayPool<byte>.Shared.Return(_buffer, clearArray: false);
+    public void Dispose => ArrayPool<byte>.Shared.Return(_buffer, clearArray: false);
 }
 ```
 

@@ -353,20 +353,20 @@ using System.Security.Cryptography;
 
 public static class Pkce
 {
- public static string GenerateCodeVerifier
- {
- var bytes = RandomNumberGenerator.GetBytes(32); // 256 bits of entropy
- return Base64UrlEncode(bytes);
- }
+    public static string GenerateCodeVerifier
+    {
+        var bytes = RandomNumberGenerator.GetBytes(32); // 256 bits of entropy
+        return Base64UrlEncode(bytes);
+    }
 
- public static string DeriveCodeChallenge(string codeVerifier)
- {
- var hash = SHA256.HashData(System.Text.Encoding.ASCII.GetBytes(codeVerifier));
- return Base64UrlEncode(hash);
- }
+    public static string DeriveCodeChallenge(string codeVerifier)
+    {
+        var hash = SHA256.HashData(System.Text.Encoding.ASCII.GetBytes(codeVerifier));
+        return Base64UrlEncode(hash);
+    }
 
- private static string Base64UrlEncode(byte[] bytes) =>
- Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    private static string Base64UrlEncode(byte[] bytes) =>
+        Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 }
 ```
 **Time complexity:** O(1) (fixed-size input). **Space complexity:** O(1).
@@ -383,30 +383,30 @@ public sealed record JwtValidationConfig(string ExpectedIssuer, string ExpectedA
 
 public static class ClaimValidator
 {
- public static (bool Valid, string? Reason) Validate(
- IDictionary<string, object> claims, JwtValidationConfig config, DateTimeOffset now)
- {
- if (!claims.TryGetValue("iss", out var iss) || (string)iss!= config.ExpectedIssuer)
- return (false, "issuer mismatch");
+    public static (bool Valid, string? Reason) Validate(
+        IDictionary<string, object> claims, JwtValidationConfig config, DateTimeOffset now)
+    {
+        if (!claims.TryGetValue("iss", out var iss) || (string)iss!= config.ExpectedIssuer)
+            return (false, "issuer mismatch");
 
- if (!claims.TryGetValue("aud", out var audObj))
- return (false, "audience missing");
- var audiences = audObj is IEnumerable<object> list
-? list.Select(a => a.ToString).ToHashSet
-: new HashSet<string?> { audObj.ToString };
- if (!audiences.Contains(config.ExpectedAudience))
- return (false, "audience does not include this resource server"); // the exact missing check
+        if (!claims.TryGetValue("aud", out var audObj))
+            return (false, "audience missing");
+        var audiences = audObj is IEnumerable<object> list
+        ? list.Select(a => a.ToString).ToHashSet
+        : new HashSet<string?> { audObj.ToString };
+        if (!audiences.Contains(config.ExpectedAudience))
+            return (false, "audience does not include this resource server"); // the exact missing check
 
- if (!claims.TryGetValue("exp", out var expObj) ||
- DateTimeOffset.FromUnixTimeSeconds(Convert.ToInt64(expObj)) <= now)
- return (false, "token expired");
+        if (!claims.TryGetValue("exp", out var expObj) ||
+            DateTimeOffset.FromUnixTimeSeconds(Convert.ToInt64(expObj)) <= now)
+        return (false, "token expired");
 
- if (claims.TryGetValue("nbf", out var nbfObj) &&
- DateTimeOffset.FromUnixTimeSeconds(Convert.ToInt64(nbfObj)) > now)
- return (false, "token not yet valid");
+        if (claims.TryGetValue("nbf", out var nbfObj) &&
+            DateTimeOffset.FromUnixTimeSeconds(Convert.ToInt64(nbfObj)) > now)
+        return (false, "token not yet valid");
 
- return (true, null);
- }
+        return (true, null);
+    }
 }
 ```
 **Time complexity:** O(A) where A = number of audience entries. **Space complexity:** O(A).
@@ -421,42 +421,42 @@ public static class ClaimValidator
 ```csharp
 public sealed class SafeJwtValidator
 {
- // Configured out-of-band, NEVER derived from the token itself.
- private readonly Dictionary<string, (string AllowedAlg, Func<string> GetPublicKeyPem)> _issuerConfig;
+    // Configured out-of-band, NEVER derived from the token itself.
+    private readonly Dictionary<string, (string AllowedAlg, Func<string> GetPublicKeyPem)> _issuerConfig;
 
- public SafeJwtValidator(Dictionary<string, (string, Func<string>)> issuerConfig) =>
- _issuerConfig = issuerConfig;
+    public SafeJwtValidator(Dictionary<string, (string, Func<string>)> issuerConfig) =>
+        _issuerConfig = issuerConfig;
 
- public JwtValidationResult Validate(string rawToken)
- {
- var (header, payload, signature) = JwtParser.SplitUnverified(rawToken);
+    public JwtValidationResult Validate(string rawToken)
+    {
+        var (header, payload, signature) = JwtParser.SplitUnverified(rawToken);
 
- if (!payload.TryGetValue("iss", out var issObj) || issObj is not string iss)
- return JwtValidationResult.Reject("missing issuer");
+        if (!payload.TryGetValue("iss", out var issObj) || issObj is not string iss)
+            return JwtValidationResult.Reject("missing issuer");
 
- if (!_issuerConfig.TryGetValue(iss, out var config))
- return JwtValidationResult.Reject("untrusted issuer");
+        if (!_issuerConfig.TryGetValue(iss, out var config))
+            return JwtValidationResult.Reject("untrusted issuer");
 
- // Critical: compare the token's claimed alg against our OWN configured
- // expectation for this issuer. Never branch validator behavior on header.alg.
- var claimedAlg = header.TryGetValue("alg", out var a)? a?.ToString: null;
- if (claimedAlg!= config.AllowedAlg)
- return JwtValidationResult.Reject(
- $"algorithm mismatch: expected {config.AllowedAlg}, token claims {claimedAlg}");
+        // Critical: compare the token's claimed alg against our OWN configured
+        // expectation for this issuer. Never branch validator behavior on header.alg.
+        var claimedAlg = header.TryGetValue("alg", out var a)? a?.ToString: null;
+        if (claimedAlg!= config.AllowedAlg)
+            return JwtValidationResult.Reject(
+            $"algorithm mismatch: expected {config.AllowedAlg}, token claims {claimedAlg}");
 
- var verified = CryptoVerify.VerifySignature(
- rawToken, algorithm: config.AllowedAlg, publicKeyPem: config.GetPublicKeyPem);
+        var verified = CryptoVerify.VerifySignature(
+            rawToken, algorithm: config.AllowedAlg, publicKeyPem: config.GetPublicKeyPem);
 
- return verified
-? JwtValidationResult.Accept(payload)
-: JwtValidationResult.Reject("signature verification failed");
- }
+        return verified
+        ? JwtValidationResult.Accept(payload)
+        : JwtValidationResult.Reject("signature verification failed");
+    }
 }
 
 public sealed record JwtValidationResult(bool IsValid, string? RejectReason, IDictionary<string, object>? Claims)
 {
- public static JwtValidationResult Accept(IDictionary<string, object> claims) => new(true, null, claims);
- public static JwtValidationResult Reject(string reason) => new(false, reason, null);
+    public static JwtValidationResult Accept(IDictionary<string, object> claims) => new(true, null, claims);
+    public static JwtValidationResult Reject(string reason) => new(false, reason, null);
 }
 ```
 **Time complexity:** O(1) signature verification plus O(C) claim parsing (C = claim count). **Space complexity:** O(C).
@@ -473,50 +473,50 @@ public enum TokenType { Access, Id, Unknown }
 
 public sealed class ResourceServerTokenPipeline
 {
- private readonly SafeJwtValidator _validator;
- private readonly string _thisResourceServerAudience;
- private readonly Action<string, string> _logKidUsage; // (kid, sub) -> audit log, for A6
+    private readonly SafeJwtValidator _validator;
+    private readonly string _thisResourceServerAudience;
+    private readonly Action<string, string> _logKidUsage; // (kid, sub) -> audit log, for A6
 
- public ResourceServerTokenPipeline(
- SafeJwtValidator validator, string thisResourceServerAudience, Action<string, string> logKidUsage)
- {
- _validator = validator;
- _thisResourceServerAudience = thisResourceServerAudience;
- _logKidUsage = logKidUsage;
- }
+    public ResourceServerTokenPipeline(
+        SafeJwtValidator validator, string thisResourceServerAudience, Action<string, string> logKidUsage)
+    {
+        _validator = validator;
+        _thisResourceServerAudience = thisResourceServerAudience;
+        _logKidUsage = logKidUsage;
+    }
 
- public AuthorizationOutcome Authorize(string rawToken, DateTimeOffset now)
- {
- var result = _validator.Validate(rawToken);
- if (!result.IsValid)
- return AuthorizationOutcome.Deny($"invalid token: {result.RejectReason}");
+    public AuthorizationOutcome Authorize(string rawToken, DateTimeOffset now)
+    {
+        var result = _validator.Validate(rawToken);
+        if (!result.IsValid)
+            return AuthorizationOutcome.Deny($"invalid token: {result.RejectReason}");
 
- var claims = result.Claims!;
+        var claims = result.Claims!;
 
- // the exact missing check: explicitly reject ID tokens used as access tokens.
- // A well-formed access token MUST NOT declare typ=id_token, and conversely.
- if (claims.TryGetValue("typ", out var typ) && typ?.ToString == "id_token")
- return AuthorizationOutcome.Deny("ID token presented as access token — rejected");
+        // the exact missing check: explicitly reject ID tokens used as access tokens.
+        // A well-formed access token MUST NOT declare typ=id_token, and conversely.
+        if (claims.TryGetValue("typ", out var typ) && typ?.ToString == "id_token")
+            return AuthorizationOutcome.Deny("ID token presented as access token — rejected");
 
- var claimConfig = new JwtValidationConfig(
- ExpectedIssuer: claims["iss"].ToString!,
- ExpectedAudience: _thisResourceServerAudience);
- var (valid, reason) = ClaimValidator.Validate(claims, claimConfig, now);
- if (!valid)
- return AuthorizationOutcome.Deny($"claim validation failed: {reason}");
+        var claimConfig = new JwtValidationConfig(
+            ExpectedIssuer: claims["iss"].ToString!,
+                ExpectedAudience: _thisResourceServerAudience);
+        var (valid, reason) = ClaimValidator.Validate(claims, claimConfig, now);
+        if (!valid)
+            return AuthorizationOutcome.Deny($"claim validation failed: {reason}");
 
- var kid = claims.TryGetValue("kid", out var k)? k?.ToString?? "unknown": "unknown";
- var sub = claims.TryGetValue("sub", out var s)? s?.ToString?? "unknown": "unknown";
- _logKidUsage(kid, sub); // enables A6's "audit every kid used after a suspected compromise" step
+        var kid = claims.TryGetValue("kid", out var k)? k?.ToString?? "unknown": "unknown";
+        var sub = claims.TryGetValue("sub", out var s)? s?.ToString?? "unknown": "unknown";
+        _logKidUsage(kid, sub); // enables A6's "audit every kid used after a suspected compromise" step
 
- return AuthorizationOutcome.Allow(sub);
- }
+        return AuthorizationOutcome.Allow(sub);
+    }
 }
 
 public sealed record AuthorizationOutcome(bool IsAllowed, string? DenyReason, string? Subject)
 {
- public static AuthorizationOutcome Allow(string subject) => new(true, null, subject);
- public static AuthorizationOutcome Deny(string reason) => new(false, reason, null);
+    public static AuthorizationOutcome Allow(string subject) => new(true, null, subject);
+    public static AuthorizationOutcome Deny(string reason) => new(false, reason, null);
 }
 ```
 **Time complexity:** O(1) validation plus O(C) claim checks, same as the Hard exercise. **Space complexity:** O(C).

@@ -148,44 +148,44 @@ graph TB
 ### Easy — Storage Account with explicit ZRS redundancy
 ```hcl
 resource "azurerm_storage_account" "checkout_media" {
- name = "checkoutmediaprod"
- resource_group_name = azurerm_resource_group.checkout_prod.name
- account_tier = "Standard"
- account_replication_type = "ZRS" # EXPLICIT choice -- the fix, NOT the cheaper LRS default many teams reach for
+  name = "checkoutmediaprod"
+  resource_group_name = azurerm_resource_group.checkout_prod.name
+  account_tier = "Standard"
+  account_replication_type = "ZRS" # EXPLICIT choice -- the fix, NOT the cheaper LRS default many teams reach for
 }
 ```
 
 ### Medium — Lifecycle management policy mirroring S3's tiering discipline
 ```json
 {
- "rules": [
- {
- "name": "transition-old-uploads",
- "type": "Lifecycle",
- "definition": {
- "actions": {
- "baseBlob": {
- "tierToCool": { "daysAfterModificationGreaterThan": 30 },
- "tierToArchive": { "daysAfterModificationGreaterThan": 90 }
- }
- },
- "filters": { "blobTypes": ["blockBlob"], "prefixMatch": ["uploads/"] }
- }
- }
- ]
+  "rules": [
+    {
+      "name": "transition-old-uploads",
+        "type": "Lifecycle",
+        "definition": {
+        "actions": {
+          "baseBlob": {
+            "tierToCool": { "daysAfterModificationGreaterThan": 30 },
+              "tierToArchive": { "daysAfterModificationGreaterThan": 90 }
+          }
+        },
+        "filters": { "blobTypes": ["blockBlob"], "prefixMatch": ["uploads/"] }
+      }
+    }
+  ]
 }
 ```
 
 ### Hard — Managed Disk with Zone-Redundant Storage, no AWS EBS equivalent
 ```hcl
 resource "azurerm_managed_disk" "checkout_db_data" {
- name = "checkout-db-data-disk"
- storage_account_type = "PremiumV2_ZRS" # ZONE-REDUNDANT -- reattachable to a VM in a
- # DIFFERENT zone if the original fails --
- # standard AWS EBS has no equivalent, single-call option
- create_option = "Empty"
- disk_size_gb = 512
- zone = "1" # primary zone; ZRS replicates synchronously to the other zones regardless
+  name = "checkout-db-data-disk"
+  storage_account_type = "PremiumV2_ZRS" # ZONE-REDUNDANT -- reattachable to a VM in a
+  # DIFFERENT zone if the original fails --
+    # standard AWS EBS has no equivalent, single-call option
+  create_option = "Empty"
+  disk_size_gb = 512
+  zone = "1" # primary zone; ZRS replicates synchronously to the other zones regardless
 }
 ```
 
@@ -193,26 +193,26 @@ resource "azurerm_managed_disk" "checkout_db_data" {
 ```csharp
 public class AzureDivergenceGovernanceCheck
 {
- public GovernanceResult Validate(DeploymentManifest manifest)
- {
- var findings = new List<string>;
+    public GovernanceResult Validate(DeploymentManifest manifest)
+    {
+        var findings = new List<string>;
 
- //: Availability Zone spanning verification
- if (manifest.Vmss.Any(v => v.Environment == "production" && v.Zones.Count == 0))
- findings.Add("VMSS missing explicit zone configuration");
+        //: Availability Zone spanning verification
+        if (manifest.Vmss.Any(v => v.Environment == "production" && v.Zones.Count == 0))
+            findings.Add("VMSS missing explicit zone configuration");
 
- //: RBAC high-scope assignment verification
- if (manifest.RoleAssignments.Any(r => r.Scope is "Subscription" or "ManagementGroup" &&!r.HasPimJustification))
- findings.Add("Subscription/MG-scope role assignment without PIM justification");
+        //: RBAC high-scope assignment verification
+        if (manifest.RoleAssignments.Any(r => r.Scope is "Subscription" or "ManagementGroup" &&!r.HasPimJustification))
+            findings.Add("Subscription/MG-scope role assignment without PIM justification");
 
- //: Storage redundancy tier verification
- if (manifest.StorageAccounts.Any(s => s.Environment == "production"
- && s.ReplicationType == "LRS"
- &&!s.HasDisposableDataException))
- findings.Add("Production storage account on LRS without disposable-data exception");
+        //: Storage redundancy tier verification
+        if (manifest.StorageAccounts.Any(s => s.Environment == "production"
+                && s.ReplicationType == "LRS"
+                &&!s.HasDisposableDataException))
+        findings.Add("Production storage account on LRS without disposable-data exception");
 
- return new GovernanceResult { Passed = findings.Count == 0, Findings = findings };
- }
+        return new GovernanceResult { Passed = findings.Count == 0, Findings = findings };
+    }
 }
 ```
 **Discussion**: this single governance check deliberately bundles all three Azure-domain-specific divergence risks identified so far (zone-spanning, RBAC scope, storage redundancy) into one pipeline gate — directly demonstrating Advanced Q1/Q10's point that this is a *systemic* pattern across the Azure domain, not three unrelated findings, and that a mature governance program should track and extend this bundled check as each subsequent Azure module (68-72) identifies its own analogous divergence risk.
