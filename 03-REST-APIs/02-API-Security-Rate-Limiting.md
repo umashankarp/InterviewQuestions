@@ -7,10 +7,10 @@
 ## 1. Fundamentals
 
 ### What is API security, and what is rate limiting?
-API security is the set of practices protecting an API's endpoints, data, and downstream systems from unauthorized access, abuse, and resource exhaustion — spanning authentication/authorization (Module 12), input validation, transport security (TLS), and abuse-prevention mechanisms. **Rate limiting** is a specific abuse-prevention mechanism: capping how many requests a given caller (or the system overall) may make within a time window, protecting the API and its downstream dependencies from being overwhelmed — whether by a malicious attacker, a buggy client in a retry loop, or simply legitimate traffic exceeding provisioned capacity.
+API security is the set of practices protecting an API's endpoints, data, and downstream systems from unauthorized access, abuse, and resource exhaustion — spanning authentication/authorization, input validation, transport security (TLS), and abuse-prevention mechanisms. **Rate limiting** is a specific abuse-prevention mechanism: capping how many requests a given caller (or the system overall) may make within a time window, protecting the API and its downstream dependencies from being overwhelmed — whether by a malicious attacker, a buggy client in a retry loop, or simply legitimate traffic exceeding provisioned capacity.
 
 ### Why do these exist?
-Any publicly (or even internally, cross-team) reachable API is a genuine attack surface — without deliberate security controls, it's vulnerable to credential attacks, injection, data exposure, and resource-exhaustion abuse. Rate limiting exists specifically because **without it, a single caller (malicious or merely buggy) can consume unbounded capacity**, degrading service for every other caller — this is true even for entirely well-intentioned callers (Module 2 §Expert Q6's thundering-herd/retry-storm scenario).
+Any publicly (or even internally, cross-team) reachable API is a genuine attack surface — without deliberate security controls, it's vulnerable to credential attacks, injection, data exposure, and resource-exhaustion abuse. Rate limiting exists specifically because **without it, a single caller (malicious or merely buggy) can consume unbounded capacity**, degrading service for every other caller — this is true even for entirely well-intentioned callers (§Expert Q6's thundering-herd/retry-storm scenario).
 
 ### When does this matter?
 Every externally-facing (and most internally-facing, cross-team) API needs both; the depth matters for correctly implementing rate limiting that's actually effective at fleet scale (not just per-replica, which is trivially bypassable by spreading requests across replicas) and for recognizing the specific, common API-security vulnerability classes (broken object-level authorization, mass assignment, excessive data exposure) that dominate real-world API breaches.
@@ -19,14 +19,14 @@ Every externally-facing (and most internally-facing, cross-team) API needs both;
 ```csharp
 builder.Services.AddRateLimiter(options =>
 {
-    options.AddTokenBucketLimiter("per-client", opt =>
-    {
-        opt.TokenLimit = 100;
-        opt.TokensPerPeriod = 100;
-        opt.ReplenishmentPeriod = TimeSpan.FromMinutes(1);
-    });
+ options.AddTokenBucketLimiter("per-client", opt =>
+ {
+ opt.TokenLimit = 100;
+ opt.TokensPerPeriod = 100;
+ opt.ReplenishmentPeriod = TimeSpan.FromMinutes(1);
+ });
 });
-app.UseRateLimiter();
+app.UseRateLimiter;
 app.MapGet("/orders", GetOrders).RequireRateLimiting("per-client");
 ```
 
@@ -35,7 +35,7 @@ app.MapGet("/orders", GetOrders).RequireRateLimiting("per-client");
 ## 2. Deep Dive
 
 ### 2.1 The OWASP API Security Top 10 — Why It's Distinct from the General OWASP Top 10
-The OWASP API Security Top 10 exists as a **separate** list from the general OWASP Top 10 because APIs have distinctive risk patterns not centered in traditional web-app security: **Broken Object Level Authorization (BOLA/IDOR)** — the single most common API vulnerability — occurs when an API checks *authentication* but not *per-object authorization* (exactly Module 12 §2.4's resource-based authorization gap, restated as an industry-recognized top vulnerability class); **Excessive Data Exposure** — returning a full internal entity/DTO with more fields than the client actually needs, relying on the client to "just not display" sensitive fields, rather than the server withholding them; **Broken Function Level Authorization** — a caller reaching an admin-only *operation* (not just a specific object) they shouldn't; **Mass Assignment** — directly Module 11 §8's over-posting vulnerability, now recognized as an API-specific OWASP category in its own right.
+The OWASP API Security Top 10 exists as a **separate** list from the general OWASP Top 10 because APIs have distinctive risk patterns not centered in traditional web-app security: **Broken Object Level Authorization (BOLA/IDOR)** — the single most common API vulnerability — occurs when an API checks *authentication* but not *per-object authorization* (exactly the resource-based authorization gap, restated as an industry-recognized top vulnerability class); **Excessive Data Exposure** — returning a full internal entity/DTO with more fields than the client actually needs, relying on the client to "just not display" sensitive fields, rather than the server withholding them; **Broken Function Level Authorization** — a caller reaching an admin-only *operation* (not just a specific object) they shouldn't; **Mass Assignment** — directly the over-posting vulnerability, now recognized as an API-specific OWASP category in its own right.
 
 ### 2.2 Rate Limiting Algorithms — Precise Trade-offs
 - **Fixed window**: count requests per fixed time bucket (e.g., per calendar minute) — simple, but has a **boundary-burst problem**: a client can send the full limit at 11:59:59 and another full limit at 12:00:01, doubling the effective allowed rate right at the window boundary.
@@ -44,28 +44,28 @@ The OWASP API Security Top 10 exists as a **separate** list from the general OWA
 - **Leaky bucket**: requests queue and are processed at a strictly constant output rate — smooths bursts entirely (no burst allowance) at the cost of added latency for bursty-but-legitimate traffic.
 
 ### 2.3 Distributed Rate Limiting — the Fleet-Scale Requirement
-A per-replica, in-memory rate limiter (`System.Threading.RateLimiting`'s built-in limiters used with default, local state) only limits **that specific replica's** view of a client's traffic — across N horizontally-scaled replicas, a client could receive N times the intended limit by simply having requests load-balanced across replicas. Genuine fleet-wide rate limiting requires **shared, external state** (a Redis-backed atomic counter/token-bucket, evaluated via a Lua script for atomicity) — directly the pattern first introduced in Module 2 §Expert Q6, now contextualized as the standard, necessary architecture for any rate limit meant to apply to a caller's *aggregate* traffic across an entire fleet, not just one replica's slice of it.
+A per-replica, in-memory rate limiter (`System.Threading.RateLimiting`'s built-in limiters used with default, local state) only limits **that specific replica's** view of a client's traffic — across N horizontally-scaled replicas, a client could receive N times the intended limit by simply having requests load-balanced across replicas. Genuine fleet-wide rate limiting requires **shared, external state** (a Redis-backed atomic counter/token-bucket, evaluated via a Lua script for atomicity) — directly the pattern first introduced §Expert Q6, now contextualized as the standard, necessary architecture for any rate limit meant to apply to a caller's *aggregate* traffic across an entire fleet, not just one replica's slice of it.
 
 ### 2.4 Rate Limit Response Contract — `429` and `Retry-After`
-A rate-limited response should return `429 Too Many Requests` with a `Retry-After` header (seconds, or an HTTP date) telling the well-behaved client exactly when to retry — this directly enables correct client-side backoff (Module 2's retry patterns) rather than the client guessing an arbitrary backoff interval; omitting `Retry-After` forces every client to implement its own guessed backoff strategy, often producing exactly the synchronized-retry-storm problem (Module 2 §Expert Q7) rate limiting exists to prevent in the first place.
+A rate-limited response should return `429 Too Many Requests` with a `Retry-After` header (seconds, or an HTTP date) telling the well-behaved client exactly when to retry — this directly enables correct client-side backoff (the retry patterns) rather than the client guessing an arbitrary backoff interval; omitting `Retry-After` forces every client to implement its own guessed backoff strategy, often producing exactly the synchronized-retry-storm problem (§Expert Q7) rate limiting exists to prevent in the first place.
 
 ### 2.5 Input Validation as a Security Boundary
-Every API input boundary must validate: type/shape (model binding, Module 11), size limits (request body size caps, preventing a single oversized payload from being a resource-exhaustion vector — directly Module 3 §8's `stackalloc`-sizing caution generalized to any input-driven allocation), and business-rule validity (422, Module 15 §2.3) — treating client input as untrusted by default, never assuming a "friendly" first-party client always sends well-formed data, since any input boundary is also reachable by a malicious or compromised caller regardless of who the API was originally designed for.
+Every API input boundary must validate: type/shape (model binding), size limits (request body size caps, preventing a single oversized payload from being a resource-exhaustion vector — directly the `stackalloc`-sizing caution generalized to any input-driven allocation), and business-rule validity (422) — treating client input as untrusted by default, never assuming a "friendly" first-party client always sends well-formed data, since any input boundary is also reachable by a malicious or compromised caller regardless of who the API was originally designed for.
 
 ## 3. Visual Architecture
 ```mermaid
 graph LR
-    Client -->|request + API key| Gateway["API Gateway / Rate Limiter"]
-    Gateway -->|check token bucket| Redis[(Shared Redis Store)]
-    Redis -->|tokens available| Gateway
-    Gateway -->|within limit| App[Application]
-    Gateway -->|exceeded| Reject["429 + Retry-After"]
-    App --> AuthZ["Resource-based Authorization<br/>(BOLA prevention)"]
-    AuthZ --> DTO["Narrow response DTO<br/>(excessive-exposure prevention)"]
+ Client -->|request + API key| Gateway["API Gateway / Rate Limiter"]
+ Gateway -->|check token bucket| Redis[(Shared Redis Store)]
+ Redis -->|tokens available| Gateway
+ Gateway -->|within limit| App[Application]
+ Gateway -->|exceeded| Reject["429 + Retry-After"]
+ App --> AuthZ["Resource-based Authorization<br/>(BOLA prevention)"]
+ AuthZ --> DTO["Narrow response DTO<br/>(excessive-exposure prevention)"]
 ```
 
 ## 4. Production Example
-**Scenario**: A partner API experienced a BOLA (Broken Object Level Authorization) vulnerability — an endpoint `GET /invoices/{id}` checked only that the caller was *authenticated* (any valid API key), never that the requested invoice actually belonged to *that specific* caller's account, allowing any partner to enumerate and read every other partner's invoices by simply incrementing the ID. **Investigation**: found via a routine security audit (not an incident) specifically testing this exact pattern across every resource-ID-accepting endpoint. **Fix**: added resource-based authorization (Module 12 §2.4's exact pattern) verifying `invoice.PartnerId == currentPartnerId` before returning data, across every affected endpoint, plus a systemic audit of the entire API surface for the same gap. **Lesson**: BOLA is the single most common real-world API vulnerability precisely because "the endpoint requires authentication" is trivially confused with "the endpoint enforces authorization" — they are not the same, and this module's OWASP-API-Top-10 framing exists specifically to keep that distinction front-of-mind.
+**Scenario**: A partner API experienced a BOLA (Broken Object Level Authorization) vulnerability — an endpoint `GET /invoices/{id}` checked only that the caller was *authenticated* (any valid API key), never that the requested invoice actually belonged to *that specific* caller's account, allowing any partner to enumerate and read every other partner's invoices by simply incrementing the ID. **Investigation**: found via a routine security audit (not an incident) specifically testing this exact pattern across every resource-ID-accepting endpoint. **Fix**: added resource-based authorization (the exact pattern) verifying `invoice.PartnerId == currentPartnerId` before returning data, across every affected endpoint, plus a systemic audit of the entire API surface for the same gap. **Lesson**: BOLA is the single most common real-world API vulnerability precisely because "the endpoint requires authentication" is trivially confused with "the endpoint enforces authorization" — they are not the same, and this module's OWASP-API-Top-10 framing exists specifically to keep that distinction front-of-mind.
 
 ## 5. Best Practices
 - Enforce resource-based (per-object) authorization on every endpoint accepting a resource identifier — never rely on authentication alone.
@@ -75,8 +75,8 @@ graph LR
 - Validate and cap request body size at the edge, before any business logic executes.
 
 ## 6. Anti-patterns
-- Checking authentication but not per-object authorization (BOLA, §4's incident).
-- Returning full domain entities directly from API endpoints (mass assignment on the way in, excessive exposure on the way out — both Module 11 §8's concerns).
+- Checking authentication but not per-object authorization (BOLA, the incident).
+- Returning full domain entities directly from API endpoints (mass assignment on the way in, excessive exposure on the way out — both the concerns).
 - Per-replica-only (in-memory) rate limiting in a horizontally-scaled deployment, trivially bypassed by load-balanced traffic spreading.
 - Omitting `Retry-After` on 429 responses, forcing clients into guessed, potentially-synchronized backoff.
 
@@ -110,41 +110,41 @@ graph LR
 
 ### Advanced (10)
 1. **Q: Design a token-bucket rate limiter backed by Redis with correct atomicity under concurrent requests.**
-   **A:** Use a Redis Lua script (executed atomically server-side) that reads the current token count and last-refill timestamp, computes the number of tokens to add based on elapsed time, caps at the bucket capacity, and atomically decrements if a token is available — all within one atomic script execution, avoiding the read-then-write race that a naive "GET count, check, SET count" sequence (non-atomic across two round-trips) would be vulnerable to under concurrent requests from the same client.
+ **A:** Use a Redis Lua script (executed atomically server-side) that reads the current token count and last-refill timestamp, computes the number of tokens to add based on elapsed time, caps at the bucket capacity, and atomically decrements if a token is available — all within one atomic script execution, avoiding the read-then-write race that a naive "GET count, check, SET count" sequence (non-atomic across two round-trips) would be vulnerable to under concurrent requests from the same client.
 2. **Q: Explain how you would systematically audit an existing large API surface for BOLA vulnerabilities.**
-   **A:** Enumerate every endpoint accepting a resource identifier (route parameter or body field); for each, write an automated test authenticating as User/Tenant A and attempting to access a resource known to belong to User/Tenant B, asserting a 403/404 (not the actual data) — run this systematically across the entire endpoint inventory rather than spot-checking, since BOLA gaps are endpoint-specific and one fixed instance doesn't imply others are also fixed.
-3. **Q: How would you design rate limiting to protect a third-party API with its own strict, contractual rate limit, across a fleet of your own services calling it?** **A:** Directly Module 2 §Expert Q6's distributed proactive rate limiter — a shared, Redis-backed token bucket sized to the third party's actual contractual limit, checked by every calling replica before issuing the outbound call, combined with local per-replica bounded concurrency and retry-with-backoff as defense-in-depth beneath the proactive limiter.
+ **A:** Enumerate every endpoint accepting a resource identifier (route parameter or body field); for each, write an automated test authenticating as User/Tenant A and attempting to access a resource known to belong to User/Tenant B, asserting a 403/404 (not the actual data) — run this systematically across the entire endpoint inventory rather than spot-checking, since BOLA gaps are endpoint-specific and one fixed instance doesn't imply others are also fixed.
+3. **Q: How would you design rate limiting to protect a third-party API with its own strict, contractual rate limit, across a fleet of your own services calling it?** **A:** Directly §Expert Q6's distributed proactive rate limiter — a shared, Redis-backed token bucket sized to the third party's actual contractual limit, checked by every calling replica before issuing the outbound call, combined with local per-replica bounded concurrency and retry-with-backoff as defense-in-depth beneath the proactive limiter.
 4. **Q: A team argues excessive data exposure isn't a real risk for an internal-only API since "we control both sides." Push back with a concrete scenario.**
-   **A:** Internal APIs are frequently consumed by more teams/services over time than originally anticipated, and a full-entity response (including, e.g., internal cost data, other customers' aggregate data, or soon-to-be-deprecated fields) becomes an unintended, hard-to-track dependency the moment any other team starts parsing fields "just in case" — when the API owner later wants to remove or restrict that field, they discover an undocumented internal consumer depends on it; narrow, intentional response contracts prevent this accidental coupling regardless of whether the API is "internal only."
+ **A:** Internal APIs are frequently consumed by more teams/services over time than originally anticipated, and a full-entity response (including, e.g., internal cost data, other customers' aggregate data, or soon-to-be-deprecated fields) becomes an unintended, hard-to-track dependency the moment any other team starts parsing fields "just in case" — when the API owner later wants to remove or restrict that field, they discover an undocumented internal consumer depends on it; narrow, intentional response contracts prevent this accidental coupling regardless of whether the API is "internal only."
 5. **Q: Design a rate-limiting strategy that adapts dynamically based on current system load (adaptive rate limiting) rather than a fixed threshold.**
-   **A:** Monitor a leading load indicator (CPU, database connection-pool utilization, downstream dependency latency) and dynamically adjust the token-bucket refill rate/capacity downward as load increases — trading strict predictability for graceful degradation under genuine system stress, at the cost of a less deterministic, harder-to-document contract for API consumers (a real trade-off to discuss explicitly, not a strictly superior approach).
+ **A:** Monitor a leading load indicator (CPU, database connection-pool utilization, downstream dependency latency) and dynamically adjust the token-bucket refill rate/capacity downward as load increases — trading strict predictability for graceful degradation under genuine system stress, at the cost of a less deterministic, harder-to-document contract for API consumers (a real trade-off to discuss explicitly, not a strictly superior approach).
 6. **Q: Explain why a rate limiter keyed purely by IP address is both under- and over-inclusive, and how would you address each failure mode.**
-   **A:** Under-inclusive: a determined attacker distributes requests across many IPs (a botnet), evading any single-IP threshold entirely — address via behavioral/anomaly-based detection layered on top, not IP-keying alone. Over-inclusive: many legitimate users can share one IP (corporate NAT, mobile carrier-grade NAT), so an aggressive per-IP limit can collectively throttle many unrelated innocent users — address via combining IP-based limiting (for unauthenticated traffic) with authenticated-identity-based limiting (a much more precise key) wherever authentication is available.
-7. **Q: How would you design an API's error responses to avoid leaking information useful for a BOLA/enumeration attack?** **A:** Return an identical `404 Not Found` (not a distinguishing `403 Forbidden`) for both "resource doesn't exist" and "resource exists but you're not authorized to see it" — returning a distinguishing 403 confirms the resource's existence to an attacker probing IDs, information a pure 404 doesn't reveal (directly Module 12 §8's 401-vs-403 information-hiding discussion, applied here to 403-vs-404).
+ **A:** Under-inclusive: a determined attacker distributes requests across many IPs (a botnet), evading any single-IP threshold entirely — address via behavioral/anomaly-based detection layered on top, not IP-keying alone. Over-inclusive: many legitimate users can share one IP (corporate NAT, mobile carrier-grade NAT), so an aggressive per-IP limit can collectively throttle many unrelated innocent users — address via combining IP-based limiting (for unauthenticated traffic) with authenticated-identity-based limiting (a much more precise key) wherever authentication is available.
+7. **Q: How would you design an API's error responses to avoid leaking information useful for a BOLA/enumeration attack?** **A:** Return an identical `404 Not Found` (not a distinguishing `403 Forbidden`) for both "resource doesn't exist" and "resource exists but you're not authorized to see it" — returning a distinguishing 403 confirms the resource's existence to an attacker probing IDs, information a pure 404 doesn't reveal (directly the 401-vs-403 information-hiding discussion, applied here to 403-vs-404).
 8. **Q: A payment API's rate limiter is itself becoming a single point of failure (the Redis-backed limiter's own outage blocks all traffic). How would you design around this?** **A:** Implement a fail-open-with-monitoring or fail-closed decision deliberately per business risk: for most APIs, briefly failing open (allowing requests through without rate-limiting enforcement) during a rate-limiter-infrastructure outage is preferable to a full API outage, provided it's paired with aggressive alerting on the rate-limiter's own health and a fast-acting circuit breaker reverting to fail-open only for a bounded window; for an API where unbounded abuse during any gap is unacceptable (e.g., a scarce, expensive third-party pass-through), fail-closed may be the correct, deliberate choice instead — the decision should be explicit and documented, not a default neither team consciously chose.
 9. **Q: Explain how excessive data exposure and mass assignment are two sides of the same underlying architectural mistake.**
-   **A:** Both stem from binding directly to/from a rich internal entity type instead of a dedicated, narrowly-scoped DTO at the API boundary — mass assignment is the input-side manifestation (a client sets fields it shouldn't), excessive exposure is the output-side manifestation (a client reads fields it shouldn't); the single, unifying fix (dedicated request/response DTOs, Module 11 §11 Hard exercise) addresses both simultaneously.
-10. **Q: As a Principal Engineer, how would you make BOLA prevention structurally enforced across an organization rather than dependent on every team remembering to add resource-based authorization checks?** **A:** Combine: (a) a shared repository/service-layer base class or helper (Module 12 §13's `IResourceAuthorizationHelper`) making the correct pattern the path of least resistance; (b) mandatory automated BOLA-probing tests (Advanced Q2) as a required CI gate for any endpoint accepting a resource identifier; (c) an architecture-review checklist item requiring explicit justification for any endpoint that intentionally omits per-object authorization (e.g., genuinely public resources) — converting "remember to check ownership" from tribal knowledge into layered, automated, and governance-enforced protection.
+ **A:** Both stem from binding directly to/from a rich internal entity type instead of a dedicated, narrowly-scoped DTO at the API boundary — mass assignment is the input-side manifestation (a client sets fields it shouldn't), excessive exposure is the output-side manifestation (a client reads fields it shouldn't); the single, unifying fix (dedicated request/response DTOs) addresses both simultaneously.
+10. **Q: As a Principal Engineer, how would you make BOLA prevention structurally enforced across an organization rather than dependent on every team remembering to add resource-based authorization checks?** **A:** Combine: (a) a shared repository/service-layer base class or helper (the `IResourceAuthorizationHelper`) making the correct pattern the path of least resistance; (b) mandatory automated BOLA-probing tests (Advanced Q2) as a required CI gate for any endpoint accepting a resource identifier; (c) an architecture-review checklist item requiring explicit justification for any endpoint that intentionally omits per-object authorization (e.g., genuinely public resources) — converting "remember to check ownership" from tribal knowledge into layered, automated, and governance-enforced protection.
 
 ### Expert (FinTech Principal Panel)
 
 1. **Q: Your card-authorization API is being used for "card testing" — attackers running many small auths to validate stolen card numbers (and BIN enumeration). Your per-IP/per-key rate limits don't stop it. Why not, and what actually defends against this?**
-   **A:** Generic rate limiting keys on the *caller* (IP/API key), but card testing distributes across many IPs/keys and stays under per-caller thresholds while abusing many *cards* — so the abused dimension isn't the caller, it's the card/BIN/velocity of attempts, which caller-keyed limits don't see. Defenses are **fraud/velocity controls**, distinct from security rate limiting: (1) **velocity limits keyed on the resource under attack** — attempts per card, per BIN, per device, per shipping/billing tuple, over rolling windows; (2) **anomaly detection** — a spike in low-value auths, high decline ratios, or many distinct cards from one device/session is the actual signal; (3) **device fingerprinting / proof-of-work / CAPTCHA** on suspicious flows to break automation; (4) **decline-rate circuit breakers** that tighten automatically when the auth-decline ratio spikes; (5) feed confirmed abuse back into a shared block/deny list. Also **don't leak an oracle** — uniform responses/timing so an attacker can't distinguish "valid card, wrong CVV" from "invalid card" (that turns your API into a card validator). The Principal framing: rate limiting protects *capacity and fairness per caller*; card testing is a *fraud* problem on the card dimension — you need velocity + anomaly + device signals + non-oracle responses, and treating it as "just tune the rate limit" fails because you're limiting the wrong dimension.
-   **Why correct:** Explains why caller-keyed limits miss card-dimension abuse and prescribes velocity/anomaly/device controls + decline circuit breakers + non-oracle responses.
-   **Common mistakes:** Assuming rate limiting stops card testing; leaking a validity oracle via distinct responses/timing; keying controls only on caller, never on card/BIN/device.
-   **Follow-ups:** "What dimensions do you key velocity limits on?" / "How does your API avoid becoming a card-validation oracle?" / "Rate limiting vs. fraud controls — where's the line?"
+ **A:** Generic rate limiting keys on the *caller* (IP/API key), but card testing distributes across many IPs/keys and stays under per-caller thresholds while abusing many *cards* — so the abused dimension isn't the caller, it's the card/BIN/velocity of attempts, which caller-keyed limits don't see. Defenses are **fraud/velocity controls**, distinct from security rate limiting: (1) **velocity limits keyed on the resource under attack** — attempts per card, per BIN, per device, per shipping/billing tuple, over rolling windows; (2) **anomaly detection** — a spike in low-value auths, high decline ratios, or many distinct cards from one device/session is the actual signal; (3) **device fingerprinting / proof-of-work / CAPTCHA** on suspicious flows to break automation; (4) **decline-rate circuit breakers** that tighten automatically when the auth-decline ratio spikes; (5) feed confirmed abuse back into a shared block/deny list. Also **don't leak an oracle** — uniform responses/timing so an attacker can't distinguish "valid card, wrong CVV" from "invalid card" (that turns your API into a card validator). The Principal framing: rate limiting protects *capacity and fairness per caller*; card testing is a *fraud* problem on the card dimension — you need velocity + anomaly + device signals + non-oracle responses, and treating it as "just tune the rate limit" fails because you're limiting the wrong dimension.
+ **Why correct:** Explains why caller-keyed limits miss card-dimension abuse and prescribes velocity/anomaly/device controls + decline circuit breakers + non-oracle responses.
+ **Common mistakes:** Assuming rate limiting stops card testing; leaking a validity oracle via distinct responses/timing; keying controls only on caller, never on card/BIN/device.
+ **Follow-ups:** "What dimensions do you key velocity limits on?" / "How does your API avoid becoming a card-validation oracle?" / "Rate limiting vs. fraud controls — where's the line?"
 
 2. **Q: Design the defense-in-depth layering for a public, internet-facing money-movement API. Name each layer, what it stops, and why no single layer suffices.**
-   **A:** Layer controls so a bypass of one is caught by the next, from edge inward: (1) **Edge/WAF + DDoS protection + TLS/mTLS** — volumetric attacks, known exploit patterns, transport security; (2) **Authentication** (sender-constrained tokens/mTLS for high value) — proves *who*; (3) **Rate limiting** (per-identity + per-IP) — caller fairness/capacity; (4) **Authorization** — coarse function-level (`[Authorize]`) *and* per-object BOLA checks (the most common real gap) — proves *allowed to touch this object*; (5) **Input validation + size/depth limits + DTO binding** — mass assignment, injection, DoS payloads; (6) **Fraud/velocity controls** — abuse on the money/card dimension (Q1); (7) **Idempotency + transactional integrity** — no double-charge; (8) **Output minimization** — no excessive data exposure; (9) **Audit + observability** — detect and prove. No single layer suffices because each addresses a different threat class and each *will* occasionally be bypassed (a valid token can be stolen, an auth check can be forgotten on one endpoint, a fraud model has false negatives) — defense-in-depth means the blast radius of any one failure is bounded by the others. The Principal framing: security for a money API is a *layered system* with an explicit threat per layer and no single point of total trust; the design goal is that compromising one control still leaves an attacker facing the rest.
-   **Why correct:** Enumerates distinct layers each mapped to a threat class and articulates why single-layer trust is unsafe (each layer fails sometimes; layering bounds blast radius).
-   **Common mistakes:** Treating auth *or* rate limiting as "the" security; forgetting per-object authorization; no fraud layer; relying on a single control.
-   **Follow-ups:** "Which layer most commonly has the real-world gap?" (per-object authorization / BOLA) / "How does idempotency function as a security control?" / "What's the blast radius if a token is stolen, under this stack?"
+ **A:** Layer controls so a bypass of one is caught by the next, from edge inward: (1) **Edge/WAF + DDoS protection + TLS/mTLS** — volumetric attacks, known exploit patterns, transport security; (2) **Authentication** (sender-constrained tokens/mTLS for high value) — proves *who*; (3) **Rate limiting** (per-identity + per-IP) — caller fairness/capacity; (4) **Authorization** — coarse function-level (`[Authorize]`) *and* per-object BOLA checks (the most common real gap) — proves *allowed to touch this object*; (5) **Input validation + size/depth limits + DTO binding** — mass assignment, injection, DoS payloads; (6) **Fraud/velocity controls** — abuse on the money/card dimension (Q1); (7) **Idempotency + transactional integrity** — no double-charge; (8) **Output minimization** — no excessive data exposure; (9) **Audit + observability** — detect and prove. No single layer suffices because each addresses a different threat class and each *will* occasionally be bypassed (a valid token can be stolen, an auth check can be forgotten on one endpoint, a fraud model has false negatives) — defense-in-depth means the blast radius of any one failure is bounded by the others. The Principal framing: security for a money API is a *layered system* with an explicit threat per layer and no single point of total trust; the design goal is that compromising one control still leaves an attacker facing the rest.
+ **Why correct:** Enumerates distinct layers each mapped to a threat class and articulates why single-layer trust is unsafe (each layer fails sometimes; layering bounds blast radius).
+ **Common mistakes:** Treating auth *or* rate limiting as "the" security; forgetting per-object authorization; no fraud layer; relying on a single control.
+ **Follow-ups:** "Which layer most commonly has the real-world gap?" (per-object authorization / BOLA) / "How does idempotency function as a security control?" / "What's the blast radius if a token is stolen, under this stack?"
 
 3. **Q: The same transaction resource is consumed by a customer app, a partner integrator, and internal ops — each should see a *different subset* of fields (e.g., only ops sees the internal risk score; PAN is masked for everyone but tokenized-vault access). How do you design field-level authorization beyond "use a DTO"?**
-   **A:** A single response DTO isn't enough when the *same* resource must expose different fields to different audiences — you need **scope/role-driven field authorization**. Approaches: (1) **audience-specific representations** — distinct DTOs/projections per consumer scope (customer view, partner view, ops view), selected by the caller's scope/role, so each audience only ever gets its allowed fields and adding a sensitive field can't accidentally leak to a narrower audience; (2) **field-level policy** — a serialization layer that includes/redacts individual fields based on the caller's scopes (useful when field visibility is fine-grained), with a **default-deny** posture (a new field is hidden unless explicitly allowed for a scope); (3) **always mask/tokenize the most sensitive data** (PAN, full account number) at rest and in every representation, exposing raw values only through a separately-authorized vault path with its own audit. Enforce with tests asserting each scope's response contains *only* its permitted fields (the output-side analogue of BOLA testing). The Principal framing: "use a DTO" solves accidental full-entity exposure, but multi-audience financial data needs *scope-driven, default-deny field authorization* so that who-you-are determines which fields you receive — and the crown-jewel fields (PAN) are masked/tokenized universally with vault-gated, audited access.
-   **Why correct:** Moves past a single DTO to scope-driven, default-deny field authorization with audience-specific projections, universal masking/tokenization of crown-jewel data, and per-scope output tests.
-   **Common mistakes:** One DTO for all audiences; opt-out (default-visible) field exposure; exposing raw PAN anywhere instead of tokenizing; no per-scope output assertions.
-   **Follow-ups:** "Default-deny vs. default-allow for new fields — why does it matter?" / "How do you expose a PAN only to an authorized, audited path?" / "How would you test that the partner scope never sees the internal risk score?"
+ **A:** A single response DTO isn't enough when the *same* resource must expose different fields to different audiences — you need **scope/role-driven field authorization**. Approaches: (1) **audience-specific representations** — distinct DTOs/projections per consumer scope (customer view, partner view, ops view), selected by the caller's scope/role, so each audience only ever gets its allowed fields and adding a sensitive field can't accidentally leak to a narrower audience; (2) **field-level policy** — a serialization layer that includes/redacts individual fields based on the caller's scopes (useful when field visibility is fine-grained), with a **default-deny** posture (a new field is hidden unless explicitly allowed for a scope); (3) **always mask/tokenize the most sensitive data** (PAN, full account number) at rest and in every representation, exposing raw values only through a separately-authorized vault path with its own audit. Enforce with tests asserting each scope's response contains *only* its permitted fields (the output-side analogue of BOLA testing). The Principal framing: "use a DTO" solves accidental full-entity exposure, but multi-audience financial data needs *scope-driven, default-deny field authorization* so that who-you-are determines which fields you receive — and the crown-jewel fields (PAN) are masked/tokenized universally with vault-gated, audited access.
+ **Why correct:** Moves past a single DTO to scope-driven, default-deny field authorization with audience-specific projections, universal masking/tokenization of crown-jewel data, and per-scope output tests.
+ **Common mistakes:** One DTO for all audiences; opt-out (default-visible) field exposure; exposing raw PAN anywhere instead of tokenizing; no per-scope output assertions.
+ **Follow-ups:** "Default-deny vs. default-allow for new fields — why does it matter?" / "How do you expose a PAN only to an authorized, audited path?" / "How would you test that the partner scope never sees the internal risk score?"
 
 ---
 
@@ -155,35 +155,35 @@ graph LR
 // BEFORE (vulnerable): only checks authentication
 app.MapGet("/invoices/{id}", async (string id, IInvoiceRepository repo) =>
 {
-    var invoice = await repo.GetByIdAsync(id);
-    return invoice is null ? Results.NotFound() : Results.Ok(invoice);
-}).RequireAuthorization();
+ var invoice = await repo.GetByIdAsync(id);
+ return invoice is null? Results.NotFound: Results.Ok(invoice);
+}).RequireAuthorization;
 
 // AFTER (fixed): checks ownership too
 app.MapGet("/invoices/{id}", async (string id, IInvoiceRepository repo, ClaimsPrincipal user) =>
 {
-    var invoice = await repo.GetByIdAsync(id);
-    var currentPartnerId = user.FindFirstValue("partner_id");
-    if (invoice is null || invoice.PartnerId != currentPartnerId)
-        return Results.NotFound(); // 404, not 403 -- avoids confirming existence (Advanced Q7)
-    return Results.Ok(invoice);
-}).RequireAuthorization();
+ var invoice = await repo.GetByIdAsync(id);
+ var currentPartnerId = user.FindFirstValue("partner_id");
+ if (invoice is null || invoice.PartnerId!= currentPartnerId)
+ return Results.NotFound; // 404, not 403 -- avoids confirming existence (Advanced Q7)
+ return Results.Ok(invoice);
+}).RequireAuthorization;
 ```
 
 ### Medium — Token-bucket rate limiting with `Retry-After`
 ```csharp
 builder.Services.AddRateLimiter(options =>
 {
-    options.OnRejected = async (context, ct) =>
-    {
-        context.HttpContext.Response.Headers.RetryAfter = "60";
-        context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-        await context.HttpContext.Response.WriteAsJsonAsync(new { error = "rate_limit_exceeded" }, ct);
-    };
-    options.AddTokenBucketLimiter("api", opt =>
-    {
-        opt.TokenLimit = 100; opt.TokensPerPeriod = 100; opt.ReplenishmentPeriod = TimeSpan.FromMinutes(1);
-    });
+ options.OnRejected = async (context, ct) =>
+ {
+ context.HttpContext.Response.Headers.RetryAfter = "60";
+ context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+ await context.HttpContext.Response.WriteAsJsonAsync(new { error = "rate_limit_exceeded" }, ct);
+ };
+ options.AddTokenBucketLimiter("api", opt =>
+ {
+ opt.TokenLimit = 100; opt.TokensPerPeriod = 100; opt.ReplenishmentPeriod = TimeSpan.FromMinutes(1);
+ });
 });
 ```
 
@@ -203,12 +203,12 @@ local elapsed = math.max(0, now - lastRefill)
 tokens = math.min(capacity, tokens + elapsed * refillRate)
 
 if tokens < 1 then
-    redis.call("HMSET", key, "tokens", tokens, "lastRefill", now)
-    return 0 -- rejected
+ redis.call("HMSET", key, "tokens", tokens, "lastRefill", now)
+ return 0 -- rejected
 else
-    tokens = tokens - 1
-    redis.call("HMSET", key, "tokens", tokens, "lastRefill", now)
-    return 1 -- allowed
+ tokens = tokens - 1
+ redis.call("HMSET", key, "tokens", tokens, "lastRefill", now)
+ return 1 -- allowed
 end
 ```
 **Discussion**: Running this as a single Lua script executed atomically by Redis (`EVAL`) is what prevents the read-then-write race a naive two-round-trip implementation would suffer under concurrent requests from the same client — exactly Advanced Q1's requirement.
@@ -219,14 +219,14 @@ public record InvoiceResponse(string Id, decimal Amount, DateTime DueDate); // n
 
 // Automated BOLA regression test (Advanced Q2's pattern):
 [Fact]
-public async Task GetInvoice_Should_Return_404_For_Other_Partners_Invoice()
+public async Task GetInvoice_Should_Return_404_For_Other_Partners_Invoice
 {
-    var clientA = _factory.CreateAuthenticatedClient(partnerId: "partner-a");
-    var invoiceOwnedByB = await SeedInvoiceAsync(partnerId: "partner-b");
+ var clientA = _factory.CreateAuthenticatedClient(partnerId: "partner-a");
+ var invoiceOwnedByB = await SeedInvoiceAsync(partnerId: "partner-b");
 
-    var response = await clientA.GetAsync($"/invoices/{invoiceOwnedByB.Id}");
+ var response = await clientA.GetAsync($"/invoices/{invoiceOwnedByB.Id}");
 
-    Assert.Equal(HttpStatusCode.NotFound, response.StatusCode); // NOT the invoice data, NOT a 403
+ Assert.Equal(HttpStatusCode.NotFound, response.StatusCode); // NOT the invoice data, NOT a 403
 }
 ```
 
@@ -234,7 +234,7 @@ public async Task GetInvoice_Should_Return_404_For_Other_Partners_Invoice()
 
 ## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
 
-A partner API platform (§4) enforces resource-based authorization on every endpoint (mandatory checklist item), narrow response DTOs everywhere, and Redis-backed token-bucket rate limiting keyed by authenticated partner identity, with automated BOLA-probing tests as a CI gate. The production-debugging signature pattern for this module is exactly §4's incident — diagnosed by systematically testing cross-tenant access on every resource-ID-accepting endpoint, not by waiting for a reported breach. Principal-level guidance: BOLA and mass assignment/excessive exposure are the two highest-value, most mechanically-auditable API vulnerability classes — invest in automated, CI-enforced testing for both before investing in more exotic security controls, since these two categories dominate real-world API breach statistics.
+A partner API platform enforces resource-based authorization on every endpoint (mandatory checklist item), narrow response DTOs everywhere, and Redis-backed token-bucket rate limiting keyed by authenticated partner identity, with automated BOLA-probing tests as a CI gate. The production-debugging signature pattern for this module is exactly the incident — diagnosed by systematically testing cross-tenant access on every resource-ID-accepting endpoint, not by waiting for a reported breach. Principal-level guidance: BOLA and mass assignment/excessive exposure are the two highest-value, most mechanically-auditable API vulnerability classes — invest in automated, CI-enforced testing for both before investing in more exotic security controls, since these two categories dominate real-world API breach statistics.
 
 ## 18. Revision
 **Key takeaways**: BOLA = authentication without per-object authorization, the #1 real-world API vulnerability. Mass assignment (input) and excessive data exposure (output) are the same architectural mistake (binding directly to rich entities) manifesting on both sides of the API boundary. Token bucket = the standard rate-limiting algorithm, allowing bursts while enforcing steady-state limits. Distributed (Redis-backed, Lua-atomic) rate limiting is required for genuine fleet-wide enforcement — per-replica limiting is trivially bypassed. Always return 429 + `Retry-After`; return 404 (not 403) to avoid confirming a resource's existence to an unauthorized caller.

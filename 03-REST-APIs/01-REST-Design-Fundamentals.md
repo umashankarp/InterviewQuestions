@@ -17,12 +17,12 @@
 - **DELETE**: idempotent — deleting an already-deleted resource should return the same successful outcome (or a 404, per API convention), not an error indicating "delete failed."
 
 ### 2.2 Idempotency — the Precise Definition and Why It Matters for Reliability
-Idempotency means **the same request, executed multiple times, produces the same end state as executing it once** — this is the single most important property for building **reliable retry logic** (Module 2's retry-with-backoff patterns) on top of an unreliable network: a client that times out waiting for a response to a PUT/DELETE genuinely doesn't know if the request succeeded — safely retrying requires the operation to be idempotent, or the retry could cause an unintended duplicate side effect. For genuinely non-idempotent operations that must tolerate retries (POST creating a payment), the standard solution is an explicit **idempotency key** (a client-generated unique ID sent in a header, e.g., `Idempotency-Key`) that the server persists and checks — a repeated request with the same key returns the original result without re-executing the side effect.
+Idempotency means **the same request, executed multiple times, produces the same end state as executing it once** — this is the single most important property for building **reliable retry logic** (the retry-with-backoff patterns) on top of an unreliable network: a client that times out waiting for a response to a PUT/DELETE genuinely doesn't know if the request succeeded — safely retrying requires the operation to be idempotent, or the retry could cause an unintended duplicate side effect. For genuinely non-idempotent operations that must tolerate retries (POST creating a payment), the standard solution is an explicit **idempotency key** (a client-generated unique ID sent in a header, e.g., `Idempotency-Key`) that the server persists and checks — a repeated request with the same key returns the original result without re-executing the side effect.
 
 ### 2.3 Status Code Semantics Beyond the Basics
 - **200 vs 201 vs 204**: 200 (OK, has a body), 201 (Created, includes a `Location` header pointing to the new resource), 204 (No Content — success, deliberately no body, common for DELETE/PUT).
 - **400 vs 422**: 400 (malformed request — can't even be parsed/understood), 422 (Unprocessable Entity — well-formed but semantically invalid, e.g., a business-rule validation failure) — a distinction many APIs blur, but a precise API design keeps them separate.
-- **409 Conflict**: the request conflicts with the resource's current state (e.g., optimistic-concurrency version mismatch, §2.5) — distinct from 400/422, since the request itself is valid, just conflicting with concurrent state.
+- **409 Conflict**: the request conflicts with the resource's current state (e.g., optimistic-concurrency version mismatch) — distinct from 400/422, since the request itself is valid, just conflicting with concurrent state.
 
 ### 2.4 Versioning Strategies
 - **URI versioning** (`/v1/orders`): simplest, most visible, but "pollutes" the URI (arguably violating REST's "URI identifies a resource, not a version of an API" purity) and requires duplicating route definitions.
@@ -38,14 +38,14 @@ The often-unimplemented "fourth constraint" — responses include **links** to r
 
 ## 3. Visual Architecture
 ```
-GET /orders/123        -> 200 { ... }  (ETag: "abc123")
-PUT /orders/123         -> 412 Precondition Failed (If-Match: "abc123" doesn't match current "xyz789")
-POST /payments          -> 201 Created (Idempotency-Key: "client-generated-uuid")
+GET /orders/123 -> 200 {... } (ETag: "abc123")
+PUT /orders/123 -> 412 Precondition Failed (If-Match: "abc123" doesn't match current "xyz789")
+POST /payments -> 201 Created (Idempotency-Key: "client-generated-uuid")
 POST /payments (retry, same Idempotency-Key) -> 201 Created (SAME result, no duplicate charge)
 ```
 
 ## 4. Production Example
-**Scenario**: A payments API without idempotency-key support experienced duplicate charges during a mobile-network flakiness period — clients retrying a timed-out POST created genuine duplicate payment records, since POST is non-idempotent by HTTP semantics and no application-level deduplication existed. **Fix**: implemented `Idempotency-Key` header support — the server persists (key → result) mappings with a TTL, returning the cached original result for a repeated key instead of re-processing. **Lesson**: idempotency isn't automatic for POST — it must be deliberately engineered for any operation that must tolerate client retries, exactly Module 2's retry-safety discipline applied at the API-contract level.
+**Scenario**: A payments API without idempotency-key support experienced duplicate charges during a mobile-network flakiness period — clients retrying a timed-out POST created genuine duplicate payment records, since POST is non-idempotent by HTTP semantics and no application-level deduplication existed. **Fix**: implemented `Idempotency-Key` header support — the server persists (key → result) mappings with a TTL, returning the cached original result for a repeated key instead of re-processing. **Lesson**: idempotency isn't automatic for POST — it must be deliberately engineered for any operation that must tolerate client retries, exactly the retry-safety discipline applied at the API-contract level.
 
 ## 5. Best Practices
 - Use idempotency keys for any POST that triggers a real-world side effect a client might need to safely retry.
@@ -66,124 +66,124 @@ POST /payments (retry, same Idempotency-Key) -> 201 Created (SAME result, no dup
 ### Basic (10)
 
 1. **Q: What makes an HTTP method idempotent?**
-   **A:** Repeating the same request multiple times produces the same end state as executing it once.
+ **A:** Repeating the same request multiple times produces the same end state as executing it once.
 
 2. **Q: Is POST idempotent by default?**
-   **A:** No — calling it twice can create two separate resources/side effects unless the application explicitly implements idempotency (e.g., via an idempotency key).
+ **A:** No — calling it twice can create two separate resources/side effects unless the application explicitly implements idempotency (e.g., via an idempotency key).
 
 3. **Q: What's the difference between 201 Created and 204 No Content?**
-   **A:** 201 indicates a resource was created and typically includes a `Location` header pointing to it, usually with a body; 204 indicates success with deliberately no response body.
+ **A:** 201 indicates a resource was created and typically includes a `Location` header pointing to it, usually with a body; 204 indicates success with deliberately no response body.
 
 4. **Q: What is an ETag?**
-   **A:** An identifier representing a resource's current version/state, used with conditional requests (`If-Match`/`If-None-Match`) for caching and optimistic concurrency control.
+ **A:** An identifier representing a resource's current version/state, used with conditional requests (`If-Match`/`If-None-Match`) for caching and optimistic concurrency control.
 
 5. **Q: What does HATEOAS stand for?**
-   **A:** Hypermedia as the Engine of Application State — responses include links to related/available actions so clients can navigate dynamically instead of hardcoding URLs.
+ **A:** Hypermedia as the Engine of Application State — responses include links to related/available actions so clients can navigate dynamically instead of hardcoding URLs.
 
 6. **Q: Name three API versioning strategies.**
-   **A:** URI versioning (`/v1/orders`), header versioning (`Api-Version: 2`), and query-string versioning (`?api-version=2`).
+ **A:** URI versioning (`/v1/orders`), header versioning (`Api-Version: 2`), and query-string versioning (`?api-version=2`).
 
 7. **Q: What's the difference between 400 and 401?**
-   **A:** 400 means the request is malformed/invalid; 401 means the caller isn't authenticated.
+ **A:** 400 means the request is malformed/invalid; 401 means the caller isn't authenticated.
 
 8. **Q: Should a GET request ever have side effects?**
-   **A:** No — GET must be safe and idempotent; caches and prefetchers may call it speculatively.
+ **A:** No — GET must be safe and idempotent; caches and prefetchers may call it speculatively.
 
 9. **Q: What does "stateless" mean in the REST architectural style?**
-   **A:** Each request contains everything needed to process it — the server holds no client-session state between requests.
+ **A:** Each request contains everything needed to process it — the server holds no client-session state between requests.
 
 10. **Q: What is a "resource" in REST terms?**
-    **A:** Any named piece of information/entity a client can address via a URI (e.g., an order, a customer) and act on via standard HTTP methods.
+ **A:** Any named piece of information/entity a client can address via a URI (e.g., an order, a customer) and act on via standard HTTP methods.
 
 ### Intermediate (10)
 
 1. **Q: Why isn't PATCH's idempotency guaranteed by the method itself?**
-   **A:** It depends on the actual patch semantics used — a JSON Merge Patch replacing specific fields is typically idempotent, but a JSON Patch `"op": "add"` appending to an array is not, since repeating it adds another element each time.
+ **A:** It depends on the actual patch semantics used — a JSON Merge Patch replacing specific fields is typically idempotent, but a JSON Patch `"op": "add"` appending to an array is not, since repeating it adds another element each time.
 
 2. **Q: How does `If-Match` prevent a lost-update race?**
-   **A:** The client sends the ETag it last observed; the server rejects the update with 412 if the resource's current ETag doesn't match, meaning someone else modified it since the client last read it — preventing a blind overwrite.
+ **A:** The client sends the ETag it last observed; the server rejects the update with 412 if the resource's current ETag doesn't match, meaning someone else modified it since the client last read it — preventing a blind overwrite.
 
 3. **Q: Why is header-based versioning generally more cache-friendly than URI versioning?**
-   **A:** The URI (the natural cache key for HTTP-level caches/CDNs) stays identical across versions; version-specific caching, if needed, can be layered on top of the `Vary` header instead of fragmenting cache keys by baked-in version paths.
+ **A:** The URI (the natural cache key for HTTP-level caches/CDNs) stays identical across versions; version-specific caching, if needed, can be layered on top of the `Vary` header instead of fragmenting cache keys by baked-in version paths.
 
 4. **Q: What's the precise difference between 400 and 422?**
-   **A:** 400 means the request couldn't even be parsed/understood (malformed syntax); 422 means the request is well-formed but semantically invalid (e.g., fails a business rule).
+ **A:** 400 means the request couldn't even be parsed/understood (malformed syntax); 422 means the request is well-formed but semantically invalid (e.g., fails a business rule).
 
 5. **Q: Why must idempotency keys be scoped per-client rather than globally?**
-   **A:** A global key namespace would let one client guess or reuse another client's key to retrieve their cached result — scoping per authenticated principal prevents this cross-client leakage.
+ **A:** A global key namespace would let one client guess or reuse another client's key to retrieve their cached result — scoping per authenticated principal prevents this cross-client leakage.
 
 6. **Q: Why is DELETE considered idempotent even though deleting an already-deleted resource might seem like it "does nothing" the second time?**
-   **A:** Idempotency is about end state, not identical response codes — the end state ("this resource no longer exists") is the same after one or many DELETE calls, even if the API conventionally returns 404 instead of 204 on a repeat call.
+ **A:** Idempotency is about end state, not identical response codes — the end state ("this resource no longer exists") is the same after one or many DELETE calls, even if the API conventionally returns 404 instead of 204 on a repeat call.
 
 7. **Q: What's the risk of using sequential integer IDs in REST resource URIs?**
-   **A:** It enables enumeration — an attacker can iterate through IDs to probe for resources, making authorization checks (not obscurity) the only real defense; using GUIDs doesn't fix missing authorization but does remove the trivial enumeration vector.
+ **A:** It enables enumeration — an attacker can iterate through IDs to probe for resources, making authorization checks (not obscurity) the only real defense; using GUIDs doesn't fix missing authorization but does remove the trivial enumeration vector.
 
 8. **Q: Why would an API choose query-string versioning over header versioning despite header versioning's cache advantages?**
-   **A:** Query-string versions are trivially testable by pasting a URL into a browser or a simple `curl` command, valuable for developer experience/debuggability even at the cost of slightly less clean caching semantics.
+ **A:** Query-string versions are trivially testable by pasting a URL into a browser or a simple `curl` command, valuable for developer experience/debuggability even at the cost of slightly less clean caching semantics.
 
 9. **Q: What's the relationship between HATEOAS and the Richardson Maturity Model?**
-   **A:** HATEOAS is level 3 (the highest) of the model; most production REST APIs stop at level 2 (proper resources + HTTP verbs, without hypermedia links) — a common, often deliberate, pragmatic trade-off rather than an incomplete implementation.
+ **A:** HATEOAS is level 3 (the highest) of the model; most production REST APIs stop at level 2 (proper resources + HTTP verbs, without hypermedia links) — a common, often deliberate, pragmatic trade-off rather than an incomplete implementation.
 
 10. **Q: Why does conditional GET (`If-None-Match` → 304) reduce backend load, not just client bandwidth?**
-    **A:** A 304 response can often be served entirely by an intermediary cache/CDN without the request ever reaching the origin server at all, and even when it does reach the origin, a 304 avoids re-serializing/re-transferring the full resource body.
+ **A:** A 304 response can often be served entirely by an intermediary cache/CDN without the request ever reaching the origin server at all, and even when it does reach the origin, a 304 avoids re-serializing/re-transferring the full resource body.
 
 ### Advanced (10)
 
 1. **Q: Design an idempotency-key implementation, including storage, TTL, and handling a duplicate request that arrives while the original is still in flight.**
-   **A:** Persist a keyed record (client ID + idempotency key → status: `InProgress`/`Completed` + cached response) in a shared store (Redis, for fleet-wide consistency); on a new request, atomically check-and-set the key to `InProgress` if absent; if a duplicate arrives while still `InProgress`, return `409 Conflict` (not process it again, and not silently wait) since the original might still fail, making the "final" result ambiguous; once the original completes, update the record to `Completed` with the cached response, returned verbatim for any future duplicate within the TTL window.
+ **A:** Persist a keyed record (client ID + idempotency key → status: `InProgress`/`Completed` + cached response) in a shared store (Redis, for fleet-wide consistency); on a new request, atomically check-and-set the key to `InProgress` if absent; if a duplicate arrives while still `InProgress`, return `409 Conflict` (not process it again, and not silently wait) since the original might still fail, making the "final" result ambiguous; once the original completes, update the record to `Completed` with the cached response, returned verbatim for any future duplicate within the TTL window.
 
 2. **Q: Explain exactly why REST's statelessness constraint enables horizontal scaling at the architecture level.**
-   **A:** Because no request depends on server-held session state from a prior request, any replica can handle any request without needing to know anything about which replica handled previous requests from the same client — this is what makes a simple round-robin load balancer sufficient, without sticky sessions or a shared state-synchronization mechanism, directly enabling elastic, uncoordinated horizontal scaling.
+ **A:** Because no request depends on server-held session state from a prior request, any replica can handle any request without needing to know anything about which replica handled previous requests from the same client — this is what makes a simple round-robin load balancer sufficient, without sticky sessions or a shared state-synchronization mechanism, directly enabling elastic, uncoordinated horizontal scaling.
 
 3. **Q: Design a versioning-deprecation strategy that communicates sunset dates to clients without abruptly breaking them.**
-   **A:** Use the `Deprecation` response header (indicating a version is deprecated, with a date) and the `Sunset` header (the date it will actually stop being served), both attached to responses from the deprecated version starting well in advance; combine with proactive, automated monitoring of which clients are still calling the deprecated version (via API-key/version telemetry) to directly notify remaining consumers before the sunset date, rather than relying solely on passive header-based communication.
+ **A:** Use the `Deprecation` response header (indicating a version is deprecated, with a date) and the `Sunset` header (the date it will actually stop being served), both attached to responses from the deprecated version starting well in advance; combine with proactive, automated monitoring of which clients are still calling the deprecated version (via API-key/version telemetry) to directly notify remaining consumers before the sunset date, rather than relying solely on passive header-based communication.
 
 4. **Q: Diagnose and fix a lost-update race using ETags end-to-end.**
-   **A:** Symptom: two users editing the same record concurrently, with the second save silently overwriting the first's changes with no error. Fix: the GET response includes an `ETag`; the client's subsequent PUT/PATCH sends `If-Match: <etag>`; the server compares it against the resource's current ETag before applying the update, returning `412 Precondition Failed` if they don't match — forcing the client to re-fetch the latest version and either re-apply or merge their change, rather than blindly overwriting.
+ **A:** Symptom: two users editing the same record concurrently, with the second save silently overwriting the first's changes with no error. Fix: the GET response includes an `ETag`; the client's subsequent PUT/PATCH sends `If-Match: <etag>`; the server compares it against the resource's current ETag before applying the update, returning `412 Precondition Failed` if they don't match — forcing the client to re-fetch the latest version and either re-apply or merge their change, rather than blindly overwriting.
 
 5. **Q: Architect a fully idempotent payments API with correct concurrent-duplicate-request handling and outbox-pattern interaction.**
-   **A:** A shared idempotency-key middleware (as in Advanced Q1) wraps every state-changing endpoint; the actual payment-processing logic and the idempotency-record update, plus the outbox-table insert for downstream event publication (a later module's Outbox pattern), all commit within a **single database transaction** — ensuring the payment, the idempotency record marking it complete, and the "PaymentProcessed" event-to-be-published are atomically consistent; a crash between charging and recording would otherwise either lose the idempotency guarantee or lose the event, and the single-transaction design eliminates that entire failure window.
+ **A:** A shared idempotency-key middleware (as in Advanced Q1) wraps every state-changing endpoint; the actual payment-processing logic and the idempotency-record update, plus the outbox-table insert for downstream event publication (a later module's Outbox pattern), all commit within a **single database transaction** — ensuring the payment, the idempotency record marking it complete, and the "PaymentProcessed" event-to-be-published are atomically consistent; a crash between charging and recording would otherwise either lose the idempotency guarantee or lose the event, and the single-transaction design eliminates that entire failure window.
 
 6. **Q: Why is `409 Conflict` the correct response for a duplicate in-flight idempotency-key request rather than blocking/waiting for the original to finish?**
-   **A:** Blocking would tie up the calling client's connection/thread for an unknown duration and couldn't guarantee the original will even succeed — returning 409 immediately gives the client clear, fast feedback ("this exact request is already being processed, don't retry blindly right now"), letting the client's own backoff/retry logic (Module 2) decide when to check back, rather than the server silently holding a connection open.
+ **A:** Blocking would tie up the calling client's connection/thread for an unknown duration and couldn't guarantee the original will even succeed — returning 409 immediately gives the client clear, fast feedback ("this exact request is already being processed, don't retry blindly right now"), letting the client's own backoff/retry logic decide when to check back, rather than the server silently holding a connection open.
 
 7. **Q: How would you design idempotency-key expiration (TTL) to balance storage cost against protection against delayed retries?**
-   **A:** Choose a TTL comfortably longer than the client's expected retry window (e.g., 24 hours) but not indefinite — balancing the storage cost of retained records against the residual risk that a very late retry (after TTL expiry) would be treated as a brand-new request; document the TTL as part of the API contract so clients know the window within which retries are guaranteed safe.
+ **A:** Choose a TTL comfortably longer than the client's expected retry window (e.g., 24 hours) but not indefinite — balancing the storage cost of retained records against the residual risk that a very late retry (after TTL expiry) would be treated as a brand-new request; document the TTL as part of the API contract so clients know the window within which retries are guaranteed safe.
 
 8. **Q: Explain a scenario where blindly trusting a client-supplied idempotency key without additional validation creates a correctness bug.**
-   **A:** If a client accidentally reuses the same idempotency key for two genuinely *different* logical requests (a client-side bug, not malice), the second request would incorrectly receive the first's cached result instead of being processed — mitigating this requires the server to also validate that the *request body* matches what was originally recorded for that key (returning an error, not silently serving a mismatched cached result, if the key matches but the payload differs).
+ **A:** If a client accidentally reuses the same idempotency key for two genuinely *different* logical requests (a client-side bug, not malice), the second request would incorrectly receive the first's cached result instead of being processed — mitigating this requires the server to also validate that the *request body* matches what was originally recorded for that key (returning an error, not silently serving a mismatched cached result, if the key matches but the payload differs).
 
 9. **Q: How would you extend ETag-based optimistic concurrency to a bulk-update endpoint modifying multiple resources at once?**
-   **A:** Require each item in the batch to carry its own ETag (or a version number) in the request payload, and process the batch transactionally with a per-item concurrency check — either failing the entire batch atomically on any single conflicting item (simpler, but a null single stale item blocks unrelated ones) or applying successful items and reporting per-item conflicts in a structured multi-status response (more complex, but more forgiving) — the choice is itself a deliberate API-design/business trade-off worth stating explicitly.
+ **A:** Require each item in the batch to carry its own ETag (or a version number) in the request payload, and process the batch transactionally with a per-item concurrency check — either failing the entire batch atomically on any single conflicting item (simpler, but a null single stale item blocks unrelated ones) or applying successful items and reporting per-item conflicts in a structured multi-status response (more complex, but more forgiving) — the choice is itself a deliberate API-design/business trade-off worth stating explicitly.
 
 10. **Q: Design a strategy for safely rolling out a breaking API change using version headers without a hard cutover.**
-    **A:** Introduce the new version as a new value for the version header while continuing to serve the old version unchanged for existing clients; run both concurrently for an extended overlap period; use the `Deprecation`/`Sunset` headers (Advanced Q3) plus proactive telemetry-driven outreach to migrate remaining clients; only remove the old version's code path once telemetry confirms zero remaining traffic, converting what could be a risky hard cutover into a monitored, gradual migration.
+ **A:** Introduce the new version as a new value for the version header while continuing to serve the old version unchanged for existing clients; run both concurrently for an extended overlap period; use the `Deprecation`/`Sunset` headers (Advanced Q3) plus proactive telemetry-driven outreach to migrate remaining clients; only remove the old version's code path once telemetry confirms zero remaining traffic, converting what could be a risky hard cutover into a monitored, gradual migration.
 
 ### Expert (FinTech Principal Panel)
 
 1. **Q: A payment doesn't complete synchronously — authorization, routing, and settlement take time and can change state later. How do you model this long-running money operation in a REST API instead of blocking the request?**
-   **A:** Don't hold the HTTP request open waiting for settlement — model the operation as a **resource with a lifecycle**. `POST /payments` (with an idempotency key) validates and *accepts* the intent, returning **`201`/`202` with a payment resource** in a `pending` state and its URL. The client learns the outcome by (a) **polling** `GET /payments/{id}` (which exposes `status`: `pending → authorized → settled`/`failed`, plus a machine-readable reason) and/or (b) **webhooks** pushing state transitions (preferred — avoids polling load). Represent state as data, use terminal states that are immutable, and make transitions idempotent so a retried settlement callback doesn't double-apply. Never encode "still processing" as an error or a timeout — a timed-out synchronous call creates the ambiguity that causes double-charges (the client can't tell accept from fail). The Principal framing: money operations are asynchronous and stateful by nature; a good REST design exposes the *state machine* (accept fast, report progress via a status resource + webhooks) rather than pretending the operation is a single blocking request-response.
-   **Why correct:** Models the operation as a stateful resource (accept-fast + status resource + webhooks), keeps transitions idempotent/terminal, and avoids the synchronous-timeout ambiguity.
-   **Common mistakes:** Blocking the request until settlement; returning a timeout that conflates accepted vs. failed; mutable/ambiguous terminal states.
-   **Follow-ups:** "202 vs. 201 here — which and why?" / "How does the status resource interact with idempotency keys?" / "Why prefer webhooks over polling at scale?"
+ **A:** Don't hold the HTTP request open waiting for settlement — model the operation as a **resource with a lifecycle**. `POST /payments` (with an idempotency key) validates and *accepts* the intent, returning **`201`/`202` with a payment resource** in a `pending` state and its URL. The client learns the outcome by (a) **polling** `GET /payments/{id}` (which exposes `status`: `pending → authorized → settled`/`failed`, plus a machine-readable reason) and/or (b) **webhooks** pushing state transitions (preferred — avoids polling load). Represent state as data, use terminal states that are immutable, and make transitions idempotent so a retried settlement callback doesn't double-apply. Never encode "still processing" as an error or a timeout — a timed-out synchronous call creates the ambiguity that causes double-charges (the client can't tell accept from fail). The Principal framing: money operations are asynchronous and stateful by nature; a good REST design exposes the *state machine* (accept fast, report progress via a status resource + webhooks) rather than pretending the operation is a single blocking request-response.
+ **Why correct:** Models the operation as a stateful resource (accept-fast + status resource + webhooks), keeps transitions idempotent/terminal, and avoids the synchronous-timeout ambiguity.
+ **Common mistakes:** Blocking the request until settlement; returning a timeout that conflates accepted vs. failed; mutable/ambiguous terminal states.
+ **Follow-ups:** "202 vs. 201 here — which and why?" / "How does the status resource interact with idempotency keys?" / "Why prefer webhooks over polling at scale?"
 
 2. **Q: You must deliver payment events (`payment.settled`, `payment.failed`) to thousands of merchant endpoints via webhooks. Design the delivery contract so it's secure, reliable, and safe for receivers.**
-   **A:** Webhooks are an at-least-once, cross-org contract, so design for the receiver's reality: (1) **Authenticity** — sign each delivery (HMAC over the raw body + timestamp, per-merchant secret; or asymmetric signature) so the merchant can verify it's genuinely from you and hasn't been tampered with; include a timestamp and enforce a window to blunt replay. (2) **At-least-once + idempotency** — you *will* redeliver (network failures, receiver 5xx), so every event carries a stable **event ID** and merchants must dedupe on it; document that they must be idempotent. (3) **Ordering** — don't assume ordered delivery; include a sequence/version or the full current state so an out-of-order `failed` after `settled` can be reconciled (state-carrying events help). (4) **Reliable delivery** — retry with exponential backoff + jitter over a defined window, then dead-letter and surface undelivered events via an API + dashboard; treat non-2xx/timeout as failure and retry. (5) **Security hardening for receivers** — recommend they verify the signature before processing and be wary of SSRF on their side; on your side, respect their timeout and don't leak internal detail. The Principal framing: a webhook is a distributed, cross-trust-boundary delivery problem — signing + event-ID idempotency + backoff-retry-then-DLQ + order-tolerant payloads are the non-negotiable pieces; omit any and integrators get security holes, duplicates, or lost events.
-   **Why correct:** Covers signing/replay, at-least-once + event-ID idempotency, order tolerance, retry/backoff/DLQ, and receiver-side safety — the full webhook contract.
-   **Common mistakes:** Unsigned webhooks; assuming exactly-once/ordered delivery; no retry/DLQ; no stable event ID for dedupe.
-   **Follow-ups:** "How does a merchant safely handle a `failed` arriving after `settled`?" / "Why sign the raw body, not the parsed object?" / "What do you expose for events that exhausted retries?"
+ **A:** Webhooks are an at-least-once, cross-org contract, so design for the receiver's reality: (1) **Authenticity** — sign each delivery (HMAC over the raw body + timestamp, per-merchant secret; or asymmetric signature) so the merchant can verify it's genuinely from you and hasn't been tampered with; include a timestamp and enforce a window to blunt replay. (2) **At-least-once + idempotency** — you *will* redeliver (network failures, receiver 5xx), so every event carries a stable **event ID** and merchants must dedupe on it; document that they must be idempotent. (3) **Ordering** — don't assume ordered delivery; include a sequence/version or the full current state so an out-of-order `failed` after `settled` can be reconciled (state-carrying events help). (4) **Reliable delivery** — retry with exponential backoff + jitter over a defined window, then dead-letter and surface undelivered events via an API + dashboard; treat non-2xx/timeout as failure and retry. (5) **Security hardening for receivers** — recommend they verify the signature before processing and be wary of SSRF on their side; on your side, respect their timeout and don't leak internal detail. The Principal framing: a webhook is a distributed, cross-trust-boundary delivery problem — signing + event-ID idempotency + backoff-retry-then-DLQ + order-tolerant payloads are the non-negotiable pieces; omit any and integrators get security holes, duplicates, or lost events.
+ **Why correct:** Covers signing/replay, at-least-once + event-ID idempotency, order tolerance, retry/backoff/DLQ, and receiver-side safety — the full webhook contract.
+ **Common mistakes:** Unsigned webhooks; assuming exactly-once/ordered delivery; no retry/DLQ; no stable event ID for dedupe.
+ **Follow-ups:** "How does a merchant safely handle a `failed` arriving after `settled`?" / "Why sign the raw body, not the parsed object?" / "What do you expose for events that exhausted retries?"
 
 3. **Q: Integrators need to *programmatically* react to declines and errors (retry a transient decline, but not a hard `do_not_honor`). Design the API error/decline contract so it's machine-actionable, not just human-readable.**
-   **A:** A human-readable `message` string is not an integration contract — integrators must not parse prose. Use **RFC 7807 Problem Details** with a **stable, documented, machine-readable code taxonomy**: a `type`/`code` field (`insufficient_funds`, `do_not_honor`, `expired_card`, `rate_limited`, `processor_unavailable`) plus a **retryability classification** (is this transient/retryable or permanent?) so a client can decide to retry vs. surface to the user vs. stop. Keep codes stable across versions (renaming a code is a breaking change), namespace them, and never leak sensitive/internal detail in the message (Q on PCI). Distinguish clearly between a *business decline* (the request was well-formed but the payment was refused — often a `200`/`402` with a decline code, not a `4xx` protocol error) and a *protocol/validation error* (`400`/`422`) — conflating them makes integrators mishandle declines. Provide a correlation ID for support. The Principal framing: the error contract is a first-class part of the API — integrators automate against stable codes + a retryable flag, so declines must be modeled as structured, versioned, documented data, distinct from transport errors, never as free text.
-   **Why correct:** Uses Problem Details + a stable code taxonomy with a retryability flag, separates business declines from protocol errors, and keeps codes versioned and PCI-safe.
-   **Common mistakes:** Forcing integrators to parse message strings; unstable/renamed codes; conflating a decline with a validation error; leaking sensitive detail.
-   **Follow-ups:** "Is a declined payment a 4xx? Why or why not?" / "How does a retryable flag change integrator behavior?" / "Why is renaming an error code a breaking change?"
+ **A:** A human-readable `message` string is not an integration contract — integrators must not parse prose. Use **RFC 7807 Problem Details** with a **stable, documented, machine-readable code taxonomy**: a `type`/`code` field (`insufficient_funds`, `do_not_honor`, `expired_card`, `rate_limited`, `processor_unavailable`) plus a **retryability classification** (is this transient/retryable or permanent?) so a client can decide to retry vs. surface to the user vs. stop. Keep codes stable across versions (renaming a code is a breaking change), namespace them, and never leak sensitive/internal detail in the message (Q on PCI). Distinguish clearly between a *business decline* (the request was well-formed but the payment was refused — often a `200`/`402` with a decline code, not a `4xx` protocol error) and a *protocol/validation error* (`400`/`422`) — conflating them makes integrators mishandle declines. Provide a correlation ID for support. The Principal framing: the error contract is a first-class part of the API — integrators automate against stable codes + a retryable flag, so declines must be modeled as structured, versioned, documented data, distinct from transport errors, never as free text.
+ **Why correct:** Uses Problem Details + a stable code taxonomy with a retryability flag, separates business declines from protocol errors, and keeps codes versioned and PCI-safe.
+ **Common mistakes:** Forcing integrators to parse message strings; unstable/renamed codes; conflating a decline with a validation error; leaking sensitive detail.
+ **Follow-ups:** "Is a declined payment a 4xx? Why or why not?" / "How does a retryable flag change integrator behavior?" / "Why is renaming an error code a breaking change?"
 
 4. **Q: An endpoint lists a customer's transaction history — millions of rows, constantly growing. Design pagination that stays correct and fast as new transactions arrive mid-paging, and that supports a consistent statement export.**
-   **A:** Offset/`page`-based pagination breaks here on two axes: it's O(offset) so deep pages get slow, and inserts shift the window so rows duplicate or vanish between pages. Use **cursor (keyset) pagination**: order by a **total, stable key** (e.g., `created_at, id` — never a non-unique column alone), and return an **opaque, signed continuation token** encoding the last-seen key; the next page is `WHERE (created_at, id) < (@last) ORDER BY created_at, id LIMIT n`. This is O(page-size) at any depth and immune to insert-shift because it anchors on a value, not a position. Make the cursor opaque+signed so clients can't tamper with it or depend on its internals (lets you change the underlying key later). For a **consistent statement export** (a point-in-time snapshot that must not shift as you page through it), page within a snapshot/repeatable-read transaction or filter to an immutable time range (`created_at < exportStart`) so newly-arriving transactions don't leak into an export that's supposed to represent a fixed period. The Principal framing: for large, append-heavy financial data, cursor pagination + total ordering is the correct default, and exports additionally need snapshot/range semantics so the report is reproducible — offset pagination is a correctness and performance bug waiting for scale.
-   **Why correct:** Chooses cursor/keyset with a total ordering + opaque signed token (correct + O(page-size)), and adds snapshot/range semantics for reproducible exports.
-   **Common mistakes:** Offset pagination on large tables; ordering by a non-unique column; a transparent/tamperable cursor; exports that shift as new rows arrive.
-   **Follow-ups:** "Why must the sort key be a total order?" / "Why make the cursor opaque and signed?" / "How do you make a statement export reproducible?"
+ **A:** Offset/`page`-based pagination breaks here on two axes: it's O(offset) so deep pages get slow, and inserts shift the window so rows duplicate or vanish between pages. Use **cursor (keyset) pagination**: order by a **total, stable key** (e.g., `created_at, id` — never a non-unique column alone), and return an **opaque, signed continuation token** encoding the last-seen key; the next page is `WHERE (created_at, id) < (@last) ORDER BY created_at, id LIMIT n`. This is O(page-size) at any depth and immune to insert-shift because it anchors on a value, not a position. Make the cursor opaque+signed so clients can't tamper with it or depend on its internals (lets you change the underlying key later). For a **consistent statement export** (a point-in-time snapshot that must not shift as you page through it), page within a snapshot/repeatable-read transaction or filter to an immutable time range (`created_at < exportStart`) so newly-arriving transactions don't leak into an export that's supposed to represent a fixed period. The Principal framing: for large, append-heavy financial data, cursor pagination + total ordering is the correct default, and exports additionally need snapshot/range semantics so the report is reproducible — offset pagination is a correctness and performance bug waiting for scale.
+ **Why correct:** Chooses cursor/keyset with a total ordering + opaque signed token (correct + O(page-size)), and adds snapshot/range semantics for reproducible exports.
+ **Common mistakes:** Offset pagination on large tables; ordering by a non-unique column; a transparent/tamperable cursor; exports that shift as new rows arrive.
+ **Follow-ups:** "Why must the sort key be a total order?" / "Why make the cursor opaque and signed?" / "How do you make a statement export reproducible?"
 
 ---
 
@@ -193,8 +193,8 @@ POST /payments (retry, same Idempotency-Key) -> 201 Created (SAME result, no dup
 ```csharp
 app.MapPost("/orders", async (CreateOrderRequest request, IOrderService service) =>
 {
-    var order = await service.CreateAsync(request);
-    return Results.Created($"/orders/{order.Id}", order); // Location header + 201, not a bare 200
+ var order = await service.CreateAsync(request);
+ return Results.Created($"/orders/{order.Id}", order); // Location header + 201, not a bare 200
 });
 ```
 
@@ -202,17 +202,17 @@ app.MapPost("/orders", async (CreateOrderRequest request, IOrderService service)
 ```csharp
 app.MapPut("/orders/{id}", async (string id, UpdateOrderRequest request, HttpRequest http, IOrderRepository repo) =>
 {
-    var order = await repo.GetByIdAsync(id);
-    if (order is null) return Results.NotFound();
+ var order = await repo.GetByIdAsync(id);
+ if (order is null) return Results.NotFound;
 
-    var currentETag = $"\"{order.Version}\"";
-    if (http.Headers.IfMatch.Count > 0 && http.Headers.IfMatch[0] != currentETag)
-        return Results.StatusCode(StatusCodes.Status412PreconditionFailed);
+ var currentETag = $"\"{order.Version}\"";
+ if (http.Headers.IfMatch.Count > 0 && http.Headers.IfMatch[0]!= currentETag)
+ return Results.StatusCode(StatusCodes.Status412PreconditionFailed);
 
-    order.ApplyUpdate(request);
-    order.Version++;
-    await repo.SaveAsync(order);
-    return Results.Ok(order);
+ order.ApplyUpdate(request);
+ order.Version++;
+ await repo.SaveAsync(order);
+ return Results.Ok(order);
 });
 ```
 
@@ -220,55 +220,55 @@ app.MapPut("/orders/{id}", async (string id, UpdateOrderRequest request, HttpReq
 ```csharp
 public class IdempotencyMiddleware
 {
-    private readonly RequestDelegate _next;
-    private readonly IDistributedCache _cache;
+ private readonly RequestDelegate _next;
+ private readonly IDistributedCache _cache;
 
-    public IdempotencyMiddleware(RequestDelegate next, IDistributedCache cache) { _next = next; _cache = cache; }
+ public IdempotencyMiddleware(RequestDelegate next, IDistributedCache cache) { _next = next; _cache = cache; }
 
-    public async Task InvokeAsync(HttpContext context)
-    {
-        if (!context.Request.Headers.TryGetValue("Idempotency-Key", out var key) || string.IsNullOrEmpty(key))
-        {
-            await _next(context);
-            return;
-        }
+ public async Task InvokeAsync(HttpContext context)
+ {
+ if (!context.Request.Headers.TryGetValue("Idempotency-Key", out var key) || string.IsNullOrEmpty(key))
+ {
+ await _next(context);
+ return;
+ }
 
-        string cacheKey = $"idem:{context.User.FindFirstValue(ClaimTypes.NameIdentifier)}:{key}";
-        var existing = await _cache.GetStringAsync(cacheKey);
+ string cacheKey = $"idem:{context.User.FindFirstValue(ClaimTypes.NameIdentifier)}:{key}";
+ var existing = await _cache.GetStringAsync(cacheKey);
 
-        if (existing == "InProgress")
-        {
-            context.Response.StatusCode = StatusCodes.Status409Conflict;
-            return;
-        }
-        if (existing is not null)
-        {
-            context.Response.StatusCode = StatusCodes.Status200OK;
-            await context.Response.WriteAsync(existing); // cached final response
-            return;
-        }
+ if (existing == "InProgress")
+ {
+ context.Response.StatusCode = StatusCodes.Status409Conflict;
+ return;
+ }
+ if (existing is not null)
+ {
+ context.Response.StatusCode = StatusCodes.Status200OK;
+ await context.Response.WriteAsync(existing); // cached final response
+ return;
+ }
 
-        await _cache.SetStringAsync(cacheKey, "InProgress", new DistributedCacheEntryOptions
-        {
-            AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5)
-        });
+ await _cache.SetStringAsync(cacheKey, "InProgress", new DistributedCacheEntryOptions
+ {
+ AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5)
+ });
 
-        var originalBody = context.Response.Body;
-        using var buffer = new MemoryStream();
-        context.Response.Body = buffer;
+ var originalBody = context.Response.Body;
+ using var buffer = new MemoryStream;
+ context.Response.Body = buffer;
 
-        await _next(context);
+ await _next(context);
 
-        buffer.Seek(0, SeekOrigin.Begin);
-        var responseText = await new StreamReader(buffer).ReadToEndAsync();
-        await _cache.SetStringAsync(cacheKey, responseText, new DistributedCacheEntryOptions
-        {
-            AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(24)
-        });
+ buffer.Seek(0, SeekOrigin.Begin);
+ var responseText = await new StreamReader(buffer).ReadToEndAsync;
+ await _cache.SetStringAsync(cacheKey, responseText, new DistributedCacheEntryOptions
+ {
+ AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(24)
+ });
 
-        buffer.Seek(0, SeekOrigin.Begin);
-        await buffer.CopyToAsync(originalBody);
-    }
+ buffer.Seek(0, SeekOrigin.Begin);
+ await buffer.CopyToAsync(originalBody);
+ }
 }
 ```
 **Discussion**: The response-body-buffering pattern here directly reuses the request-body-buffering technique from the Minimal-APIs-vs-Controllers module (`EnableBuffering`/position-reset), applied to the *response* side instead — swapping `context.Response.Body` temporarily, capturing the written content, then replaying it both into the cache and back to the real output stream.
@@ -276,22 +276,22 @@ public class IdempotencyMiddleware
 ### Expert — Combined optimistic-concurrency + idempotency-key payment flow
 ```csharp
 app.MapPost("/payments", async (
-    ProcessPaymentRequest request, HttpRequest http, IPaymentService service, IIdempotencyStore idemStore) =>
+ ProcessPaymentRequest request, HttpRequest http, IPaymentService service, IIdempotencyStore idemStore) =>
 {
-    if (!http.Headers.TryGetValue("Idempotency-Key", out var key))
-        return Results.BadRequest("Idempotency-Key header is required.");
+ if (!http.Headers.TryGetValue("Idempotency-Key", out var key))
+ return Results.BadRequest("Idempotency-Key header is required.");
 
-    var existing = await idemStore.TryGetAsync(key!, request); // validates body hash matches, per Advanced Q8
-    if (existing is { Status: IdempotencyStatus.InProgress }) return Results.StatusCode(409);
-    if (existing is { Status: IdempotencyStatus.Completed }) return Results.Ok(existing.CachedResult);
-    if (existing is { Status: IdempotencyStatus.KeyReusedWithDifferentPayload })
-        return Results.Conflict("Idempotency-Key was reused with a different request payload.");
+ var existing = await idemStore.TryGetAsync(key!, request); // validates body hash matches, per Advanced Q8
+ if (existing is { Status: IdempotencyStatus.InProgress }) return Results.StatusCode(409);
+ if (existing is { Status: IdempotencyStatus.Completed }) return Results.Ok(existing.CachedResult);
+ if (existing is { Status: IdempotencyStatus.KeyReusedWithDifferentPayload })
+ return Results.Conflict("Idempotency-Key was reused with a different request payload.");
 
-    await idemStore.MarkInProgressAsync(key!, request);
+ await idemStore.MarkInProgressAsync(key!, request);
 
-    // Payment charge, idempotency-record completion, and outbox event insert -- ONE transaction (Advanced Q5).
-    var result = await service.ProcessPaymentInSingleTransactionAsync(request, key!);
-    return Results.Created($"/payments/{result.PaymentId}", result);
+ // Payment charge, idempotency-record completion, and outbox event insert -- ONE transaction (Advanced Q5).
+ var result = await service.ProcessPaymentInSingleTransactionAsync(request, key!);
+ return Results.Created($"/payments/{result.PaymentId}", result);
 });
 ```
 **Discussion**: `TryGetAsync` returning a `KeyReusedWithDifferentPayload` case is the concrete fix for Advanced Q8's bug scenario — comparing a hash of the incoming request body against what was originally recorded for that key, rejecting a mismatch explicitly rather than silently serving a wrong cached result.
@@ -299,22 +299,22 @@ app.MapPost("/payments", async (
 ---
 
 ## 12. System Design
-A payments platform's idempotency middleware (Hard/Expert exercises) is the module's central production pattern — every non-idempotent, side-effect-triggering endpoint routes through it, with per-client-scoped keys and a short-TTL cache backed by Redis for fleet-wide consistency (Module 12 §9's distributed-cache reasoning applied here).
+A payments platform's idempotency middleware (Hard/Expert exercises) is the module's central production pattern — every non-idempotent, side-effect-triggering endpoint routes through it, with per-client-scoped keys and a short-TTL cache backed by Redis for fleet-wide consistency (the distributed-cache reasoning applied here).
 
 ## 13. Low-Level Design
 A shared `IIdempotencyStore` abstraction (used identically by the Expert exercise) centralizes key-validation, in-progress-tracking, and payload-hash-comparison logic once, reusable across every non-idempotent endpoint in a codebase, rather than each team re-implementing subtly different idempotency logic independently.
 
 ## 14. Production Debugging
-The signature incident for this module: duplicate payment charges from unhandled POST retries during network flakiness (§4) — diagnosed by correlating duplicate charges with client-side retry logs showing a timeout on the original request followed by an identical retry with no idempotency key at all.
+The signature incident for this module: duplicate payment charges from unhandled POST retries during network flakiness — diagnosed by correlating duplicate charges with client-side retry logs showing a timeout on the original request followed by an identical retry with no idempotency key at all.
 
 ## 15. Architecture Decision
 Header-based versioning is recommended as the default for new large-scale/long-lived public APIs (cache-key cleanliness, REST purity); URI versioning remains acceptable for simpler, smaller APIs prioritizing discoverability/manual testability over those concerns.
 
 ## 16. Enterprise Case Study
-Stripe's and GitHub's publicly-documented API versioning approaches (both header/date-based) are directly citable, large-scale precedents for the header-versioning recommendation in §15 — both explicitly chose this specifically to avoid URI fragmentation across API versions at massive integration scale.
+Stripe's and GitHub's publicly-documented API versioning approaches (both header/date-based) are directly citable, large-scale precedents for the header-versioning recommendation — both explicitly chose this specifically to avoid URI fragmentation across API versions at massive integration scale.
 
 ## 17. Principal Engineer Perspective
-Treat idempotency-key support as a mandatory, non-negotiable requirement for any payment/order-creation endpoint from day one — retrofitting it after a duplicate-charge incident (§4) is far more disruptive (requiring careful backfill/reconciliation of already-affected records) than building it into the initial design.
+Treat idempotency-key support as a mandatory, non-negotiable requirement for any payment/order-creation endpoint from day one — retrofitting it after a duplicate-charge incident is far more disruptive (requiring careful backfill/reconciliation of already-affected records) than building it into the initial design.
 
 ## 18. Revision
 **Key takeaways**: Idempotent = same request repeated → same end state (GET, PUT, DELETE; not POST by default). Idempotency keys make POST safely retryable. ETags + `If-Match` prevent lost updates. 400 = malformed, 422 = semantically invalid, 409 = conflicts with current state. Versioning strategy is a genuine trade-off, not a solved question.

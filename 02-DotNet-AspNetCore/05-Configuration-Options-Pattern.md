@@ -1,6 +1,6 @@
 # Module 13 — ASP.NET Core: Configuration & the Options Pattern Internals
 
-> Domain: .NET / ASP.NET Core | Level: Beginner → Expert | Prerequisite: [[02-DI-Container-Internals]] (service lifetimes — `IOptionsMonitor` as the "safe to hold long-term" example referenced there)
+> Domain:.NET / ASP.NET Core | Level: Beginner → Expert | Prerequisite: [[02-DI-Container-Internals]] (service lifetimes — `IOptionsMonitor` as the "safe to hold long-term" example referenced there)
 
 ---
 
@@ -21,9 +21,9 @@ builder.Services.Configure<SmtpOptions>(builder.Configuration.GetSection("Smtp")
 
 public class EmailSender
 {
-    private readonly IOptionsMonitor<SmtpOptions> _options; // always current
-    public EmailSender(IOptionsMonitor<SmtpOptions> options) => _options = options;
-    public void Send() => Connect(_options.CurrentValue.Host);
+ private readonly IOptionsMonitor<SmtpOptions> _options; // always current
+ public EmailSender(IOptionsMonitor<SmtpOptions> options) => _options = options;
+ public void Send => Connect(_options.CurrentValue.Host);
 }
 ```
 
@@ -36,14 +36,14 @@ Sources are added in order (`appsettings.json` → `appsettings.{Environment}.js
 
 ### 2.2 `IOptions<T>` vs `IOptionsSnapshot<T>` vs `IOptionsMonitor<T>`
 - **`IOptions<T>`**: `Singleton`-lifetime-safe, computed **once** and cached forever — never reflects later configuration changes. Simplest, but stale-by-design.
-- **`IOptionsSnapshot<T>`**: `Scoped` — recomputed **once per request/scope**, reflecting the configuration as of that scope's start. Good for per-request consistency with reload support, but **cannot be injected into a `Singleton`** (a captive-dependency violation, directly Module 10 §2.2's rule — `IOptionsSnapshot<T>` is literally `Scoped`).
-- **`IOptionsMonitor<T>`**: `Singleton`-safe, but **always current** via `.CurrentValue` (re-reads on change) and supports `.OnChange(callback)` for reactive updates — this is precisely why Module 10 §Advanced Q6 cited it as the canonical example of "safe for a Singleton to hold long-term because it's designed to be a live view, not a frozen snapshot."
+- **`IOptionsSnapshot<T>`**: `Scoped` — recomputed **once per request/scope**, reflecting the configuration as of that scope's start. Good for per-request consistency with reload support, but **cannot be injected into a `Singleton`** (a captive-dependency violation, directly the rule — `IOptionsSnapshot<T>` is literally `Scoped`).
+- **`IOptionsMonitor<T>`**: `Singleton`-safe, but **always current** via `.CurrentValue` (re-reads on change) and supports `.OnChange(callback)` for reactive updates — this is precisely why §Advanced Q6 cited it as the canonical example of "safe for a Singleton to hold long-term because it's designed to be a live view, not a frozen snapshot."
 
 ### 2.3 Options Validation
-`services.AddOptions<SmtpOptions>().Bind(config.GetSection("Smtp")).ValidateDataAnnotations().ValidateOnStart()` — `ValidateOnStart()` (rather than lazy, first-use validation) forces invalid configuration to fail the application at **startup**, not on the first request that happens to touch it — directly the same "fail fast, fail loud, fail at build/start time not runtime" principle recurring throughout this course (Module 7's exhaustiveness-as-error, Module 10's `ValidateOnBuild`).
+`services.AddOptions<SmtpOptions>.Bind(config.GetSection("Smtp")).ValidateDataAnnotations.ValidateOnStart` — `ValidateOnStart` (rather than lazy, first-use validation) forces invalid configuration to fail the application at **startup**, not on the first request that happens to touch it — directly the same "fail fast, fail loud, fail at build/start time not runtime" principle recurring throughout this course.
 
 ### 2.4 Named Options
-Multiple distinct configurations of the same options type (`services.Configure<SmtpOptions>("Marketing", ...)`, `services.Configure<SmtpOptions>("Transactional", ...)`) resolved via `IOptionsMonitor<T>.Get("Marketing")` — lets one options *type* serve multiple independently-configured instances.
+Multiple distinct configurations of the same options type (`services.Configure<SmtpOptions>("Marketing",...)`, `services.Configure<SmtpOptions>("Transactional",...)`) resolved via `IOptionsMonitor<T>.Get("Marketing")` — lets one options *type* serve multiple independently-configured instances.
 
 ---
 
@@ -51,30 +51,30 @@ Multiple distinct configurations of the same options type (`services.Configure<S
 
 ```mermaid
 graph LR
-    A[appsettings.json] --> M[Merged IConfiguration]
-    B[appsettings.Production.json] --> M
-    C[Environment Variables] --> M
-    D[Command-line args] --> M
-    M -->|Bind| E["IOptions&lt;T&gt; (once, frozen)"]
-    M -->|Bind per-scope| F["IOptionsSnapshot&lt;T&gt; (per request)"]
-    M -->|Bind + watch for change| G["IOptionsMonitor&lt;T&gt; (always current)"]
+ A[appsettings.json] --> M[Merged IConfiguration]
+ B[appsettings.Production.json] --> M
+ C[Environment Variables] --> M
+ D[Command-line args] --> M
+ M -->|Bind| E["IOptions&lt;T&gt; (once, frozen)"]
+ M -->|Bind per-scope| F["IOptionsSnapshot&lt;T&gt; (per request)"]
+ M -->|Bind + watch for change| G["IOptionsMonitor&lt;T&gt; (always current)"]
 ```
 
 ---
 
 ## 4. Production Example
 
-**Scenario**: A feature-flag service injected `IOptionsSnapshot<FeatureFlags>` into a `Singleton`-registered background scheduler — this threw `InvalidOperationException` (captive-dependency violation, Module 10 §2.3) immediately once `ValidateOnBuild` was enabled organization-wide (Module 10 §4's remediation). **Fix**: switched to `IOptionsMonitor<FeatureFlags>`, which is `Singleton`-safe and still reflects live config-file changes via its `.OnChange` hook. **Lesson**: the three options interfaces aren't interchangeable — the choice is a lifetime decision with the exact same captive-dependency stakes as any other DI lifetime choice.
+**Scenario**: A feature-flag service injected `IOptionsSnapshot<FeatureFlags>` into a `Singleton`-registered background scheduler — this threw `InvalidOperationException` (captive-dependency violation) immediately once `ValidateOnBuild` was enabled organization-wide (the remediation). **Fix**: switched to `IOptionsMonitor<FeatureFlags>`, which is `Singleton`-safe and still reflects live config-file changes via its `.OnChange` hook. **Lesson**: the three options interfaces aren't interchangeable — the choice is a lifetime decision with the exact same captive-dependency stakes as any other DI lifetime choice.
 
 ---
 
 ## 5. Best Practices
 - Default to `IOptionsMonitor<T>` for anything that might ever be consumed by a `Singleton`; use `IOptionsSnapshot<T>` only for genuinely `Scoped` consumers needing per-request consistency.
-- Always call `.ValidateOnStart()` for required configuration — fail at startup, not on first use.
+- Always call `.ValidateOnStart` for required configuration — fail at startup, not on first use.
 - Never inject raw `IConfiguration` deep into business logic — bind to a typed options class at the composition root.
 
 ## 6. Anti-patterns
-- Injecting `IOptionsSnapshot<T>` into a `Singleton` (captive dependency, §4).
+- Injecting `IOptionsSnapshot<T>` into a `Singleton` (captive dependency).
 - Stringly-typed `configuration["A:B:C"]` lookups scattered through business logic instead of bound options classes.
 - Storing secrets in `appsettings.json` committed to source control instead of user-secrets/Key Vault/environment variables.
 
@@ -85,118 +85,118 @@ graph LR
 ### Basic (10)
 
 1. **Q: What does the Options pattern solve that raw `IConfiguration` access doesn't?**
-   **A:** Strong typing (no string-indexed key lookups scattered through code), validation, and structured, well-defined reload semantics via three distinct interfaces.
+ **A:** Strong typing (no string-indexed key lookups scattered through code), validation, and structured, well-defined reload semantics via three distinct interfaces.
 
 2. **Q: If a key exists in both `appsettings.json` and an environment variable, which wins?**
-   **A:** The environment variable — later-added configuration sources override earlier ones for the same key.
+ **A:** The environment variable — later-added configuration sources override earlier ones for the same key.
 
 3. **Q: What is `IOptions<T>`'s reload behavior?**
-   **A:** None — it's computed once and cached forever for the application's lifetime, never reflecting later configuration changes.
+ **A:** None — it's computed once and cached forever for the application's lifetime, never reflecting later configuration changes.
 
 4. **Q: Can `IOptionsSnapshot<T>` be safely injected into a `Singleton`-lifetime service?**
-   **A:** No — `IOptionsSnapshot<T>` is itself `Scoped`, so injecting it into a `Singleton` is a captive-dependency violation.
+ **A:** No — `IOptionsSnapshot<T>` is itself `Scoped`, so injecting it into a `Singleton` is a captive-dependency violation.
 
-5. **Q: What does calling `.ValidateOnStart()` do?**
-   **A:** Forces options validation to run at application startup, failing the app immediately if configuration is invalid, rather than only failing lazily on first use.
+5. **Q: What does calling `.ValidateOnStart` do?**
+ **A:** Forces options validation to run at application startup, failing the app immediately if configuration is invalid, rather than only failing lazily on first use.
 
 6. **Q: What are named options for?**
-   **A:** Registering multiple independently-configured instances of the same options type, resolved by name via `IOptionsMonitor<T>.Get(name)`.
+ **A:** Registering multiple independently-configured instances of the same options type, resolved by name via `IOptionsMonitor<T>.Get(name)`.
 
 7. **Q: Where should secrets be stored during local development?**
-   **A:** The User Secrets manager — never committed to `appsettings.json` in source control.
+ **A:** The User Secrets manager — never committed to `appsettings.json` in source control.
 
 8. **Q: What is `IOptionsMonitor<T>.OnChange` used for?**
-   **A:** Registering a callback that runs reactively whenever the underlying configuration changes, enabling live-update behavior beyond just reading `.CurrentValue`.
+ **A:** Registering a callback that runs reactively whenever the underlying configuration changes, enabling live-update behavior beyond just reading `.CurrentValue`.
 
 9. **Q: What lifetime is `IConfiguration` itself typically registered with?**
-   **A:** `Singleton` — the merged configuration root is built once at host startup and shared process-wide; reload-on-change providers mutate its underlying data in place rather than replacing the registered instance.
+ **A:** `Singleton` — the merged configuration root is built once at host startup and shared process-wide; reload-on-change providers mutate its underlying data in place rather than replacing the registered instance.
 
 10. **Q: What's the standard way to bind a configuration section to a strongly-typed class?**
-    **A:** `services.Configure<T>(configuration.GetSection("SectionName"))`.
+ **A:** `services.Configure<T>(configuration.GetSection("SectionName"))`.
 
 ### Intermediate (10)
 
 1. **Q: Precisely distinguish `IOptionsSnapshot<T>` from `IOptionsMonitor<T>`.**
-   **A:** `IOptionsSnapshot<T>` is `Scoped` and recomputed once per request/scope, giving per-request consistency but no ability to be held by a `Singleton`; `IOptionsMonitor<T>` is `Singleton`-safe and always reflects the current configuration via `.CurrentValue`, re-evaluated on each access against the latest known state rather than frozen at scope start.
+ **A:** `IOptionsSnapshot<T>` is `Scoped` and recomputed once per request/scope, giving per-request consistency but no ability to be held by a `Singleton`; `IOptionsMonitor<T>` is `Singleton`-safe and always reflects the current configuration via `.CurrentValue`, re-evaluated on each access against the latest known state rather than frozen at scope start.
 
 2. **Q: Why do the exact same captive-dependency rules from the DI module apply to options interfaces?**
-   **A:** Because `IOptionsSnapshot<T>` is, under the hood, just an ordinary `Scoped`-registered service like any other — the container has no special-cased exception for options types, so capturing it in a `Singleton`'s constructor triggers the identical `ValidateScopes`/`ValidateOnBuild` violation as any other `Scoped`-into-`Singleton` mistake.
+ **A:** Because `IOptionsSnapshot<T>` is, under the hood, just an ordinary `Scoped`-registered service like any other — the container has no special-cased exception for options types, so capturing it in a `Singleton`'s constructor triggers the identical `ValidateScopes`/`ValidateOnBuild` violation as any other `Scoped`-into-`Singleton` mistake.
 
-3. **Q: How does `ValidateDataAnnotations()` integrate with `ValidateOnStart()`?**
-   **A:** `ValidateDataAnnotations()` registers a validator that checks the bound options object against its `[Required]`/`[Range]`/etc. attributes; `ValidateOnStart()` ensures that validator actually runs eagerly at startup rather than only the first time the option is resolved.
+3. **Q: How does `ValidateDataAnnotations` integrate with `ValidateOnStart`?**
+ **A:** `ValidateDataAnnotations` registers a validator that checks the bound options object against its `[Required]`/`[Range]`/etc. attributes; `ValidateOnStart` ensures that validator actually runs eagerly at startup rather than only the first time the option is resolved.
 
 4. **Q: Why do command-line arguments have the highest default precedence among configuration sources?**
-   **A:** They're added last in the default configuration-source ordering, and later-added sources override earlier ones — command-line args are specifically intended for one-off overrides at launch time, which is why this ordering is deliberate.
+ **A:** They're added last in the default configuration-source ordering, and later-added sources override earlier ones — command-line args are specifically intended for one-off overrides at launch time, which is why this ordering is deliberate.
 
 5. **Q: How does reload-on-change work under the hood for the JSON configuration provider?**
-   **A:** It uses an `IChangeToken`-based file-system watcher — when the underlying JSON file changes, the change token fires, triggering re-parsing and notifying any `IOptionsMonitor<T>.OnChange` subscribers.
+ **A:** It uses an `IChangeToken`-based file-system watcher — when the underlying JSON file changes, the change token fires, triggering re-parsing and notifying any `IOptionsMonitor<T>.OnChange` subscribers.
 
 6. **Q: Why can't you simply "add a reload feature" to `IOptions<T>` without changing which interface you inject?**
-   **A:** `IOptions<T>`'s entire contract is "compute once, cache forever" — its `Singleton`-safe caching behavior is exactly why it never re-reads; changing that behavior would require injecting a different interface (`IOptionsMonitor<T>`) designed for live updates, not modifying `IOptions<T>` itself.
+ **A:** `IOptions<T>`'s entire contract is "compute once, cache forever" — its `Singleton`-safe caching behavior is exactly why it never re-reads; changing that behavior would require injecting a different interface (`IOptionsMonitor<T>`) designed for live updates, not modifying `IOptions<T>` itself.
 
 7. **Q: What's a realistic bug scenario where a team believes their configuration reload feature is broken, but the actual root cause is interface choice?**
-   **A:** A service injects `IOptions<T>` (perhaps copied from an older code example), updates the underlying config file in production, and reports "the app isn't picking up my change" — the fix is switching to `IOptionsMonitor<T>`, not debugging the configuration provider's file-watching mechanism, which was working correctly all along.
+ **A:** A service injects `IOptions<T>` (perhaps copied from an older code example), updates the underlying config file in production, and reports "the app isn't picking up my change" — the fix is switching to `IOptionsMonitor<T>`, not debugging the configuration provider's file-watching mechanism, which was working correctly all along.
 
 8. **Q: Why might named options be preferable to registering a separate class per tenant/variant?**
-   **A:** They let one shared options type and one shared consuming-service implementation serve many independently-configured instances, avoiding class-per-variant duplication while keeping each instance's configuration independently bindable and validatable.
+ **A:** They let one shared options type and one shared consuming-service implementation serve many independently-configured instances, avoiding class-per-variant duplication while keeping each instance's configuration independently bindable and validatable.
 
 9. **Q: What's the risk of storing a security-critical setting in `appsettings.json` with no environment-variable override guard?**
-   **A:** Anyone with access to modify environment variables in any deployment environment could silently override the intended value — for genuinely security-critical settings, some teams deliberately lock down which sources are trusted to override them, rather than accepting the default full-precedence-chain behavior unconditionally.
+ **A:** Anyone with access to modify environment variables in any deployment environment could silently override the intended value — for genuinely security-critical settings, some teams deliberately lock down which sources are trusted to override them, rather than accepting the default full-precedence-chain behavior unconditionally.
 
 10. **Q: Why is validating configuration shape different from validating configuration values, and why might both matter for a feature-flag system?**
-    **A:** Shape validation (via `ValidateOnStart`) ensures required feature-flag keys exist and are the correct type at startup; runtime value changes (a flag's boolean value flipping live) are a separate, expected, reactive event handled via `IOptionsMonitor.OnChange`, not something `ValidateOnStart` needs to re-check on every change.
+ **A:** Shape validation (via `ValidateOnStart`) ensures required feature-flag keys exist and are the correct type at startup; runtime value changes (a flag's boolean value flipping live) are a separate, expected, reactive event handled via `IOptionsMonitor.OnChange`, not something `ValidateOnStart` needs to re-check on every change.
 
 ### Advanced (10)
 
 1. **Q: Design a Key-Vault-backed configuration provider that fails the application gracefully (not with an obscure exception deep in business logic) if a required secret is missing.**
-   **A:** Register the Key Vault provider early in the configuration-source chain, then bind the dependent options with `.ValidateDataAnnotations().ValidateOnStart()` — a missing secret leaves the bound property at its default (often `null` for a `[Required] string`), and `ValidateOnStart()` surfaces a clear, startup-time `OptionsValidationException` naming exactly which property failed validation, rather than the application starting successfully and failing obscurely (a `NullReferenceException` deep in an unrelated code path) the first time that secret is actually used.
+ **A:** Register the Key Vault provider early in the configuration-source chain, then bind the dependent options with `.ValidateDataAnnotations.ValidateOnStart` — a missing secret leaves the bound property at its default (often `null` for a `[Required] string`), and `ValidateOnStart` surfaces a clear, startup-time `OptionsValidationException` naming exactly which property failed validation, rather than the application starting successfully and failing obscurely (a `NullReferenceException` deep in an unrelated code path) the first time that secret is actually used.
 
 2. **Q: Explain exactly why `IOptionsMonitor<T>` was cited in the DI module as the canonical exception to "don't let a Singleton hold long-lived state that should vary."**
-   **A:** It isn't a frozen snapshot the way `IOptions<T>` is — it's a live, self-updating view explicitly designed to be held indefinitely by a `Singleton` and always reflect current configuration; the "safe to hold long-term" property comes from its *design intent*, not from an exception to DI lifetime rules — it's simply not carrying any per-scope state that would need to vary per request in the first place.
+ **A:** It isn't a frozen snapshot the way `IOptions<T>` is — it's a live, self-updating view explicitly designed to be held indefinitely by a `Singleton` and always reflect current configuration; the "safe to hold long-term" property comes from its *design intent*, not from an exception to DI lifetime rules — it's simply not carrying any per-scope state that would need to vary per request in the first place.
 
 3. **Q: A team reports "our configuration change isn't taking effect" despite confirming the underlying JSON file was updated correctly. Walk through the diagnostic steps.**
-   **A:** First check which options interface the consuming service actually injects (`IOptions<T>` never reflects changes — the most common root cause); if it's already `IOptionsMonitor<T>`, verify the JSON provider was registered with `reloadOnChange: true` (a configurable, sometimes-overlooked flag); if using a centralized/remote configuration source (Key Vault, Azure App Configuration), verify that specific provider's own polling/refresh interval, since not all providers watch for changes as immediately as a local file-system watcher does.
+ **A:** First check which options interface the consuming service actually injects (`IOptions<T>` never reflects changes — the most common root cause); if it's already `IOptionsMonitor<T>`, verify the JSON provider was registered with `reloadOnChange: true` (a configurable, sometimes-overlooked flag); if using a centralized/remote configuration source (Key Vault, Azure App Configuration), verify that specific provider's own polling/refresh interval, since not all providers watch for changes as immediately as a local file-system watcher does.
 
 4. **Q: Design named-options support for multi-tenant per-tenant SMTP configuration, and explain how a consuming service resolves the correct instance per request.**
-   **A:** Register each tenant's configuration via `services.Configure<SmtpOptions>(tenantId, config.GetSection($"Tenants:{tenantId}:Smtp"))` at startup (or dynamically via a custom `IConfigureOptions<SmtpOptions>` reading tenant IDs from a database); the consuming service injects `IOptionsMonitor<SmtpOptions>` and calls `.Get(currentTenantId)` (with `currentTenantId` resolved from the current request's tenant context, Module 12's `ITenantContext` pattern) rather than `.CurrentValue`, which would return the unnamed/default instance.
+ **A:** Register each tenant's configuration via `services.Configure<SmtpOptions>(tenantId, config.GetSection($"Tenants:{tenantId}:Smtp"))` at startup (or dynamically via a custom `IConfigureOptions<SmtpOptions>` reading tenant IDs from a database); the consuming service injects `IOptionsMonitor<SmtpOptions>` and calls `.Get(currentTenantId)` (with `currentTenantId` resolved from the current request's tenant context, the `ITenantContext` pattern) rather than `.CurrentValue`, which would return the unnamed/default instance.
 
 5. **Q: Architect a zero-downtime, fleet-wide configuration-rollout strategy using centralized configuration and `IOptionsMonitor`.**
-   **A:** Use a centralized configuration store (Azure App Configuration, Consul) with each replica's `IConfiguration` polling it on a short interval; changes propagate to every replica's `IOptionsMonitor<T>.OnChange` callbacks without any redeployment or restart — combined with a feature-flag-gated rollout (enabling a change for 5% of traffic via a per-request flag check before 100%), this gives a genuine progressive-rollout capability without touching deployment infrastructure at all, purely through configuration propagation.
+ **A:** Use a centralized configuration store (Azure App Configuration, Consul) with each replica's `IConfiguration` polling it on a short interval; changes propagate to every replica's `IOptionsMonitor<T>.OnChange` callbacks without any redeployment or restart — combined with a feature-flag-gated rollout (enabling a change for 5% of traffic via a per-request flag check before 100%), this gives a genuine progressive-rollout capability without touching deployment infrastructure at all, purely through configuration propagation.
 
 6. **Q: What would you need to implement to build a fully custom `IConfigurationProvider` with correct change-token support, beyond just reading key/value pairs?**
-   **A:** Implement `Load()` to populate the provider's internal data dictionary, and implement `IChangeToken GetReloadToken()` returning a token that correctly fires (`.HasChanged` becomes observable via its registered callback) whenever the underlying source's data actually changes — without a correctly-implemented, firing change token, `IOptionsMonitor<T>.OnChange` subscribers would never be notified, silently defeating live-reload for that specific custom source despite the provider otherwise working correctly for initial reads.
+ **A:** Implement `Load` to populate the provider's internal data dictionary, and implement `IChangeToken GetReloadToken` returning a token that correctly fires (`.HasChanged` becomes observable via its registered callback) whenever the underlying source's data actually changes — without a correctly-implemented, firing change token, `IOptionsMonitor<T>.OnChange` subscribers would never be notified, silently defeating live-reload for that specific custom source despite the provider otherwise working correctly for initial reads.
 
 7. **Q: Explain the security implication of configuration-source precedence when environment variables can override values from a more tightly-access-controlled source like Key Vault.**
-   **A:** If environment variables are added to the configuration chain *after* Key Vault, an actor with access to modify a deployment's environment variables (potentially a broader set of people than those with Key Vault write access) could silently override a security-critical value Key Vault was specifically meant to authoritatively control — deliberately ordering Key Vault *last* (highest precedence) for security-critical settings, or explicitly restricting which sources are even registered in security-sensitive deployment contexts, is the correct mitigation.
+ **A:** If environment variables are added to the configuration chain *after* Key Vault, an actor with access to modify a deployment's environment variables (potentially a broader set of people than those with Key Vault write access) could silently override a security-critical value Key Vault was specifically meant to authoritatively control — deliberately ordering Key Vault *last* (highest precedence) for security-critical settings, or explicitly restricting which sources are even registered in security-sensitive deployment contexts, is the correct mitigation.
 
 8. **Q: How would you test that a custom `IValidateOptions<T>` correctly catches a cross-field validation failure that Data Annotations alone can't express?**
-   **A:** Write a unit test constructing the options POCO directly with an invalid cross-field combination (e.g., `MinValue > MaxValue`), invoke the custom validator's `Validate(name, options)` method directly, and assert the returned `ValidateOptionsResult` is a failure with the expected error message — no DI container or `ValidateOnStart()` needed for this unit-level test, since the validator is a plain, directly-testable class.
+ **A:** Write a unit test constructing the options POCO directly with an invalid cross-field combination (e.g., `MinValue > MaxValue`), invoke the custom validator's `Validate(name, options)` method directly, and assert the returned `ValidateOptionsResult` is a failure with the expected error message — no DI container or `ValidateOnStart` needed for this unit-level test, since the validator is a plain, directly-testable class.
 
-9. **Q: Why might binding configuration directly into a mutable class (rather than an immutable `record`, Module 7) create a subtle bug for `IOptionsMonitor<T>` consumers?**
-   **A:** If a consumer holds a reference to `.CurrentValue` and the underlying options are mutable, a concurrent reload could, in principle, mutate the very object a consumer is mid-way through reading (a race), whereas `IOptionsMonitor<T>` is actually designed to hand out a fresh, immutable instance on each configuration change rather than mutating the existing one in place — using an immutable `record`-based options class removes any ambiguity or accidental reliance on in-place mutation, structurally reinforcing the intended "immutable snapshot per version" semantics.
+9. **Q: Why might binding configuration directly into a mutable class (rather than an immutable `record`) create a subtle bug for `IOptionsMonitor<T>` consumers?**
+ **A:** If a consumer holds a reference to `.CurrentValue` and the underlying options are mutable, a concurrent reload could, in principle, mutate the very object a consumer is mid-way through reading (a race), whereas `IOptionsMonitor<T>` is actually designed to hand out a fresh, immutable instance on each configuration change rather than mutating the existing one in place — using an immutable `record`-based options class removes any ambiguity or accidental reliance on in-place mutation, structurally reinforcing the intended "immutable snapshot per version" semantics.
 
 10. **Q: How would you reason about whether a given piece of application state belongs in configuration/options versus a database-backed settings table?**
-    **A:** Configuration/options are appropriate for values that are deployment/environment-scoped and change relatively infrequently, ideally versioned alongside code/infrastructure; a database-backed settings table is more appropriate for values that are business-data-scoped (per-user, per-tenant, frequently changed by end users through a UI, needing audit history) — conflating the two (e.g., storing rapidly-changing, user-editable business preferences as "configuration") tends to produce awkward reload/consistency semantics that a proper data-layer model would handle more naturally.
+ **A:** Configuration/options are appropriate for values that are deployment/environment-scoped and change relatively infrequently, ideally versioned alongside code/infrastructure; a database-backed settings table is more appropriate for values that are business-data-scoped (per-user, per-tenant, frequently changed by end users through a UI, needing audit history) — conflating the two (e.g., storing rapidly-changing, user-editable business preferences as "configuration") tends to produce awkward reload/consistency semantics that a proper data-layer model would handle more naturally.
 
 ### Expert (FinTech Principal Panel)
 
 1. **Q: A production incident is traced to a runtime configuration change (someone lowered a risk threshold, or flipped a flag) that no one reviewed. In a regulated shop, how do you govern configuration so a config change is treated with the same rigor as a code change?**
-   **A:** The core insight is that **configuration is code** — a live config change can move money, disable a control, or take down trading just as a deploy can, so it belongs under the same change-management regime (SOX/PCI change-control expectations apply). Governance: (1) store config in **version control / a system of record** (GitOps, or App Configuration with change history), never hand-edited in a portal with no trail; (2) require **peer review/approval** for changes to security- or money-affecting settings, with the highest-risk ones behind maker-checker; (3) capture an **immutable audit trail** — who changed what, from what to what, when, and why (ticket ref) — because auditors and incident reviews will ask; (4) **stage rollouts** (canary %, then fleet) with `IOptionsMonitor` propagation and an **instant rollback** to the last known-good; (5) **validate on load** (`ValidateOnStart`/`IValidateOptions`) so a malformed or out-of-band value fails fast rather than silently degrading a control; (6) restrict *who* can change *which* settings (least privilege, and mind source precedence — Advanced Q7 — so a broadly-accessible env var can't override a Key-Vault-authoritative control). The Principal framing: untracked, unreviewed runtime config is an unlogged production change; the fix is to put config through review + audit + staged rollout + fast rollback, exactly like code.
-   **Why correct:** Treats config as a change-controlled artifact with review, immutable audit, staged rollout/rollback, validation, and least-privilege — the regulated-shop answer.
-   **Common mistakes:** Portal-edited config with no history; no approval on control-affecting settings; no canary/rollback; broad access to change critical values.
-   **Follow-ups:** "Which settings warrant maker-checker vs. simple review?" / "How does source precedence become a governance hole?" / "How do you prove to an auditor who changed a threshold last quarter?"
+ **A:** The core insight is that **configuration is code** — a live config change can move money, disable a control, or take down trading just as a deploy can, so it belongs under the same change-management regime (SOX/PCI change-control expectations apply). Governance: (1) store config in **version control / a system of record** (GitOps, or App Configuration with change history), never hand-edited in a portal with no trail; (2) require **peer review/approval** for changes to security- or money-affecting settings, with the highest-risk ones behind maker-checker; (3) capture an **immutable audit trail** — who changed what, from what to what, when, and why (ticket ref) — because auditors and incident reviews will ask; (4) **stage rollouts** (canary %, then fleet) with `IOptionsMonitor` propagation and an **instant rollback** to the last known-good; (5) **validate on load** (`ValidateOnStart`/`IValidateOptions`) so a malformed or out-of-band value fails fast rather than silently degrading a control; (6) restrict *who* can change *which* settings (least privilege, and mind source precedence — Advanced Q7 — so a broadly-accessible env var can't override a Key-Vault-authoritative control). The Principal framing: untracked, unreviewed runtime config is an unlogged production change; the fix is to put config through review + audit + staged rollout + fast rollback, exactly like code.
+ **Why correct:** Treats config as a change-controlled artifact with review, immutable audit, staged rollout/rollback, validation, and least-privilege — the regulated-shop answer.
+ **Common mistakes:** Portal-edited config with no history; no approval on control-affecting settings; no canary/rollback; broad access to change critical values.
+ **Follow-ups:** "Which settings warrant maker-checker vs. simple review?" / "How does source precedence become a governance hole?" / "How do you prove to an auditor who changed a threshold last quarter?"
 
 2. **Q: A database or API secret must be rotated (routine policy, or after a suspected leak) with zero downtime across a large fleet. Design the rotation, and discuss the blast radius of a leaked secret in a payments system.**
-   **A:** Zero-downtime rotation requires **overlapping validity**: provision the *new* secret while the *old* one is still accepted (dual-valid window), propagate the new value to the fleet via the centralized store + `IOptionsMonitor.OnChange` (no redeploy), confirm all instances have switched, then revoke the old — never flip atomically to a single new value while instances still hold the old (that causes auth failures mid-rotation). Prefer **short-lived, auto-rotated credentials** (a secrets manager issuing dynamic DB creds, managed identity / workload identity so there's no static secret at all) so rotation is continuous and mostly automated rather than a risky manual event. Blast radius of a leak: a static, long-lived payments secret grants an attacker whatever that credential authorizes for as long as it's valid — so minimize it by scoping each secret to least privilege (one purpose, one service), keeping lifetimes short, isolating secrets per environment/tenant so one leak doesn't span the estate, and monitoring for anomalous use. On a *suspected* leak you must be able to revoke and rotate **fast** — which is only possible if the system already supports dual-valid rotation and per-service scoping. The Principal framing: design so that rotation is cheap and routine and a leaked secret is short-lived and narrowly-scoped — the goal is a small, quickly-closable blast radius, not perfect secrecy.
-   **Why correct:** Uses overlapping-validity rotation with fleet propagation, favors dynamic/short-lived creds, and bounds blast radius via least-privilege scoping + fast revocation.
-   **Common mistakes:** Atomic single-value swap causing mid-rotation auth failures; long-lived broadly-scoped static secrets; no fast-revoke path; secrets shared across environments/services.
-   **Follow-ups:** "Why is a dual-valid window necessary for zero downtime?" / "How do managed/workload identities remove the secret entirely?" / "First hour after a suspected leak — what do you do?"
+ **A:** Zero-downtime rotation requires **overlapping validity**: provision the *new* secret while the *old* one is still accepted (dual-valid window), propagate the new value to the fleet via the centralized store + `IOptionsMonitor.OnChange` (no redeploy), confirm all instances have switched, then revoke the old — never flip atomically to a single new value while instances still hold the old (that causes auth failures mid-rotation). Prefer **short-lived, auto-rotated credentials** (a secrets manager issuing dynamic DB creds, managed identity / workload identity so there's no static secret at all) so rotation is continuous and mostly automated rather than a risky manual event. Blast radius of a leak: a static, long-lived payments secret grants an attacker whatever that credential authorizes for as long as it's valid — so minimize it by scoping each secret to least privilege (one purpose, one service), keeping lifetimes short, isolating secrets per environment/tenant so one leak doesn't span the estate, and monitoring for anomalous use. On a *suspected* leak you must be able to revoke and rotate **fast** — which is only possible if the system already supports dual-valid rotation and per-service scoping. The Principal framing: design so that rotation is cheap and routine and a leaked secret is short-lived and narrowly-scoped — the goal is a small, quickly-closable blast radius, not perfect secrecy.
+ **Why correct:** Uses overlapping-validity rotation with fleet propagation, favors dynamic/short-lived creds, and bounds blast radius via least-privilege scoping + fast revocation.
+ **Common mistakes:** Atomic single-value swap causing mid-rotation auth failures; long-lived broadly-scoped static secrets; no fast-revoke path; secrets shared across environments/services.
+ **Follow-ups:** "Why is a dual-valid window necessary for zero downtime?" / "How do managed/workload identities remove the secret entirely?" / "First hour after a suspected leak — what do you do?"
 
 3. **Q: You need an instant "kill switch" to disable a payment rail or a risky feature fleet-wide the moment something goes wrong. Design it with the options/config system, and address consistency and safety.**
-   **A:** Model it as a centrally-stored flag consumed via `IOptionsMonitor<T>`/a feature-flag service so a single change propagates to every replica within seconds without a deploy — the value being *not* redeploying is the whole point in an incident. Design for **fail-safe defaults**: the switch should default to the *safe* state if config can't be read (a payment rail that can't confirm its flag should fail closed, not open), and the code path must actually check the flag at the decision point (a flipped flag that a long-running loop only reads at startup is useless — read `CurrentValue` per operation). Consistency: propagation is eventually-consistent across the fleet, so accept a brief window where some instances have switched and others haven't, and make the action **idempotent/safe under partial rollout** (don't design a switch whose half-applied state corrupts data). Safety/governance: kill switches are powerful, so who can flip them, an audit record of every flip (Q1), and alerting when one is active are mandatory; pair with a tested runbook so flipping it during an incident is routine, not improvised. The Principal framing: a kill switch trades a little consistency for the ability to stop harm in seconds — worth it, provided it fails safe, is checked at the decision point, is idempotent under partial rollout, and is audited.
-   **Why correct:** Fast fleet-wide propagation, fail-safe default, per-operation flag checks, partial-rollout safety, and audit/access governance — a correct, operable kill switch.
-   **Common mistakes:** Flag read only at startup; fail-open default when config is unreadable; unaudited/unrestricted flipping; assuming instant fleet-wide consistency.
-   **Follow-ups:** "Why default to the safe state on a config-read failure?" / "How do you handle the window where only some instances have flipped?" / "Who can flip it and how is that logged?"
+ **A:** Model it as a centrally-stored flag consumed via `IOptionsMonitor<T>`/a feature-flag service so a single change propagates to every replica within seconds without a deploy — the value being *not* redeploying is the whole point in an incident. Design for **fail-safe defaults**: the switch should default to the *safe* state if config can't be read (a payment rail that can't confirm its flag should fail closed, not open), and the code path must actually check the flag at the decision point (a flipped flag that a long-running loop only reads at startup is useless — read `CurrentValue` per operation). Consistency: propagation is eventually-consistent across the fleet, so accept a brief window where some instances have switched and others haven't, and make the action **idempotent/safe under partial rollout** (don't design a switch whose half-applied state corrupts data). Safety/governance: kill switches are powerful, so who can flip them, an audit record of every flip (Q1), and alerting when one is active are mandatory; pair with a tested runbook so flipping it during an incident is routine, not improvised. The Principal framing: a kill switch trades a little consistency for the ability to stop harm in seconds — worth it, provided it fails safe, is checked at the decision point, is idempotent under partial rollout, and is audited.
+ **Why correct:** Fast fleet-wide propagation, fail-safe default, per-operation flag checks, partial-rollout safety, and audit/access governance — a correct, operable kill switch.
+ **Common mistakes:** Flag read only at startup; fail-open default when config is unreadable; unaudited/unrestricted flipping; assuming instant fleet-wide consistency.
+ **Follow-ups:** "Why default to the safe state on a config-read failure?" / "How do you handle the window where only some instances have flipped?" / "Who can flip it and how is that logged?"
 
 ---
 
@@ -206,33 +206,33 @@ graph LR
 ```csharp
 public class SmtpOptions
 {
-    [Required] public string Host { get; set; } = "";
-    [Range(1, 65535)] public int Port { get; set; }
+ [Required] public string Host { get; set; } = "";
+ [Range(1, 65535)] public int Port { get; set; }
 }
 
-builder.Services.AddOptions<SmtpOptions>()
-    .Bind(builder.Configuration.GetSection("Smtp"))
-    .ValidateDataAnnotations()
-    .ValidateOnStart(); // fails the app at startup, not on first email send, if Host/Port are invalid
+builder.Services.AddOptions<SmtpOptions>
+.Bind(builder.Configuration.GetSection("Smtp"))
+.ValidateDataAnnotations
+.ValidateOnStart; // fails the app at startup, not on first email send, if Host/Port are invalid
 ```
-**Discussion**: Without `ValidateOnStart()`, a missing `Host` would only surface as an exception the first time `EmailSender` actually tries to connect — potentially hours after a bad deploy, in production, on the first attempted email send.
+**Discussion**: Without `ValidateOnStart`, a missing `Host` would only surface as an exception the first time `EmailSender` actually tries to connect — potentially hours after a bad deploy, in production, on the first attempted email send.
 
 ### Medium — Named options for per-tenant SMTP configuration
 ```csharp
-foreach (var tenant in builder.Configuration.GetSection("Tenants").GetChildren())
+foreach (var tenant in builder.Configuration.GetSection("Tenants").GetChildren)
 {
-    builder.Services.Configure<SmtpOptions>(tenant.Key, tenant.GetSection("Smtp"));
+ builder.Services.Configure<SmtpOptions>(tenant.Key, tenant.GetSection("Smtp"));
 }
 
 public class TenantEmailSender
 {
-    private readonly IOptionsMonitor<SmtpOptions> _options;
-    private readonly ITenantContext _tenantContext;
-    public TenantEmailSender(IOptionsMonitor<SmtpOptions> options, ITenantContext tenantContext)
-    {
-        _options = options; _tenantContext = tenantContext;
-    }
-    public void Send() => Connect(_options.Get(_tenantContext.TenantId).Host);
+ private readonly IOptionsMonitor<SmtpOptions> _options;
+ private readonly ITenantContext _tenantContext;
+ public TenantEmailSender(IOptionsMonitor<SmtpOptions> options, ITenantContext tenantContext)
+ {
+ _options = options; _tenantContext = tenantContext;
+ }
+ public void Send => Connect(_options.Get(_tenantContext.TenantId).Host);
 }
 ```
 **Discussion**: `.Get(name)` — not `.CurrentValue` — is what resolves the named instance; forgetting this and using `.CurrentValue` silently returns the unnamed default configuration instead of the tenant-specific one, a realistic, easy-to-make mistake.
@@ -241,29 +241,29 @@ public class TenantEmailSender
 ```csharp
 public class RangeOptions { public int MinValue { get; set; } public int MaxValue { get; set; } }
 
-public class RangeOptionsValidator : IValidateOptions<RangeOptions>
+public class RangeOptionsValidator: IValidateOptions<RangeOptions>
 {
-    public ValidateOptionsResult Validate(string? name, RangeOptions options)
-    {
-        if (options.MinValue >= options.MaxValue)
-            return ValidateOptionsResult.Fail("MinValue must be less than MaxValue.");
-        return ValidateOptionsResult.Success;
-    }
+ public ValidateOptionsResult Validate(string? name, RangeOptions options)
+ {
+ if (options.MinValue >= options.MaxValue)
+ return ValidateOptionsResult.Fail("MinValue must be less than MaxValue.");
+ return ValidateOptionsResult.Success;
+ }
 }
-// Registration: builder.Services.AddSingleton<IValidateOptions<RangeOptions>, RangeOptionsValidator>();
+// Registration: builder.Services.AddSingleton<IValidateOptions<RangeOptions>, RangeOptionsValidator>
 ```
-**Discussion**: Data Annotations (`[Range]`) validate a single property in isolation; `IValidateOptions<T>` is the correct extensibility point for validation logic spanning multiple properties, exactly the same "escalate to a custom mechanism once the built-in convenience methods can't express the rule" pattern seen with `AuthorizationHandler<T>` in Module 12.
+**Discussion**: Data Annotations (`[Range]`) validate a single property in isolation; `IValidateOptions<T>` is the correct extensibility point for validation logic spanning multiple properties, exactly the same "escalate to a custom mechanism once the built-in convenience methods can't express the rule" pattern seen with `AuthorizationHandler<T>`.
 
 ### Expert — Live-reloading feature flags invalidating a dependent cache atomically
 ```csharp
 public class FeatureFlagCache
 {
-    private readonly IMemoryCache _cache;
-    public FeatureFlagCache(IOptionsMonitor<FeatureFlags> monitor, IMemoryCache cache)
-    {
-        _cache = cache;
-        monitor.OnChange(flags => _cache.Remove("computed-feature-state")); // invalidate on ANY change
-    }
+ private readonly IMemoryCache _cache;
+ public FeatureFlagCache(IOptionsMonitor<FeatureFlags> monitor, IMemoryCache cache)
+ {
+ _cache = cache;
+ monitor.OnChange(flags => _cache.Remove("computed-feature-state")); // invalidate on ANY change
+ }
 }
 ```
 **Discussion**: `OnChange` fires on every reload regardless of whether the *specific* flag a given cache entry depends on actually changed — a coarse but simple and safe invalidation strategy; a more surgical version would diff old vs. new values and invalidate only affected cache keys, a worthwhile refinement to mention if asked to extend this further in an interview.
@@ -271,13 +271,13 @@ public class FeatureFlagCache
 ---
 
 ## 12. System Design
-A multi-region platform centralizes configuration via Azure App Configuration, with every replica's `IOptionsMonitor<T>` reacting to changes without redeployment; feature-flag rollouts are staged progressively (5% → 25% → 100% of traffic) using a per-request flag evaluation rather than a binary on/off switch, and every required setting is validated at startup (`ValidateOnStart`) so a bad configuration push fails new replica startup immediately (failing readiness checks, Module 14) rather than serving with broken configuration.
+A multi-region platform centralizes configuration via Azure App Configuration, with every replica's `IOptionsMonitor<T>` reacting to changes without redeployment; feature-flag rollouts are staged progressively (5% → 25% → 100% of traffic) using a per-request flag evaluation rather than a binary on/off switch, and every required setting is validated at startup (`ValidateOnStart`) so a bad configuration push fails new replica startup immediately (failing readiness checks) rather than serving with broken configuration.
 
 ## 13. Low-Level Design
-A small `ITenantOptionsResolver<T>` wrapping `IOptionsMonitor<T>.Get(tenantId)` behind a single-method interface lets consuming services depend on an abstraction rather than remembering to call `.Get(...)` with the correct tenant ID at every call site — directly mirroring Module 12 §13's `IResourceAuthorizationHelper` facade pattern, applied here to reduce repetitive, easy-to-get-wrong named-options resolution boilerplate.
+A small `ITenantOptionsResolver<T>` wrapping `IOptionsMonitor<T>.Get(tenantId)` behind a single-method interface lets consuming services depend on an abstraction rather than remembering to call `.Get(...)` with the correct tenant ID at every call site — directly mirroring the `IResourceAuthorizationHelper` facade pattern, applied here to reduce repetitive, easy-to-get-wrong named-options resolution boilerplate.
 
 ## 14. Production Debugging
-The signature incident for this module: a `Singleton` capturing `IOptionsSnapshot<T>` (§4) — diagnosed identically to any other captive-dependency bug (Module 10 §14): `ValidateOnBuild` throws at startup, naming the exact offending registration; the fix is switching to `IOptionsMonitor<T>`, not restructuring the consuming service's lifetime.
+The signature incident for this module: a `Singleton` capturing `IOptionsSnapshot<T>` — diagnosed identically to any other captive-dependency bug: `ValidateOnBuild` throws at startup, naming the exact offending registration; the fix is switching to `IOptionsMonitor<T>`, not restructuring the consuming service's lifetime.
 
 ## 15. Architecture Decision
 Centralized, live-reloadable configuration (Azure App Configuration/Consul + `IOptionsMonitor`) is recommended over redeploy-to-change static configuration for any setting that plausibly needs adjustment without a full deployment (feature flags, rate limits, timeout thresholds) — reserving redeploy-required static configuration for settings that are genuinely part of the application's build-time identity (connection strings tied to a specific environment's infrastructure).
@@ -286,15 +286,15 @@ Centralized, live-reloadable configuration (Azure App Configuration/Consul + `IO
 Large-scale feature-flag platforms (LaunchDarkly, Azure App Configuration's feature-management integration) are, architecturally, a specialized, externally-hosted implementation of exactly this module's `IOptionsMonitor`-based live-reload pattern — recognizing this parallel helps explain *why* a third-party feature-flag service integrates so naturally with `IOptionsMonitor<T>`-consuming code: it's solving the identical "Singleton-safe, always-current, reactively-updatable configuration" problem this module covers, just with a richer targeting/rollout UI layered on top.
 
 ## 17. Principal Engineer Perspective
-Treat options-interface choice with the same lifetime rigor as any other DI decision (Module 10) — this module's captive-dependency bug class is not a separate concern, it's the identical bug wearing configuration-specific clothing. Mandate `ValidateOnStart()` for all required configuration organization-wide, converting configuration mistakes into startup failures caught in CI/staging rather than production runtime surprises.
+Treat options-interface choice with the same lifetime rigor as any other DI decision — this module's captive-dependency bug class is not a separate concern, it's the identical bug wearing configuration-specific clothing. Mandate `ValidateOnStart` for all required configuration organization-wide, converting configuration mistakes into startup failures caught in CI/staging rather than production runtime surprises.
 
 ---
 
 ## 18. Revision
 
-**Key takeaways**: `IOptions` = frozen once; `IOptionsSnapshot` = per-scope, not Singleton-safe; `IOptionsMonitor` = always-current, Singleton-safe. `ValidateOnStart()` converts runtime configuration failures into startup failures. Configuration source precedence: later-added source wins.
+**Key takeaways**: `IOptions` = frozen once; `IOptionsSnapshot` = per-scope, not Singleton-safe; `IOptionsMonitor` = always-current, Singleton-safe. `ValidateOnStart` converts runtime configuration failures into startup failures. Configuration source precedence: later-added source wins.
 
-**Cross-reference**: [[02-DI-Container-Internals]] §2.5/§Advanced Q6 for the lifetime rules this module's options-interface choice directly inherits.
+**Cross-reference**: [[02-DI-Container-Internals]]/§Advanced Q6 for the lifetime rules this module's options-interface choice directly inherits.
 
 ---
 
