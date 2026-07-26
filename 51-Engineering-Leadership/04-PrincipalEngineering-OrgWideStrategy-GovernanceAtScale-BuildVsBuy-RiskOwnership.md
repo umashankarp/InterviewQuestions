@@ -32,45 +32,40 @@ Each of these is a *structural gap* in the organization, exactly as argued the s
 **How (30,000-ft view) — the Principal's operating loop:**
 
 ```
- ┌───────────────────────────────────────────────────────────────┐
- │ MAINTAIN AN AGGREGATE MODEL OF TECHNICAL RISK & CAPABILITY │
- │ Not systems — the *distribution*. Where is the firm fragile? │
- │ What is it structurally unable to do? What is it paying for │
- │ and not getting? Built from portfolio-level data, never │
- │ from personal familiarity (which no longer scales). │
- └────────────────────────────┬──────────────────────────────────┘
- │
- ┌────────────────────────┼─────────────────────────┐
- │ │ │
- ┌────▼─────────┐ ┌─────────▼──────────┐ ┌──────────▼─────────┐
- │ SET │ │ DESIGN THE │ │ MAKE THE FEW │
- │ DIRECTION │ │ DECISION SYSTEM │ │ BETS PERSONALLY │
- │ │ │ │ │ │
- │ Multi-year │ │ Who decides what. │ │ Build-vs-buy at │
- │ technical │ │ Golden paths so │ │ org scale. │
- │ strategy. │ │ most decisions │ │ Platform choices. │
- │ Explicit │ │ need not be made. │ │ 5-10 yr horizons. │
- │ non-goals. │ │ Exceptions with │ │ Irreversible, high │
- │ │ │ expiry. Mechanical │ │ blast radius. │
- │ │ │ verification. │ │ ~2-4 per year. │
- └────┬─────────┘ └─────────┬──────────┘ └──────────┬─────────┘
- │ │ │
- └────────────────────────┼─────────────────────────┘
- │
- ┌────────────────────────────▼──────────────────────────────────┐
- │ DEVELOP THE STAFF+ LAYER THAT EXECUTES ALL OF IT │
- │ This is not a side activity. A Principal without a capable │
- │ Staff+ population has no execution mechanism and is │
- │ structurally limited to whatever they can personally do — │
- │ i.e. they are a Staff engineer with a larger title. │
- └────────────────────────────┬──────────────────────────────────┘
- │
- ┌────────────────────────────▼──────────────────────────────────┐
- │ VERIFY IN AGGREGATE │
- │ Not "did this team comply" but "what is the distribution │
- │ of compliance, and is it moving?" Point-in-time approval │
- │ verifies intent; continuous measurement verifies reality. │
- └───────────────────────────────────────────────────────────────┘
+   MAINTAIN AN AGGREGATE MODEL OF TECHNICAL RISK & CAPABILITY
+   Not systems -- the *distribution*. Where is the firm fragile?
+   What is it structurally unable to do? What is it paying for and
+   not getting? Built from portfolio-level data, never from personal
+   familiarity (which no longer scales).
+                            │
+           ┌────────────────┼────────────────┐
+           ▼                ▼                ▼
+           SET              DESIGN THE       MAKE THE FEW
+           DIRECTION        DECISION SYSTEM  BETS PERSONALLY
+
+           Multi-year       Who decides      Build-vs-buy at
+           technical        what. Golden     org scale.
+           strategy.        paths so most    Platform choices.
+           Explicit         decisions need   5-10 year horizons.
+           non-goals.       not be made.     Irreversible, high
+                            Exceptions with  blast radius.
+                            expiry.          ~2-4 per year.
+                            Mechanical
+                            verification.
+           │                │                │
+           └────────────────┼────────────────┘
+                            ▼
+   DEVELOP THE STAFF+ LAYER THAT EXECUTES ALL OF IT
+   This is not a side activity. A Principal without a capable Staff+
+   population has no execution mechanism and is structurally limited
+   to whatever they can personally do -- i.e. they are a Staff
+   engineer with a larger title.
+                            │
+                            ▼
+   VERIFY IN AGGREGATE
+   Not "did this team comply" but "what is the distribution of
+   compliance, and is it moving?" Point-in-time approval verifies
+   intent; continuous measurement verifies reality.
 ```
 
 The **"make few bets personally"** box has a number attached deliberately. A Principal who is personally driving fifteen initiatives has not scaled; the whole design of the role assumes most things happen through the decision system and the Staff+ layer, with the Principal's direct effort reserved for the small number of decisions where being wrong is expensive and irreversible.

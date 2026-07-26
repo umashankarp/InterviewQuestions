@@ -34,43 +34,37 @@ The distinguishing property against every other role in this domain: **an archit
 **How (30,000-ft view) — the architect's actual loop:**
 
 ```
- ┌──────────────────────────────────────────────────────────────┐
- │ 1. UNDERSTAND WHAT ACTUALLY EXISTS │
- │ Not the diagram. The running estate: what calls what, │
- │ what data flows where, what is actually load-bearing. │
- │ Most architecture functions skip this and describe the │
- │ estate they believe in. is what that costs. │
- └──────────────────────────┬───────────────────────────────────┘
- │
- ┌──────────────────────────▼───────────────────────────────────┐
- │ 2. DECIDE WHAT MUST BE COMMON, AND WHAT MUST NOT │
- │ The whole job is this boundary. Constrain interfaces, │
- │ controls, and shared data. Leave implementation alone. │
- │ Over-constraining is the failure that kills the function. │
- └──────────────────────────┬───────────────────────────────────┘
- │
- ┌──────────────────────────▼───────────────────────────────────┐
- │ 3. MAKE THE CONSTRAINT THE PATH OF LEAST RESISTANCE │
- │ Reference implementation, template, library, scaffold. │
- │ A constraint that costs teams effort to honor will be │
- │ honored on paper only. This step is what separates an │
- │ architect who changes outcomes from one who writes docs. │
- └──────────────────────────┬───────────────────────────────────┘
- │
- ┌──────────────────────────▼───────────────────────────────────┐
- │ 4. VERIFY CONTINUOUSLY THAT IT HELD │
- │ Fitness functions, conformance checks, drift detection. │
- │ An architecture diagram is a CLAIM. Something must keep │
- │ the claim true, or it becomes fiction on a schedule. │
- └──────────────────────────┬───────────────────────────────────┘
- │
- ┌──────────────────────────▼───────────────────────────────────┐
- │ 5. TRANSLATE, IN BOTH DIRECTIONS │
- │ Business intent → technical constraint. │
- │ Technical risk → business consequence. │
- │ This is half the job in a bank and is why the role often │
- │ sits organizationally between engineering and the business.│
- └──────────────────────────────────────────────────────────────┘
+   1. UNDERSTAND WHAT ACTUALLY EXISTS
+      Not the diagram -- the running estate: what calls what, what
+      data flows where, what is actually load-bearing. Most
+      architecture functions skip this and describe the estate they
+      believe in rather than the one that exists.
+                            │
+                            ▼
+   2. DECIDE WHAT MUST BE COMMON, AND WHAT MUST NOT
+      The whole job is this boundary. Constrain interfaces, controls,
+      and shared data. Leave implementation alone. Over-constraining
+      is the failure that kills the function.
+                            │
+                            ▼
+   3. MAKE THE CONSTRAINT THE PATH OF LEAST RESISTANCE
+      Reference implementation, template, library, scaffold. A
+      constraint that costs teams effort to honour will be honoured
+      on paper only. This step separates an architect who changes
+      outcomes from one who writes documents.
+                            │
+                            ▼
+   4. VERIFY CONTINUOUSLY THAT IT HELD
+      Fitness functions, conformance checks, drift detection. An
+      architecture diagram is a CLAIM; something must keep the claim
+      true, or it becomes fiction on a schedule.
+                            │
+                            ▼
+   5. TRANSLATE, IN BOTH DIRECTIONS
+      Business intent  ->  technical constraint.
+      Technical risk   ->  business consequence.
+      This is half the job in a bank, and is why the role often sits
+      organizationally between engineering and the business.
 ```
 
 Steps 1, 3, and 4 are where most enterprise architecture functions fail. They produce step 2 in abundance — target-state diagrams, principles, standards documents — without ever establishing what exists, without making the target cheap to reach, and without checking whether anything moved. **That specific failure pattern is the single most interviewable thing in this module.**

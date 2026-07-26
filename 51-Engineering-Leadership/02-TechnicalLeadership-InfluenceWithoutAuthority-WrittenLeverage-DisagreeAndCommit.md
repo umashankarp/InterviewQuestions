@@ -29,57 +29,40 @@ If (1) is false you have authority — use it, sparingly and explicitly. If (2) 
 **How (30,000-ft view):**
 
 ```
- ┌─────────────────────────────────────────┐
- │ A technical outcome that needs work │
- │ from people you cannot direct │
- └────────────────┬────────────────────────┘
- │
- ┌───────────────────▼────────────────────┐
- │ 1. ESTABLISH THE PROBLEM IS REAL │
- │ Evidence, not assertion. │
- │ Incident counts, latency, $ cost, │
- │ velocity drag — measured. │
- └───────────────────┬────────────────────┘
- │
- ┌───────────────────▼────────────────────┐
- │ 2. WRITE IT DOWN │
- │ Design doc / RFC / ADR. │
- │ Options compared honestly. │
- │ This is the leverage step: a doc │
- │ read by 50 people scales an │
- │ argument no meeting can. │
- └───────────────────┬────────────────────┘
- │
- ┌───────────────────▼────────────────────┐
- │ 3. SOCIALIZE BEFORE YOU CONVENE │
- │ 1:1s with each affected owner │
- │ BEFORE any group forum. │
- │ Surface objections privately, where │
- │ changing your mind is cheap. │
- └───────────────────┬────────────────────┘
- │
- ┌───────────────────▼────────────────────┐
- │ 4. DECIDE — AND CLOSE THE WINDOW │
- │ Explicit decision, explicit owner, │
- │ explicit date. Disagree & commit │
- │ starts HERE, not before. │
- └───────────────────┬────────────────────┘
- │
- ┌───────────────────▼────────────────────┐
- │ 5. MAKE IT THE DEFAULT PATH │
- │ Scaffolding, CI gate, template, │
- │ lint rule. A decision that requires │
- │ everyone to remember it will drift. │
- │ (the golden-path finding.) │
- └───────────────────┬────────────────────┘
- │
- ┌───────────────────▼────────────────────┐
- │ 6. VERIFY IT ACTUALLY HELD │
- │ Measure adoption, not announcement. │
- │ "Verify the verifier" — this │
- │ course's most-repeated finding, │
- │ applied to a human decision. │
- └────────────────────────────────────────┘
+   A technical outcome that needs work from people you cannot direct
+                        │
+                        ▼
+   1. ESTABLISH THE PROBLEM IS REAL
+      Evidence, not assertion -- incident counts, latency, cost in
+      currency, velocity drag. Measured, not claimed.
+                        │
+                        ▼
+   2. WRITE IT DOWN
+      Design doc / RFC / ADR, with options compared honestly.
+      This is the leverage step: a document read by 50 people
+      scales an argument no meeting can.
+                        │
+                        ▼
+   3. SOCIALIZE BEFORE YOU CONVENE
+      1:1s with each affected owner BEFORE any group forum, so
+      objections surface privately -- where changing your mind
+      is still cheap.
+                        │
+                        ▼
+   4. DECIDE -- AND CLOSE THE WINDOW
+      Explicit decision, explicit owner, explicit date.
+      Disagree-and-commit starts HERE, not before.
+                        │
+                        ▼
+   5. MAKE IT THE DEFAULT PATH
+      Scaffolding, CI gate, template, lint rule. A decision that
+      requires everyone to remember it will drift.
+                        │
+                        ▼
+   6. VERIFY IT ACTUALLY HELD
+      Measure adoption, not announcement. "Verify the verifier" --
+      this course's most-repeated finding, applied to a human
+      decision rather than to a system.
 ```
 
 Steps 1, 5, and 6 are where technical leadership differs most sharply from what candidates describe in interviews. Almost everyone describes steps 2–4. Very few describe step 1 with actual numbers, and almost nobody describes steps 5–6 at all — which is precisely why "the standard we agreed on last year is followed by three of nine teams" is such a common organizational state.

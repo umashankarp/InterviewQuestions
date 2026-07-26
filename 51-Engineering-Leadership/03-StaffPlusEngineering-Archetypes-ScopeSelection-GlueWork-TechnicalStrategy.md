@@ -29,41 +29,31 @@ If (1) is absent, the person is a strong senior engineer, which is a completely 
 **How (30,000-ft view) — the Staff+ loop:**
 
 ```
- ┌──────────────────────────────────────────────────────────┐
- │ MAINTAIN A MODEL OF THE ORG'S TECHNICAL REALITY │
- │ Where the seams are. What keeps breaking. What is slow │
- │ and why. Who is blocked on what. Built from incidents, │
- │ cycle-time data, and conversations — not from diagrams. │
- └───────────────────────┬──────────────────────────────────┘
- │
- ┌───────────────────────▼──────────────────────────────────┐
- │ SELECT — the highest-leverage problem you are │
- │ uniquely positioned to solve. Not the hardest, not the │
- │ most interesting: the one where (impact × your unique │
- │ positioning) is maximal.. │
- └───────────────────────┬──────────────────────────────────┘
- │
- ┌──────────────────┼──────────────────┐
- │ │ │
- ┌────▼─────┐ ┌─────▼─────┐ ┌──────▼──────┐
- │ SOLVE │ │ MULTIPLY │ │ DOCUMENT │
- │ directly │ │ others │ │ durably │
- │ (deep │ │ (design │ │ (strategy, │
- │ work, │ │ review, │ │ reference │
- │ proto- │ │ pairing, │ │ impl, ADR) │
- │ types) │ │ sponsor) │ │ │
- └────┬─────┘ └─────┬─────┘ └──────┬──────┘
- └──────────────────┼──────────────────┘
- │
- ┌───────────────────────▼──────────────────────────────────┐
- │ HAND OFF — to a team that will own it permanently. │
- │ A Staff engineer who still owns everything they've │
- │ built has stopped being able to select new problems. │
- └───────────────────────┬──────────────────────────────────┘
- │
- ┌──────▼──────┐
- │ (loop) │
- └─────────────┘
+   MAINTAIN A MODEL OF THE ORG'S TECHNICAL REALITY
+   Where the seams are. What keeps breaking. What is slow and why.
+   Who is blocked on what. Built from incidents, cycle-time data,
+   and conversations -- not from architecture diagrams.
+                            │
+                            ▼
+   SELECT the highest-leverage problem you are UNIQUELY positioned
+   to solve. Not the hardest, not the most interesting: the one
+   where (impact x your unique positioning) is maximal.
+                            │
+           ┌────────────────┼────────────────┐
+           ▼                ▼                ▼
+           SOLVE            MULTIPLY         DOCUMENT
+           directly         others           durably
+           (deep work,      (design review,  (strategy,
+           prototypes)      pairing,         reference impl,
+                            sponsorship)     ADR)
+           │                │                │
+           └────────────────┼────────────────┘
+                            ▼
+   HAND OFF to a team that will own it permanently. A Staff
+   engineer who still owns everything they have built has
+   stopped being able to select new problems.
+                            │
+                            └──────>  back to the top (loop)
 ```
 
 The **hand-off** step is the one most often missing, and its absence is why some Staff engineers plateau: each solved problem adds permanent operational load, and after four or five, their capacity to select new problems is gone. They have become a very senior maintenance engineer with a large surface area.
