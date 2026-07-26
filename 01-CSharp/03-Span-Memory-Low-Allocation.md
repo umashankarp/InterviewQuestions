@@ -121,25 +121,25 @@ graph LR
 ### Memory View Hierarchy (ASCII)
 
 ```
- ┌───────────────────────────────────────────┐
- │ Underlying Memory │
- │ (array on heap | stackalloc | native buf) │
- └───────────────────────────────────────────┘
- ▲ ▲ ▲
- view (no copy) view (no copy) view (no copy)
- │ │ │
- ┌────────────────┐ ┌──────────────────┐ ┌───────────────┐
- │ Span<T> │ │ ReadOnlySpan<T> │ │ Memory<T> │
- │ (stack only) │ │ (stack only) │ │ (heap-safe, │
- │ mutable │ │ read-only │ │ field/await- │
- │ │ │ │ │ safe) │
- └────────────────┘ └──────────────────┘ └───────┬───────┘
- │.Span
- ▼
- ┌──────────────────┐
- │ Span<T> (materialized
- │ right before use) │
- └──────────────────┘
+               ┌───────────────────────────────────────────┐
+               │ Underlying Memory                         │
+               │ (array on heap | stackalloc | native buf) │
+               └───────────────────────────────────────────┘
+                      ▲                ▲               ▲
+               view (no copy)   view (no copy)   view (no copy)
+                      │                │               │
+        ┌────────────────┐  ┌──────────────────┐  ┌────────────────┐
+        │ Span<T>        │  │ ReadOnlySpan<T>  │  │ Memory<T>      │
+        │ (stack only)   │  │ (stack only)     │  │ (heap-safe,    │
+        │ mutable        │  │ read-only        │  │ field/await-   │
+        │                │  │                  │  │ safe)          │
+        └────────────────┘  └──────────────────┘  └───────┬────────┘
+                                                          │ .Span
+                                                          ▼
+                                                  ┌──────────────────────┐
+                                                  │ Span<T> materialized │
+                                                  │ right before use     │
+                                                  └──────────────────────┘
 ```
 
 ### Data Flow — Zero-Allocation Request Parsing (Kestrel-style)

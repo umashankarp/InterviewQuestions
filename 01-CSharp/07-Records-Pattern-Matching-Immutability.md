@@ -171,20 +171,25 @@ The `..` (slice pattern) can appear at most once per list pattern and captures t
 var original = new Order(1, "Widget", 10) { Tags = new List<string> { "sale" } };
 var copy = original with { Quantity = 20 };
 
-┌─────────────────────────┐ ┌─────────────────────────┐
-│ original (heap object) │ │ copy (NEW heap object) │
-│ Id = 1 │ │ Id = 1 │
-│ Name = "Widget" │ │ Name = "Widget" │
-│ Quantity = 10 ─────────►│ 10 │ Quantity = 20 (CHANGED) │
-│ Tags ────────────────────┼────┐ │ Tags ─────────────────────┼──┐
-└─────────────────────────┘ │ └─────────────────────────┘ │
- │ │
- ▼ ▼
- ┌─────────────────────────────────────────┐
- │ SHARED List<string> { "sale" } │ <-- shallow copy!
- │ Mutating via EITHER reference │
- │ affects BOTH original and copy │
- └─────────────────────────────────────────┘
+  ┌───────────────────────────┐        ┌───────────────────────────┐
+  │ original (heap object)    │        │ copy (NEW heap object)    │
+  │   Id       = 1            │        │   Id       = 1            │
+  │   Name     = "Widget"     │        │   Name     = "Widget"     │
+  │   Quantity = 10           │        │   Quantity = 20  <- the   │
+  │                           │        │                  only     │
+  │                           │        │                  change   │
+  │   Tags ───────────────────┼───┐    │   Tags ───────────────────┼───┐
+  └───────────────────────────┘   │    └───────────────────────────┘   │
+                                  │                                    │
+                                  └─────────────────┬──────────────────┘
+                                                    │
+                                                    ▼
+                          ┌─────────────────────────────────────────┐
+                          │ SHARED List<string> { "sale" }          │
+                          │ `with` copied the REFERENCE, not the    │
+                          │ list -- mutating via EITHER reference   │
+                          │ affects BOTH original and copy          │
+                          └─────────────────────────────────────────┘
 ```
 
 ### Pattern Matching Decision Tree (Discriminated-Union-Style Modeling)

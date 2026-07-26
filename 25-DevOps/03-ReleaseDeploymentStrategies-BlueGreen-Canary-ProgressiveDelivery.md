@@ -55,17 +55,21 @@ Every strategy above assumes old and new *application* versions can coexist brie
 ## 3. Visual Architecture
 
 ### Blue-Green vs. Canary — Traffic Exposure Shape Over Time
+```text
+  BLUE-GREEN (atomic cutover)              CANARY (progressive ramp)
+  new version's share of traffic           new version's share of traffic
+
+  100%          +----------------          100%                      +------
+                |                                               +----+
+                |                                          +----+
+                |                                     +----+
+    0% ---------+                           0% -------+
+       +--------+---------------->             +------+----+----+----+------->
+                T = cutover                          each step gated by
+                                                      automated analysis
 ```
-Blue-Green: Canary:
-100%|--------blue--------| 100%|--stable------------\
- | |cutover | \___
- | | (atomic) | \___
- 0%| |------green---- 0%|--canary--/----/----/-------100%
- +--------------------+----------> +--------------------------->
- time (instant switch, time (progressive ramp,
- 100% exposure at cutover) gated by automated analysis
- at each step)
-```
+
+The two shapes are the whole argument. Blue-green's exposure is a **step function**: at `T` the new version's share goes from 0% to 100% in one instant, so a fault that automated checks did not catch reaches the entire user base at once — and the mitigation is that rollback is equally instant. Canary's exposure is a **staircase**: 1% → 5% → 25% → 100%, with a verification gate between steps, so the blast radius at any moment is the current step's percentage rather than everything. The cost of that smaller blast radius is elapsed time and the requirement that both versions run simultaneously against the same data — which is why canary demands backward-compatible schema changes in a way blue-green's atomic switch can partly avoid.
 
 ### Canary Rollout with Automated Analysis (Argo Rollouts / Flagger pattern)
 ```mermaid

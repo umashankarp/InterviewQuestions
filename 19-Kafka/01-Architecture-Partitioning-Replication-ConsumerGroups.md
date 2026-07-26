@@ -4,7 +4,7 @@
 
 ---
 
-# Apache Kafka Architecture
+## Apache Kafka Architecture
 
 ```mermaid
 flowchart LR
@@ -30,105 +30,100 @@ flowchart LR
 
 ---
 
-# Topic Partitioning
+## Topic Partitioning
 
 ```text
 Topic: Orders
 
-+------------+
-| Partition0 |
-+------------+
-| Order-101 |
-| Order-104 |
-| Order-107 |
-+------------+
-
-+------------+
-| Partition1 |
-+------------+
-| Order-102 |
-| Order-105 |
-| Order-108 |
-+------------+
-
-+------------+
-| Partition2 |
-+------------+
-| Order-103 |
-| Order-106 |
-| Order-109 |
-+------------+
+   +--------------+     +--------------+     +--------------+
+   |  Partition 0 |     |  Partition 1 |     |  Partition 2 |
+   +--------------+     +--------------+     +--------------+
+   | Order-101    |     | Order-102    |     | Order-103    |   offset 0
+   | Order-104    |     | Order-105    |     | Order-106    |   offset 1
+   | Order-107    |     | Order-108    |     | Order-109    |   offset 2
+   +--------------+     +--------------+     +--------------+
+          |                    |                    |
+          v                    v                    v
+     append-only          append-only          append-only
+     ordered log          ordered log          ordered log
 ```
+
+Drawing the partitions **side by side** rather than stacked is the point: they are parallel, independent logs, not one sequence split into chunks. Ordering is guaranteed *within* a partition and never *across* them — so `Order-101` is guaranteed to be read before `Order-104`, while nothing whatsoever is guaranteed about the relative order of `Order-101` and `Order-102`. Partition count is therefore the unit of both parallelism and of ordering scope, and those two pull in opposite directions.
 
 ---
 
-# Replication
+## Replication
 
 ```text
-Broker-1
-Partition-0 (Leader)
-
- │
- │ Replication
- ▼
-
-Broker-2
-Partition-0 (Follower)
-
- │
- ▼
-
-Broker-3
-Partition-0 (Follower)
+         ┌──────────────────────────┐
+         │ Broker-1                 │
+         │ Partition-0  (LEADER)    │   <- every produce and consume goes here
+         └─────────────┬────────────┘
+                       │  followers PULL from the leader
+            ┌──────────┴──────────┐
+            ▼                     ▼
+   ┌──────────────────┐  ┌──────────────────┐
+   │ Broker-2         │  │ Broker-3         │
+   │ Partition-0      │  │ Partition-0      │
+   │ (FOLLOWER, ISR)  │  │ (FOLLOWER, ISR)  │
+   └──────────────────┘  └──────────────────┘
 ```
+
+Note what the arrows do **not** show: no client traffic reaches a follower. Followers exist for durability and failover, not for read scaling — which is the single most common wrong assumption about this diagram. A follower earns its place in the **ISR** (in-sync replica set) by staying caught up; only an ISR member can be promoted to leader without data loss, so `min.insync.replicas` is what actually determines your durability guarantee, not the replication factor alone.
 
 ---
 
-# Consumer Group
+## Consumer Group
 
 ```text
-Topic
- │
- ▼
-+----------------------+
-| Consumer Group A |
-+----------------------+
- │
- ├─────────────┐
- ▼ ▼
-Consumer-1 Consumer-2
+                Topic: Orders
+                      │
+        ┌─────────────┴──────────────┐
+        │      Consumer Group A      │
+        └─────────────┬──────────────┘
+              ┌───────┴───────┐
+              ▼               ▼
+        ┌────────────┐  ┌────────────┐
+        │ Consumer-1 │  │ Consumer-2 │
+        └────────────┘  └────────────┘
 
-Partition-0 → Consumer-1
-Partition-1 → Consumer-2
-Partition-2 → Consumer-1
+   Partition-0  ->  Consumer-1
+   Partition-1  ->  Consumer-2
+   Partition-2  ->  Consumer-1     <- 3 partitions, 2 consumers:
+                                      one consumer carries two
 ```
+
+The assignment table is the important half of this diagram. Each partition is consumed by **exactly one** member of the group, which is what makes a consumer group Kafka's implementation of competing consumers. It also fixes the ceiling: **adding consumers beyond the partition count adds nothing** — a third consumer here would take over `Partition-2`, but a fourth would sit idle with no partition to own. Partition count, chosen at topic-creation time, is therefore the permanent upper bound on a group's parallelism.
 
 ---
 
-# Message Flow
+## Message Flow
 
 ```text
-Producer
- │
-Publish Message
- │
- ▼
-Kafka Topic
- │
-Partition
- │
-Leader Broker
- │
-Replicate to Followers
- │
-Consumer Group
- │
-Business Service
+   Producer
+      │
+      │  publish
+      ▼
+   Kafka Topic
+      │
+      │  partition selected: hash(key), or round-robin when key is null
+      ▼
+   Leader Broker for that partition
+      │
+      │  replicate to followers; acks honoured per min.insync.replicas
+      ▼
+   Consumer Group
+      │
+      │  one partition -> exactly one member
+      ▼
+   Business Service
 ```
+
+The labels on the arrows carry the content here, not the boxes. Two of them decide correctness rather than mechanics: **`hash(key)`** is where per-entity ordering is won or lost (a null or wrongly-chosen key scatters one entity's events across partitions and forfeits ordering silently), and **`acks` / `min.insync.replicas`** is where the durability guarantee is actually set — `acks=all` means nothing if `min.insync.replicas` is 1, because a single surviving replica then satisfies "all".
 
 ---
 
-# Kafka Components
+## Kafka Components
 
 | Component | Responsibility |
 |-----------|----------------|
@@ -143,22 +138,30 @@ Business Service
 | Offset | Tracks message position |
 
 
- Producer
- │
- ▼
- Kafka Cluster
- ┌──────────┬──────────┬──────────┐
- │ Broker1 │ Broker2 │ Broker3 │
- └──────────┴──────────┴──────────┘
- │
- Topic (Orders)
- │
- ┌────────┼─────────┐
- ▼ ▼ ▼
- Partition0 Partition1 Partition2
- │ │ │
- ▼ ▼ ▼
- Consumer1 Consumer2 Consumer3
+### End-to-End: Cluster, Topic, Partitions, Consumers
+
+```text
+                    Producer
+                        │
+                        ▼
+                  Kafka Cluster
+        ┌──────────┬──────────┬──────────┐
+        │ Broker1  │ Broker2  │ Broker3  │
+        └──────────┴──────────┴──────────┘
+                        │
+                 Topic (Orders)
+                        │
+          ┌─────────────┴─────────────┐
+          ▼             ▼             ▼
+     Partition0    Partition1    Partition2
+          │             │             │
+          ▼             ▼             ▼
+     Consumer1     Consumer2     Consumer3
+```
+
+This is the whole model on one page, and it is worth reading bottom-up: the three parallel consumer lanes exist **because** there are three partitions, and the three partitions are spread across brokers **because** that is what makes the topic both parallel and fault-tolerant. Brokers are the physical unit, partitions the logical unit of parallelism, and consumers the unit of work — collapse any two of those three and the model stops explaining anything.
+
+---
 
 ## 1. Fundamentals
 

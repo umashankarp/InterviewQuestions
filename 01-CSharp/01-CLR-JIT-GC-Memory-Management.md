@@ -201,13 +201,13 @@ graph TB
 ### GC Heap Layout (ASCII)
 
 ```
-Small Object Heap (SOH) Large Object Heap (LOH) Pinned Object Heap (POH)
-┌───────────┬───────────┬─────────────────┐ ┌────────────────────┐ ┌──────────────────┐
-│ Gen 0 │ Gen 1 │ Gen 2 │ │ Objects >= 85,000B │ │ fixed/GCHandle │
-│ (nursery) │ (buffer) │ (long-lived) │ │ not compacted by │ │.Pinned objects │
-│ freq. GC │ occasional │ rare, expensive │ │ default │ │ │
-└───────────┴───────────┴─────────────────┘ └────────────────────┘ └──────────────────┘
- ~fast <1ms ~1-10ms ~10-100ms+ never moved
+Small Object Heap (SOH)                        Large Object Heap (LOH)  Pinned Object Heap (POH)
+┌───────────┬────────────┬─────────────────┐   ┌────────────────────┐   ┌────────────────────┐
+│ Gen 0     │ Gen 1      │ Gen 2           │   │ Objects >= 85,000B │   │ fixed / GCHandle   │
+│ (nursery) │ (buffer)   │ (long-lived)    │   │ not compacted by   │   │ .Pinned objects    │
+│ freq. GC  │ occasional │ rare, expensive │   │ default            │   │                    │
+└───────────┴────────────┴─────────────────┘   └────────────────────┘   └────────────────────┘
+ ~fast <1ms   ~1-10ms      ~10-100ms+                                      never moved
 ```
 
 ---

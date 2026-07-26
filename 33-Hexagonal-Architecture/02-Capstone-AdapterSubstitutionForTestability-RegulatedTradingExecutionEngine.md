@@ -23,15 +23,23 @@ A registered broker-dealer's **Algorithmic Order Execution Engine** submits equi
 **When:** This pattern is worth its ceremony specifically when (a) the business logic is genuinely complex and high-stakes enough that manual paper-trading review alone is insufficient assurance, (b) multiple environments genuinely need to run the identical logic (not just "we have a staging environment," but a *deliberate*, regulator-relevant simulation tier), and (c) the cost of a live-production logic bug is severe enough (real capital, regulatory reportable incidents) to justify the Port-contract-testing discipline's ongoing maintenance cost.
 
 **How (30,000-ft view):**
+```text
+Primary Port
+  ISubmitOrderInputPort  -->  implemented by SubmitOrderUseCase (the core)
+
+Secondary Ports -- each with three interchangeable Adapters:
+
+  Port                    paper                UAT                    live
+  ---------------------   ------------------   --------------------   ---------------------
+  IMarketDataFeed         SimulatedFeed        VenueUATFeed           LiveVenueFeed
+  IOrderExecutionVenue    SimulatedVenue       VenueUATConnector      LiveVenueConnector
+  IPositionRepository     InMemoryPositions    UATSqlPositions        ProdSqlPositions
+  ITradeReportPublisher   InMemoryReportSink   UATRegulatoryGateway   LiveRegulatoryGateway
+
+The Use Case's own code never changes across tiers -- only DI registration differs.
 ```
-Primary Port: ISubmitOrderInputPort → implemented by SubmitOrderUseCase (the core)
-Secondary Ports (each with 3 concrete Adapters — paper / UAT / live):
- IMarketDataFeed → SimulatedFeed | VenueUATFeed | LiveVenueFeed
- IOrderExecutionVenue → SimulatedVenue | VenueUATConnector | LiveVenueConnector
- IPositionRepository → InMemoryPositions | UATSqlPositions | ProdSqlPositions
- ITradeReportPublisher → InMemoryReportSink | UATRegulatoryGateway| LiveRegulatoryGateway
-The Use Case's own code never changes across tiers — only DI registration differs.
-```
+
+Read the table by **row** to see one port's three substitutable implementations; read it by **column** to see a complete deployment tier. That the columns can be swapped wholesale, with the centre column of business logic untouched, is the entire property Hexagonal Architecture exists to deliver — and the reason a paper-trading tier costs almost nothing to maintain here, where in a layered design it would require a parallel code path.
 
 ---
 

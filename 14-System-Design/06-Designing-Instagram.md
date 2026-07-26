@@ -3,7 +3,7 @@
 > Domain: System Design | Level: Beginner → Expert | Prerequisite: [[02-Designing-News-Feed-System]] (fan-out/ranking directly reused), [[05-Designing-YouTube-Video-Streaming]] (media storage/CDN directly reused), [[../07-Redis/01-Data-Structures-Caching-Patterns]] (TTL for Stories)
 
 ---
-# Instagram Architecture (AWS)
+## Instagram Architecture (AWS)
 
 ```mermaid
 flowchart LR
@@ -51,46 +51,59 @@ flowchart LR
 
 ---
 
-# Request Flow
+## Request Flow
 
+```text
+                    +------------------+
+                    | Mobile / Web App |
+                    +---------+--------+
+                              |
+                              v
+                      Amazon CloudFront
+                              |
+                              v
+                           AWS WAF
+                              |
+                              v
+                         API Gateway
+                              |
+                              v
+                        Cognito Auth
+                              |
+                              v
+                  Application Load Balancer
+                              |
+      +-----------+-----------+-----------+-----------+
+      |           |           |           |           |
+      v           v           v           v           v
+   UserSvc     FeedSvc     PostSvc    StorySvc    MediaSvc
+      |           |           |           |           |
+      v           v           v           v           v
+   Aurora       Redis      Aurora      Aurora        S3
+
+               Services publish domain events
+                              |
+                              v
+                   +---------------------+
+                   | Amazon EventBridge  |
+                   +---------------------+
+                              |
+          +-------------------+-------------------+
+          |                   |                   |
+          v                   v                   v
+     Feed Worker         Notification        Story Worker
+                              |
+                              v
+                             SNS
+                              |
+                              v
+                             SQS
+                              |
+                              v
+                        Push / Email
 ```
- +------------------+
- | Mobile / Web App |
- +---------+--------+
- |
- v
- Amazon CloudFront
- |
- AWS WAF
- |
- API Gateway
- |
- Cognito Auth
- |
- Application Load Balancer
- |
- +----------+----------+-----------+-----------+
- | | | | |
- v v v v v
- UserSvc FeedSvc PostSvc StorySvc MediaSvc
- | | | | |
- | Redis Aurora Aurora S3
- | | | | |
- +----------+----------+-----------+-----------+
- |
- Amazon EventBridge
- |
- +---------------+----------------+
- | | |
- v v v
- Feed Worker Notification Story Worker
- |
- SNS
- |
- SQS
- |
- Push / Email
-```
+
+The read path and the write path are deliberately separated in this diagram. Everything above the bus is synchronous request handling — the client waits for it. Everything below is asynchronous reaction, so feed fan-out, story processing, and notification delivery cannot add latency to the user's original request, and cannot fail it. Note also that each service terminates in its own store (Aurora for relational user/post data, Redis for the precomputed feed, S3 for media), which is what lets those services scale and fail independently.
 
 ## AWS Services Used
 

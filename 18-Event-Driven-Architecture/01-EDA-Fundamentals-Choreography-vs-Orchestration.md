@@ -55,22 +55,27 @@ A **topic** (or exchange, in AMQP terminology) delivers a copy of each published
 
 ## 3. Visual Architecture
 
-# Event-Driven Architecture
+### Event-Driven Architecture — the Core Shape
 
 Instead of calling services directly, the **Order Service** publishes an event to an event bus. Any interested services subscribe to that event and react independently.
 
 ```text
- Order Service
- |
- OrderCreated Event
- |
- Amazon EventBridge
- ------------------------------------------------
- | | | |
-Payment Service Inventory Service Email Service Analytics Service
+                            Order Service
+                                  |
+                       publishes OrderCreated
+                                  |
+                                  v
+                       +---------------------+
+                       | Amazon EventBridge  |
+                       +---------------------+
+                                  |
+        +-----------------+-------+--------+----------------+
+        |                 |                |                |
+        v                 v                v                v
+ Payment Service  Inventory Service  Email Service  Analytics Service
 ```
 
-# Event-Driven Architecture Using AWS
+### Event-Driven Architecture Using AWS
 
 In an **AWS Event-Driven Architecture (EDA)**, microservices do **not** communicate by calling each other directly. Instead, they communicate through **events** using services such as **Amazon EventBridge**, **Amazon SNS**, and **Amazon SQS**.
 
@@ -78,30 +83,39 @@ The service that produces the event is called the **Producer**, and the services
 
 ---
 
-# AWS Architecture
+### AWS Architecture — Producer, Bus, Consumers, and Each Consumer's Own Store
 
 ```text
- Customer
- |
- |
- Amazon API Gateway
- |
- Amazon ECS / EKS / Lambda
- |
- Order Service
- |
- Save Order in Database
- |
- Publish OrderCreated Event
- |
- Amazon EventBridge
- |
- ------------------------------------------------------------------
- | | | | |
-Payment Service Inventory Service Email Service Analytics Service Loyalty Service
- | | | | |
-Aurora DynamoDB Amazon SES Redshift DynamoDB
+                                       Customer
+                                           |
+                                           v
+                                  Amazon API Gateway
+                                           |
+                                           v
+                               Amazon ECS / EKS / Lambda
+                                           |
+                                           v
+                                     Order Service
+                                           |
+                                Save Order in Database
+                                           |
+                              Publish OrderCreated Event
+                                           |
+                                           v
+                                +---------------------+
+                                | Amazon EventBridge  |
+                                +---------------------+
+                                           |
+        +-----------------+----------------+----------------+-----------------+
+        |                 |                |                |                 |
+        v                 v                v                v                 v
+ Payment Service  Inventory Service  Email Service  Analytics Service  Loyalty Service
+        |                 |                |                |                 |
+        v                 v                v                v                 v
+     Aurora           DynamoDB        Amazon SES         Redshift          DynamoDB
 ```
+
+Read the bottom two rows together: each consumer owns **its own** datastore, chosen for its own access pattern (Aurora for the payments ledger's relational integrity, DynamoDB for key-lookup loyalty balances, Redshift for analytical scans). That per-consumer store ownership is not incidental to the diagram — it is the property that makes the consumers genuinely independent, and it is what would be lost if they shared a database behind the event bus.
 
 ---
 

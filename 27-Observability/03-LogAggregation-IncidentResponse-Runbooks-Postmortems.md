@@ -79,22 +79,33 @@ SEV-3/4 (minor/contained): owning team handles; async updates, no dedicated IC
 ```
 
 ### Runbook Drill Verification Loop
+```text
+   Runbook written or updated
+                   |
+                   v
+   DECLARED procedure -- "this resolves incident type X"
+                   |
+                   v
+   Scheduled, periodic DRILL: execute the runbook's EXACT steps in a
+   safe, non-production-impacting environment (staging, game day)
+                   |
+                   v
+             Drill succeeds?
+                   |
+        +----------+----------+
+        |                     |
+       YES                    NO
+        |                     |
+        v                     v
+   CONFIRMED             STALE immediately
+   current;              - blocks further reliance until fixed
+   "last verified"       - re-drilled BEFORE the next reliance, rather
+   date updated            than discovered stale for the first time
+                           during a genuine, time-pressured incident
+                           (Sec 4's exact failure mode without this loop)
 ```
-Runbook written/updated --> DECLARED procedure ("this resolves incident type X")
- |
- v
- Scheduled, periodic DRILL: execute the runbook's EXACT steps in a safe,
- non-production-impacting environment (staging, game day)
- |
- v
- Drill succeeds? --YES--> Runbook CONFIRMED current; "last verified" date updated
- |
- NO
- v
- Runbook flagged STALE immediately -- fixed and re-drilled BEFORE next
- reliance, rather than discovered stale for the first time during a
- genuine, time-pressured incident (Sec4's exact failure mode without this loop)
-```
+
+The loop's whole purpose is the **"last verified" date**, because that is the only field distinguishing a runbook that works from a runbook that merely exists. A runbook is a *declared* procedure; the drill is what converts the declaration into a verified one, and without the drill the declaration decays silently — indistinguishable from a current one right up to the moment someone relies on it under time pressure.
 
 ---
 
