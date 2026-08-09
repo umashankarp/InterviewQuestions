@@ -203,9 +203,293 @@ public class ChatMessageDeduplicator
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design — Designing a Chat / Messaging System
 
-*(This entire module IS the deep-dive case study — the incident, the four worked exercises, and the extensive Advanced-tier Q&A collectively constitute this section's typical content.)*
+*Authored to the four-step standard (see Module 01 §12 for the method).*
+
+---
+
+### Step 1 — Understand the Problem and Establish Design Scope
+
+#### The dialogue
+
+> **C:** One-to-one messaging, group messaging, or both? Group changes the ordering problem materially.
+> **I:** Both. Groups up to 500 members.
+>
+> **C:** Is this end-to-end encrypted?
+> **I:** No — assume server-side storage in plaintext. E2E is a separate design.
+>
+> **C:** Multi-device? A user on a phone and a laptop simultaneously?
+> **I:** Yes, up to 5 devices per user, all must stay in sync.
+>
+> **C:** Scale?
+> **I:** 100 million DAU, about 40 messages sent per user per day.
+>
+> **C:** Do we need delivery and read receipts?
+> **I:** Yes — sent, delivered, read.
+>
+> **C:** Message history — how long, and searchable?
+> **I:** Retained indefinitely, retrievable by conversation with pagination. Search is out of scope.
+>
+> **C:** What's the ordering requirement, precisely? "Ordered" can mean several things.
+> **I:** Every participant in a conversation must converge on the *same* order. Within a device's live view, messages must not visibly reorder after being displayed.
+>
+> **C:** Media?
+> **I:** Assume a media service; messages carry URLs.
+>
+> **C:** What happens when the recipient is offline?
+> **I:** They must receive everything on reconnect, plus a push notification while offline.
+
+The eighth answer is the important one. **"Same order for everyone" is a far stronger requirement than "ordered"** — it rules out per-recipient independent fan-out, which is precisely the defect §4 documents. Getting the interviewer to state it explicitly is what makes the sequencer defensible rather than looking like over-engineering.
+
+#### Functional requirements
+
+1. Send a message to a 1:1 conversation or a group; persist durably.
+2. Deliver to every participant's every active device, in a single canonical order.
+3. Queue for offline recipients; deliver on reconnect; push-notify while offline.
+4. Delivery and read receipts.
+5. Paginated history retrieval per conversation.
+6. Presence (online/last-seen) — nice-to-have, explicitly deprioritised if the clock runs short.
+
+#### Non-functional requirements
+
+| Requirement | Target |
+|---|---|
+| Send → recipient device latency | p99 < 500 ms when both are online |
+| Message durability | **Zero loss once acknowledged** — this is the system's core promise |
+| Delivery guarantee | At-least-once transport + client-side dedup = effectively-once |
+| Ordering | Total order per conversation, identical for all participants |
+| Availability | 99.99% for send; 99.9% for history |
+| Concurrent connections | ~20 million (20% of DAU online at peak) |
+| Consistency | Strong within a conversation's sequence; eventual across conversations |
+
+#### Back-of-the-envelope estimation
+
+```
+Messages/day      = 100M DAU × 40                    = 4 × 10^9
+Average send QPS  = 4 × 10^9 ÷ 10^5                  = 40,000 sends/s
+Peak (×3)                                             = 120,000 sends/s
+
+Fan-out: 1:1 avg 2 recipients × 2.5 devices ≈ 5 deliveries
+Groups skew this up; assume a blended 8 deliveries per send
+Delivery QPS      = 40,000 × 8                       = 320,000 deliveries/s
+Peak                                                  = 960,000 deliveries/s
+```
+
+Connections and servers:
+
+```
+Concurrent connections     ≈ 20,000,000
+Per server (tuned Linux, epoll, ~10 KB/conn kernel + app state)
+                           ≈ 100,000 connections
+Connection servers needed  = 20M ÷ 100,000            = 200 servers
+Memory per server          = 100,000 × ~40 KB         ≈ 4 GB   ← comfortable
+```
+
+Storage:
+
+```
+Message row ≈ 300 B (ids, seq, body pointer, timestamps, flags)
+4 × 10^9 × 300 B                                     ≈ 1.2 TB/day
+Per year                                              ≈ 440 TB
+Indefinite retention → tiering is mandatory, not optional
+```
+
+#### What the numbers tell us
+
+1. **The message throughput is not the problem.** 120,000 sends/s across a partitioned store is ordinary. Even 960,000 deliveries/s is just a fan-out over already-open sockets.
+2. **The connection count is the architecture.** 20 million stateful, long-lived TCP connections is what forces every unusual decision here: a connection registry, an inter-server routing hop, connection-aware load balancing, and a deployment strategy that does not disconnect 100,000 users at once.
+3. **Durability plus total ordering is the correctness core.** A lost message is a product failure with no recovery — unlike a feed entry (Module 02), a message cannot be recomputed. So the write path must persist *before* it acknowledges, and the sequence must be assigned *before* fan-out.
+
+The hard problem is therefore **stateful connection management at scale, and assigning a canonical order before any delivery happens.**
+
+---
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+#### The two core flows
+
+- **Online delivery** — both parties connected; the path the latency SLO is written against.
+- **Offline delivery and resync** — the recipient is absent or on a stale device; correctness lives here, and it is where most designs are thin.
+
+#### Components
+
+**Connection Service (WebSocket tier).** Holds the 20M persistent connections. Deliberately thin: authenticate, maintain the socket, translate frames, and forward. It holds *no* business logic, because it is the tier you least want to redeploy.
+
+**Session Registry.** `user_id → {device_id → connection_server}` in Redis with a TTL heartbeat. Every message delivery consults it. Must tolerate staleness (§3.4).
+
+**Message Service.** Validates, persists, and — critically — **obtains the sequence number** before anything is fanned out.
+
+**Sequencer.** Assigns a monotonic `seq` per conversation. Implemented as an atomic counter in the conversation's own partition, not as a global service, so it scales with conversations rather than becoming a bottleneck.
+
+**Message Store.** Cassandra, partitioned by `conversation_id`, clustered by `seq`.
+
+**Delivery Service.** Looks up recipients' devices in the registry and routes each delivery to the owning connection server via Kafka (keyed by `connection_server_id`) or Redis pub/sub.
+
+**Offline Queue.** Per-device pending set for devices with no live connection.
+
+**Push Bridge.** Hands off to the notification platform (Module 20) when a device is offline — an explicit dependency, and worth naming because it makes chat's availability partly a function of APNs/FCM.
+
+**Sync Service.** Serves `messages since seq` per device — the mechanism that makes reconnect correct.
+
+#### End-to-end walkthrough — sending a message
+
+1. Client sends a `SEND` frame over its WebSocket with a **client-generated `client_msg_id`** (a UUID). This is the idempotency key and it is generated by the client because only the client knows its own retry is a retry.
+2. Connection server forwards to the Message Service.
+3. Message Service checks `client_msg_id` for a prior write; a duplicate returns the original result.
+4. **Sequencer assigns `seq`** for that conversation — atomically, once, before anything else.
+5. Message persisted to Cassandra at `(conversation_id, seq)`.
+6. **Only now** is an `ACK{client_msg_id, server_msg_id, seq}` returned to the sender. Acknowledging before persistence would break the durability promise.
+7. Delivery Service resolves the participant list, then each participant's devices.
+8. For each device: online → route to its connection server; offline → write to the offline queue and enqueue a push.
+9. Recipient device receives, renders in `seq` order, and sends a `DELIVERED` receipt.
+10. When the conversation is foregrounded, the device sends `READ` up to a `seq` — a **watermark, not per-message**, which reduces receipt traffic by orders of magnitude in groups.
+
+#### API design
+
+The transport is a WebSocket carrying typed frames; history is REST. Both matter.
+
+**WebSocket frames**
+
+| Frame | Direction | Payload |
+|---|---|---|
+| `SEND` | C→S | `{ client_msg_id, conversation_id, body, media[], reply_to }` |
+| `ACK` | S→C | `{ client_msg_id, server_msg_id, seq, server_ts }` |
+| `MESSAGE` | S→C | `{ server_msg_id, conversation_id, seq, sender_id, body, server_ts }` |
+| `RECEIPT` | both | `{ conversation_id, up_to_seq, type: DELIVERED\|READ }` |
+| `SYNC_REQ` | C→S | `{ conversation_id, since_seq }` |
+| `PING`/`PONG` | both | Liveness; drives the registry TTL |
+
+**`GET /v1/conversations/{id}/messages`**
+
+| Param | Type | Description |
+|---|---|---|
+| `before_seq` | int | Cursor — **sequence-based, never offset or timestamp** |
+| `limit` | int | Default 50, max 200 |
+
+**`GET /v1/sync?since={device_cursor}`** — the reconnect endpoint. Returns changes across all conversations for this device, capped, with a continuation cursor.
+
+#### Data model
+
+**`message`** — Cassandra, partition `conversation_id`, clustering `seq DESC`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `conversation_id` | uuid | Partition key — all reads and the sequencer are conversation-scoped |
+| `seq` | bigint | Clustering key. **The canonical order.** Assigned once, never changed |
+| `server_msg_id` | uuid | Globally unique |
+| `client_msg_id` | uuid | Dedup key; unique index per `(conversation_id, sender_id)` |
+| `sender_id` | bigint | |
+| `body`, `media` | text/list | |
+| `server_ts` | timestamp | For display only — **never for ordering** (§2.4) |
+
+**`conversation`** — `conversation_id`, `type` (`DIRECT`/`GROUP`), `member_ids`, `last_seq` (the sequencer's counter), `created_at`.
+
+**`device_cursor`** — `(user_id, device_id) → { conversation_id → last_delivered_seq }`. This is the sync state and it is per *device*, not per user; conflating them is why multi-device chat implementations lose messages on one device.
+
+**`session`** — Redis: `session:{user_id}` → hash of `device_id → {server_id, connected_at}`, TTL 60 s refreshed by `PING`.
+
+**Message status lifecycle:** `PENDING (client-local) → SENT (ACKed, seq assigned) → DELIVERED (per device) → READ (per device)`. Note that `DELIVERED` and `READ` are **per-device facts aggregated for display** — in a group of 500, "read" means "read by everyone", which is an aggregation the client computes, not a state the message has.
+
+#### Database selection, and why
+
+| Store | Choice | Reason |
+|---|---|---|
+| Messages | **Cassandra** | Write-heavy (120k/s), append-only, always read by `conversation_id` with a range on `seq` — which is exactly a partition+clustering scan. No cross-conversation query exists. Linear scale-out, tunable durability via `QUORUM` |
+| Sequencer counter | **The conversation's own partition** (Cassandra LWT, or a small Postgres/Redis per shard) | Keeping it conversation-scoped means no global bottleneck. A single global sequence service would cap the entire system's send rate |
+| Session registry | **Redis** | Needs sub-ms reads on the delivery path and TTL semantics; loss is survivable because clients reconnect |
+| Offline queue | **Redis / Kafka per device** | Bounded, drained on reconnect |
+| Conversation metadata | **PostgreSQL** | Small, relational, membership changes need transactions |
+
+The decision worth defending: **not** using a relational database for messages. At 1.2 TB/day with a pure partition-scan access pattern and no joins, Cassandra's shape matches the workload exactly — and unlike Module 01's read-heavy site, here the estimation genuinely justifies it.
+
+---
+
+### Step 3 — Design Deep Dive
+
+#### 3.1 Ordering — sequence before fan-out
+
+The entire correctness argument is one sentence: **the sequence number is assigned exactly once, by a single authority per conversation, before any delivery is attempted.** §4's incident is what happens when fan-out precedes sequencing — two servers deliver two concurrent messages to two recipients in opposite orders, and both recipients are "correct" from their own view.
+
+Consequences worth stating:
+
+- **Wall-clock timestamps are display metadata, never ordering.** NTP skew of tens of milliseconds is routine and messages arrive milliseconds apart.
+- **Clients render strictly by `seq` and buffer gaps.** If a device holds `seq` 41 and 43, it must not display 43 until 42 arrives or a short timeout expires, after which it requests `SYNC_REQ{since: 41}`. Displaying out of order and reordering later is visibly wrong.
+- **The sequencer must be atomic.** A read-modify-write on `last_seq` across two servers produces duplicate sequence numbers — the same lost-update hazard that appears throughout this course. Use a lightweight transaction, a Redis `INCR`, or a per-conversation single-writer.
+
+#### 3.2 Delivery guarantees, precisely
+
+**At-least-once transport plus client-side deduplication on `client_msg_id`, presented as effectively-once.** The precision matters in an interview — claiming exactly-once delivery is a red flag, because the final hop (server → device over a network that can drop the ACK) is unclosable.
+
+Concretely: the server retries delivery until the device ACKs; the device may therefore receive a message twice; it deduplicates on `server_msg_id`. The sender's own retry is deduplicated on `client_msg_id`. Two different keys for two different duplicate sources, which is the detail most answers miss.
+
+#### 3.3 Offline delivery and multi-device sync
+
+The naive design keeps a per-user offline queue. That is wrong for multi-device: five devices consume at different rates, and a queue with one cursor either delivers to one device or delivers everything to all of them repeatedly.
+
+**Correct model: no queue — a per-device cursor over the durable message log.** The messages are already persisted and ordered by `seq`. "Delivery" to an offline device is simply advancing that device's cursor when it returns:
+
+1. Device reconnects, presents `device_cursor` per conversation.
+2. Sync Service returns messages with `seq > cursor`, capped (say 500 per conversation).
+3. Device processes, advances cursor, repeats until caught up.
+4. A device offline for months gets a **truncated sync with a "load older" affordance** rather than an unbounded backlog — an unbounded catch-up is how a returning user takes the connection server down.
+
+This is strictly better than a queue: it needs no extra durable structure, is idempotent under repeated sync, and handles a device that was offline for a year identically to one offline for a minute.
+
+#### 3.4 Connection registry staleness — the routing race
+
+The registry says user U's device is on server 7. Server 7 crashed two seconds ago; U has already reconnected to server 12. A message routed to 7 is lost unless handled.
+
+The resolution is layered, and the layering is the answer:
+
+- **Registry writes are heartbeat-driven with a short TTL**, so stale entries expire quickly.
+- **Routing is best-effort with a durable fallback**: if the target server reports no such connection (or the send fails), the delivery does *not* error — it advances nothing, and the device picks the message up via cursor-based sync on its next connect. Because the message is already durable and ordered, a mis-routed delivery is a latency event, not a loss event.
+- **On reconnect, the client always syncs** rather than assuming live delivery was complete.
+
+This is the key architectural insight: **make live delivery an optimisation over a correct sync protocol, not the mechanism correctness depends on.** Designs that treat the socket as the delivery guarantee are the ones that lose messages.
+
+#### 3.5 Group fan-out at 500 members
+
+One message to a 500-member group with 2.5 devices each is 1,250 deliveries. At 120,000 sends/s with groups in the mix, fan-out is the dominant cost.
+
+- **Fan out to *connection servers*, not devices.** Group the target devices by owning server and send one batched frame per server — 1,250 deliveries collapse to ~200 inter-server messages.
+- **Do not fan out receipts.** In a 500-member group, per-message read receipts are 500× amplification of a signal nobody reads. Use per-conversation read watermarks, aggregated and sent at a throttled rate.
+- **Very large groups (>1,000) should flip to pull**, exactly as Module 02's celebrity threshold does — members sync on foreground rather than receiving pushes. Naming this parallel explicitly is worth credit: it is the same bimodal-distribution problem.
+
+#### 3.6 The reconnect storm
+
+Deploying the connection tier disconnects 100,000 clients per server. If they all reconnect immediately with exponential backoff starting at zero, you get a synchronised thundering herd against the auth service and the registry — and, worse, each reconnect triggers a sync, so the message store sees a correlated read burst too.
+
+Mitigations, all of which must be designed in rather than discovered: **jittered reconnect backoff** (mandatory, and the jitter must be on the client); **staggered rolling deploys** with a connection-drain phase that asks clients to reconnect over a window rather than dropping them; and **capped sync page sizes** so a herd of catch-ups cannot each pull unbounded history. This is the failure mode that turns a routine deploy into an incident, and it is invisible until you have millions of connections.
+
+---
+
+### Step 4 — Wrap-Up
+
+**What we left out:** end-to-end encryption and multi-device key management (Module 08 — and note it makes server-side fan-out and search structurally impossible, changing this design significantly); message search; media upload and thumbnailing (Module 05); voice/video calling (a different transport entirely — WebRTC with signalling here); moderation and abuse; multi-region routing, where conversation locality determines whether cross-region hops are on the hot path; and retention/legal-hold policy.
+
+**What we would measure:** send→ACK p99 and ACK→delivery p99 separately, because they have different owners; **sequence-gap rate observed by clients**, which is the direct detector for §4's failure class and exists nowhere else; connections per server and connection churn rate; registry lookup hit/stale rate; offline sync page counts (a rising distribution means catch-ups are getting longer, which predicts the next incident); and push-bridge delivery rate as an explicit external dependency.
+
+**Summary.** Persist and sequence before fan-out; treat live socket delivery as an optimisation over a cursor-based sync protocol that is correct on its own; hold connection state in a TTL'd registry that is allowed to be stale because nothing depends on it being right; and batch fan-out per connection server rather than per device. The estimation justifies the shape: throughput is ordinary, but 20 million stateful connections and a zero-loss promise are what make this a different system from every read-heavy design in this folder.
+
+---
+
+### References
+
+1. Alex Xu — *System Design Interview Vol. 1*, ch. 12 "Design a Chat System".
+2. WhatsApp Engineering / Erlang Factory — *Scaling to millions of simultaneous connections* (the connections-per-server envelope).
+3. Slack Engineering — *Flannel: an application-level edge cache* and Slack's real-time messaging architecture.
+4. Discord Engineering — *How Discord stores billions of messages* (Cassandra partitioning by channel, the model used here).
+5. RFC 6455 — The WebSocket Protocol; and RFC 7692 for per-message compression.
+6. Leslie Lamport — *Time, Clocks, and the Ordering of Events in a Distributed System* (why wall-clock ordering fails).
+7. Cassandra docs — lightweight transactions and their cost, relevant to the sequencer.
+8. Signal — *The Sesame Algorithm* (multi-device session management), for the E2E variant in Module 08.
+
+---
+
+## 13–17. LLD / Debugging / Decision / Case Study / Principal
+
+*(This module predates the full 16-section template; its incident, worked exercises, and Advanced-tier Q&A collectively carry this content. §12 above was authored to the four-step standard on 2026-08-09.)*
 
 ## 18. Revision
 **Key takeaways**: WebSockets provide genuine bidirectional communication chat requires; SSE/long-polling are insufficient alone. WebSocket connections are inherently stateful, requiring a distributed connection registry (Redis) to enable horizontal scaling despite this — a direct architectural accommodation for a class of system that doesn't fit the default stateless-replica assumption. Delivery guarantees must be precisely defined: at-least-once-plus-client-generated-ID-deduplication is the practical, standard approximation of "exactly-once." Message ordering requires a single, authoritative per-conversation sequence number assigned as a genuine prerequisite gate **before** fan-out — fanning out independently per-recipient before sequencing is the root cause of cross-recipient ordering discrepancies under concurrent load, invisible at low concurrency and real under production traffic, precisely this course's recurring dangerous bug shape.

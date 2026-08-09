@@ -33,6 +33,8 @@ Then work the case studies by **shape**, not by title. Roughly eight shapes cove
 | 07 | [Amazon / E-commerce](./07-Designing-Amazon-Ecommerce.md) | Multi-service transactions; the Saga motivation; inventory contention |
 | 08 | [WhatsApp — E2E & Multi-Device](./08-Designing-WhatsApp-E2E-MultiDevice.md) | End-to-end encryption; per-device key management |
 | 17 | [URL Shortener & Distributed ID Generation](./17-Designing-URL-Shortener-Distributed-ID-Generation.md) | **The most-asked opener.** Coordination-free unique IDs; extreme read skew; hot keys |
+| 19 | [Search, Typeahead & Autocomplete](./19-Designing-Search-Typeahead-Autocomplete.md) | Inverted indexes and FSTs; freshness vs. latency; scatter-gather tails; relevance as an *unverifiable* correctness definition |
+| 20 | [Notification & Alerting System](./20-Designing-Notification-Alerting-System.md) | Multi-channel fan-out through infrastructure you don't own; consent at dispatch time; delivery evidence and reconciliation |
 
 ### Financial systems
 
@@ -70,8 +72,9 @@ Then work the case studies by **shape**, not by title. Roughly eight shapes cove
 | Multi-tenancy & isolation | 12 | Strong |
 | Regulatory / completeness / deadlines | 13 | Strong |
 | Migration & evolution | 14 | Strong |
-| **Search & typeahead** | — | **Gap** |
-| **Notification / push fan-out** | — | **Gap** |
+| Search & typeahead | 19 | Strong |
+| Notification / push fan-out | 20 | Strong |
+| **Delivery evidence via a third party you don't control** | **20** | Strong |
 | **Geospatial proximity & matching** | — | **Gap** |
 | **Booking / inventory contention** | — | **Gap** |
 | **Job scheduling & workflow orchestration** | — | **Gap** |
@@ -83,12 +86,12 @@ Then work the case studies by **shape**, not by title. Roughly eight shapes cove
 
 These question classes are asked at the Principal/Staff bar and are not yet covered. Listed in the order they should be written, by how frequently they appear:
 
-1. **Search, typeahead & autocomplete** — inverted index, trie/FST, ranking, index freshness vs. query latency, scatter-gather tail latency.
-2. **Notification & push delivery** — multi-channel fan-out, preference/quiet hours, provider failover, poison-endpoint isolation, delivery receipts.
-3. **Geospatial proximity & real-time matching** — geohash/S2/quadtree, location ingest, dispatch under contention. *(The Uber/DoorDash class.)*
-4. **Booking & inventory contention** — reservation TTLs, oversell as a correctness bug, queue-based admission for onsales. *(Partially touched in 07.)*
-5. **Distributed job scheduler & workflow orchestration** — cron at scale, exactly-once triggering, leader election, missed-window semantics, backfill.
-6. **Real-time counting & stream aggregation** — windowing, watermarks, late data, exactly-once aggregation, HyperLogLog/count-min.
+1. **Geospatial proximity & real-time matching** — geohash/S2/quadtree, location ingest, dispatch under contention. *(The Uber/DoorDash class.)*
+2. **Booking & inventory contention** — reservation TTLs, oversell as a correctness bug, queue-based admission for onsales. *(Partially touched in 07.)*
+3. **Distributed job scheduler & workflow orchestration** — cron at scale, exactly-once triggering, leader election, missed-window semantics, backfill.
+4. **Real-time counting & stream aggregation** — windowing, watermarks, late data, exactly-once aggregation, HyperLogLog/count-min.
+
+*Closed since this backlog was written:* search & typeahead (Module 19) and notification & push delivery (Module 20).
 
 Adjacent material that partially covers some of this lives outside the folder: `16-Distributed-Systems/` (consensus, CRDTs, tail latency, storage engines), `12-Data-Structures/02-Graphs-Tries-Union-Find.md` (tries), `07-Redis/` (caching, streams), and `36-Saga/` + `37-Outbox/`.
 
@@ -96,7 +99,9 @@ Adjacent material that partially covers some of this lives outside the folder: `
 
 ## Format note
 
-Modules **01–08** predate the current template: they use a compressed format (~30 short-form Q&A, no dedicated Performance/Security/Scalability sections, and §12–17 collapsed into a pointer). Their *content* is sound and the case studies are complete, but they do not carry the five-part answers (Ideal Answer / Why correct / Common mistakes / Follow-ups) that Modules 09 onward provide. Per this repo's standing no-retrofit precedent they are left as-is. Modules **09–18** use the full 16-section template with 40 complete Q&A.
+Modules **01–08** predate the current template: they use a compressed format (~30 short-form Q&A, no dedicated Performance/Security/Scalability sections, and §12–17 collapsed into a pointer). Their *content* is sound and the case studies are complete, but they do not carry the five-part answers (Ideal Answer / Why correct / Common mistakes / Follow-ups) that Modules 09 onward provide. Per this repo's standing no-retrofit precedent they are left as-is. Modules **09–20** use the full 16-section template with 40 complete Q&A.
+
+Module **20 onward** additionally follows the **four-step System Design standard** (`CLAUDE.md`, 2026-08-09): §12 is written to the structure and depth of the *System Design Interview Vol. 2* payment chapter — a candidate↔interviewer scope dialogue, functional/non-functional requirements, back-of-envelope estimation that concludes what the numbers say the *hard problem* is, then high-level design with a component glossary, a numbered end-to-end walkthrough, real API parameter tables and real table schemas with a status lifecycle, then a failure-oriented deep dive, a wrap-up of what was left out, and a numbered reference list. In these modules §12 is the largest section in the file, not a summary. Modules 01–19 keep their existing §12 treatment — no retrofit.
 
 If you are practising against 01–08, supplement them with Module 16's rubric — the compressed Q&A will not by itself calibrate you to the Staff+ bar.
 
@@ -107,5 +112,5 @@ If you are practising against 01–08, supplement them with Module 16's rubric �
 Three patterns surface repeatedly and are worth carrying into any design:
 
 - **Correctness is often unobservable at the point of consumption yet immediately consequential.** Most of the complexity in Modules 09–14 and 18 exists to establish *evidence*, not throughput. The Principal-level question is not "can we compute this fast enough" but **"how would we know if this were wrong?"**
-- **A check whose expected set derives from the logic being checked cannot detect that logic's omissions**, and **an aggregate cannot detect a concentrated failure.** Modules 13, 15, 17, and 18 each contain an incident of this shape — green dashboards throughout, because the monitoring was structurally blind in exactly the dimension of the failure.
+- **A check whose expected set derives from the logic being checked cannot detect that logic's omissions**, and **an aggregate cannot detect a concentrated failure.** Modules 13, 15, 17, 18, 19, and 20 each contain an incident of this shape — green dashboards throughout, because the monitoring was structurally blind in exactly the dimension of the failure. Module 19 adds a *directional* variant (a metric that detects under-matching is blind to over-matching), and Module 20 adds the sharpest form: a non-terminal state counted in the success numerator, so **the more messages got stuck, the better the dashboard looked**. The remedy is the same triple every time — an independent verifier, a counter on every silent path, and detection by **aging rather than rate**.
 - **Prefer making the bad state unrepresentable over detecting it.** A protection mechanism with exceptions is one whose exceptions are where the incidents occur. Modules 03, 12, 17, and 18 each arrive at this independently.

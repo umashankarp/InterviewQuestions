@@ -548,47 +548,306 @@ public async Task<ReconciliationReport> ReconcileAsync(DateOnly asOf)
 
 ---
 
-## 12. System Design
+## 12. System Design — Designing a Real-Time Portfolio Risk Engine
 
-**Functional requirements**
-- Compute sensitivities, VaR, and stress results per position, aggregated to portfolio, fund-family, and firm level.
-- Full revaluation overnight; incremental recomputation intraday on material factor moves, position changes, and a floor cadence (Expert Q5).
-- Serve risk to PM dashboards, a pre-trade limits engine, and regulatory reporting.
-- Reproduce any historical risk number on demand from recorded inputs (Advanced Q5).
-
-**Non-functional requirements**
-- Intraday freshness: material change reflected within 60s (P99).
-- Reproducibility: byte-identical re-derivation from recorded inputs, indefinitely within the retention period.
-- Correctness: every run internally consistent (single market state); incremental drift bounded and monitored.
-- Availability: risk read path 99.9%; limits-engine path fails closed rather than serving stale.
-
-**Capacity estimation** (worked, since this is where candidates most often go wrong)
-- 9,000 portfolios × ~220 positions ≈ 2M positions.
-- Historical-simulation VaR at 500 scenarios → 2M × 500 = 1B pricings per full run.
-- At ~40µs per pricing (typical for vanilla instruments; derivatives are far slower) → 40,000 CPU-seconds ≈ 11 CPU-hours.
-- Overnight window of 90 minutes → ~8 cores minimum, ~24 with 3× headroom for heavy-tail portfolios and stragglers. Intraday incremental touches perhaps 2–5% of positions per trigger → comfortably sub-minute on the same grid.
-- **The point of the estimate is the sensitivity analysis, not the number:** if instrument mix shifts toward derivatives at ~2ms per pricing, the same run becomes ~550 CPU-hours — a 50× swing driven entirely by instrument mix. Capacity planning must be driven by mix, not position count.
-
-**Architecture:** the diagram — task generator fanning out over a pull-based grid, deterministic aggregation, bitemporal risk store feeding three differently-postured consumers.
-
-**Components:** Task generator (dependency-graph-driven); pull-based grid workers; deterministic hierarchical aggregator; bitemporal risk store; reconciliation job; pricing-model registry (immutable, versioned).
-
-**Database selection:** Market-data snapshots — immutable object storage, versioned, replicated (this is the irreplaceable asset, Intermediate Q5). Positions — bitemporal relational store (point-in-time correctness is a query requirement, not an afterthought). Risk results — columnar/time-series store, append-only, partitioned by portfolio + as-of date, since the dominant query is "risk for these portfolios across this date range."
-
-**Caching:** Sensitivity cache and pricing memoization, both fully-keyed and correctness-verified by periodic recomputation, never hit-rate-monitored alone.
-
-**Messaging:** Market-data ticks and position changes arrive as events; run triggering is event-driven with materiality filtering (Expert Q5). Completed-run notifications published for downstream consumers via the Outbox pattern where consumers require guaranteed delivery.
-
-**Scaling:** Horizontal grid scaling with hierarchical aggregation to avoid a single-aggregator bottleneck; dedicated pools per tenant class where multi-tenant (Expert Q3).
-
-**Failure handling:** Worker loss → task re-queue (idempotent by construction, since tasks are pure functions of pinned inputs). Coordinator loss → resume from durable task-completion state. Bad market data → reject at ingestion with recorded quarantine (Expert Q8). Run-level input inconsistency → reject the entire run at aggregation (Advanced Q1).
-
-**Monitoring:** Two distinct signal sets (Expert Q9) — performance (run duration, task P99, queue depth) and *correctness* (input-consistency verification, reconciliation divergence trend, graph coverage, spot-reproduction success). The latter must be deliberately constructed.
-
-**Trade-offs:** Snapshot pinning trades marginal freshness for consistency — correct given consequence asymmetry. Incremental intraday trades exactness for latency, bounded by reconciliation. Deterministic aggregation trades some aggregation throughput for reproducibility — non-negotiable given the regulatory requirement.
+*Authored to the four-step standard (see Module 01 §12 for the method).*
 
 ---
 
+### Step 1 — Understand the Problem and Establish Design Scope
+
+#### The dialogue
+
+> **C:** Whose risk, and for what purpose? Market risk for a trading desk, counterparty risk, and regulatory capital are three different systems.
+> **I:** Market risk for an asset manager — sensitivities, VaR, and stress, across the firm's portfolios.
+>
+> **C:** Who consumes it? The consumers determine the freshness and availability requirements far more than the maths does.
+> **I:** Three: portfolio manager dashboards, a pre-trade limits engine, and regulatory reporting.
+>
+> **C:** Those have incompatible postures — a dashboard prefers stale-but-available, a limits engine must refuse rather than serve stale, and reporting needs reproducibility. Confirmed?
+> **I:** Confirmed, and that tension is part of the problem.
+>
+> **C:** Overnight batch, intraday, or both?
+> **I:** Both. Full revaluation overnight; intraday updates when something material moves.
+>
+> **C:** What defines "material"? If it's every tick, the design is completely different.
+> **I:** You define it — but assume we cannot recompute everything on every tick.
+>
+> **C:** Do we need to reproduce a historical risk number exactly?
+> **I:** Yes. If a regulator asks why a limit breached on a date two years ago, we must reproduce the number byte-for-byte.
+>
+> **C:** Scale?
+> **I:** About 9,000 portfolios, roughly 220 positions each.
+>
+> **C:** Instrument mix? Vanilla equities and bonds price in microseconds; exotic derivatives are milliseconds — that's a 50× swing in total compute.
+> **I:** Predominantly vanilla today, but the derivative book is growing.
+>
+> **C:** Out of scope?
+> **I:** Market-data sourcing (assume Module 10's platform supplies pinned snapshots), the pricing models themselves, and the reporting formats.
+
+The sixth answer is the constraint that shapes everything: **byte-identical reproducibility** rules out non-deterministic parallel aggregation, floating-point order sensitivity, and any "current market data" read that is not pinned. It converts a compute problem into an *evidence* problem.
+
+#### Functional requirements
+
+1. Compute sensitivities, VaR, and stress results per position, aggregated to portfolio, fund-family, and firm level.
+2. Full revaluation overnight; incremental recomputation intraday on material factor moves, position changes, and a floor cadence.
+3. Serve risk to PM dashboards, a pre-trade limits engine, and regulatory reporting — each with its own posture.
+4. Reproduce any historical risk number on demand from recorded inputs.
+5. Reconcile the incremental intraday state against a full recomputation, and bound the drift.
+
+#### Non-functional requirements
+
+| Requirement | Target |
+|---|---|
+| Intraday freshness | Material change reflected within 60 s (p99) |
+| Overnight window | Full revaluation complete within 90 minutes |
+| Reproducibility | **Byte-identical** re-derivation from recorded inputs, for the full retention period |
+| Correctness | Every run internally consistent (a single pinned market state); incremental drift bounded and monitored |
+| Availability — dashboard read path | 99.9%, stale-tolerant |
+| Availability — limits engine | **Fails closed** — refuses rather than serving stale |
+| Retention | Inputs and results for the regulatory period, queryable |
+
+#### Back-of-the-envelope estimation
+
+```
+Positions        = 9,000 portfolios × 220              ≈ 2,000,000
+Historical-sim VaR at 500 scenarios
+Pricings/run     = 2,000,000 × 500                     = 1 × 10^9
+At ~40 µs/pricing (vanilla)
+CPU time         = 10^9 × 40 µs                        = 40,000 CPU-s ≈ 11 CPU-hours
+Overnight window = 90 min = 1.5 h
+Cores needed     = 11 ÷ 1.5                            ≈ 8 cores minimum
+With 3× headroom for heavy-tail portfolios and stragglers ≈ 24 cores
+```
+
+Intraday:
+
+```
+A material trigger touches ~2–5% of positions
+                 = 40,000–100,000 positions × 500 scenarios
+                 = 2–5 × 10^7 pricings ≈ 0.8–2 CPU-hours
+On the same 24-core grid                                ≈ 2–5 minutes
+...which does NOT meet the 60-second target, so incremental
+recomputation must be narrower than "every affected position"
+— see §3.3.
+```
+
+**The sensitivity that matters — and the reason to do the estimate at all:**
+
+```
+If instrument mix shifts toward derivatives at ~2 ms per pricing:
+Same run = 10^9 × 2 ms = 2,000,000 CPU-s ≈ 550 CPU-hours
+                                          → 370 cores for the same window
+A 50× swing driven ENTIRELY by instrument mix, with no change
+in position count, portfolio count, or scenario count.
+```
+
+Storage:
+
+```
+Risk results: 2M positions × ~20 measures × 8 B × 2 runs/day ≈ 640 MB/day
+Market-data snapshots: the irreplaceable asset — small, but must
+be retained immutably for the full period
+```
+
+#### What the numbers tell us
+
+1. **Compute is not the binding constraint today — 24 cores is nothing.** A candidate who spends the round on grid scaling has misread the problem.
+2. **Capacity planning must be driven by instrument mix, not position count.** The 50× sensitivity means a headcount-neutral, AUM-neutral change in the book can invalidate the capacity model overnight. So the monitored capacity metric must be *pricings weighted by instrument cost*, not position count — an unusual metric that falls directly out of this arithmetic.
+3. **The 60-second intraday target is not met by "recompute affected positions."** The estimate says 2–5 minutes. That gap is what forces materiality filtering and sensitivity-based approximation (§3.3) rather than brute recomputation — and identifying the gap *from your own numbers*, rather than discovering it later, is the point of Step 1.
+
+The hard problem is **reproducibility and internal consistency under incremental update**, not throughput.
+
+---
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+#### The two core flows
+
+- **Full run (overnight)** — complete, deterministic, pinned to one market snapshot, the reference against which everything else is judged.
+- **Incremental run (intraday)** — narrow, triggered, approximate at the margin, and continuously reconciled against what a full run would have produced.
+
+Treating these as one pipeline with a parameter is the common mistake; they have different correctness definitions.
+
+#### Components
+
+**Snapshot Pinner.** Obtains a `snapshotId` from the market-data platform (Module 10) and pins it for the entire run. **Every task in a run reads the same snapshot** — this is the single mechanism that makes a run internally consistent.
+
+**Task Generator.** Walks the risk-factor dependency graph and emits pure-function tasks. Dependency-aware, because naive per-position parallelism recomputes shared factor state repeatedly.
+
+**Compute Grid (pull-based workers).** Workers pull tasks; each task is a pure function of `(pinned inputs, model version)`, which makes retry free and idempotent by construction.
+
+**Deterministic Aggregator.** Hierarchical, with a **fixed combination order** — because floating-point addition is not associative, and an aggregation whose order varies with worker completion order produces different numbers on every run. This is the single most commonly missed reproducibility requirement.
+
+**Pricing-Model Registry.** Immutable, versioned model binaries. A risk number is meaningless without the model version that produced it.
+
+**Bitemporal Risk Store.** Results by `(portfolio, as-of date, knowledge time)` — so "what did we believe on Tuesday" and "what do we now believe about Tuesday" are both answerable.
+
+**Reconciliation Job.** Compares the incremental intraday state against a from-scratch recomputation; produces a bounded drift measure.
+
+**Consumer Adapters.** Three, with three different postures, enforced in the adapter rather than by convention.
+
+#### End-to-end walkthrough — a full overnight run
+
+1. Scheduler triggers; the Snapshot Pinner acquires `snapshotId=S`, and positions are read `asOf` the same business date.
+2. A `run_id` is created recording `{snapshotId, position_asof, model_registry_version, scenario_set_version}` — **the complete reproduction key**, written before any compute starts.
+3. Task Generator walks the dependency graph: shared risk-factor state (curves, surfaces, scenario matrices) is computed once and published; per-position pricing tasks reference it.
+4. Workers pull tasks, pricing against `S` only. A worker that cannot obtain `S` **fails the task rather than falling back to current data** — silent substitution is how a run becomes internally inconsistent.
+5. Completed task results land in a durable task-completion log, so a coordinator crash resumes rather than restarts.
+6. Aggregation runs hierarchically in a fixed, deterministic order, producing portfolio → family → firm results.
+7. **Input-consistency verification** before publication: every task in the run must have used `S` and the same model versions. Any mismatch **rejects the entire run** rather than publishing a partially-consistent number.
+8. Results written to the bitemporal store with `run_id`; a completion event published via the Outbox to downstream consumers.
+
+#### End-to-end walkthrough — an intraday incremental update
+
+1. A market-data event or position change arrives; the **materiality filter** evaluates whether it can move any measure past a stated threshold.
+2. Below threshold → recorded, not recomputed. (Recorded, because "we chose not to recompute" must be evidence, not an absence.)
+3. Above threshold → a new `snapshotId` is pinned, the affected sub-graph is identified, and a narrow task set is emitted.
+4. Results merge into the intraday state with a **new knowledge time**, never overwriting.
+5. A floor cadence (say every 15 minutes) forces an update regardless of materiality, so a quiet market cannot produce an indefinitely stale number that looks fresh.
+
+#### API design
+
+**`GET /v1/risk/portfolios/{id}`**
+
+| Param | Type | Description |
+|---|---|---|
+| `as_of` | date | Business date |
+| `knowledge_time` | RFC3339 | Optional; defaults to now. **This parameter is what makes the store bitemporal in practice rather than in theory** |
+| `measures` | string[] | `delta`, `var_99_1d`, `stress:{scenario_id}`, … |
+| `aggregation` | enum | `POSITION` \| `PORTFOLIO` \| `FAMILY` \| `FIRM` |
+
+Response:
+
+| Field | Type | Description |
+|---|---|---|
+| `values` | object | Measure → value |
+| `run_id` | string | Which run produced this |
+| `snapshot_id` | string | Which market state |
+| `computed_at`, `staleness_seconds` | | **Staleness is returned, not inferred** — the limits engine needs it to decide whether to refuse |
+| `basis` | enum | `FULL` \| `INCREMENTAL` — consumers are entitled to know which |
+
+**`POST /v1/risk/runs`** — `{ run_type, as_of, snapshot_id?, scope? }` → `202 { run_id }`.
+
+**`GET /v1/risk/runs/{run_id}/reproduction-key`** → the full input manifest. This endpoint exists so reproduction is a *supported operation*, not an archaeology exercise.
+
+**`POST /v1/risk/reproduce`** — `{ run_id }` → re-executes from the recorded manifest and reports whether the output is byte-identical. Running this on a sample continuously is the only way to know reproducibility still works.
+
+#### Data model
+
+**`risk_run`** — `run_id`, `run_type` (`FULL`/`INCREMENTAL`), `as_of`, `snapshot_id`, `position_asof`, `model_registry_version`, `scenario_set_version`, `started_at`, `completed_at`, `status`, `task_count`, `consistency_verified`.
+Lifecycle: `PENDING → RUNNING → AGGREGATING → VERIFYING → PUBLISHED`, with `REJECTED` (consistency failure) and `FAILED` branches. **`REJECTED` is a first-class terminal state** — a run that fails verification must not be silently retried into existence.
+
+**`risk_result`** — columnar, partitioned by `(portfolio_id, as_of)`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `portfolio_id`, `position_id`, `as_of` | | Partition/cluster |
+| `knowledge_time` | timestamptz | The bitemporal second axis; append-only |
+| `measure`, `value` | text/double | |
+| `run_id` | string | Provenance on every row — non-negotiable |
+| `basis` | enum | `FULL`/`INCREMENTAL` |
+
+**`position`** — bitemporal relational store; point-in-time correctness is a *query requirement*, not a nice-to-have, because a trade booked late must not retroactively change a published number without a new knowledge time.
+
+**`market_snapshot`** — immutable object storage, addressed by `snapshot_id`, versioned and replicated. **This is the irreplaceable asset**: models can be rebuilt and results recomputed, but a market state that was never captured is gone forever.
+
+#### Store selection, and why
+
+| Store | Choice | Reason |
+|---|---|---|
+| Market snapshots | **Immutable object storage, versioned** | Write-once, read-by-key, must survive everything. Cheap, durable, and immutability is the property that makes reproduction possible |
+| Positions | **Bitemporal relational** | Point-in-time queries with joins; modest volume; corrections must not overwrite |
+| Risk results | **Columnar/time-series, append-only** | The dominant query is "these portfolios across this date range for these measures" — a columnar scan. Append-only preserves the knowledge-time axis |
+| Task state | **Durable log** | Crash resumption |
+| Model binaries | **Immutable artefact registry** | A model version is part of the reproduction key |
+
+---
+
+### Step 3 — Design Deep Dive
+
+#### 3.1 Determinism — the four places it is lost
+
+Reproducibility fails quietly, and always in one of these four places:
+
+1. **Floating-point aggregation order.** `(a+b)+c ≠ a+(b+c)` in IEEE 754. If the aggregator sums results in worker-completion order, the firm-level number differs run to run. Fix: aggregate in a **fixed, position-ID-ordered tree**, or use a compensated (Kahan) summation with a fixed order. Sorting before summing costs a little and buys the whole requirement.
+2. **Unpinned inputs.** Any task that reads "current" anything — market data, reference data, a config flag — breaks reproduction. Fix: every input arrives through the pinned manifest, and workers have **no network path** to live sources. Structural prevention, not discipline.
+3. **Model version drift.** The same code path, a different binary. Fix: model version is in the reproduction key and is verified at task execution, not assumed.
+4. **Non-deterministic randomness.** Monte Carlo without a recorded, per-task seed derived deterministically from `(run_id, position_id, scenario_index)`. Fix: derive seeds; never use a global RNG.
+
+The verification that this still works is the `POST /v1/risk/reproduce` sample job — because all four of these regress silently, and none of them produce an error.
+
+#### 3.2 Snapshot pinning and the consistency/freshness trade
+
+Pinning trades marginal freshness for internal consistency. It is correct here because of **consequence asymmetry**: a risk number that is 30 seconds old is fine; a risk number where half the positions were priced against 09:00 data and half against 09:01 data is *wrong in an unquantifiable way* — you cannot say by how much, which means you cannot defend it.
+
+Concretely, this means a long-running task must not "refresh" its data mid-run, and a straggler must not be re-dispatched against a newer snapshot. The task's inputs are part of its identity.
+
+#### 3.3 Closing the intraday gap the estimation exposed
+
+The estimate said naive incremental recomputation takes 2–5 minutes against a 60-second target. Three levers, applied in order:
+
+- **Materiality filtering.** Do not recompute for moves that cannot change any measure past its reporting threshold. This is the largest lever, and it must be *conservative and provable* — the filter's job is to prove a move is immaterial, not to guess.
+- **Sensitivity-based approximation.** For small factor moves, first-order (delta/gamma) revaluation approximates full revaluation at a fraction of the cost. Valid within a bounded move size; **outside that bound, fall back to full revaluation**, and the bound must be enforced rather than assumed.
+- **Dependency-graph narrowing.** Recompute only the sub-graph the move actually touches, not every position in an affected portfolio.
+
+The essential discipline: every approximation is **bounded and measured**, and the reconciliation job (§3.4) is what turns "we think the approximation is fine" into evidence.
+
+#### 3.4 Reconciliation and bounded drift
+
+Incremental state accumulates approximation error. The control is a periodic from-scratch recomputation compared against the incremental state, producing a per-measure drift distribution.
+
+- Drift within tolerance → recorded, trend tracked.
+- Drift outside tolerance → the incremental state is **replaced by the full result** and an investigation is raised.
+- **Drift trend is the alert, not drift level.** A slowly growing drift that is still inside tolerance is the leading indicator; by the time it breaches, the cause is weeks old.
+
+#### 3.5 Three consumers, three postures — enforced structurally
+
+| Consumer | Posture | Behaviour when risk is stale or unavailable |
+|---|---|---|
+| PM dashboard | **AP** | Serve last known value, **prominently labelled with its staleness**. A dashboard that hides staleness is worse than one that fails |
+| Pre-trade limits engine | **CP — fails closed** | Refuse to authorise. Trading blocked is a business cost; trading against unknown risk is a control failure |
+| Regulatory reporting | **Reproducible over fresh** | Uses published, verified full runs only; never incremental state |
+
+This is why `staleness_seconds` and `basis` are in the API response rather than being internal details: **the consumer cannot implement its posture unless the response tells it what it is holding.** Designs that return a bare number force every consumer to guess.
+
+#### 3.6 Failure handling
+
+- **Worker loss** → task re-queued. Free, because tasks are pure functions of pinned inputs — idempotence by construction rather than by mechanism.
+- **Straggler task** → hedged re-dispatch against **the same snapshot**; first result wins, the other is discarded. Re-dispatching against fresh data would silently break run consistency.
+- **Coordinator loss** → resume from the durable task-completion log.
+- **Bad market data** → rejected at ingestion with a recorded quarantine, never silently substituted.
+- **Run-level input inconsistency** → **reject the entire run.** Publishing a partially-consistent risk number is the worst available outcome, because it is wrong in a way nobody can bound.
+- **Overnight run overruns the window** → this is a capacity event, and per the estimation's sensitivity, its most likely cause is instrument-mix drift rather than volume growth. The alert should therefore be on **cost-weighted pricings**, which moves before the window is missed.
+
+---
+
+### Step 4 — Wrap-Up
+
+**What we left out:** the pricing models and scenario construction themselves; counterparty credit risk and XVA, which have a different computational shape (nested simulation); regulatory capital calculation; the limits engine's own design; multi-tenant isolation across fund families, where a noisy tenant must not consume another's grid capacity (Module 12); and disaster recovery for the snapshot archive, which given its irreplaceability deserves its own review.
+
+**What we would measure — two deliberately separate signal sets:**
+
+*Performance:* run duration versus window, task p99, queue depth, straggler rate, cost-weighted pricings per run.
+
+*Correctness — and this set must be deliberately constructed, because none of it emerges from ordinary instrumentation:* input-consistency verification pass rate; reconciliation drift **trend** per measure; dependency-graph coverage (positions that were in the book but in no task — the completeness question, which is Module 13's problem arriving here); spot-reproduction success rate on sampled historical runs; and approximation-bound violations.
+
+**Summary.** Pin one market snapshot per run and give workers no path to live data; make tasks pure functions so retries are free; aggregate in a fixed order because floating-point addition is not associative; keep results bitemporal so corrections add knowledge rather than destroy it; and reject rather than publish when input consistency fails. The estimation drives the two non-obvious decisions: capacity is governed by instrument mix rather than position count, and the 60-second intraday target cannot be met by recomputation alone, which is what forces bounded, measured approximation with reconciliation as its control.
+
+---
+
+### References
+
+1. Basel Committee — *Minimum capital requirements for market risk* (FRTB), for the reproducibility and model-versioning expectations regulators actually apply.
+2. Philippe Jorion — *Value at Risk*, for historical-simulation mechanics and the scenario-count/compute relationship.
+3. David Goldberg — *What Every Computer Scientist Should Know About Floating-Point Arithmetic* — the formal basis for §3.1's aggregation-order requirement.
+4. William Kahan — compensated summation, the practical mitigation.
+5. Martin Fowler — *Bitemporal History*, the model used for the risk store and positions.
+6. Google — *The Tail at Scale* (Dean & Barroso, CACM 2013) — hedged requests, and why they must be hedged against identical inputs here.
+7. Modules 10 and 12 of this folder — the market-data platform supplying pinned snapshots, and multi-tenant grid isolation.
+8. Module 13 of this folder — completeness as an evidence problem, the shape §4's monitoring set inherits.
+
+---
 ## 13. Low-Level Design
 
 **Requirements:** Tasks are pure functions of pinned inputs; aggregation is order-independent; every result carries full provenance; graph resolution is efficient over the reachable subgraph.

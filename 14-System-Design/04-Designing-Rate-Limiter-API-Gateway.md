@@ -330,9 +330,300 @@ public class GatewayPipeline
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design — Designing an API Gateway with Multi-Tier Rate Limiting
 
-*(This entire module IS the deep-dive case study — the incident, the four worked exercises, and the extensive Advanced-tier Q&A collectively constitute this section's typical content, directly synthesizing Modules 2, 12, 16, and 25's earlier rate-limiting/gateway-adjacent content into one cohesive system-design treatment.)*
+*Authored to the four-step standard (see Module 01 §12 for the method). For the limiter **algorithms** themselves — fixed/sliding window, token bucket, GCRA, and their distributed-correctness proofs — see Module 15; this section designs the **system** that runs them.*
+
+---
+
+### Step 1 — Understand the Problem and Establish Design Scope
+
+#### The dialogue
+
+> **C:** What is the gateway responsible for? "API gateway" covers everything from a reverse proxy to a full service mesh ingress.
+> **I:** TLS termination, authentication, rate limiting, routing to backends, and request/response observability. No protocol translation, no response aggregation.
+>
+> **C:** Is this multi-tenant — do we have paying customers with contractual limits?
+> **I:** Yes. Tenants have plan-based quotas that appear in a contract.
+>
+> **C:** So limits are a billing artefact, not just an abuse control. Do we need per-user limits inside a tenant too?
+> **I:** Yes — one bad integration inside a tenant shouldn't consume the tenant's whole quota.
+>
+> **C:** And per-endpoint? Some endpoints are far more expensive than others.
+> **I:** Yes.
+>
+> **C:** Scale?
+> **I:** 50,000 requests/sec peak across roughly 5,000 tenants and 200 backend services.
+>
+> **C:** What latency budget does the gateway get? It's on every request, so its overhead multiplies.
+> **I:** Under 5 ms at p99 for the gateway's own processing, excluding the backend call.
+>
+> **C:** When the rate-limit store is unavailable, do we fail open or fail closed?
+> **I:** Good question — that's part of what I want you to design.
+>
+> **C:** Last one: are limits enforced globally across the fleet, or is approximate per-instance enforcement acceptable?
+> **I:** Contractual limits must be fleet-accurate. Abuse limits can be approximate.
+
+That last exchange is the hinge. **"Contractual" and "abuse" limits have different correctness requirements**, and recognising that lets you use a cheap approximate mechanism for the high-volume case and an exact one only where money is involved — which is what makes the 5 ms budget achievable.
+
+#### Functional requirements
+
+1. Terminate TLS; authenticate the caller (API key, JWT, or mTLS) and resolve tenant/user identity.
+2. Enforce four simultaneous limit tiers: global, per-tenant, per-user, per-endpoint. A request must pass **all** applicable tiers.
+3. Route to the correct backend using service discovery over healthy instances only.
+4. Return `429` with `Retry-After` and `X-RateLimit-*` headers on rejection.
+5. Emit per-request telemetry (latency, status, tenant, route) without adding meaningful latency.
+6. Support runtime policy changes (a plan upgrade takes effect in seconds, not at next deploy).
+
+#### Non-functional requirements
+
+| Requirement | Target |
+|---|---|
+| Gateway added latency | p99 < 5 ms, p50 < 1 ms |
+| Throughput | 50,000 req/s peak, headroom to 100,000 |
+| Availability | **99.99%** — the gateway's availability is the ceiling on every backend's |
+| Limit accuracy — contractual | Exact within a window; over-admission is a revenue leak, under-admission is a customer complaint |
+| Limit accuracy — abuse | ±5% acceptable |
+| Policy propagation | < 10 s from admin change to fleet-wide effect |
+| Failure mode | Explicitly chosen per tier, not accidental |
+
+#### Back-of-the-envelope estimation
+
+The estimation here is about **latency budget**, not capacity — and that inversion is itself the insight.
+
+```
+Peak throughput            = 50,000 req/s
+Gateway instances (4 vCPU, ~5,000 req/s each, TLS-heavy)
+                           = 50,000 ÷ 5,000        = 10 instances
+                           + N+2 redundancy + AZ spread ≈ 15 instances
+```
+
+Now the part that decides the design:
+
+```
+Latency budget                                       = 5 ms  (p99)
+  TLS handshake (amortised over keep-alive)          ≈ 0.1 ms
+  Auth: JWT verify (cached JWKS, no network)         ≈ 0.2 ms
+  Routing + service discovery (in-memory table)      ≈ 0.05 ms
+  Telemetry (async, off the hot path)                ≈ 0
+  Remaining for rate limiting                        ≈ 4 ms
+
+Redis round trip within an AZ                        ≈ 0.4–0.8 ms (p99 higher: ~2 ms)
+Four tiers × one round trip each                     = 4 × 2 ms = 8 ms  ← BLOWS THE BUDGET
+Four tiers in ONE Lua script                         = 1 × 2 ms = 2 ms  ← fits
+```
+
+State size:
+
+```
+Tenants 5,000 × endpoints 200 × window keys ~2   ≈ 2,000,000 keys
+Per key ≈ 100 B                                  ≈ 200 MB   ← trivially fits in Redis
+```
+
+#### What the numbers tell us
+
+1. **Capacity is a non-issue.** Fifteen instances. Anyone who spends the round designing gateway autoscaling has missed the problem.
+2. **The design is entirely determined by the latency budget**, and specifically by the arithmetic above: the naive implementation — one Redis call per tier — is **four times over budget**, and the fix (one atomic script evaluating all tiers) is therefore not an optimisation but a requirement. This is the sentence the whole design turns on.
+3. **200 MB of state means the limiter's data can live anywhere** — including replicated into each gateway's memory, which opens the door to the local-lease design in §3.2 that removes the Redis hop from the common path entirely.
+
+The hard problem is **paying for fleet-accurate enforcement without paying a network round trip per tier per request** — plus the failure §4 exposes, that per-tenant limits are structurally blind to aggregate backend capacity.
+
+---
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+#### Two planes, and keeping them separate
+
+- **Data plane** — the request path. Must be fast, must not block on anything it can avoid, and must degrade rather than fail.
+- **Control plane** — policy definition, tenant plans, route configuration, discovery. Slow, transactional, and **never on the request path**. A control-plane outage must not stop traffic; it must only freeze policy changes.
+
+Conflating these is the most common architectural error in gateway design, and stating the split up front is worth real credit.
+
+#### Components
+
+**Edge load balancer (L4 or cloud NLB).** Distributes to gateway instances. Deliberately dumb — the intelligence is one layer in.
+
+**Gateway instances (data plane).** Stateless. Pipeline: TLS → auth → identity resolution → **rate limit** → route → proxy → telemetry.
+
+**Limiter.** A local token-lease cache plus a Redis-backed authority (§3.2).
+
+**Policy Store (control plane).** Tenant plans, per-endpoint costs, tier definitions. PostgreSQL, published to gateways via a watch/stream.
+
+**Service Registry.** Healthy backend instances per route. Consul/Envoy xDS/cloud service discovery, cached in-memory on each gateway with a health-aware refresh.
+
+**Redis Cluster.** The shared limiter state. Sharded by limit key so tiers spread across nodes.
+
+**Telemetry pipeline.** Async, buffered, lossy-by-design — telemetry must never apply backpressure to the request path.
+
+#### End-to-end walkthrough — one request
+
+1. Client connects; edge LB routes to a gateway instance; TLS terminates (session resumption keeps the handshake amortised).
+2. Gateway extracts credentials. JWT is verified against a **cached JWKS** — never a network call per request.
+3. Identity resolves to `(tenant_id, user_id, plan_id)`, cached locally with a short TTL.
+4. Route match on path/method produces `(service, endpoint_id, cost_weight)`. Endpoints have **weights**, so an expensive search endpoint consumes 10 tokens while a cheap lookup consumes 1 — a single mechanism that replaces a proliferation of per-endpoint limits.
+5. **One limiter call evaluates all four tiers atomically** and returns allow/deny plus remaining quota per tier.
+6. Denied → `429` with `Retry-After`, `X-RateLimit-Limit/Remaining/Reset`, and the **tier that rejected** named in the body. Telling the caller *which* limit they hit is what turns a support ticket into a self-service fix.
+7. Allowed → select a healthy backend instance (least-request, from the in-memory registry), proxy with a per-route timeout and retry budget.
+8. Response streams back; telemetry is emitted asynchronously.
+
+#### API design
+
+**The proxied request** carries no gateway-specific input, but the response contract matters:
+
+| Header | Example | Notes |
+|---|---|---|
+| `X-RateLimit-Limit` | `1000` | The binding tier's limit |
+| `X-RateLimit-Remaining` | `847` | |
+| `X-RateLimit-Reset` | `1723200000` | Unix seconds |
+| `Retry-After` | `12` | On `429` only; the single most useful header for well-behaved clients |
+| `X-RateLimit-Scope` | `tenant` | Which tier bound — `global`\|`tenant`\|`user`\|`endpoint` |
+
+**Control-plane API — `PUT /admin/v1/policies/{tenant_id}`**
+
+| Field | Type | Description |
+|---|---|---|
+| `plan_id` | string | Named plan the tenant is on |
+| `overrides` | object[] | `{ tier, scope_id, limit, window_seconds, burst }` |
+| `enforcement` | enum | `ENFORCE` \| `SHADOW` — shadow mode counts and reports but never rejects |
+| `effective_from` | RFC3339 | |
+
+`SHADOW` is worth calling out unprompted: **you never turn on a new limit in enforce mode.** You run it in shadow, look at how many requests *would* have been rejected, and only then enforce. Every limit rollout that skipped this step is an incident.
+
+**`GET /admin/v1/policies/{tenant_id}/usage`** — current consumption per tier, for support and for the customer's own dashboard.
+
+#### Data model
+
+**`plan`** (PostgreSQL) — `plan_id`, `name`, and per-tier defaults.
+
+**`policy`** — `policy_id`, `tenant_id`, `tier`, `scope_id` (nullable — null means all), `limit`, `window_seconds`, `burst`, `enforcement`, `effective_from`, `version`.
+
+**`endpoint`** — `endpoint_id`, `service`, `method`, `path_pattern`, `cost_weight`, `default_limit`.
+
+**Redis key schema** — the part that is actually load-bearing:
+
+```
+rl:g:{window}                        global
+rl:t:{tenant_id}:{window}            per-tenant
+rl:u:{tenant_id}:{user_id}:{window}  per-user
+rl:e:{tenant_id}:{endpoint_id}:{w}   per-endpoint
+```
+
+All four keys for a request are hashed to the **same Redis slot** using a hash tag on `tenant_id` — `rl:{...}` — so one Lua script can touch all of them atomically. Without co-location, a cluster-mode Redis rejects the multi-key script outright, and this is the detail that separates a design that works from one that only works on a single node.
+
+#### Store selection, and why
+
+| Store | Choice | Reason |
+|---|---|---|
+| Limiter state | **Redis Cluster** | Needs atomic read-modify-write with sub-ms latency and TTL semantics. Lua gives atomicity across the four tiers in one round trip — the requirement the estimation derived |
+| Policy | **PostgreSQL** | Small, relational, transactional, audited. Read once and cached; never on the hot path |
+| Discovery | **In-memory, fed by xDS/Consul** | A network call per request to a registry would blow the budget by itself |
+| Telemetry | **Kafka → columnar store** | Async, high volume, analytical access |
+
+The decision worth defending: **limiter state is not durable and should not be.** If Redis loses its state, the worst case is one window of over-admission. Choosing a durable store for it would trade the latency budget for a guarantee nobody needs — and §3.4 makes the failure behaviour explicit rather than accidental.
+
+---
+
+### Step 3 — Design Deep Dive
+
+#### 3.1 All tiers in one atomic operation
+
+```lua
+-- KEYS: global, tenant, user, endpoint (co-located by hash tag)
+-- ARGV: now_ms, cost, then {limit, window_ms, burst} per tier
+for i = 1, 4 do
+  local limit  = tonumber(ARGV[3 + (i-1)*3])
+  if limit > 0 then
+    local used = tonumber(redis.call('GET', KEYS[i]) or '0')
+    if used + cost > limit then
+      return {0, i, limit - used}      -- denied, and BY WHICH TIER
+    end
+  end
+end
+for i = 1, 4 do
+  if tonumber(ARGV[3 + (i-1)*3]) > 0 then
+    redis.call('INCRBY', KEYS[i], cost)
+    redis.call('PEXPIRE', KEYS[i], tonumber(ARGV[4 + (i-1)*3]))
+  end
+end
+return {1, 0, 0}
+```
+
+Two properties make this correct rather than merely fast. It is **check-all-then-commit-all**: a request that fails tier 3 must not have consumed tiers 1 and 2, or a heavily-rejected tenant would silently burn the global budget. And it returns **which tier denied**, which is what populates `X-RateLimit-Scope` and makes the system debuggable from the client side.
+
+(The algorithm shown is a counter for brevity; Module 15 derives why a sliding-window-log or GCRA is preferable and what each costs.)
+
+#### 3.2 Removing the round trip: local leases
+
+Even 2 ms × 50,000 req/s is 100 CPU-seconds/s of waiting and a hard dependency on Redis for every request. The refinement is **batched leases**: a gateway instance atomically claims a block of tokens from Redis (say 100), spends them locally, and re-claims when low.
+
+| | Per-request Redis | Local leases |
+|---|---|---|
+| Redis ops/s at 50k req/s | 50,000 | ~500 |
+| Added p99 latency | ~2 ms | ~0.01 ms (amortised) |
+| Accuracy | Exact | Over-admits by up to `lease_size × instances` at a window boundary |
+| Redis outage behaviour | Every request affected | Requests continue until leases exhaust |
+
+The over-admission is bounded and computable: 15 instances × 100 tokens = 1,500 requests worst case. For an abuse limit of 100,000/hour, that is 1.5% — inside the stated ±5%. For a **contractual** limit it may not be acceptable, which is exactly why the dialogue's last question mattered.
+
+**Recommendation: leases for global/abuse tiers with lease size scaled to the limit; exact per-request evaluation for contractual tenant tiers.** Hybrid, justified by the requirement rather than uniform for tidiness. And the lease size must shrink as remaining quota shrinks — a tenant with 200 requests left must not have 15 instances each holding 100.
+
+#### 3.3 The gap §4 exposed: nobody is limiting the *backend*
+
+Every per-tenant limit can be satisfied while the sum across tenants destroys the backend. Per-tenant limiting is a **fairness and billing** mechanism; it is structurally incapable of protecting capacity, because it has no knowledge of capacity. The fix is a second, orthogonal control:
+
+- **Concurrency limiting, not rate limiting, at the backend boundary.** Rate is the wrong unit — what saturates a backend is in-flight work. Cap in-flight requests per backend service and use an adaptive algorithm (AIMD or gradient, à la Netflix's concurrency-limits) that discovers the ceiling from observed latency rather than from a configured number that will be wrong within a quarter.
+- **Load shedding by priority when the cap binds.** Shed in a stated order: free tier → batch/async endpoints → interactive reads → writes. Never shed uniformly; uniform shedding means your most valuable traffic fails at the same rate as your least.
+- **Queue with a deadline, not an unbounded buffer.** A request that has already waited past its client's timeout should be dropped, not served — serving it burns capacity for a response nobody will read.
+
+Naming this as *a different control with a different unit* rather than "tune the tenant limits down" is the Staff-level answer, and it is what §4's team actually lacked.
+
+#### 3.4 Failure modes, chosen deliberately
+
+| Failure | Naive behaviour | Designed behaviour |
+|---|---|---|
+| Redis unavailable | Every request errors, or every request passes | **Per tier**: abuse tiers fail *open* on local leases and last-known limits; contractual tiers fail *open* with a counted, alerted "unenforced" flag — because rejecting paying customers is worse than a brief over-admission. The count is what makes it a decision instead of a leak |
+| Policy store unavailable | Gateway can't start / can't route | Gateway serves **last-known-good policy from local cache indefinitely**; only *changes* stall. Startup must be able to boot from cached policy, or a control-plane outage becomes a total outage on the next deploy |
+| Service registry stale | Routes to dead instances | Health-check-driven passive eviction on connection failure, plus outlier detection; a route with zero healthy instances returns `503` fast rather than hanging |
+| One backend slow | Threads/connections pile up, gateway degrades for *all* routes | **Per-route connection pools and concurrency caps** — bulkheads. Without them, one slow backend takes down the gateway and therefore every other backend |
+| Gateway instance dies | Connections dropped | Stateless; LB removes it; clients retry. A non-event *because* nothing per-request lives in gateway memory |
+
+The bulkhead row deserves emphasis: the most common real gateway outage is not the gateway failing but **one slow dependency consuming a shared resource pool**, which is Module 01 §3.4's cache-pool lesson at a different layer.
+
+#### 3.5 Policy propagation without a hot-path lookup
+
+Policy changes must take effect in under 10 seconds without the gateway reading Postgres per request. Mechanism: the control plane writes a versioned policy snapshot; gateways subscribe to a change stream (or long-poll a version endpoint); on change they fetch the delta and swap an immutable in-memory map. Swapping an immutable map means the request path never takes a lock, which matters at 50,000 req/s.
+
+Two safeguards worth stating: **version every snapshot and expose the active version per instance**, so a partially-propagated fleet is visible rather than mysterious; and **validate before swap**, because a malformed policy that all 15 instances accept simultaneously is a fleet-wide outage delivered in under 10 seconds — the propagation speed you built is also the blast radius you built.
+
+---
+
+### Step 4 — Wrap-Up
+
+**What we left out:** authentication protocol depth (Modules 40, 41); request/response transformation and API versioning; WebSocket and gRPC proxying, which break the request/response assumptions here; multi-region gateways and the question of whether limits are per-region or global (they cannot be both cheap and global); caching at the gateway; canary routing and traffic shifting; and WAF/bot management, which is an adjacent but genuinely different problem.
+
+**What we would measure:** gateway added latency p50/p99 **as its own metric**, separated from backend time, because a blended number hides the gateway entirely; `429` rate by tier and tenant, with **shadow-mode counters** for unenforced policies; limiter store latency and error rate; lease over-admission estimate; per-route backend concurrency versus its adaptive cap; policy version distribution across the fleet; and — the one people forget — **the ratio of `429`s to `503`s**, because a healthy system rejects deliberately at the gateway rather than collapsing at the backend, and a rising `503`:`429` ratio means the limits are set above the capacity they are supposed to protect.
+
+**Summary.** Fifteen stateless instances, four limit tiers evaluated in one atomic script, leases where approximation is acceptable and exact evaluation where money is involved, an orthogonal adaptive **concurrency** control at the backend boundary because rate limiting cannot see capacity, per-route bulkheads, and a control plane that is never on the request path. The estimation is what forces it: the naive four-round-trip design is four times over a 5 ms budget, and that single arithmetic result determines nearly every decision downstream.
+
+---
+
+### References
+
+1. Alex Xu — *System Design Interview Vol. 1*, ch. 4 "Design a Rate Limiter".
+2. Netflix — *Performance Under Load: Adaptive Concurrency Limits* (the AIMD/gradient approach in §3.3).
+3. Stripe Engineering — *Scaling your API with rate limiters* (tiered limits and the load-shedder distinction).
+4. Envoy Proxy docs — global rate limiting service, circuit breaking, outlier detection, and xDS for config propagation.
+5. Redis docs — Lua scripting atomicity, cluster hash tags (the key co-location requirement in §2).
+6. IETF draft — *RateLimit header fields for HTTP* (`RateLimit-Limit`/`Remaining`/`Reset`).
+7. Google SRE Book, ch. 21 *Handling Overload* and ch. 22 *Addressing Cascading Failures* — the shedding and bulkhead arguments.
+8. Kong / AWS API Gateway quota documentation — real-world tier semantics and their stated accuracy caveats.
+9. Module 15 of this folder — the limiter algorithms themselves, including GCRA and distributed-correctness proofs.
+
+---
+
+## 13–17. LLD / Debugging / Decision / Case Study / Principal
+
+*(This module predates the full 16-section template; its incident, worked exercises, and Advanced-tier Q&A collectively carry this content. §12 above was authored to the four-step standard on 2026-08-09.)*
 
 ## 18. Revision
 **Key takeaways**: The API Gateway centralizes cross-cutting concerns (auth, rate limiting, routing) once, rather than duplicating them per backend service — its own latency/availability directly multiplies across the entire system's traffic, making it a uniquely high-leverage (and high-blast-radius) component. Multi-tier rate limiting (global, per-tenant, per-user, per-endpoint) must include a global, aggregate tier specifically to protect against many individually-compliant sources overwhelming backend capacity in aggregate — per-tenant/per-user limits alone cannot prevent this failure mode. The gateway itself is not a single point of failure when correctly horizontally-scaled and stateless; its shared dependencies (Redis, service discovery) are the actual availability-critical components requiring the most rigorous HA design. Every optimization/correctness decision at the gateway tier (atomic Lua-script rate checks, signed internal trust assertions, early request rejection) is amplified in importance by being multiplied across 100% of the system's traffic.

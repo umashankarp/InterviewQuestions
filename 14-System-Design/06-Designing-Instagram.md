@@ -332,9 +332,291 @@ public async Task<List<RankedPost>> GetExploreCandidatesAsync(string userId, int
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design — Designing Instagram (Photo Sharing, Feed, Stories, Explore)
 
-*(This entire module IS the deep-dive case study — the incident, the four worked exercises, and the extensive Advanced-tier Q&A collectively constitute this section's typical content.)*
+*Authored to the four-step standard (see Module 01 §12 for the method). Feed fan-out mechanics come from Module 02 and the media pipeline from Module 05 — this section designs what is genuinely **new** here: the combination, plus ephemeral content and discovery.*
+
+---
+
+### Step 1 — Understand the Problem and Establish Design Scope
+
+#### The dialogue
+
+> **C:** Which surfaces are in scope? Instagram is at least four products — the following-feed, Stories, Explore, and Reels.
+> **I:** Following-feed, Stories, and Explore. Skip Reels, DMs, and shopping.
+>
+> **C:** Photos only, or video too?
+> **I:** Photos and short video, but treat the media pipeline as understood — focus on how it plugs in.
+>
+> **C:** Scale?
+> **I:** 500 million DAU, 100 million posts a day, 500 million Stories a day.
+>
+> **C:** Stories outnumber posts 5:1 and expire in 24 hours — is that expiry a hard deletion requirement or a display rule?
+> **I:** Hard. After 24 hours the content should be gone, not hidden.
+>
+> **C:** That's a storage-lifecycle requirement, not an application one — I'll come back to it. Follower distribution?
+> **I:** Power law, same as any social platform. Top accounts have 400+ million followers.
+>
+> **C:** Is the feed chronological or ranked?
+> **I:** Ranked. Assume a ranking service exists.
+>
+> **C:** For Explore, what's the input — is this personalised recommendation?
+> **I:** Yes, personalised, from content the user does *not* follow.
+>
+> **C:** Consistency: if I post, when must I see it? And when must my followers?
+> **I:** You see it immediately. Followers within seconds. Explore can be minutes stale.
+>
+> **C:** Out of scope?
+> **I:** The ranking and recommendation models, moderation, and ads.
+
+The fourth exchange is the one that matters most. **"Gone, not hidden"** turns Stories from a filtering problem into a storage-lifecycle problem — and §4's incident is precisely a team that treated it as the former.
+
+#### Functional requirements
+
+1. Upload a photo/video post with caption; it appears in followers' feeds.
+2. Retrieve a ranked following-feed, paginated.
+3. Post a Story visible for exactly 24 hours, then **deleted**.
+4. Retrieve the Stories tray (which followed accounts have unseen Stories) and view a Story.
+5. Retrieve a personalised Explore grid of content from accounts the user does not follow.
+6. Likes, comments, and follow/unfollow.
+
+#### Non-functional requirements
+
+| Requirement | Target |
+|---|---|
+| Feed read latency | p99 < 300 ms |
+| Media load (first image) | p95 < 500 ms — CDN-served |
+| Story expiry | **Hard delete within a bounded window** (say 25 h), auditable |
+| Post visibility to followers | p99 < 10 s |
+| Explore freshness | Minutes acceptable |
+| Availability — read | 99.99% |
+| Consistency | Read-your-own-writes for your own posts; eventual for everything else |
+| Media durability | 11 nines |
+
+#### Back-of-the-envelope estimation
+
+```
+Posts/day        = 100,000,000        → 1,000 posts/s avg, 3,000 peak
+Stories/day      = 500,000,000        → 5,000 stories/s avg, 15,000 peak
+Feed views/day   = 500M DAU × 8       = 4 × 10^9  → 40,000 reads/s, 80,000 peak
+Story views/day  = 500M × 30          = 1.5 × 10^10 → 150,000 views/s
+```
+
+Media storage — where the two content types diverge sharply:
+
+```
+Post: original + 4 derivatives ≈ 2.5 MB
+      100M/day × 2.5 MB               ≈ 250 TB/day  → 91 PB/year, PERMANENT
+
+Story: original + 2 derivatives ≈ 1.5 MB
+      500M/day × 1.5 MB               ≈ 750 TB/day
+      but 24-hour TTL → steady state  ≈ 750 TB total, NOT growing
+```
+
+Fan-out:
+
+```
+Post fan-out (median 150 followers)  = 1,000/s × 150 = 150,000 feed writes/s
+Story fan-out                        = ZERO — see below
+```
+
+#### What the numbers tell us
+
+Three conclusions:
+
+1. **Stories are 5× the write volume of posts but a rounding error in storage** — 750 TB steady-state versus 91 PB/year growing — *provided* the TTL is enforced by the storage layer. If it is enforced in application code, Stories become 270 PB/year of the most expensive kind of dead data. That factor-of-360 difference is the entire argument for §3.1, and §4 is the incident that proves it.
+2. **Stories must not be fanned out.** 5,000 stories/s × 150 followers = 750,000 feed writes/s for content that expires in a day — five times the post fan-out, for content with a fraction of the lifetime. The Stories tray is a **pull** over followed accounts' active Stories, and the estimation is what proves that rather than asserting it.
+3. **The three surfaces have three different architectures** and combining them is the actual exam: the feed is push/pull hybrid (Module 02), Stories is pure pull with TTL storage, and Explore is precomputed-per-user and refreshed on a schedule. A candidate who applies one pattern to all three has missed the question.
+
+---
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+#### Components
+
+**Media Service.** Pre-signed direct-to-object-storage upload; async derivative generation (thumbnails, feed-size, full-size). Per Module 05, bytes never traverse the app tier.
+
+**Post Service.** Post metadata; source of truth.
+
+**Fan-out Service.** Push to follower feeds below the celebrity threshold; pull above it (Module 02 §3.1). Applies to **posts only**.
+
+**Feed Store.** Redis sorted sets, trimmed.
+
+**Story Service.** Writes to a TTL-native store; serves the tray by pulling active Stories for followed accounts.
+
+**Story Seen-State.** Per-viewer, per-story seen markers — also TTL'd, and larger in row count than the Stories themselves.
+
+**Explore Service.** Serves a precomputed candidate grid per user, refreshed on a schedule and on significant interaction.
+
+**Graph Service.** Follows.
+
+**Ranking Service.** Reorders candidates (feed) and scores candidates (Explore) — deliberately separate from candidate generation, per Module 02 §2.5.
+
+#### End-to-end walkthrough — posting
+
+1. `POST /v1/media/upload-url` → pre-signed URL; client uploads bytes directly.
+2. `POST /v1/posts` with `media_key`, caption, and `Idempotency-Key`.
+3. Post row written; **author's own profile grid updated synchronously** (read-your-own-writes).
+4. Outbox → Kafka → derivative generation and fan-out in parallel.
+5. Fan-out: celebrity check → push to follower feeds, or no-op for pull.
+6. Post becomes visible in followers' feeds as derivatives complete; the feed entry references the media by ID and the client resolves CDN URLs.
+
+#### End-to-end walkthrough — Stories
+
+1. Upload identically, but the media object is written under a **TTL-configured prefix**.
+2. `POST /v1/stories` writes one row to a TTL-native table with `expires_at = now + 24h`.
+3. **No fan-out at all.**
+4. Viewer opens the app → `GET /v1/stories/tray` → service reads the viewer's following list, queries active Stories per followed account (batched), joins seen-state, returns ordered tray.
+5. Viewing writes a seen marker with the same TTL.
+6. At 24 hours, **the store deletes the row and the object-storage lifecycle rule deletes the bytes** — no application code participates in expiry.
+
+#### API design
+
+**`POST /v1/posts`**
+
+| Field | Type | Description |
+|---|---|---|
+| `media_keys` | string[] | From the upload step — never bytes |
+| `caption` | string | |
+| `location_id`, `tagged_user_ids` | optional | |
+| `visibility` | enum | `PUBLIC` \| `FOLLOWERS` |
+
+Header: `Idempotency-Key`.
+
+**`GET /v1/feed`** — `?limit=20&cursor=…`; returns items with `media` (CDN URLs, multiple sizes), `author`, `counts`, and `source: PUSHED|PULLED`.
+
+**`POST /v1/stories`** — `{ media_key, stickers[], visibility, close_friends_only }`. Response includes `expires_at` — surfacing the expiry in the API contract is what stops a client from caching it indefinitely.
+
+**`GET /v1/stories/tray`**
+
+| Field | Type | Description |
+|---|---|---|
+| `accounts` | array | `{ user_id, avatar_url, has_unseen, latest_story_at, story_count }` |
+| `cursor` | string | Tray is paginated — a user following 5,000 accounts cannot get one response |
+
+**`GET /v1/explore?cursor=`** — returns the precomputed grid slice plus a `refreshed_at` so the client can decide whether to request a refresh.
+
+#### Data model
+
+**`post`** — Cassandra, partition `author_id`, clustering `created_at DESC`. Serves both the profile grid and the celebrity pull path.
+
+**`story`** — **DynamoDB with native TTL**, or Cassandra with a TTL on write:
+
+| Column | Type | Notes |
+|---|---|---|
+| `author_id` | Partition key | The tray query is per-author |
+| `story_id` | Clustering (time-ordered ULID) | |
+| `media_key`, `stickers`, `close_friends_only` | | |
+| `created_at` | timestamp | |
+| `expires_at` / row TTL | **The store deletes it.** Not a column an application reads and filters on | |
+
+**`story_seen`** — `(viewer_id, story_id)` with the same TTL. Row count is `stories × viewers`, far larger than the Stories table — 150,000 views/s of writes — which is why it must be a wide-column store with TTL and never a relational table.
+
+**`feed:{user_id}`** — Redis sorted set, trimmed to ~500 (Module 02).
+
+**`explore:{user_id}`** — Redis list of candidate post IDs plus `refreshed_at`, TTL a few hours.
+
+#### Store selection, and why
+
+| Store | Choice | Reason |
+|---|---|---|
+| Posts | **Cassandra** | Permanent, append-heavy, partition-by-author matches both access patterns |
+| Stories & seen-state | **DynamoDB/Cassandra with native TTL** | The requirement is *deletion*, and TTL-native storage makes deletion the store's job. This is the module's central decision |
+| Feed & Explore | **Redis** | Derived, bounded, evictable |
+| Graph | **Sharded relational / graph store** | Reverse-edge index for `followers(x)` |
+| Media | **Object storage + CDN**, with **separate buckets/prefixes for posts and Stories** | Different lifecycle policies. Mixing them makes the Story lifecycle rule unexpressible |
+
+The separate-bucket decision looks trivial and is not: a lifecycle policy applies to a prefix, so if Story and post media share a prefix you cannot express "delete after 24 hours" without also deleting posts. The storage layout has to encode the retention policy, or you are back to application-managed deletion — which is §4.
+
+---
+
+### Step 3 — Design Deep Dive
+
+#### 3.1 Ephemerality as a storage property, not an application rule
+
+The naive Stories design stores content permanently and filters on read: `WHERE created_at > now() - 24h`. It is functionally correct and structurally wrong, for three compounding reasons:
+
+1. **Storage grows without bound.** The filter hides rows; it deletes nothing. At 750 TB/day, a cleanup job that falls behind never catches up — and §4 is exactly that.
+2. **The cleanup job is a separate failure domain.** "Hidden in the UI" and "deleted from storage" become two independently-implemented concerns that can and do diverge. When they diverge, the user-visible behaviour is correct and the bill is not, so nothing alerts.
+3. **It is a privacy defect.** "Disappears after 24 hours" is a promise to the user. Content that is merely hidden is still present, still in backups, still discoverable by a bug or a subpoena. Under GDPR this is a genuine compliance exposure, not just untidiness.
+
+**The design rule: when expiry is a product promise, express it in the storage layer's own semantics — DynamoDB TTL, Cassandra per-row TTL, S3 lifecycle rules — so that no application code participates in deletion.** Then verify: a scheduled job that samples for rows past their TTL and alerts if any exist. TTL mechanisms are asynchronous and best-effort, so "we set a TTL" is a claim that needs a monitor, exactly like every other silent success path in this course.
+
+This generalises well beyond Stories: **a protection mechanism that requires code to run correctly is weaker than one the platform enforces structurally.** It is the same principle as Module 178's append-only `GRANT` and Module 20's non-suppressible category.
+
+#### 3.2 Why Stories pull and posts push
+
+| | Posts | Stories |
+|---|---|---|
+| Volume | 1,000/s | 5,000/s |
+| Lifetime | Permanent | 24 h |
+| Fan-out cost if pushed | 150,000 writes/s | 750,000 writes/s |
+| Value of a precomputed entry | High — read many times over years | Low — read once, then expires |
+| Read shape | Ranked, merged, paginated timeline | "Which of the accounts I follow have something new" |
+
+Push exists to amortise fan-out cost across many reads. A Story is read approximately once per viewer and then vanishes, so there is nothing to amortise — precomputation is pure cost. And the tray query is a *membership* question over the following set, which is cheap when the per-author Story list is small and hot.
+
+The tray does need help at the tail: a user following 5,000 accounts triggers 5,000 lookups. Mitigations: batch by partition, cache the per-author "has active stories" bit with a short TTL (it is the same answer for every viewer), and **paginate the tray**, ordering by an affinity score so the accounts the user actually watches come first.
+
+#### 3.3 Explore — a third architecture
+
+Explore is neither push nor pull; it is **precompute-per-user on a schedule**. Candidate generation (embedding similarity, co-engagement, trending-in-your-graph) is far too expensive to run per request at 500M DAU, and its inputs change on the order of hours, not seconds.
+
+- A batch/streaming job produces a candidate set per active user, refreshed every few hours and on significant interaction (a burst of engagement with a new topic should move Explore within minutes, not at the next batch).
+- Serving reads the precomputed list and applies **only cheap filters at read time**: already-seen, blocked/muted authors, and safety flags.
+
+That last point is a correctness requirement, not an optimisation. Personalised recommendation surfaces are where privacy and safety failures become *visible* — a blocked user's content appearing in Explore is a serious trust failure. **Blocked/muted/safety filtering must be applied at read time**, never baked into the precomputed set, because the precomputed set was built before the user pressed block. This is the same evaluate-at-the-last-moment principle as consent in Module 20 §2.2, and it recurs for the same reason.
+
+#### 3.4 Consistency, per content type
+
+| Content | Model | Rationale |
+|---|---|---|
+| Your own post, your own grid | **Read-your-own-writes** | Written synchronously on the author's path |
+| Your post in followers' feeds | Eventual, seconds | Fan-out is async |
+| Story existence | Eventual, seconds | Tray is pulled on open |
+| Story expiry | **Bounded, monotonic** — once gone, never returns | Re-appearing content is a trust violation and possibly a privacy one |
+| Like/comment counts | Eventual, approximate | Counters are batched |
+| Block/mute | **Strong, immediate, at read time** | A stale block is a safety failure |
+
+Applying one consistency model across all of these is Module 01 §4's exact mistake, and the table is the answer to "what's your consistency model?" — the correct answer is that there isn't one.
+
+#### 3.5 Failure handling
+
+- **Derivative generation fails** → post exists but has no feed-size image. Serve the original scaled by the CDN as a fallback rather than showing a broken post; retry generation.
+- **Fan-out lag** → posts appear late. Detect on per-partition consumer lag (Module 02 §3.4).
+- **Story TTL mechanism silently stops** → the failure that produces no error. Detect with the sampling monitor of §3.1 and a storage-growth alert on the Stories prefix — growth is the symptom, and it is the *only* symptom.
+- **Explore pipeline stalls** → users see a stale grid. Acceptable for hours; alert on `refreshed_at` age distribution, not on job success, because a job that succeeds while producing nothing is the more common failure.
+- **Feed cache node loss** → rebuild on read (Module 02 §3.4).
+
+---
+
+### Step 4 — Wrap-Up
+
+**What we left out:** Reels and the short-video ranking surface; DMs (Module 03); moderation and safety classification, which is a large system in its own right and interacts with every surface here; ads insertion; shopping and checkout (Module 07); multi-region with media locality; and the ranking/recommendation models themselves.
+
+**What we would measure:** **Stories storage footprint versus theoretical steady state** — the single metric that would have caught §4 on day one, because unbounded growth is the only visible symptom of a TTL that is not firing; TTL-expiry lag (sampled rows past `expires_at`); tray latency segmented by following-count decile, since the tail is where it breaks; feed p99 by `PUSHED`/`PULLED` composition; Explore `refreshed_at` age distribution; and post-to-visible latency p99.
+
+**Summary.** Three surfaces, three architectures: the following-feed is Module 02's push/pull hybrid; Stories are pure pull over TTL-native storage with **no fan-out and no application-managed deletion**; Explore is per-user precomputation with safety and seen-state filtering applied at read time. The estimation drives the two non-obvious decisions — Stories would cost 5× the post fan-out for content read once, and would cost 270 PB/year instead of 750 TB if expiry lived in application code rather than in the storage layer.
+
+---
+
+### References
+
+1. Instagram Engineering — *Sharding & IDs at Instagram* (time-sortable IDs used for cursors here).
+2. Instagram Engineering — *Storing hundreds of millions of simple key-value pairs in Redis*, and later posts on feed ranking infrastructure.
+3. Facebook Engineering — *Haystack: an object storage system for photos* (the small-object problem behind media storage at this scale).
+4. AWS — DynamoDB *Time To Live* documentation, including its explicitly best-effort, asynchronous deletion semantics — the reason §3.1 requires a monitor.
+5. AWS — S3 Lifecycle configuration (prefix-scoped, hence the separate-bucket decision).
+6. Cassandra docs — per-row TTL and tombstone behaviour, including the compaction cost of very high TTL churn.
+7. Alex Xu — *System Design Interview Vol. 1*, ch. 11 (feed) and Vol. 2's Explore-style recommendation surfaces.
+8. GDPR Arts. 5(1)(e) and 17 — storage limitation and erasure, the legal backing for "gone, not hidden".
+9. Modules 02 and 05 of this folder — feed fan-out and the media pipeline this design composes.
+
+---
+
+## 13–17. LLD / Debugging / Decision / Case Study / Principal
+
+*(This module predates the full 16-section template; its incident, worked exercises, and Advanced-tier Q&A collectively carry this content. §12 above was authored to the four-step standard on 2026-08-09.)*
 
 ## 18. Revision
 **Key takeaways**: Instagram's core feed and media pipeline directly reuse (fan-out/celebrity-problem) and (chunked upload, async per-rendition processing, CDN-primary delivery) — recognize and state this reuse explicitly rather than re-deriving from scratch. Stories require storage-layer-native TTL (Redis `EXPIRE`, object-storage lifecycle policies), never application-level "hide if old" filtering over permanent storage, which silently risks unbounded storage growth if a separate cleanup job falls behind. The Explore page is a genuinely distinct recommendation-system problem (candidate generation from outside the social graph, offline model training, real-time-signal blending), architecturally separate from the feed's graph-traversal-based fan-out, even though both ultimately involve "ranking."

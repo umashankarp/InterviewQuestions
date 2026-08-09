@@ -584,49 +584,334 @@ public async Task<ReconciliationReport> ReconcileAsync(VenueId venue, DateOnly s
 
 ---
 
-## 12. System Design
+## 12. System Design — Designing an Order Management System & Trade Lifecycle
 
-**Functional requirements**
-- Accept orders from human traders, programmatic APIs, and algorithmic strategies through one system of record.
-- Enforce pre-trade compliance and risk checks before routing.
-- Route to venues, process execution reports, and maintain authoritative order state.
-- Support amendments and cancels with correct pending-state semantics.
-- Allocate fills across accounts deterministically and reconcilably.
-- Hand off to settlement and provide full lifecycle reconstruction.
-
-**Non-functional requirements**
-- Pre-trade path P99 latency budget: single-digit milliseconds for the check chain.
-- Zero unknown positions: every execution either applied or surfaced as a reconciliation break.
-- Full auditability: every state transition and its cause, reconstructable indefinitely.
-- Availability: order entry may degrade (refuse) but execution-report processing must not.
-
-**Capacity estimation**
-- 400 traders + algorithmic strategies; ~250k parent orders/day, ~2M child orders/day at peak algorithmic activity.
-- Peak burst: ~2,000 orders/second during high-activity periods (open, close, volatility events).
-- Execution reports ~3–5× order count (pending/ack/fills/status) → ~10M messages/day.
-- Order store growth: ~10M events/day × ~500 bytes ≈ 5 GB/day, ~1.8 TB/year before compression — modest, and retained for the full regulatory period.
-- **The sensitivity that matters:** child-order multiplier, not trader count. A change in algorithmic strategy mix can shift order volume by an order of magnitude with no change in headcount (Intermediate Q3).
-
-**Architecture:** — multi-channel entry into a single order aggregate, pre-trade check chain, smart order router, per-venue FIX sessions, event-sourced store, allocation engine, settlement handoff.
-
-**Components:** Order aggregate (event-sourced); pre-trade check chain (ordered per Intermediate Q2); smart order router; FIX session managers (per venue, pinned); allocation engine; reconciliation service; kill switch (Expert Q8).
-
-**Database selection:** Event store for order events — append-only, partitioned by order, with snapshots for long-lived orders. Reference data (accounts, instruments, restricted lists) in a bitemporal relational store, resolved `asOf` (§Expert Q4). Read models for blotters and position views projected from the event stream (the CQRS pattern, of which this is a natural application).
-
-**Caching:** Restricted lists and mandate rules cached with bounded staleness; live limits deliberately not cached for hard checks.
-
-**Messaging:** FIX for venue connectivity; internal events published via the Outbox pattern to position, risk, and settlement consumers — guaranteed delivery is required since a lost fill notification means downstream systems are wrong.
-
-**Scaling:** Partition by order ID; FIX sessions pinned per venue; pre-trade check dependencies scaled independently (they are the latency constraint).
-
-**Failure handling:** Transactional deduplication; FIX gap detection with resend; failover re-synchronization before accepting orders; conservative treatment of orders at unreachable venues (Advanced Q7); daily and, where available, intraday reconciliation (Advanced Q4).
-
-**Monitoring:** Working-order count versus expectation; reconciliation break counts by category; pre-trade check latency per stage; per-venue reject rates with cross-venue comparison (Advanced Q9); order-to-fill ratio per algorithm (Expert Q8).
-
-**Trade-offs:** CP over AP for order entry, accepting refusal over uncertain state. Synchronous hard-limit checks accepting latency cost, cached soft checks accepting bounded staleness. Event sourcing accepting its complexity because this domain satisfies the adoption test unambiguously.
+*Authored to the four-step standard (see Module 01 §12 for the method).*
 
 ---
 
+### Step 1 — Understand the Problem and Establish Design Scope
+
+#### The dialogue
+
+> **C:** Buy-side or sell-side? An asset manager's OMS and a broker's order-handling system have different authorities and different regulatory obligations.
+> **I:** Buy-side — an asset manager routing to brokers and venues.
+>
+> **C:** Who enters orders? Human traders, programmatic clients, and algorithmic strategies have very different volume profiles.
+> **I:** All three, through one system of record.
+>
+> **C:** Do we own execution, or route to brokers who execute?
+> **I:** Route out. You process execution reports; you don't match.
+>
+> **C:** So the authoritative state of an order lives partly outside the system — the venue knows things we don't yet. That shapes everything. Confirmed?
+> **I:** Confirmed.
+>
+> **C:** Do we allocate block orders across accounts?
+> **I:** Yes, and allocations must be deterministic and reconcilable — we're audited on fair allocation.
+>
+> **C:** Pre-trade compliance and risk checks?
+> **I:** Yes, before routing, with a latency budget.
+>
+> **C:** What's the budget? Compliance checks and low latency are in direct tension.
+> **I:** Single-digit milliseconds for the whole check chain.
+>
+> **C:** Volumes?
+> **I:** About 400 traders, 250,000 parent orders/day, up to 2 million child orders/day when algos are active.
+>
+> **C:** What must never happen?
+> **I:** We must never have a position we don't know about. Every execution is either applied or surfaced as a break.
+>
+> **C:** Out of scope?
+> **I:** Settlement itself (assume a handoff), the algorithms, and client reporting.
+
+The fourth exchange is the one that defines the system. **The authority on order state is external** — the venue knows about a fill before you do, and may tell you twice, out of order, or not at all. Every hard problem here descends from that, and it is the same shape as Module 18's payment orchestration against a PSP.
+
+#### Functional requirements
+
+1. Accept orders from human traders, programmatic APIs, and algorithmic strategies through one system of record.
+2. Enforce pre-trade compliance and risk checks before routing.
+3. Route to venues/brokers, process execution reports, and maintain authoritative order state.
+4. Support amendments and cancels with correct pending-state semantics.
+5. Allocate fills across accounts deterministically and reconcilably.
+6. Hand off to settlement and reconstruct any order's full lifecycle on demand.
+
+#### Non-functional requirements
+
+| Requirement | Target |
+|---|---|
+| Pre-trade check chain | p99 single-digit milliseconds |
+| Position correctness | **Zero unknown positions** — every execution applied or surfaced as a break |
+| Auditability | Every state transition and its cause, reconstructable for the retention period |
+| Availability — order entry | May degrade to **refusing** orders |
+| Availability — execution-report processing | **Must not degrade.** Refusing to accept a fill does not make it not have happened |
+| Idempotency | Duplicate execution reports must never double-count |
+| Ordering | Per-order causal order preserved despite out-of-order arrival |
+
+That availability asymmetry is worth stating explicitly: **order entry is optional, execution-report processing is not.** A system that treats them as one availability target has mis-modelled the problem — you can always stop sending orders, but you cannot stop the market from filling the ones already out there.
+
+#### Back-of-the-envelope estimation
+
+```
+Parent orders/day  = 250,000
+Child orders/day   = 2,000,000     (algorithmic slicing)
+Peak burst         ≈ 2,000 orders/s   (open, close, volatility events)
+
+Execution reports  ≈ 3–5× order count (pending-new, new, partial fills, done)
+Messages/day       ≈ 10,000,000     → ~100/s average, ~10,000/s peak
+```
+
+Storage:
+
+```
+Order events: 10^7/day × ~500 B                ≈ 5 GB/day
+Per year                                        ≈ 1.8 TB before compression
+Full regulatory retention (7 years)             ≈ 13 TB
+```
+
+Pre-trade latency budget — the arithmetic that constrains the design:
+
+```
+Total budget                                    = 8 ms (p99)
+  Order validation + enrichment                 ≈ 0.5 ms
+  Restricted-list check (cached, in-memory)     ≈ 0.1 ms
+  Mandate/concentration check (needs positions) ≈ 2 ms
+  Hard risk limit (live, uncached)              ≈ 3 ms   ← the binding constraint
+  Routing decision                              ≈ 0.5 ms
+  FIX encode + send                             ≈ 0.5 ms
+  Remaining headroom                            ≈ 1.4 ms
+```
+
+**The sensitivity that matters:**
+
+```
+The volume driver is the CHILD-ORDER MULTIPLIER, not trader count.
+A shift in algorithmic strategy mix — say, from VWAP slicing every
+5 minutes to every 30 seconds — multiplies child orders 10× with
+ZERO change in headcount, AUM, or parent-order count.
+Capacity models keyed to traders or AUM will be wrong without warning.
+```
+
+#### What the numbers tell us
+
+1. **Throughput is trivial.** 10,000 messages/s peak and 13 TB over seven years is a small system by every measure. Anyone designing for scale here has misread the problem.
+2. **The latency budget is genuinely tight and is consumed by one check.** The live hard-limit check is 3 of 8 ms, and it is the one thing that cannot be cached without breaking its purpose (§3.4). That single arithmetic line is what forces the cached/uncached split in the check chain.
+3. **Capacity must be monitored on child-order rate**, not on any business metric. This is the same lesson as Module 09's instrument-mix sensitivity, arriving independently: **the driver of load is a technical parameter that no business dashboard tracks.**
+
+The hard problem is **maintaining correct state for a long-lived entity whose authority lives elsewhere**, under duplicate and out-of-order messages, within a millisecond budget.
+
+---
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+#### The two core flows
+
+- **Outbound (order entry → checks → route)** — latency-bound, may refuse.
+- **Inbound (execution reports → state → position → allocation → settlement)** — must never refuse, must be idempotent, must handle out-of-order.
+
+#### Components
+
+**Order Entry Adapters.** Three channels (GUI, REST/programmatic, algo engine) that all converge on **one order aggregate** — the "one system of record" requirement made structural. Channel-specific order stores are how firms end up with two answers to "what's our position?"
+
+**Pre-Trade Check Chain.** Ordered, short-circuiting, with each check declaring whether it is cacheable.
+
+**Smart Order Router.** Venue selection and child-order generation.
+
+**FIX Session Managers.** One per venue, session state pinned to an instance, with sequence-number persistence.
+
+**Order Aggregate (event-sourced).** The authoritative order state, as an append-only event stream.
+
+**Execution Processor.** Applies execution reports idempotently, resolves out-of-order arrival, updates state.
+
+**Allocation Engine.** Deterministic distribution of fills across accounts.
+
+**Reconciliation Service.** Compares internal state against venue/broker end-of-day (and where available, intraday) reports.
+
+**Kill Switch.** An out-of-band control that stops order flow immediately, at the session level, without requiring the OMS to be healthy.
+
+#### End-to-end walkthrough — order to settlement
+
+1. Trader submits a parent order; the adapter normalises it and assigns an internal `order_id`.
+2. `OrderReceived` event appended. **State is durable before any check runs**, so a crash mid-check leaves a recoverable order rather than a phantom one.
+3. Pre-trade chain runs in declared order, cheapest and most-likely-to-reject first (§3.4).
+4. Rejected → `OrderRejected{reason}`, terminal, returned to the trader with the specific failing check.
+5. Passed → `OrderAccepted`, then the router produces child orders.
+6. Each child gets a **`ClOrdID`** and is sent over the venue's FIX session; `ChildOrderSent` appended **before** the wire send, so a crash after send does not lose the fact that we sent it.
+7. Venue returns execution reports: `PENDING_NEW → NEW → PARTIALLY_FILLED* → FILLED | CANCELED | REJECTED`.
+8. Each report is deduplicated on `ExecID` **scoped correctly** (§3.3), applied to the aggregate, and appended as an event.
+9. Fills roll up from child to parent; the parent's filled quantity is **derived from events, never stored as a mutable counter**.
+10. On completion, the Allocation Engine distributes fills across accounts deterministically.
+11. Allocations are published via the Outbox to position, risk (Module 09), and settlement consumers.
+12. End of day: reconciliation against the broker's report produces breaks by category.
+
+#### API design
+
+**`POST /v1/orders`**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `instrument_id` | string | yes | Canonical ID (Module 10's symbology) |
+| `side` | enum | yes | `BUY` \| `SELL` \| `SELL_SHORT` — short is a *different* order type for compliance, not a flag |
+| `quantity` | decimal | yes | |
+| `order_type` | enum | yes | `MARKET` \| `LIMIT` \| `VWAP` \| … |
+| `limit_price` | decimal | conditional | |
+| `time_in_force` | enum | yes | `DAY` \| `IOC` \| `FOK` \| `GTC` |
+| `accounts` | array | yes | `[{ account_id, target_quantity }]` — allocation intent captured **at entry**, not decided after the fill (§3.5) |
+| `strategy_id` | string | no | For algorithmic orders |
+
+Header: `Idempotency-Key`. Response `201`: `{ order_id, status: ACCEPTED, checks_passed[] }`, or `422` with the failing check named.
+
+**`POST /v1/orders/{id}/amend`** — `{ new_quantity?, new_limit_price?, expected_version }`. Returns `409` if `expected_version` is stale, because an amendment computed against a superseded view of the order is exactly how a trader accidentally doubles a position.
+
+**`POST /v1/orders/{id}/cancel`** → `202`. **Cancel is a request, not a command** — the venue may fill before the cancel arrives, and the API's naming and status codes must reflect that.
+
+**`GET /v1/orders/{id}`** — current state plus `version`, `filled_quantity`, `remaining_quantity`, `pending_amend`, `pending_cancel`, `child_orders[]`, `venue_state_as_of`.
+
+**`GET /v1/orders/{id}/events`** — the full event stream. This is the audit artefact and it is a first-class, supported endpoint rather than a database query someone runs in an incident.
+
+#### Data model
+
+**`order_event`** — event store, partitioned by `order_id`, ordered by `sequence`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `order_id`, `sequence` | Partition + clustering | |
+| `event_type` | enum | `OrderReceived`, `OrderAccepted`, `ChildOrderSent`, `ExecutionReportApplied`, `AmendRequested`, `AmendAccepted`, `CancelRequested`, `Filled`, `Allocated`, … |
+| `payload` | json | |
+| `caused_by` | text | **The cause, not just the effect** — `ExecID`, user ID, or strategy ID. This is what makes "why did this happen" answerable |
+| `occurred_at`, `recorded_at` | timestamp | Venue time and our time |
+
+**`execution`** — `(exec_id_scope, exec_id)` **unique**, `order_id`, `child_order_id`, `last_qty`, `last_px`, `cum_qty`, `avg_px`, `exec_type`, `ord_status`, `transact_time`, `received_at`.
+
+**`clordid_chain`** — `(venue, cl_ord_id)` → `order_id`, `orig_cl_ord_id`, `status`. Amendments create a new `ClOrdID` chained to the original; reconstructing the chain is required to interpret any execution report.
+
+**`allocation`** — `(order_id, account_id)`, `quantity`, `price`, `method`, `computed_at`, `input_hash`. The `input_hash` makes the allocation **reproducible** — the same inputs must yield the same allocation, and proving it is an audit requirement.
+
+**Order state machine** — and it is not simple:
+
+```
+NEW → PENDING_NEW → ACCEPTED → WORKING
+WORKING → PARTIALLY_FILLED → FILLED
+WORKING → PENDING_CANCEL → CANCELED
+WORKING → PENDING_AMEND → WORKING (amended) | REJECTED (amend rejected, original stands)
+Any → EXPIRED (time in force)
+Any → REJECTED (terminal)
+```
+
+The **pending states are the whole difficulty.** `PENDING_CANCEL` means we asked and don't know; during it the order can still fill, and a fill during pending-cancel is normal, not an error. A state machine without pending states forces the system to guess, and guessing about whether an order is live is how a firm ends up double-hedged.
+
+#### Store selection, and why
+
+| Store | Choice | Reason |
+|---|---|---|
+| Order events | **Append-only event store**, partitioned by order, with periodic snapshots for long-lived orders | The domain is *inherently* a sequence of externally-caused state transitions with a hard audit requirement. This is the rare case where event sourcing's costs are unambiguously justified |
+| Reference data (accounts, instruments, restricted lists) | **Bitemporal relational**, resolved `asOf` | A compliance check must be evaluated against the rules in force at order time, and defensible months later |
+| Read models (blotter, positions) | **Projected from the event stream** | CQRS falls out naturally; blotter queries have nothing to do with order-write patterns |
+| Live limits | **Not cached** | See §3.4 |
+
+---
+
+### Step 3 — Design Deep Dive
+
+#### 3.1 Why event sourcing is right here, specifically
+
+This course is generally sceptical of event sourcing (Module 18 §E3 declines it for a ledger). The adoption test it fails there, it passes here, and the reasons are worth being precise about:
+
+- **The aggregate boundary matches the transaction boundary.** An order is modified only by events about that order. A ledger transaction spans multiple accounts, which is why the ledger fails this test.
+- **History is the product, not a byproduct.** "Reconstruct why this order ended in this state" is a *regulatory obligation*, not a debugging convenience.
+- **State is genuinely a fold over external events.** The order's state is definitionally the accumulation of execution reports; storing a mutable `filled_quantity` alongside them creates a second source of truth that can disagree with the events.
+- **Aggregates are bounded and short-lived** — days, not years — so replay cost stays trivial and snapshots handle the exceptions.
+
+Say the test, then apply it. "We'd event-source it because it's financial" is not an argument.
+
+#### 3.2 The ClOrdID chain and amendment semantics
+
+FIX requires a new `ClOrdID` for each amendment, with `OrigClOrdID` pointing at the prior one. So a single logical order becomes a *chain*, and an execution report may reference any link in it.
+
+The failure this causes: an execution report arrives citing an `OrigClOrdID` after the amendment was accepted. Systems that key state on the current `ClOrdID` alone drop it — a **lost fill**, which is the one thing the requirements said must never happen. The design must resolve any link in the chain to the same internal `order_id`, which is why `clordid_chain` is a first-class table rather than a derived view.
+
+The related trap: an **amend rejected** does not cancel the original — the original order stands, still working. Systems that transition to a terminal state on amend-reject believe they have no exposure while holding a live order.
+
+#### 3.3 Idempotency under retransmission, and the scope trap
+
+FIX sessions resend on reconnect; brokers occasionally duplicate; failover replays. Deduplication is on `ExecID` — and **the scope of that key is the trap.**
+
+`ExecID` is unique *per venue*, sometimes per venue *session*, and occasionally — as Module 18 §4 documents from the payments side — per *processing centre*. Deduplicating on `ExecID` alone across venues means two venues' unrelated executions can collide, and the correctly-functioning dedup logic **silently discards a real fill**. The discard produces no error; the position is simply wrong.
+
+The rules, and they are the same rules as Module 18 and Module 20 reach independently:
+
+1. **Scope the key explicitly**: `(venue, session_or_centre, ExecID)`. Over-scoping costs a duplicate row; under-scoping loses data silently.
+2. **The dedup check and the state application share a transaction.** Deduplicating in one store and applying in another creates a window where a crash loses the fill while recording that it was seen.
+3. **Count every discard.** A silent-discard path with no counter is undetectable by construction — this course's most-repeated finding, and it arrives here for the same reason it arrives everywhere else.
+
+#### 3.4 The pre-trade latency bind
+
+The estimation showed the live hard-limit check consuming 3 of 8 ms and being the only uncacheable step. Resolving that bind is the design's central latency decision:
+
+| Check | Cacheable? | Why |
+|---|---|---|
+| Restricted list | **Yes**, bounded staleness (seconds) | Lists change on a human timescale; a few seconds of staleness is a documented, accepted risk |
+| Mandate/concentration | **Partially** — cache the mandate, compute against live positions | The rule is stable; the position is not |
+| Hard risk limit | **No** | A cached limit check is not a limit check. Its entire purpose is to be correct *now*; caching it means authorising against a limit that was true a moment ago, which is precisely the case limits exist to prevent |
+| Credit/buying power | **No** | Same reasoning |
+
+Chain ordering matters independently of caching: run **cheap and high-rejection-rate checks first**, so the expensive uncacheable check runs only for orders that will otherwise pass. That single ordering decision removes most of the load from the 3 ms step without weakening it.
+
+And the honest framing for an interview: **this is a bind, not a solved problem.** The design accepts bounded staleness where the consequence is bounded and refuses it where the consequence is not, and states which is which.
+
+#### 3.5 Deterministic allocation
+
+Allocating a partially-filled block across accounts is where fairness becomes auditable. Requirements:
+
+- **Allocation intent is captured at order entry**, not decided after the fill. Deciding afterwards — even fairly — is indistinguishable from cherry-picking (allocating good fills to favoured accounts) and is a genuine regulatory offence.
+- **The method is declared and deterministic**: pro-rata, or pro-rata with a rounding rule, or a documented alternative. Given the same inputs, the same allocation must result — which is what `input_hash` proves.
+- **Rounding must sum exactly.** Naive per-account rounding creates or destroys shares — the same defect as Module 18 §2.9's currency allocation. Use largest-remainder so the parts sum to the whole by construction.
+- **Odd lots and minimum sizes** are the messy real-world constraints; whatever rule handles them must be part of the declared method, not code that quietly deviates from the documented policy.
+
+#### 3.6 Reconciliation and the break taxonomy
+
+Internal state is a belief about an external reality. Reconciliation against the broker's report is what tests it:
+
+| Break | Meaning | Handling |
+|---|---|---|
+| We have it, they don't | Possible duplicate application, or an execution we invented | Investigate immediately — this direction implies a phantom position |
+| They have it, we don't | **Lost fill** — the §3.3 failure | Highest severity; apply and root-cause |
+| Quantity/price mismatch | Amendment or correction we missed | Their record governs; correct with a new event |
+| Timing-only difference | Boundary effect | Usually benign; still counted |
+
+Detection must be on **aging** as well as on count: an unmatched execution that is four hours old is a break even if today's totals happen to agree. And where the broker offers intraday reports, use them — a break found at 16:00 is far cheaper than one found at 08:00 the next morning, when the market has moved.
+
+#### 3.7 Failure handling
+
+- **FIX session drops** → reconnect with sequence-number resynchronisation, request resend of the gap, and **do not accept new orders until resynchronised**. Sending new orders while blind to outstanding fills is how a position doubles.
+- **Venue unreachable with orders working** → treat those orders as **potentially live**, never as cancelled. Assuming cancellation and re-sending is the classic way to double a position. Escalate to a human and, if the venue supports it, use an out-of-band cancel-on-disconnect facility.
+- **OMS instance failure** → the event store is the state; a new instance rebuilds by replay. FIX session state must fail over with persisted sequence numbers, or resynchronisation is impossible.
+- **Execution processor backlog** → **never shed**. Buffer, alert, and scale. Order entry may be refused to relieve pressure; inbound processing may not.
+- **Kill switch** → operates at the FIX session and entitlement layer, out of band, so it works even when the OMS itself is unhealthy. A kill switch that requires the failing system to be healthy is not a kill switch.
+
+---
+
+### Step 4 — Wrap-Up
+
+**What we left out:** settlement and the T+1 lifecycle (Module 18's territory for the cash leg); the execution algorithms themselves; TCA and best-execution analysis; the compliance rule engine's own design and rule language; multi-asset specifics (FX, derivatives, and fixed income each have materially different lifecycles); client reporting; and cross-region deployment where venue proximity conflicts with a single system of record.
+
+**What we would measure:** **working-order count versus expectation** — the direct detector for orders that have silently escaped state tracking; **reconciliation breaks by category and age**, with lost-fills paged immediately; pre-trade check latency **per stage**, because a blended number hides which check regressed; per-venue reject rates with **cross-venue comparison**, which distinguishes "our order was bad" from "this venue is unhealthy"; order-to-fill ratio per algorithm, the leading indicator of a runaway strategy and the trigger for the kill switch; **duplicate-ExecID discard counts** (§3.3), which must be non-zero and stable — zero means dedup is broken, a spike means a broker is misbehaving; and child-order rate as the capacity metric the estimation identified.
+
+**Summary.** One order aggregate behind three entry channels, event-sourced because this domain unambiguously passes the adoption test; a pre-trade chain ordered cheap-first with an explicit, justified split between cacheable and uncacheable checks; execution reports deduplicated on a **correctly scoped** `ExecID` with a counter on every discard; pending states modelled as first-class so the system never has to guess whether an order is live; and reconciliation as the standing test of a belief about an external reality. The volume is small and the correctness bar is not — which is why the design spends its complexity on state, evidence, and idempotency rather than on scale.
+
+---
+
+### References
+
+1. FIX Trading Community — *FIX 4.4 / 5.0 SP2* specification: `ExecutionReport` (35=8), `OrderCancelReplaceRequest` (35=G), `ClOrdID`/`OrigClOrdID` chaining, and `ExecID` uniqueness scope.
+2. FIX — *Session Protocol (FIXT)*: sequence numbers, `ResendRequest`, gap fill, and the resynchronisation discipline in §3.7.
+3. SEC Rule 15c3-5 — *Market Access Rule*: pre-trade risk controls and the kill-switch requirement, the regulatory basis for §3.4 and §3.7.
+4. MiFID II RTS 6 — algorithmic trading controls, order-record-keeping, and clock synchronisation.
+5. FINRA Rule 5310 and SEC Rule 206(4)-7 — best execution and fair allocation, the basis for §3.5's "intent captured at entry".
+6. Greg Young / Martin Fowler — *Event Sourcing* and *CQRS*, and the adoption test applied in §3.1.
+7. Hohpe & Woolf — *Enterprise Integration Patterns*: idempotent receiver, message resequencer.
+8. Modules 09, 10, and 18 of this folder — pre-trade limits, the market data this prices against, and the ledger the cash leg settles into.
+
+---
 ## 13. Low-Level Design
 
 **Requirements:** Transitions are guarded; fills are exactly-once; the ClOrdID chain is preserved; allocation is deterministic and reconciling.

@@ -365,9 +365,292 @@ public class OrderFulfillmentSaga
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design — Designing an E-Commerce Platform (Catalog, Cart, Inventory, Checkout, Fulfilment)
 
-*(This entire module IS the deep-dive case study — the incident, the four worked exercises, and the extensive Advanced-tier Q&A collectively constitute this section's typical content.)*
+*Authored to the four-step standard (see Module 01 §12 for the method). The money-movement half — ledger, settlement, reconciliation — is Module 18; this section stops at the payment authorisation boundary and points there.*
+
+---
+
+### Step 1 — Understand the Problem and Establish Design Scope
+
+#### The dialogue
+
+> **C:** How much of the platform? Catalog, search, cart, checkout, payments, fulfilment, returns, and seller tooling are seven systems.
+> **I:** Catalog browse, cart, inventory, checkout, and order fulfilment. Search is out of scope; treat payments as an external PSP.
+>
+> **C:** First-party inventory only, or a marketplace with third-party sellers?
+> **I:** Marketplace. Multiple sellers can offer the same product from different warehouses.
+>
+> **C:** That changes inventory materially — availability is per-offer-per-location, not per-product. Confirmed?
+> **I:** Confirmed.
+>
+> **C:** Scale?
+> **I:** 100 million DAU, 10 million orders a day, 500 million catalog items.
+>
+> **C:** What's the read:write ratio on the catalog?
+> **I:** Enormous — assume 1,000 product views per order.
+>
+> **C:** Do we have flash sales or drops? That's a completely different contention profile from steady-state traffic.
+> **I:** Yes, and they're strategically important.
+>
+> **C:** Is overselling ever acceptable? Some retailers accept a small oversell rate and cancel; others cannot.
+> **I:** For normal items, a very small oversell rate is tolerable. For flash-sale items it is not — those are reputational.
+>
+> **C:** Consistency on the cart — must it be identical across a user's devices instantly?
+> **I:** Eventually consistent is fine; last-write-wins per line item.
+>
+> **C:** Out of scope?
+> **I:** Search and ranking, recommendations, pricing/promotions engine, returns, and the seller portal.
+
+Two answers carry the design. **"Overselling is tolerable normally but not in a flash sale"** licenses two different inventory mechanisms rather than one — which is the answer §4's team needed and did not have. And **1,000:1 read:write** means the catalog and the transaction path are different systems with different technology, not two endpoints on one service.
+
+#### Functional requirements
+
+1. Browse and view products, with per-offer availability across sellers.
+2. Add to / update / remove from a cart that survives sessions and devices.
+3. Checkout: validate, reserve inventory, authorise payment, create an order.
+4. Prevent overselling within the tolerance stated per item class.
+5. Fulfil orders through a multi-service workflow with compensations.
+6. Support flash sales with bounded, fair admission.
+
+#### Non-functional requirements
+
+| Requirement | Target |
+|---|---|
+| Product page latency | p99 < 200 ms |
+| Add-to-cart | p99 < 300 ms |
+| Checkout | p99 < 3 s end-to-end including PSP |
+| Availability — browse | 99.99% |
+| Availability — checkout | 99.95% (lower traffic, higher value per request) |
+| Oversell rate — normal items | < 0.1% of units, auto-cancelled with notification |
+| Oversell — flash-sale items | **Zero** |
+| Order durability | Zero loss once the customer sees a confirmation |
+| Consistency — inventory display | Eventual (seconds); **display is a hint, not a promise** |
+| Consistency — inventory commit | Strong at the moment of reservation |
+
+#### Back-of-the-envelope estimation
+
+```
+Orders/day       = 10,000,000        → 100 orders/s avg, 300/s peak
+Product views    = 10M × 1,000       = 10^10/day → 100,000 views/s, 300,000 peak
+Cart operations  ≈ 5 per order       → 500/s avg
+```
+
+Flash sale — the number that reframes everything:
+
+```
+10,000 units, 500,000 interested buyers, arriving within ~10 seconds
+Peak checkout attempts = 500,000 ÷ 10 s        = 50,000 attempts/s
+                                                 (167× normal peak)
+Contention: ALL of them on ONE inventory row.
+```
+
+Storage:
+
+```
+Catalog: 500M items × 20 KB (attributes, media refs, offers) ≈ 10 TB
+Orders:  10M/day × 3 KB                                       ≈ 30 GB/day → 11 TB/year
+Inventory: 500M items × ~3 offers × 200 B                     ≈ 300 GB, hot
+```
+
+#### What the numbers tell us
+
+1. **The catalog is a read-serving problem** (100,000+ views/s, 10 TB, eventually consistent) — CDN, cache, denormalised read models. Ordinary.
+2. **Checkout is a correctness problem at modest volume** (300/s). Anyone optimising checkout for throughput is solving the wrong problem; the difficulty is the multi-service transaction, not the rate.
+3. **Flash sales are a third system.** 50,000 attempts/s against one row is 167× normal peak concentrated on a single key. No amount of tuning the normal checkout path survives that — §4 is the proof — so flash sales need a *different admission mechanism*, not a faster lock. That conclusion is the point of the estimation.
+
+---
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+#### The three flows
+
+- **Browse** — read-heavy, cacheable, eventually consistent.
+- **Checkout** — transactional, multi-service, compensatable.
+- **Flash sale** — admission-controlled, queue-based, strictly bounded.
+
+#### Components
+
+**Catalog Service + read model.** Denormalised product documents; served from cache/CDN.
+
+**Inventory Service.** The authority on available-to-promise per `(offer_id, location)`. Owns reservations.
+
+**Cart Service.** Per-user cart; deliberately simple, deliberately not authoritative about price or availability.
+
+**Pricing Service.** Prices are re-resolved at checkout, never trusted from the cart.
+
+**Checkout Orchestrator.** Runs the order saga.
+
+**Order Service.** Order records and state machine.
+
+**Payment Adapter.** Talks to the PSP; authorise at checkout, capture at ship. See Module 18.
+
+**Fulfilment Service.** Warehouse allocation, pick/pack/ship.
+
+**Admission Controller (flash sales).** Token-based queue; the mechanism §3.3 designs.
+
+#### End-to-end walkthrough — checkout
+
+1. `POST /v1/checkout` with `cart_id`, address, payment method, `Idempotency-Key`.
+2. Orchestrator creates an order in `PENDING` and **claims the idempotency key in the same transaction** — this is what makes a double-submitted checkout return the same order rather than create two.
+3. **Re-resolve prices and availability** from the authoritative services. The cart's cached values are display state and are never trusted.
+4. **Reserve inventory** — a soft hold with a TTL (typically 15 minutes), per line item.
+5. **Authorise payment** with the PSP (not capture).
+6. Create the order in `CONFIRMED`; convert reservations to allocations.
+7. Return the confirmation. **Everything after this point is asynchronous.**
+8. Fulfilment: allocate warehouse → pick/pack → ship → **capture payment on ship**, which is both the legally correct point in most jurisdictions and the one that avoids refunding for items that turn out to be unfulfillable.
+
+Failures compensate in reverse: payment declined → release reservation, order `FAILED`. Fulfilment impossible → refund/void authorisation, order `CANCELLED`, notify. **Every step has a compensating action defined before the saga runs**, which is what distinguishes a saga from a distributed transaction wearing a costume.
+
+#### API design
+
+**`POST /v1/carts/{id}/items`**
+
+| Field | Type | Description |
+|---|---|---|
+| `offer_id` | string | Seller-specific offer, not `product_id` — the marketplace distinction |
+| `quantity` | int | |
+| `client_price` | money | **Advisory only.** Echoed back with the authoritative price so the UI can show a change |
+
+**`POST /v1/checkout`**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `cart_id` | string | yes | |
+| `shipping_address_id` | string | yes | |
+| `payment_method_token` | string | yes | PSP token — **never card data** (Module 18 §8) |
+| `accepted_total` | money | yes | The total the customer saw. A mismatch returns `409` with the new total rather than silently charging a different amount |
+
+Header: `Idempotency-Key` (required).
+
+Responses: `201` with the order; `409 PRICE_CHANGED`; `409 OUT_OF_STOCK` naming the line items; `402 PAYMENT_DECLINED`.
+
+**`GET /v1/products/{id}`** — returns product attributes plus `offers[]`, each with `{ seller, price, availability_hint, ships_from, delivery_estimate }`. The field is named `availability_hint` deliberately: **displayed availability is a cached hint, and the API name should say so** so no client treats it as a reservation.
+
+**`POST /v1/flash-sales/{id}/join`** → `{ position, token, valid_from, valid_until }` (§3.3).
+
+#### Data model
+
+**`product`** — document store (catalog read model): `product_id`, attributes, media, `offers[]` denormalised. Rebuilt from source-of-truth events.
+
+**`offer`** — `offer_id`, `product_id`, `seller_id`, `price`, `condition`, `fulfilment_type`.
+
+**`inventory`** — PostgreSQL, the transactional authority:
+
+| Column | Type | Notes |
+|---|---|---|
+| `offer_id`, `location_id` | Composite PK | |
+| `on_hand` | int | Physically present |
+| `reserved` | int | Held by open reservations |
+| `available` | int GENERATED | `on_hand - reserved`. **Derived, not stored independently** — a second source of truth is a future divergence (Module 18 §A5) |
+| `version` | bigint | Optimistic concurrency |
+
+**`reservation`** — `reservation_id`, `order_id`, `offer_id`, `location_id`, `quantity`, `expires_at`, `status` (`HELD`/`COMMITTED`/`RELEASED`/`EXPIRED`). A TTL'd hold, swept by a job — and the sweeper needs a monitor, because a stuck sweeper leaks inventory silently.
+
+**`order`** — `order_id`, `user_id`, `status`, `items[]`, `totals`, `idempotency_key UNIQUE`, timestamps.
+Lifecycle: `PENDING → CONFIRMED → ALLOCATED → SHIPPED → DELIVERED`, with `FAILED` / `CANCELLED` / `RETURNED` branches.
+
+**`cart`** — Redis with a database backstop; `user_id → items[]`, TTL 30 days.
+
+#### Store selection, and why
+
+| Store | Choice | Reason |
+|---|---|---|
+| Catalog read model | **Document store + CDN/Redis** | 100,000 reads/s of denormalised documents; eventual consistency is explicitly acceptable |
+| Inventory | **PostgreSQL** | Needs atomic read-modify-write with a constraint (`available >= 0`) — the one place in this design where a relational database is not negotiable |
+| Orders | **PostgreSQL** | Transactional, relational, audited, modest volume |
+| Cart | **Redis + backstop** | High churn, low value, tolerant of loss |
+| Events | **Kafka** | Saga choreography, read-model rebuilds, analytics |
+
+The decision worth defending: **inventory and catalog are deliberately different stores with different consistency models**, and the API names the display value `availability_hint` to keep that honest. Serving inventory reads from the transactional store at 300,000 views/s would put browse traffic on the same rows checkout needs — which is how a browse spike becomes a checkout outage.
+
+---
+
+### Step 3 — Design Deep Dive
+
+#### 3.1 Overselling: four mechanisms, and when each is right
+
+| Mechanism | How | Throughput on one row | Oversell risk | Right for |
+|---|---|---|---|---|
+| **Pessimistic lock** (`SELECT … FOR UPDATE`) | Serialise on the row | ~100–500/s | Zero | Low-contention, normal checkout |
+| **Optimistic concurrency** (version + retry) | CAS on `version` | Degrades badly under contention — retry storms | Zero | Low-to-moderate contention |
+| **Atomic decrement with constraint** | `UPDATE … SET reserved = reserved + n WHERE available >= n` | ~1,000–5,000/s | Zero | The default for normal traffic |
+| **Distributed counter / pre-allocated blocks** | Split stock into N shards; decrement one | ~50,000/s | Small, bounded | Flash sales, hot items |
+
+**Recommendation: the single-statement atomic decrement as the default** — one round trip, no explicit lock held across application logic, and the `available >= n` predicate makes overselling structurally impossible rather than checked-then-hoped. §4's team used a pessimistic lock held across application logic, which is the worst of both: full serialisation *and* a long hold time.
+
+The deeper point: **`SELECT` then check then `UPDATE` in application code is a lost-update bug at every isolation level below serialisable.** Push the predicate into the write statement and the race disappears. This is the same conclusion Module 18 §E9 reaches for hot ledger accounts, arriving from a different domain.
+
+#### 3.2 Reservations and the TTL you must sweep
+
+A reservation is a hold, not a sale. Three failure modes to design for:
+
+- **The customer abandons checkout** → TTL expires, the sweeper releases. Without a sweeper, inventory leaks and eventually everything shows out-of-stock while sitting in the warehouse — a failure that looks like a demand problem to the business and is actually a bug.
+- **The sweeper stalls** → the same leak, silently. Monitor `count(reservations WHERE status='HELD' AND expires_at < now())` and alert on any non-zero sustained value. Aging, not rate — this folder's recurring rule.
+- **Payment takes longer than the TTL** → the reservation expires mid-checkout and the order fails after the customer was charged. Extend the reservation before authorising, and make the TTL comfortably exceed the PSP's worst-case latency including 3DS challenges, which can take minutes.
+
+#### 3.3 Flash sales — admission control, not a faster lock
+
+50,000 attempts/s against one row cannot be tuned into working. Change the shape of the problem:
+
+1. **Virtual waiting room.** All traffic hits a lightweight admission controller before the checkout path exists. It issues time-windowed tokens at a rate the checkout path can absorb (say 500/s), and everyone else waits with an honest position and estimate.
+2. **Pre-allocate stock into shards.** 10,000 units split across 20 Redis counters; a request decrements one shard chosen by hash. Contention drops 20×. When a shard empties, fall back to scanning others — and when all are empty, the sale is over and the answer is instant.
+3. **Admission ≠ purchase.** A token grants the *right to attempt* checkout within a window, not a unit. This keeps the promise honest and prevents the token system from becoming a second inventory system that can disagree with the first.
+4. **Shed hard and early.** Once tokens for the full stock are issued, reject further joins immediately at the edge. A user told "sold out" in 50 ms is better served than one queued for four minutes to be told the same thing.
+
+The bounded oversell of sharded counters is why the dialogue's zero-oversell requirement for flash items is met by **issuing tokens for exactly the stock count and no more** — the counter shards control rate, the token count controls the total.
+
+#### 3.4 The order saga
+
+Steps and compensations, defined up front:
+
+| Step | Forward action | Compensation |
+|---|---|---|
+| 1 | Reserve inventory | Release reservation |
+| 2 | Authorise payment | Void authorisation |
+| 3 | Create order | Cancel order |
+| 4 | Allocate to warehouse | Deallocate, restock |
+| 5 | Ship | *(No compensation — this is the point of no return; after it, the process is returns, not compensation)* |
+| 6 | Capture payment | Refund |
+
+Three properties make it work: **every step is idempotent**, because retries are guaranteed; **the saga's state is persisted before each step**, so a crashed orchestrator resumes rather than restarts; and **compensations are themselves retryable and idempotent**, because a failed compensation is the worst state in the system — money taken, goods not shipped, and no automatic path back. Compensation failures need a human queue with an SLA, not just a log line.
+
+#### 3.5 Failure handling
+
+- **Inventory service down** → checkout fails fast (correct — better than selling what you cannot ship); browse continues from cached hints, marked as such.
+- **PSP down** → checkout fails with a retryable error; **never** confirm an order without an authorisation. Consider queueing for later authorisation only where the business explicitly accepts the fraud/decline risk.
+- **PSP timeout — the indeterminate case** → do not assume either outcome. Query the PSP by idempotency key; if unresolved, hold the order in `PENDING_PAYMENT` and resolve by webhook or reconciliation (Module 18 §I4 and §3.6).
+- **Catalog read model stale** → prices differ from the authoritative service; the `accepted_total` check catches it and returns `409` rather than silently charging a different amount. Surfacing the mismatch is the honest behaviour and it is also the one that survives a chargeback dispute.
+- **Warehouse allocation fails after payment** → this is the case that must never silently strand a customer: void or refund, cancel, notify, and — because the notification is now a legally-significant communication — treat it as Module 20's mandatory category.
+
+---
+
+### Step 4 — Wrap-Up
+
+**What we left out:** search and ranking (Module 19); recommendations; the pricing and promotions engine, which interacts painfully with cart caching; returns and reverse logistics; seller onboarding and payouts (Module 18's pay-out flow); fraud scoring at checkout; tax and cross-border compliance; and multi-region with inventory locality, which is genuinely hard because inventory is physical and cannot be replicated.
+
+**What we would measure:** oversell events per item class, as an explicit SLI rather than a support-ticket category; **reservation leak rate** — aged `HELD` reservations, the detector for §3.2's silent failure; checkout funnel conversion by failure reason (`OUT_OF_STOCK` vs `PRICE_CHANGED` vs `PAYMENT_DECLINED`), because these have completely different owners; saga step durations and **compensation failure count**, which should be zero and needs a human queue when it isn't; inventory contention (lock waits, retry rate) per offer, which is the leading indicator of the next flash-sale incident; and catalog read-model lag.
+
+**Summary.** Three systems behind one product: a cached, eventually-consistent read model for browse; a transactional saga for checkout where the difficulty is correctness rather than rate; and an admission-controlled path for flash sales, because 167× peak on a single row is a different problem requiring a different mechanism. The inventory decision is the core: push the predicate into the write (`WHERE available >= n`) so overselling is structurally impossible, shard the counter only where contention demands it, and accept a small bounded oversell only where the business has said it can.
+
+---
+
+### References
+
+1. Alex Xu — *System Design Interview Vol. 2*, ch. "Design a Hotel Reservation System" (the reservation/oversell shape) and Vol. 1's e-commerce material.
+2. Hector Garcia-Molina & Kenneth Salem — *Sagas* (1987), the original paper behind §3.4.
+3. Amazon — *Dynamo: Amazon's Highly Available Key-value Store* (SOSP '07), including the shopping-cart conflict-resolution discussion.
+4. Shopify Engineering — *Surviving Flash Sales* and the checkout throttle/queue architecture.
+5. Stripe — *Idempotent Requests*; and 3-D Secure timing, which is why reservation TTLs must exceed PSP worst-case latency.
+6. PostgreSQL docs — transaction isolation and `SELECT … FOR UPDATE`, and why a check-then-update in application code is not equivalent to a predicated update.
+7. Martin Kleppmann — *Designing Data-Intensive Applications*, ch. 7 (write skew and lost updates — §3.1's formal grounding).
+8. Modules 18, 36, and 37 of this course — ledger and settlement, Saga, and Outbox respectively.
+
+---
+
+## 13–17. LLD / Debugging / Decision / Case Study / Principal
+
+*(This module predates the full 16-section template; its incident, worked exercises, and Advanced-tier Q&A collectively carry this content. §12 above was authored to the four-step standard on 2026-08-09.)*
 
 ## 18. Revision
 **Key takeaways**: An e-commerce platform's browse/catalog path (eventually consistent, cache/CDN-heavy) and checkout/fulfillment path (strongly consistent, idempotent, correctness-critical) have genuinely different requirements — apply the "consistency per data type" discipline at its most consequential. Preventing overselling requires atomic, conditional inventory updates (optimistic concurrency or pessimistic locking); extreme-contention scenarios (flash sales) require specialized techniques (sharded counters) applied proactively, anticipated in advance, not retrofitted reactively. Checkout requires idempotency-key support to prevent duplicate orders/double-charges on retry. Multi-step order fulfillment spanning independent services requires the Saga pattern (compensating actions in reverse order, themselves idempotent/retryable) rather than an infeasible cross-service distributed transaction. A payment-gateway outage should fail closed (reject cleanly), a deliberate contrast to a rate limiter's typical fail-open default, justified by checkout's uniquely high correctness stakes.

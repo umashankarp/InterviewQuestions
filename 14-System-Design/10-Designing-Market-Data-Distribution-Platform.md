@@ -540,47 +540,325 @@ public async Task<ReconciliationReport> ReconcileAsync(DateOnly session, IReadOn
 
 ---
 
-## 12. System Design
+## 12. System Design — Designing a Market Data Distribution Platform
 
-**Functional requirements**
-- Ingest from heterogeneous venues/vendors; normalize to a canonical model with canonical identifiers.
-- Serve three consumption models: streaming/conflated, consistent snapshots, complete ordered history.
-- Retain full tick history bitemporally with knowledge-time-filtered query.
-- Enforce per-consumer entitlements and record per-consumer delivery.
-
-**Non-functional requirements**
-- Ingest-to-consumer latency: P99 < 5ms for the streaming path (platform, not direct-feed, tier).
-- Snapshot consistency: absolute — an inconsistent snapshot must never be emitted.
-- Zero unrecorded tick loss on the complete-history path; all gaps detected, escalated, and recorded.
-- Burst capacity: 100× session-mean without degradation.
-
-**Capacity estimation**
-- 200k instruments; session-mean 80k ticks/s; peak burst 5M ticks/s (open/announcement).
-- Tick record ~48 bytes normalized → sustained ~3.8 MB/s, peak ~240 MB/s.
-- Daily volume ≈ 80k × 23,400s (6.5h) ≈ 1.9B ticks/day ≈ 90 GB/day raw, ~10–15 GB/day compressed at typical tick-compression ratios.
-- Annual archive ≈ 3–4 TB compressed; a 7-year regulatory retention ≈ 25 TB — modest, and the reason the archive's cost concern is durability rather than size.
-- **The sensitivity that matters:** peak-to-mean ratio, not mean. Sizing on the 80k mean produces a platform that fails at every open. Every capacity number above should be read as "peak governs."
-
-**Architecture:** — feed handlers per venue, central normalizer with versioned reference data (Expert Q4), partitioned bus, three structurally-separate consumption paths.
-
-**Components:** Feed handlers (concurrent-redundant); normalizer; distribution bus; conflating fan-out; snapshot service (sequence barrier); tick archive (columnar, bitemporal); entitlement service; delivery recorder.
-
-**Database selection:** Archive — columnar, time-partitioned by `(instrument, date)`, heavily compressed. Reference data — bitemporal relational (Expert Q4). Latest-value — in-memory lock-free slots, not a general cache. Snapshots — immutable object storage, addressed by `snapshotId` (the pinning requirement).
-
-**Caching:** The latest-value structure is the platform's hot read path; the snapshot store serves as an effective cache of consistent states for repeat consumers.
-
-**Messaging:** Broker-based bus partitioned by instrument, with optional multicast for the latency-critical tier (Expert Q2); consumer groups per consumption model.
-
-**Scaling:** Per-venue handler scaling; per-instrument bus partitioning; snapshot barrier at snapshot cadence rather than tick cadence (Expert Q7) to keep coordination affordable.
-
-**Failure handling:** Concurrent redundant handlers with sequence-based dedup; gap detection with time-critical retransmit escalation (Advanced Q4); ingestion-time plausibility quarantine with recording (Intermediate Q9); unmapped-symbol quarantine (Advanced Q1); snapshot fails rather than emitting inconsistency.
-
-**Monitoring:** Per-feed gap rate, unmapped-symbol rate, staleness, and latency distribution — all aggregated and thresholded, never raw logs; cross-path divergence (Expert Q6); cross-handler comparison for venue-vs-platform attribution (Advanced Q9).
-
-**Trade-offs:** Conflation trades resolution for feed protection, correct only for latest-value consumers. Structural path separation trades infrastructure duplication for guarantee integrity (Intermediate Q3) — justified because the alternative failure is silent. Quarantine trades data availability for identity integrity, justified by the demonstrated cost of misattribution.
+*Authored to the four-step standard (see Module 01 §12 for the method).*
 
 ---
 
+### Step 1 — Understand the Problem and Establish Design Scope
+
+#### The dialogue
+
+> **C:** Who consumes this, and how? "Market data" means at least three incompatible products depending on the consumer.
+> **I:** Say more.
+>
+> **C:** A trading screen wants the *latest* price and doesn't care about ticks it missed. A risk engine wants a *consistent snapshot* across instruments at one instant. A TCA or surveillance system wants the *complete, ordered history* with nothing dropped. Those are different guarantees.
+> **I:** All three. That's the problem.
+>
+> **C:** Are we the lowest-latency tier — co-located, direct feed handlers — or the platform tier that serves the firm?
+> **I:** Platform tier. The latency-critical strategies take direct feeds and bypass you; assume single-digit milliseconds is acceptable here.
+>
+> **C:** How many venues and instruments?
+> **I:** Roughly 30 venues and vendors; 200,000 instruments.
+>
+> **C:** What's the tick rate — mean and peak? For market data the ratio matters more than either number.
+> **I:** Around 80,000 ticks/second in session; opens and macro announcements produce bursts up to 5 million/second.
+>
+> **C:** Do we need to handle corrections — a venue restating a print after the fact?
+> **I:** Yes, and the corrected value must not silently replace what consumers already acted on.
+>
+> **C:** Entitlements? Exchange data is licensed per consumer.
+> **I:** Yes — per-consumer entitlement enforcement and per-consumer delivery records, because we're audited and billed on it.
+>
+> **C:** Retention?
+> **I:** Full tick history, seven years.
+>
+> **C:** Out of scope?
+> **I:** The trading strategies, the direct-feed co-located tier, and vendor contract management.
+
+The first exchange is the design. **Three consumption models with three different guarantees cannot be served correctly by one path**, and getting the interviewer to agree to that framing early is what makes §3.5's structural separation defensible rather than looking like duplication.
+
+#### Functional requirements
+
+1. Ingest from heterogeneous venues and vendors with different protocols and semantics.
+2. Normalise to a canonical model with canonical instrument identifiers.
+3. Serve three consumption models: **streaming/conflated**, **consistent snapshots**, **complete ordered history**.
+4. Retain full tick history bitemporally, queryable filtered by knowledge time.
+5. Enforce per-consumer entitlements and record per-consumer delivery.
+6. Handle late, out-of-order, and corrected ticks without destroying what was previously believed.
+
+#### Non-functional requirements
+
+| Requirement | Target |
+|---|---|
+| Ingest → consumer latency (streaming path) | p99 < 5 ms |
+| Snapshot consistency | **Absolute** — an inconsistent snapshot must never be emitted; failing is correct |
+| Complete-history path | **Zero unrecorded tick loss**; every gap detected, escalated, and recorded |
+| Burst capacity | 100× session mean without degradation |
+| Availability | 99.99% in session |
+| Retention | 7 years, queryable by `(instrument, time, knowledge time)` |
+| Entitlement enforcement | Per consumer, per instrument class, with an auditable delivery record |
+
+#### Back-of-the-envelope estimation
+
+```
+Instruments        = 200,000
+Session-mean rate  = 80,000 ticks/s
+Peak burst         = 5,000,000 ticks/s
+Peak-to-mean ratio = 62×                    ← THE governing number
+```
+
+Volume and storage:
+
+```
+Normalised tick    ≈ 48 B
+Sustained          = 80,000 × 48 B          ≈ 3.8 MB/s
+Peak               = 5,000,000 × 48 B       ≈ 240 MB/s
+Daily              = 80,000 × 23,400 s      ≈ 1.9 × 10^9 ticks/day
+                                            ≈ 90 GB/day raw
+Compressed (columnar, delta+dictionary, typical 6–9×)
+                                            ≈ 10–15 GB/day
+Annual archive                              ≈ 3–4 TB compressed
+7-year retention                            ≈ 25 TB
+```
+
+Fan-out:
+
+```
+~150 internal consumers × subscribed subsets
+Conflated streaming fan-out at 25 ms conflation interval:
+  200,000 instruments ÷ 25 ms = 8,000,000 potential updates/s
+  ...but conflation caps each instrument at 40 updates/s,
+  so a consumer subscribed to 5,000 instruments receives
+  at most 200,000 updates/s regardless of market activity.
+  THAT is what conflation buys: a bounded consumer cost.
+```
+
+#### What the numbers tell us
+
+1. **The archive is small.** 25 TB over seven years is unremarkable — so the archive's engineering concern is **durability and queryability, not size**. Teams that size this problem on volume optimise the wrong axis.
+2. **Peak governs everything.** A platform sized on the 80,000/s mean fails at every market open, every day, predictably. Every capacity number in this design must be read as "peak governs" — buffers, thread pools, network, and disk queue depth are all sized on 5M/s.
+3. **Conflation is what makes fan-out bounded.** Without it, consumer cost is a function of market volatility, which means every consumer degrades simultaneously at exactly the moment the data matters most. With it, consumer cost is a function of *subscription size*, which is a number you control.
+
+The hard problem is **serving three mutually incompatible guarantees from one ingest without letting the weakest contaminate the strongest.**
+
+---
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+#### The three consumption models, stated as contracts
+
+| Model | Guarantee | Explicitly does NOT guarantee |
+|---|---|---|
+| **Streaming (conflated)** | You will see the latest value within the conflation interval | That you saw every tick |
+| **Snapshot** | Every instrument in the response reflects the same instant | Freshness within milliseconds |
+| **History** | Every tick, in order, with corrections identifiable | Low latency |
+
+Writing these as contracts up front prevents the single most damaging failure in market-data platforms: a consumer building a P&L or a surveillance rule on the *conflated* stream and silently losing ticks that mattered.
+
+#### Components
+
+**Feed Handlers (per venue, concurrently redundant).** Protocol-specific. Two independent instances per feed, both publishing; downstream deduplicates by venue sequence number. Redundancy is *concurrent*, not failover — a failover gap is exactly the tick loss the history path forbids.
+
+**Normaliser.** Maps venue-specific messages to the canonical model and venue symbols to canonical instrument IDs, using **versioned, bitemporal reference data** — because a symbol's meaning changes over time and yesterday's tick must be interpreted with yesterday's mapping.
+
+**Distribution Bus.** Partitioned by instrument, retaining a replay window.
+
+**Conflating Fan-out.** Per-consumer, per-instrument latest-value slots flushed on an interval.
+
+**Snapshot Service.** Constructs consistent snapshots via a sequence barrier; publishes immutable, addressable snapshots.
+
+**Tick Archive.** Columnar, bitemporal, partitioned by `(instrument, date)`.
+
+**Entitlement Service.** Per-consumer permissions, consulted on subscribe and on history query.
+
+**Delivery Recorder.** Records what was delivered to whom — an audit and billing artefact, not telemetry.
+
+**Gap Detector.** Per-feed sequence continuity monitoring with retransmit escalation.
+
+#### End-to-end walkthrough — a tick
+
+1. Venue emits a message; both redundant handlers for that feed receive it.
+2. Each handler timestamps at **ingest** (its own clock, PTP-synchronised) and preserves the **venue's own timestamp and sequence number** — three distinct times, and conflating them is a classic error.
+3. Both publish to the normaliser; the normaliser deduplicates on `(feed_id, venue_sequence)` — the first wins, the second is counted and discarded.
+4. Normalisation resolves the venue symbol to a canonical instrument ID **using reference data as-of the tick's business date**. An unmapped symbol is **quarantined, not guessed** (§3.2).
+5. The normalised tick is published to the bus partition for that instrument, and appended to the archive writer's buffer.
+6. Three consumers diverge here:
+   - **Streaming**: the tick overwrites the instrument's latest-value slot; the slot is flushed to subscribers on the conflation tick.
+   - **Snapshot**: the tick contributes to the running state the barrier will capture.
+   - **History**: the tick is written to the archive with its ingest time as knowledge time.
+7. The Delivery Recorder logs per-consumer delivery counts by entitlement class.
+
+#### End-to-end walkthrough — a consistent snapshot
+
+1. A consumer (e.g. the risk engine of Module 09) requests a snapshot.
+2. The Snapshot Service issues a **sequence barrier**: it records, per bus partition, the current sequence position.
+3. It waits for all partitions to be drained past their barrier positions — bounded by a timeout.
+4. It captures the latest value per instrument as of those positions.
+5. The result is written to immutable object storage under a `snapshot_id` and returned.
+6. **If the barrier cannot be satisfied within the timeout, the snapshot fails.** It does not degrade to a best-effort snapshot, because a snapshot that is *almost* consistent is indistinguishable from a consistent one to its consumer and wrong in an unquantifiable way.
+
+Note that barriers run at **snapshot cadence, not tick cadence** — a few times a minute, not 80,000 times a second — which is what makes the coordination affordable.
+
+#### API design
+
+**Subscribe (streaming) — WebSocket or binary session**
+
+| Field | Type | Description |
+|---|---|---|
+| `instruments` | string[] | Canonical IDs, or a subscription expression |
+| `fields` | string[] | `bid`, `ask`, `last`, `volume`, book levels |
+| `conflation_ms` | int | 0 = unconflated (requires entitlement and a capacity check), default 25 |
+| `on_gap` | enum | `NOTIFY` \| `IGNORE` — **a conflated consumer must acknowledge that gaps exist** |
+
+Every update carries `{ instrument_id, fields, venue_ts, ingest_ts, sequence, conflated_count }`. **`conflated_count` is the number of ticks collapsed into this update** — it costs 2 bytes and it is the difference between a consumer that knows it is seeing conflated data and one that assumes it isn't.
+
+**`POST /v1/snapshots`**
+
+| Field | Type | Description |
+|---|---|---|
+| `universe` | string[] or `universe_id` | |
+| `as_of` | RFC3339 | Optional; historical snapshots reconstruct from the archive |
+| `timeout_ms` | int | After which the request **fails** rather than degrading |
+
+Response: `{ snapshot_id, captured_at, instrument_count, barrier_positions, url }`. The `snapshot_id` is what Module 09 pins for an entire risk run.
+
+**`GET /v1/history`**
+
+| Param | Type | Description |
+|---|---|---|
+| `instrument_id`, `from`, `to` | | |
+| `knowledge_time` | RFC3339 | **The bitemporal axis** — "what did we know at this time", which is how a surveillance query reproduces what a trader could actually have seen |
+| `include_corrections` | bool | Default true |
+
+#### Data model
+
+**`tick`** — columnar archive, partitioned by `(instrument_id, date)`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `instrument_id`, `date` | Partition | |
+| `venue_ts` | timestamp(ns) | The venue's clock |
+| `ingest_ts` | timestamp(ns) | Ours — the knowledge time |
+| `feed_id`, `venue_sequence` | | Dedup and gap-detection key |
+| `price`, `size`, `side`, `condition_codes` | | |
+| `correction_of` | nullable | Points at the tick this corrects. **Corrections are new rows, never updates** |
+| `quarantine_reason` | nullable | Present rows that did not pass validation, retained rather than dropped |
+
+**`instrument`** — bitemporal reference data: `(canonical_id, valid_from, valid_to, knowledge_from, knowledge_to)`, with venue symbol mappings, corporate-action history, and identifier cross-references (ISIN/CUSIP/SEDOL/RIC).
+
+**`snapshot`** — `snapshot_id`, `captured_at`, `universe_id`, `barrier_positions`, `storage_key`, `instrument_count`. Immutable.
+
+**`delivery_record`** — `(consumer_id, date, entitlement_class)` → counts and instrument sets. An audit artefact with its own retention.
+
+**Latest-value store** — in-memory, lock-free per-instrument slots. **Not a general cache**: fixed cardinality (200,000), no eviction, no misses, single-writer per partition. Modelling it as a cache invites eviction policies and hit-rate metrics that make no sense here.
+
+#### Store selection, and why
+
+| Store | Choice | Reason |
+|---|---|---|
+| Archive | **Columnar, time-partitioned, compressed** | The dominant query is "instrument × time range × subset of columns" — exactly a columnar scan. 6–9× compression on tick data is routine |
+| Reference data | **Bitemporal relational** | Small, relational, correction-heavy, and every historical query needs as-of resolution |
+| Latest value | **In-memory lock-free slots** | 200,000 fixed slots, sub-microsecond reads, no eviction semantics needed |
+| Snapshots | **Immutable object storage, addressed by ID** | Pinning requires immutability; Module 09 depends on it |
+| Bus | **Partitioned log with a replay window** | Replay is what lets a slow consumer recover without a retransmit from the venue |
+
+---
+
+### Step 3 — Design Deep Dive
+
+#### 3.1 Feed handler redundancy and gap detection
+
+**Concurrent redundancy, not failover.** Two handlers per feed both process and publish; the normaliser deduplicates on `(feed_id, venue_sequence)`. Failover would leave a gap during detection and cutover — measured in hundreds of milliseconds, which on the history path is thousands of lost ticks.
+
+Gap detection watches venue sequence continuity per feed:
+
+- **Gap detected** → attempt retransmit from the venue's replay facility, on a clock. Venue replay windows are *short* (often seconds to a few minutes), so escalation is time-critical: a gap noticed after the window closes is unrecoverable.
+- **Unrecoverable gap** → **record it**. The archive gets an explicit gap marker. This matters more than it sounds: a history consumer must be able to distinguish "no trades occurred" from "we lost the data", and those are identical in a store that simply has no rows.
+
+#### 3.2 Normalisation, symbology, and the quarantine decision
+
+Symbology is where correctness is actually decided. `VOD.L`, `VOD LN`, `GB00BH4HKS39`, and a venue-specific numeric ID may all refer to one instrument — or, after a corporate action, may not.
+
+The design rule: **an unmapped or ambiguous symbol is quarantined, never guessed.** A guess produces a tick attributed to the wrong instrument, which flows into risk (Module 09), P&L, and surveillance, and is discovered weeks later — if ever. A quarantine produces a visible, countable, fixable break.
+
+The trade is explicit: quarantine trades data availability for identity integrity, and it is correct because **misattribution is silent and unbounded while a missing tick is visible and bounded.** Unmapped-symbol rate is therefore a first-class SLI, not a log line.
+
+Reference data must be **bitemporal** for the same reason: a tick from 2019 must be resolved with the 2019 mapping. Resolving historical ticks with today's symbology is a subtle, systematic corruption of every historical study.
+
+#### 3.3 Conflation — deliberate, bounded data loss
+
+Conflation drops intermediate values, keeping the latest per instrument per interval. It is **correct for latest-value consumers and wrong for everyone else**, and the platform's job is to make that impossible to get wrong by accident:
+
+- Conflated subscriptions carry `conflated_count` on every update, so a consumer *can* detect that collapsing occurred.
+- Unconflated subscriptions require an entitlement and a capacity check, because an unconflated consumer at 5M ticks/s is a denial-of-service against itself and a fan-out cost against the platform.
+- **The history path is never conflated.** Structurally separate, not a configuration flag — see §3.5.
+
+Conflation intervals are per-consumer, and a slow consumer's conflation interval **widens automatically** rather than the platform buffering unboundedly on its behalf. That is the correct backpressure response: degrade resolution for the consumer that cannot keep up, rather than degrade latency for everyone else.
+
+#### 3.4 Late, out-of-order, and corrected ticks
+
+Three distinct cases with three distinct handlings:
+
+| Case | Handling |
+|---|---|
+| **Late** (arrives after later ticks, same venue sequence order intact) | Insert by `venue_ts`; knowledge time is `ingest_ts`. Streaming consumers may never see it — acceptable and documented |
+| **Out-of-order** (venue sequence out of order) | Reorder within a bounded window; beyond the window, treat as late |
+| **Corrected** (venue restates a prior print) | **A new row with `correction_of`** — never an update. The original remains, because consumers acted on it |
+
+Bitemporality is what makes corrections tractable: a query at `knowledge_time = T` returns what was believed at T, which is exactly what a surveillance investigation or a trade dispute needs. Overwriting corrections destroys the ability to answer "what did the trader actually see?", which is usually the whole question.
+
+#### 3.5 Structural separation of the three paths
+
+The three consumption models share ingest and normalisation, and then **diverge into physically separate paths** — separate processes, separate queues, separate storage, separate resource pools.
+
+The alternative — one pipeline with per-consumer flags — has a specific failure mode: **the weakest guarantee contaminates the strongest.** A conflation setting applied at the wrong layer silently drops ticks from the history path. A backpressure policy that drops on overflow, correct for streaming, is catastrophic for history. A shared thread pool means a slow streaming consumer delays archive writes.
+
+Separation trades infrastructure duplication for guarantee integrity. It is justified here specifically because **the alternative failure is silent** — a history path that has been quietly conflated for six months produces studies that are wrong with no error anywhere. This is the same reasoning as Module 20's physical priority lanes: isolation must be structural, not advisory.
+
+#### 3.6 Burst absorption at 62× mean
+
+The open produces 5M ticks/s against an 80k/s mean. What must be sized on peak rather than mean:
+
+- **Feed handler input buffers** — a handler that blocks on a full buffer loses ticks at the socket, which is unrecoverable.
+- **Bus partition count** — partitions must be numerous enough that no single instrument's burst saturates one partition's writer. The most active instruments at the open are precisely the ones with the highest burst.
+- **Archive write path** — buffered and batched, with the buffer sized for the full burst duration, not the burst rate.
+- **Conflation** absorbs the burst for streaming consumers automatically — which is its second and less-discussed benefit: a 62× input burst produces *no increase at all* in conflated output rate.
+
+The failure to avoid: sizing on mean and relying on autoscaling. A burst that lasts 90 seconds is over before any autoscaler reacts.
+
+#### 3.7 Entitlements and delivery recording
+
+Exchange data is licensed per consumer, per instrument class, often per user seat, and firms are audited on it. Two consequences that are design requirements rather than compliance overhead:
+
+- **Entitlement is checked on subscribe *and* on every history query**, because entitlements change and a long-lived subscription outlives the permission that authorised it — the same evaluate-at-the-last-moment principle as consent in Module 20 §2.2.
+- **Delivery is recorded per consumer**, and the record is an audit and billing artefact with its own retention — not telemetry that can be sampled or dropped under load. Sampling the delivery record to save space is how a firm fails an exchange audit.
+
+---
+
+### Step 4 — Wrap-Up
+
+**What we left out:** the co-located, kernel-bypass direct-feed tier, which is a genuinely different engineering problem (this platform explicitly serves the tier above it); order-book construction and depth-of-book maintenance; derived analytics (VWAP, indicators); vendor contract and cost management, which at 30 feeds is a large operational concern; cross-venue consolidation and best-execution calculation; and multicast versus unicast for the latency tier.
+
+**What we would measure:** per-feed **gap rate and unrecovered-gap count** — the history path's core SLI; **unmapped-symbol rate**, the leading indicator of a symbology or corporate-action problem; per-feed staleness (time since last tick, per instrument class) which detects a silently dead feed that a rate metric shows as "quiet"; ingest→consumer latency distribution per path; **cross-path divergence** — reconstructing a conflated stream's latest value from the archive and comparing, which is the only detector for the contamination §3.5 prevents; snapshot barrier satisfaction time and failure rate; and cross-handler comparison, which distinguishes "the venue is slow" from "our handler is slow" and is the difference between escalating to a vendor and debugging your own code.
+
+**Summary.** One ingest, three structurally separate paths, because three incompatible guarantees cannot share a pipeline without the weakest silently winning. Concurrent-redundant feed handlers with sequence-based dedup rather than failover; quarantine rather than guess on symbology; bitemporal storage so corrections add knowledge instead of destroying it; snapshot barriers at snapshot cadence rather than tick cadence; and everything sized on a 62× peak-to-mean ratio, because a platform sized on the mean fails every morning at the open.
+
+---
+
+### References
+
+1. FIX Trading Community — *FIX Protocol* and *Simple Binary Encoding (SBE)*, the wire formats most venue feeds use.
+2. Nasdaq — *TotalView-ITCH* specification, a canonical example of sequence-numbered venue feeds with a bounded replay facility.
+3. CME Group — *MDP 3.0* market data platform specification, including its incremental/snapshot recovery model (the design §3.1 mirrors).
+4. Martin Fowler — *Bitemporal History*, the model behind the archive and reference data.
+5. Martin Thompson et al. — *Aeron* and the LMAX Disruptor, for the lock-free single-writer patterns behind the latest-value store.
+6. IEEE 1588 (PTP) — clock synchronisation, and why `venue_ts` and `ingest_ts` must both be recorded.
+7. MiFID II RTS 25 — clock synchronisation and timestamp granularity requirements for European venues.
+8. Modules 09 and 11 of this folder — the risk engine that pins these snapshots, and the OMS that prices against this data.
+
+---
 ## 13. Low-Level Design
 
 **Requirements:** Ticks are immutable and identity-validated at the boundary; snapshots are consistent by construction; consumption paths cannot be crossed; archive queries are knowledge-time-aware.

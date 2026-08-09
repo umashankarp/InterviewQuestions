@@ -239,9 +239,311 @@ public async Task RecordViewAsync(string videoId)
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design — Designing a Video Streaming Platform
 
-*(This entire module IS the deep-dive case study — the incident, the four worked exercises, and the extensive Advanced-tier Q&A collectively constitute this section's typical content.)*
+*Authored to the four-step standard (see Module 01 §12 for the method).*
+
+---
+
+### Step 1 — Understand the Problem and Establish Design Scope
+
+#### The dialogue
+
+> **C:** Video-on-demand or live streaming? They share almost nothing below the manifest.
+> **I:** VOD only. Live is out of scope.
+>
+> **C:** Who uploads — a small set of studios, or every user?
+> **I:** Every user. Creator-uploaded, arbitrary length and quality.
+>
+> **C:** Scale, on both sides? Upload volume and watch volume are separate problems.
+> **I:** 500 hours uploaded per minute. 1 billion watch-hours per day.
+>
+> **C:** Global?
+> **I:** Yes, worldwide.
+>
+> **C:** Do we need DRM and paid content?
+> **I:** No DRM. Assume public and unlisted videos only; access control is a signed-URL problem at most.
+>
+> **C:** How quickly must a video be watchable after upload?
+> **I:** Ideally minutes. It's acceptable for high resolutions to arrive later than low ones.
+>
+> **C:** That's useful — it means renditions can publish progressively. Do we need exact view counts?
+> **I:** Approximate is fine, but they must not drift permanently or be gameable.
+>
+> **C:** Out of scope?
+> **I:** Recommendations, comments, search, monetisation, and the mobile player itself.
+
+The seventh answer is worth more than it looks: **"low resolutions may publish before high ones"** converts transcoding from a blocking, monolithic job into an independently-schedulable fan-out — which is exactly the defect §4 documents, pre-empted by one clarifying question.
+
+#### Functional requirements
+
+1. Resumable upload of arbitrarily large files.
+2. Transcode into a rendition ladder (240p…4K) plus thumbnails, asynchronously and independently.
+3. Package for adaptive streaming (HLS/DASH) and publish a manifest.
+4. Stream to players worldwide with low startup latency and adaptive quality.
+5. Track view counts at high write volume without exact-per-view durability.
+6. Publish progressively: a video becomes watchable as soon as *any* rendition is ready.
+
+#### Non-functional requirements
+
+| Requirement | Target |
+|---|---|
+| Playback start time | p95 < 2 s |
+| Rebuffer ratio | < 0.5% of playback time |
+| Upload durability | **Zero loss** of an acknowledged upload — the creator cannot re-shoot |
+| Time-to-first-rendition | p95 < 10 min for a 10-minute video |
+| Availability — playback | 99.99% |
+| Availability — upload | 99.9% (a failed upload is retryable; a failed playback is churn) |
+| Storage durability | 11 nines (object storage class) |
+| Cost | **A first-class requirement here**, not an afterthought — see the estimation |
+
+#### Back-of-the-envelope estimation
+
+**Ingest:**
+
+```
+Upload rate       = 500 hours/min × 60 × 24        = 720,000 hours/day
+Source bitrate    ≈ 10 Mbps                        ≈ 4.5 GB/hour
+Raw ingest        = 720,000 × 4.5 GB               ≈ 3.2 PB/day
+```
+
+**Transcode compute — the number that sizes the fleet:**
+
+```
+Ladder: 240p, 480p, 720p, 1080p, 4K  (5 renditions)
+Transcode speed ≈ 0.5× realtime per core for the mid ladder,
+much worse for 4K; blended ≈ 1.5 core-hours per source-hour per rendition
+Compute = 720,000 h/day × 5 × 1.5 core-h            = 5,400,000 core-hours/day
+        ÷ 24                                        ≈ 225,000 cores sustained
+```
+
+**Storage:**
+
+```
+Renditions ≈ 1.5× source across the ladder          ≈ 6.75 GB/source-hour
+Per day    = 720,000 × 6.75 GB                      ≈ 4.9 PB/day
+Per year                                             ≈ 1.8 EB/year
+```
+
+**Egress — the number that dominates everything:**
+
+```
+Watch      = 1 × 10^9 hours/day
+Avg bitrate ≈ 3 Mbps                                 ≈ 1.35 GB/hour
+Egress     = 10^9 × 1.35 GB                          ≈ 1.35 EB/day
+In bits/s  = 1.35 × 10^18 × 8 ÷ 86,400               ≈ 125 Tbps sustained
+Peak (×2)                                            ≈ 250 Tbps
+```
+
+#### What the numbers tell us
+
+Three conclusions, and the third is the one that reorders the whole design:
+
+1. **Egress is the system.** 125 Tbps cannot originate from your servers at any price — it is roughly the capacity of a large tier-1 network. The CDN is therefore not an optimisation layered on an origin design; **the origin is a fallback for the CDN**, and every URL a player sees is a CDN URL from the start.
+2. **Transcoding is the second-largest cost and it is elastic**, which makes it the natural home for spot/preemptible capacity and for priority scheduling — a fundamentally different operational posture from the always-on serving tier.
+3. **Most of the stored bytes will never be watched.** Upload is 720,000 hours/day; watch is 1 billion hours/day concentrated overwhelmingly on a small popular set. Generating a 4K rendition for every upload therefore spends the most expensive compute and the most expensive storage on content with, in the median case, near-zero views. **Generate the ladder on demand above a popularity threshold** — this single decision is worth more than every other optimisation in the design combined, and it falls directly out of the estimation.
+
+The hard problem is not "how do we stream video" — it is **cost-shaped**: routing bytes so they never touch your application tier, and refusing to do expensive work for content nobody will watch.
+
+---
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+#### The two core flows
+
+- **Write path (upload → transcode → publish)** — slow, asynchronous, compute-heavy, failure-tolerant.
+- **Read path (manifest → segments → CDN)** — enormous, latency-sensitive, and **completely decoupled** from the write path. The two share only object storage and a metadata record.
+
+Stating that decoupling first is what allows every subsequent decision to be made independently on each side.
+
+#### Components
+
+**Upload Service.** Issues pre-signed multipart upload URLs. **Bytes never traverse the application tier** — the client uploads directly to object storage. At 3.2 PB/day, any design that proxies upload bytes has already failed.
+
+**Raw Store.** Object storage bucket for source files; lifecycle-transitioned to cold storage after transcoding succeeds, and retained (not deleted) so the ladder can be regenerated when a codec changes.
+
+**Transcode Orchestrator.** Splits a video into **per-rendition, per-segment jobs**. Emits them to priority queues. Tracks completion per rendition.
+
+**Transcode Workers.** Autoscaled, largely on spot capacity, GPU-accelerated for the expensive tiers.
+
+**Packager.** Produces HLS/DASH segments and per-rendition playlists; writes the master manifest.
+
+**Metadata Service.** Video record, rendition availability, publish state.
+
+**Manifest Service.** Serves the master manifest. Thin, cacheable, and the only dynamic thing on the read path.
+
+**CDN (multi-vendor).** Serves segments and thumbnails. Origin-shielded so a cold popular video does not stampede object storage.
+
+**View Pipeline.** Kafka → stream aggregation → periodic flush to durable counters.
+
+#### End-to-end walkthrough — upload to playable
+
+1. Client calls `POST /v1/videos` → gets `video_id` and a multipart upload session.
+2. Client uploads 8 MB parts directly to object storage, retrying **per part**, with parts idempotent by part number. A dropped connection at 90% costs one part, not the upload.
+3. Client calls `POST /v1/videos/{id}/complete` with the part ETags; object storage assembles the source.
+4. Metadata state → `UPLOADED`. An event goes to the orchestrator.
+5. Orchestrator probes the source (duration, resolution, codec) and **decides the initial ladder**: 240p/480p/720p always; 1080p if the source supports it; **4K only on demand** (§3.5).
+6. Orchestrator splits the source into ~30-second chunks and emits `chunks × renditions` independent jobs to priority queues — **cheap renditions to a high-priority queue**, expensive ones to a lower one. This is the fix §4 arrived at the hard way.
+7. Workers transcode chunks in parallel; a chunk failure retries only that chunk.
+8. As each rendition's chunks complete, the packager stitches its playlist and marks the rendition available.
+9. **On the first rendition completing, state → `PARTIALLY_READY` and the video is publishable.** The master manifest lists only ready renditions and is re-published as more arrive.
+10. Client plays: fetch master manifest (CDN-cached, short TTL) → pick a rendition → fetch segments (CDN-cached, effectively immutable, long TTL).
+
+#### API design
+
+**`POST /v1/videos`**
+
+| Field | Type | Description |
+|---|---|---|
+| `title`, `description` | string | |
+| `visibility` | enum | `PUBLIC` \| `UNLISTED` \| `PRIVATE` |
+| `file_size`, `content_type` | int/string | Sizes the multipart plan |
+
+Response: `{ video_id, upload_id, part_size, part_urls[], expires_at }`.
+
+**`PUT {presigned_part_url}`** — client → object storage directly. Returns an `ETag` per part.
+
+**`POST /v1/videos/{id}/complete`** — `{ upload_id, parts: [{ part_number, etag }] }` → `202`.
+
+**`GET /v1/videos/{id}`**
+
+| Field | Type | Description |
+|---|---|---|
+| `status` | enum | `UPLOADING`, `UPLOADED`, `TRANSCODING`, `PARTIALLY_READY`, `READY`, `FAILED` |
+| `available_renditions` | string[] | Grows over time — the progressive-publish contract made explicit in the API |
+| `manifest_url` | string | **CDN URL**, never an origin URL |
+| `thumbnail_urls` | object | |
+| `duration_seconds` | int | |
+
+**`POST /v1/videos/{id}/views`** — fire-and-forget beacon: `{ session_id, position_seconds, watched_seconds }`. Note it reports *watched seconds*, not a boolean view — which is what makes the count both meaningful and much harder to game.
+
+#### Data model
+
+**`video`** (PostgreSQL — small, relational, transactional):
+
+| Column | Type | Notes |
+|---|---|---|
+| `video_id` | uuid PK | |
+| `creator_id`, `title`, `description`, `visibility` | | |
+| `status` | enum | The lifecycle above |
+| `source_key`, `duration_seconds`, `source_codec` | | |
+| `created_at`, `published_at` | timestamptz | |
+
+**`rendition`** — `(video_id, rendition_id)`, `resolution`, `bitrate`, `codec`, `status`, `playlist_key`, `segment_count`, `bytes`, `completed_at`. One row per ladder step; **this table is why progressive publish works** — the manifest is a projection of the ready rows.
+
+**`transcode_job`** — `(video_id, rendition_id, chunk_index)`, `status`, `attempts`, `worker_id`, `error`. Chunk-level granularity is what makes retries cheap.
+
+**`view_counter`** — Cassandra/DynamoDB, `video_id → count`, updated by batched increments; plus a `view_event` stream retained for recomputation and fraud analysis.
+
+**Storage key layout** — content-addressed and immutable:
+
+```
+raw/{video_id}/source
+hls/{video_id}/{rendition}/playlist.m3u8
+hls/{video_id}/{rendition}/seg-{n}.ts
+hls/{video_id}/master.m3u8        ← the only mutable object; short TTL
+```
+
+Immutable segment keys mean segments can be cached at the edge **forever**, which is the cheapest consistency model available and the reason the master manifest is the only thing with a short TTL.
+
+#### Store selection, and why
+
+| Store | Choice | Reason |
+|---|---|---|
+| Video/rendition metadata | **PostgreSQL** | Small (hundreds of GB), relational, needs transactions for state transitions. Nothing about this workload justifies more |
+| Media bytes | **Object storage (S3-class)** | 1.8 EB/year, 11-nines durability, lifecycle tiering, and — decisively — it can be a CDN origin |
+| View counts | **Cassandra/DynamoDB + stream aggregation** | Extremely high write volume with no read-modify-write per event; approximate is acceptable per requirements |
+| Job state | **PostgreSQL or a workflow engine** | Millions of small rows with state machines; needs exactly-once-ish transitions |
+| Delivery | **Multi-vendor CDN** | 125 Tbps. Multi-vendor is not redundancy theatre here — it is negotiating leverage and genuine regional coverage |
+
+---
+
+### Step 3 — Design Deep Dive
+
+#### 3.1 Resumable upload, correctly
+
+Multipart upload with client-side retry per part. The details that matter: **parts are idempotent by number**, so a retried part overwrites rather than appends; the upload session has a TTL and abandoned sessions are garbage-collected by a lifecycle rule (otherwise incomplete multipart uploads accumulate as invisible, billable storage — a real and commonly-missed cost leak); and the client must verify the assembled object's checksum, because a silently corrupted source produces five corrupted renditions and a support ticket that looks like a transcode bug.
+
+#### 3.2 Per-rendition, per-chunk jobs — and why the queue must be split
+
+§4's incident was a monolithic per-video job. The fix is two-dimensional decomposition: **by rendition** (independent outputs) and **by chunk** (independent inputs). Both are needed — rendition-only decomposition still leaves a 4-hour 4K job as one unit.
+
+The subtlety beyond the decomposition is **queue separation by cost**. If cheap and expensive jobs share a queue, an upload burst of long 4K videos still delays every 240p job behind it — the same head-of-line blocking, one level down. Separate queues with separate worker pools (and separate autoscaling) make the fast path structurally fast rather than statistically fast.
+
+Chunk boundaries must land on **keyframes (GOP boundaries)**, or the chunks cannot be stitched without re-encoding at the seams. This is the kind of domain detail that distinguishes someone who has built a pipeline from someone who has read about one.
+
+#### 3.3 Adaptive bitrate: what the server owes the client
+
+The server publishes a master manifest listing renditions with bandwidth and resolution; the **client** measures throughput and buffer level and chooses the next segment's rendition. Server-side responsibilities are narrow but strict:
+
+- **Segment duration** ≈ 2–6 s. Shorter means faster adaptation and lower startup latency, but more requests and more per-segment overhead. 4 s is a defensible default; state the trade-off rather than asserting the number.
+- **Every rendition must be segment-aligned** — segment *n* covers the same time range in every rendition, or switching mid-stream produces a visible glitch or a gap.
+- **The lowest rendition must be reachable on genuinely bad networks.** A ladder starting at 720p is unusable on the connections most of the world's viewers actually have — and this is a design decision with a market-size consequence, not a technical detail.
+
+#### 3.4 CDN strategy and the cold-popular problem
+
+A brand-new video that goes viral is a cache miss everywhere at once: thousands of edges simultaneously request the same segments from the origin, and object storage sees a stampede on a handful of keys.
+
+- **Origin shield**: a mid-tier cache between edges and origin, so N edges collapse into one origin fetch per segment.
+- **Pre-warming** for content with predictable demand (scheduled premieres, known-large creators) — push segments to edges before the traffic arrives.
+- **Tiered storage by popularity**: hot content on the fastest storage class, the long tail on infrequent-access, cold archives for content untouched in a year. Given that most uploads are watched almost never, this is a very large line item.
+
+#### 3.5 The popularity-driven ladder — the biggest cost lever
+
+Falling directly out of the estimation's third conclusion:
+
+1. On upload, generate only the cheap ladder (240p/480p/720p). Time-to-watchable is short and cost is small.
+2. Track views. When a video crosses a threshold (say 1,000 views, or a rising velocity), enqueue 1080p; at a higher threshold, 4K.
+3. For videos that never cross it — the overwhelming majority — the expensive renditions are **never generated at all**.
+
+The trade-off is honest and must be stated: the first thousand viewers of what becomes a hit see a lower maximum quality than they would have. Given that the alternative is generating 4K for hundreds of thousands of hours a day of content nobody watches, that is a trade worth making — and framing it as a *stated, measured* trade rather than a silent degradation is what makes it a design decision instead of a corner cut.
+
+#### 3.6 View counting without a synchronous increment
+
+Client beacons → Kafka → windowed aggregation → periodic flush of batched increments.
+
+- **Deduplicate by `session_id`** within a window so a page refresh is not a view.
+- **Require a watch-time threshold** (e.g., 30 s or 30% of duration) before counting — this is both a quality signal and the primary anti-gaming control.
+- **The event stream is retained** so counts can be *recomputed* after a fraud rule changes. A counter you can only increment is a counter you can never correct, and view-count fraud rules change constantly.
+- Display counts are read from a cache with a short TTL; exactness at the second is neither achievable nor required.
+
+#### 3.7 Failure handling
+
+- **A chunk transcode fails** → retry that chunk; after N attempts, fail that *rendition* only. Other renditions still publish. The video remains watchable.
+- **All renditions fail** → `FAILED` with a creator-visible reason. Silent failure here is a creator-trust event, not just a bug.
+- **Spot instance reclaimed mid-job** → chunk-level granularity means at most one chunk of work is lost; this is what makes spot capacity viable for 225,000 cores.
+- **CDN vendor degradation in a region** → shift traffic to the secondary vendor via DNS/steering. Multi-vendor is what makes this a routing change rather than an outage.
+- **Object storage regional issue** → playback continues from CDN caches for popular content and fails for the cold tail — a graceful, popularity-weighted degradation that is worth naming as a *designed* property rather than an accident.
+
+---
+
+### Step 4 — Wrap-Up
+
+**What we left out:** live streaming (a different ingest, packaging, and latency model end to end); DRM and licence servers; recommendations and search (Module 19); comments and community; monetisation and ad insertion, which changes manifest generation substantially; per-title and per-scene encoding optimisation, which is where the next large cost win lives; captions and multi-language audio; and copyright matching.
+
+**What we would measure:** playback start time and **rebuffer ratio segmented by region, ISP, and device** — the aggregate is useless because failures here are always concentrated (this folder's recurring finding); CDN offload ratio, the single most economically significant number in the design; time-to-first-rendition p95, split by rendition; transcode cost per source-hour and spot-reclamation rate; queue depth **per priority class**, since a blended depth hides exactly the head-of-line problem §4 suffered; and renditions generated versus renditions ever watched, which is the metric that justifies §3.5 and would flag if the threshold drifted wrong.
+
+**Summary.** Bytes go client → object storage → CDN and never through the application tier; transcoding is decomposed by rendition *and* chunk onto cost-separated queues so cheap renditions publish first; the expensive half of the ladder is generated only for content that earns it; and the read path is decoupled from the write path entirely, sharing only an immutable object store and a small metadata record. The estimation drives all of it: 125 Tbps of egress makes the CDN the system, and the gap between 720,000 upload-hours and a view distribution concentrated on a tiny fraction makes on-demand rendition generation the largest single lever available.
+
+---
+
+### References
+
+1. Alex Xu — *System Design Interview Vol. 1*, ch. 14 "Design YouTube".
+2. Netflix Technology Blog — *Per-Title Encode Optimization* and *Dynamic Optimizer* (the next step beyond a fixed ladder).
+3. Netflix Technology Blog — *Open Connect* CDN architecture and ISP embedding.
+4. RFC 8216 — HTTP Live Streaming (HLS); ISO/IEC 23009-1 — MPEG-DASH.
+5. AWS — *Amazon S3 Multipart Upload* and lifecycle policies for incomplete uploads (the cost leak in §3.1).
+6. YouTube Engineering — *Vitess* and the metadata-scaling story.
+7. Facebook Engineering — *Under the hood: Broadcasting live video* (for contrast with the VOD path designed here).
+8. Twitter/X Engineering — *Cache-aside and origin shielding for media at scale*.
+9. Google SRE Book, ch. 22 — cascading failure, applied here to origin stampede on cold-popular content.
+
+---
+
+## 13–17. LLD / Debugging / Decision / Case Study / Principal
+
+*(This module predates the full 16-section template; its incident, worked exercises, and Advanced-tier Q&A collectively carry this content. §12 above was authored to the four-step standard on 2026-08-09.)*
 
 ## 18. Revision
 **Key takeaways**: Video platforms are fundamentally a large-binary-content problem, requiring chunked/resumable upload, an asynchronous, independently-job-per-rendition transcoding pipeline (never monolithic —), and CDN-primary (not CDN-as-cache) delivery. Adaptive bitrate streaming is client-driven, requiring pre-generated discrete quality renditions, not server-side dynamic encoding. View-count and similar high-frequency counters must be batched/aggregated asynchronously (Redis counters + periodic flush), never synchronously written per-event. Storage tiering by access-frequency/popularity (a power-law distribution, directly paralleling the celebrity-account skew) is an economic necessity at this scale, not an optional optimization.

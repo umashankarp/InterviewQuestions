@@ -368,9 +368,283 @@ public async Task ProcessFanOutJobAsync(FanOutJob job)
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design — Designing a News Feed / Timeline System
 
-*(This entire module IS the deep-dive system-design case study — the incident, the four worked exercises, and the extensive Advanced-tier Q&A collectively constitute the full design-review-depth content this section would otherwise contain separately.)*
+*Authored to the four-step standard (see Module 01 §12 for the method).*
+
+---
+
+### Step 1 — Understand the Problem and Establish Design Scope
+
+#### The dialogue
+
+> **C:** Which feed are we designing? A home timeline (posts from accounts you follow) and a user timeline (one account's own posts) are different problems — the second is trivial.
+> **I:** The home timeline. Assume the user timeline is a simple indexed query.
+>
+> **C:** What's the follower-count distribution — roughly uniform, or power-law?
+> **I:** Power-law. Median user has about 200 followers; the top accounts have tens of millions.
+>
+> **C:** That single answer decides the architecture, so let me pin it down: what's the largest account?
+> **I:** Around 50 million followers.
+>
+> **C:** Scale?
+> **I:** 500 million registered, 200 million DAU.
+>
+> **C:** How often does a user read their feed versus post?
+> **I:** Assume 10 feed views per DAU per day, and 0.1 posts per DAU per day.
+>
+> **C:** Ordering — strictly chronological, or ranked?
+> **I:** Ranked, but treat ranking as a separate service. Design candidate generation.
+>
+> **C:** How fresh must the feed be? If someone I follow posts now, when must I see it?
+> **I:** Seconds for normal accounts. For very large accounts, tens of seconds is acceptable.
+>
+> **C:** Media?
+> **I:** Posts can carry images and video, but assume a media service exists and gives you URLs.
+>
+> **C:** And out of scope?
+> **I:** The ranking model itself, notifications, direct messages, and the follow graph's own storage design — assume you can query "who follows X" and "who does X follow."
+
+The fifth and sixth answers are what make this designable: **a 500:1 read:write ratio** and a **staleness budget that differs by account size**. The second is the permission slip for the hybrid model — if freshness had to be identical for all accounts, the celebrity path would be much harder.
+
+#### Functional requirements
+
+1. Publish a post; it becomes visible to followers.
+2. Retrieve a user's home timeline, paginated, newest-first within a ranked ordering.
+3. Follow / unfollow, with the feed reflecting the change.
+4. Deduplicate and consistently order results merged from two different sources.
+
+#### Non-functional requirements
+
+| Requirement | Target |
+|---|---|
+| Feed read latency | p99 < 200 ms for the first page |
+| Propagation — normal accounts | p99 < 5 s from post to visible |
+| Propagation — large accounts | p99 < 30 s acceptable |
+| Availability — read | 99.99% (a feed that won't load is the product being down) |
+| Availability — write | 99.9% |
+| Consistency | Eventual, **except** a user must see their own post in their own timeline immediately |
+| Durability | A published post is never lost; a *feed entry* may be lost and rebuilt |
+
+That last row is the load-bearing one: **the feed is a derived cache, not a system of record.** Anything in it can be recomputed from posts plus the follow graph. Establishing that early licenses aggressive use of Redis with eviction, and it is the reason a lost feed entry is an annoyance rather than data loss.
+
+#### Back-of-the-envelope estimation
+
+```
+DAU                        = 200,000,000
+Feed reads/day             = 200M × 10               = 2 × 10^9
+Average read QPS           = 2 × 10^9 ÷ 10^5         = 20,000 reads/s
+Peak (×2)                                            = 40,000 reads/s
+
+Posts/day                  = 200M × 0.1             = 20,000,000
+Average write QPS          = 20M ÷ 10^5             = 200 posts/s
+Peak (×3)                                            = 600 posts/s
+```
+
+**Fan-out amplification — the number that decides everything:**
+
+```
+Average followers ≈ 200 (median; the mean is higher and misleading — say ~500)
+Push fan-out writes/s = 200 posts/s × 500 = 100,000 feed writes/s   ← sustainable
+Peak                  = 600 × 500         = 300,000 feed writes/s   ← still sustainable in Redis
+
+But ONE post by a 50M-follower account = 50,000,000 writes.
+At 300,000 writes/s of spare capacity, that single post takes 166 seconds
+to fully propagate — and consumes the ENTIRE fan-out capacity while doing so,
+delaying every other user's post behind it.
+```
+
+Storage:
+
+```
+Feed entry ≈ 30 B (post_id + score + flags), cap 800 entries/user
+Per user     = 24 KB;  × 200M DAU        ≈ 4.8 TB in Redis
+Posts        = 20M/day × 1 KB metadata   ≈ 20 GB/day ≈ 7 TB/year
+```
+
+#### What the numbers tell us
+
+1. **Push fan-out is correct for the overwhelming majority of accounts.** 100k feed writes/s is unremarkable for a Redis fleet, and it converts a 20,000/s read problem into an O(1) `ZREVRANGE`.
+2. **Push fan-out is catastrophic for the tail, and the failure is not "slow" — it is *shared*.** The 166-second calculation shows one celebrity post consuming the whole fan-out budget, which is why §4's incident degraded *everyone's* posting, not just the celebrity's followers. That is the difference between a capacity problem and an isolation problem, and it is the sentence that earns the score.
+3. **4.8 TB of feed cache is affordable only because the feed is bounded.** Unbounded per-user feeds would grow without limit; the 800-entry cap is a correctness requirement disguised as a memory optimisation.
+
+The hard problem is therefore **not fan-out itself but the bimodal distribution** — and the design must isolate the two populations so that one cannot consume the other's capacity.
+
+---
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+#### The two core flows
+
+- **Write path (post creation + fan-out)** — rare, asynchronous, and the path where the celebrity problem lives.
+- **Read path (feed assembly)** — 100× more frequent, latency-critical, and where the hybrid merge happens.
+
+#### Components
+
+**Post Service.** Accepts and persists posts. Returns fast; does not fan out inline.
+
+**Fan-out Service.** Consumes post events, looks up followers, and writes feed entries — **but only for accounts below the celebrity threshold**. Partitioned so a single large fan-out job cannot monopolise workers.
+
+**Celebrity Registry.** The set of accounts above the threshold. Read on both paths. Small, hot, cached everywhere.
+
+**Feed Store (Redis).** One sorted set per user: `feed:{user_id}`, member = `post_id`, score = ranking score or timestamp. Trimmed to 800 entries.
+
+**Feed Read Service.** Assembles a page: read the precomputed set, pull recent posts from followed celebrities, merge, deduplicate, rank, hydrate.
+
+**Ranking Service.** Reorders an already-gathered candidate set. Deliberately separate — §2.5's separable-concerns point made structural.
+
+**Post Store.** Source of truth for post content; the feed stores only IDs.
+
+**Follow Graph Service.** `followers(user)` and `following(user)`. Assumed to exist per the scope dialogue.
+
+#### End-to-end walkthrough — publishing
+
+1. `POST /v1/posts` → Post Service validates and writes to the post store.
+2. Same transaction writes an outbox row; response returns to the client (target < 300 ms).
+3. **The author's own timeline is updated synchronously** — this is what satisfies "see your own post immediately" without waiting for fan-out.
+4. Outbox publisher emits `PostCreated` to Kafka, partitioned by `author_id`.
+5. Fan-out Service consumes. First action: **is the author a celebrity?**
+   - **Yes** → do nothing. The post is served on the read path. Cost: O(1).
+   - **No** → page through followers in batches of 1,000, pipelining `ZADD` + `ZREMRANGEBYRANK` per follower.
+6. Inactive followers are skipped — a user who has not opened the app in 30 days gets no feed writes, and their feed is rebuilt on next login. At a 200M/500M active ratio this removes roughly 60% of all fan-out work for free.
+
+#### End-to-end walkthrough — reading
+
+1. `GET /v1/feed?limit=20&cursor=…`
+2. Read `feed:{user_id}` via `ZREVRANGEBYSCORE` — one round trip, ~1 ms.
+3. In parallel, fetch the celebrity accounts this user follows (cached per user), and read each one's recent posts from a small per-author cache (`author_posts:{id}`, last 50).
+4. **k-way merge** the two already-sorted streams — not a concatenate-and-sort. Both inputs are sorted, so merging is O(n) rather than O(n log n), and at 40,000 reads/s that difference is real money.
+5. Deduplicate by `post_id` (a post can legitimately appear in both streams during a threshold transition).
+6. Pass the candidate set to the ranking service — reorder only, never re-gather.
+7. Hydrate post content in one batch read (`MGET`), never per-post.
+8. Return with an **opaque cursor** encoding `(score, post_id)` of the last item — not an offset. Offsets break under insertion, which in a feed is constant.
+
+#### API design
+
+**`GET /v1/feed`**
+
+| Param | Type | Description |
+|---|---|---|
+| `limit` | int | Default 20, max 50 |
+| `cursor` | string | Opaque; encodes `(score, post_id)` of the last item returned |
+| `include` | string[] | Optional hydration hints (`author`, `media`, `counts`) |
+
+Response: `{ items: [...], next_cursor, has_more }`. Each item: `{ post_id, author, created_at, body, media[], counts, source }` — where `source` is `PUSHED` or `PULLED`, which is *diagnostic gold* and costs nothing.
+
+**`POST /v1/posts`** — `{ body, media_keys[], visibility }`, header `Idempotency-Key`. Returns `{ post_id, created_at }`.
+
+**`POST /v1/follows`** — `{ target_user_id }`. Returns `202`; backfill is asynchronous (§3.3).
+
+#### Data model
+
+**`post`** — Cassandra, partition `author_id`, clustering `created_at DESC`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `author_id`, `post_id` | Partition + clustering | Naturally supports "recent posts by author" — the celebrity read path |
+| `body`, `media_keys` | text / list | |
+| `created_at` | timestamp | |
+| `visibility` | enum | `PUBLIC`, `FOLLOWERS`, `DELETED` |
+
+**`feed:{user_id}`** — Redis sorted set. Member `post_id`, score = ranking score. `ZADD` then `ZREMRANGEBYRANK feed:{u} 0 -801` on every write — **the trim is not optional**, and omitting it is the single most common way this design fails in production.
+
+**`celebrity_accounts`** — a Redis set plus in-process cache with a short TTL, refreshed by a job that recomputes membership from follower counts.
+
+**`author_posts:{author_id}`** — Redis list, last 50 posts, maintained for *all* accounts but only *read* for celebrities.
+
+#### Database selection, and why
+
+| Store | Choice | Reason |
+|---|---|---|
+| Posts | **Cassandra** | Write-heavy, append-only, partition-by-author matches both access patterns exactly, linear scale-out. No joins needed — the feed stores IDs |
+| Feed entries | **Redis sorted sets** | The access pattern *is* "top-N by score", which is `ZREVRANGE`'s native operation. Feed data is derived, so eviction is survivable — which is precisely what makes an in-memory store acceptable for 4.8 TB |
+| Follow graph | **Sharded MySQL / graph store** | Out of scope per the dialogue, but note the shape: `followers(x)` needs an index on the reverse edge |
+| Post content hydration | **Redis + Cassandra fallback** | Batch `MGET` on the hot path |
+
+The decision worth defending: **the feed is not in a database.** It is a derived, bounded, evictable cache. Saying so explicitly changes what durability and consistency you owe it, and candidates who model feed entries as durable rows end up designing a far more expensive system for no benefit.
+
+---
+
+### Step 3 — Design Deep Dive
+
+#### 3.1 The hybrid threshold — where it comes from, and why it must move
+
+The threshold separating push from pull is not a constant; it is the point where a single account's fan-out cost exceeds what the shared fan-out tier can absorb without delaying others. Derive it rather than guessing:
+
+```
+Fan-out capacity            ≈ 300,000 feed writes/s
+Acceptable monopolisation   ≈ 10% of capacity for ≤ 5 s  = 150,000 writes
+Threshold                   ≈ 100,000 followers
+```
+
+Accounts above ~100k followers go pull. But **the distribution shifts as the platform grows** — §4's incident is exactly a threshold that was correct at launch and silently became wrong. So:
+
+- The celebrity set is **recomputed continuously**, not configured.
+- The threshold itself is a **monitored parameter** with a dashboard showing fan-out job duration distribution; when the p99 job starts consuming a growing share of capacity, the threshold is too high.
+- Transitions must be handled: an account crossing the threshold upward leaves stale pushed entries in follower feeds (harmless — dedup catches them); crossing downward means its recent posts are missing from feeds until the next post, which is why the read path keeps pulling for a grace period after demotion.
+
+#### 3.2 The merge, and the ordering trap
+
+Merging a pushed stream (scores assigned at fan-out time) with a pulled stream (scores computed at read time) is only correct if both use the **same scoring function evaluated over the same inputs**. They usually do not, because the pushed score was computed minutes ago against then-current engagement counts.
+
+Two workable resolutions:
+
+- **Score at read time for both streams.** The feed store then holds `post_id` ordered by *timestamp* only, and ranking happens uniformly after the merge. Simple, correct, and costs a scoring pass over ~200 candidates per read — which at 40,000 reads/s is a real but affordable CPU line.
+- **Score at write time and accept drift**, re-scoring only the top page. Cheaper, and the drift is usually below perceptual threshold.
+
+**Recommendation: timestamp in the store, ranking after the merge.** It keeps the store's semantics simple (chronological is unambiguous), makes the two streams genuinely comparable, and preserves §2.5's separation — candidate generation and ranking stay independent, which means the ranking model can be changed without touching the fan-out path at all. That decoupling is worth more than the CPU it costs.
+
+#### 3.3 Follow and unfollow — the backfill problem
+
+Following someone should show their content. Three options, and the naive one is wrong:
+
+- **Backfill on follow** — read the new followee's recent posts and inject them into the follower's feed. Correct-looking, but a user who follows 50 accounts in a session triggers 50 backfills, and a bot following thousands is a denial-of-service vector against your own fan-out tier.
+- **Nothing; new posts only** — the feed looks empty for a new user, which is the worst possible first-run experience.
+- **Backfill asynchronously, bounded, with a read-time union for the gap** — enqueue a bounded backfill job (last 20 posts, rate-limited per user), and until it completes, the read path unions the followee's recent posts directly.
+
+Take the third. Unfollow is the mirror image and is easier: **do not** scrub the feed synchronously (that is another fan-out); instead filter at read time against the current following set, and let the trim eventually evict the entries. Filtering at read time is cheap because the follow set is already loaded for the celebrity pull.
+
+#### 3.4 Failure handling
+
+- **Fan-out consumer lag** → posts propagate slowly. Detect on **consumer lag per partition**, not aggregate, because a single celebrity's partition is exactly where lag concentrates and an average hides it.
+- **Redis node loss** → those users' feeds are gone. Because the feed is derived, the correct response is **rebuild on read**, not restore from backup: a miss on `feed:{u}` triggers a synchronous, bounded pull-based assembly and repopulation. This must be rate-limited, or a node loss becomes a thundering herd against the post store.
+- **Post store unavailable** → feeds render from cached hydration where possible; degrade to IDs-with-placeholders rather than an error.
+- **Ranking service unavailable** → **fall back to chronological.** A worse-ordered feed is a working product; an error page is not. Making this fallback explicit is the difference between a resilient design and one that has a hidden hard dependency on an ML service.
+
+#### 3.5 Hot spots and the read path's own tail
+
+A celebrity's `author_posts:{id}` key is read by every one of their followers on every feed load — tens of thousands of reads per second against a single Redis key on a single shard. Mitigations: replicate the key across N shards with a random read (`author_posts:{id}:{0..15}`), or cache it in-process on the feed-read service with a 1–2 s TTL. The in-process cache is usually right: it is the same data for everyone, staleness of a second is within budget, and it removes the hot key entirely.
+
+This is worth naming because it is the *second* celebrity problem — the write-side one is famous, the read-side one is what actually pages you.
+
+---
+
+### Step 4 — Wrap-Up
+
+**What we left out**, and would be next: the ranking model (features, training, and the online/offline skew); notification fan-out (Module 20, structurally the same problem with different delivery semantics); media pipeline (Module 05); abuse and rate limiting (Modules 04, 15); multi-region feed assembly, where the follow graph's locality determines whether it is even feasible; and privacy filtering (blocked users, private accounts) which must apply at read time and interacts badly with precomputation.
+
+**What we would measure:** fan-out job duration **distribution** — not the mean, since the mean is the metric that hid §4's incident; consumer lag per partition; feed-read p99 split by `PUSHED`/`PULLED` composition; feed cache hit rate and rebuild-on-read rate; the follower-count distribution itself, as a standing metric, because it is the assumption the whole architecture rests on; and merge dedup counts, which should be small and non-zero — zero means the pull path is not firing.
+
+**Summary.** The design is push for the body of the distribution, pull for the tail, merged at read time with ranking applied after the merge. The estimation is what justifies it: push alone breaks on a 50-million-follower account by monopolising shared capacity, and pull alone pays a scatter-gather on every one of 40,000 reads/s. The engineering that earns the score is in the three places the naive hybrid gets wrong — deriving the threshold instead of hardcoding it, making both streams comparable before merging, and treating the feed as derived so a lost cache node is a rebuild rather than an outage.
+
+---
+
+### References
+
+1. Twitter Engineering — *The Infrastructure Behind Twitter: Scale* and the timeline fan-out architecture (the canonical hybrid).
+2. Raffi Krikorian — *Timelines at Scale* (QCon) — the original public description of push/pull hybridisation.
+3. Facebook Engineering — *Scaling Memcache at Facebook* (NSDI '13) — hot-key handling and lease-based stampede control.
+4. Instagram Engineering — *Sharding & IDs at Instagram* — time-sortable IDs, which make cursor pagination correct.
+5. Redis docs — sorted sets, `ZREVRANGEBYSCORE`, `ZREMRANGEBYRANK` (the trim that bounds the feed).
+6. Alex Xu — *System Design Interview Vol. 1*, ch. 11 "Design a News Feed System".
+7. LinkedIn Engineering — *Feed personalization and the candidate-generation / ranking split*.
+8. Cassandra docs — partition and clustering key design for time-series-shaped data.
+
+---
+
+## 13–17. LLD / Debugging / Decision / Case Study / Principal
+
+*(This module predates the full 16-section template; its incident, worked exercises, and Advanced-tier Q&A collectively carry this content. §12 above was authored to the four-step standard on 2026-08-09.)*
 
 ## 18. Revision
 **Key takeaways**: The fan-out decision (push vs. pull vs. hybrid) is the defining architectural choice for any feed/timeline system, determined primarily by the actual follower-count distribution — a non-functional requirement that can silently change as a platform grows (the celebrity problem). Ranking is a separable concern from candidate-gathering/fan-out — don't conflate the two design axes. Precomputed feed caches need explicit bounding/trimming (Redis ZSet + `ZREMRANGEBYRANK`), directly paralleling the unbounded-embedding lesson. Merging precomputed and live-pulled results should use an efficient k-way merge (both streams already sorted), not a full re-sort. Asynchronous, queue-based fan-out processing absorbs traffic bursts as monitorable backpressure rather than overwhelming the write path directly.
