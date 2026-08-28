@@ -72,6 +72,56 @@ graph TB
 
 ---
 
+## 7. Performance Engineering
+
+**CPU:** Per-connection overhead (TLS/frame parsing, heartbeat handling) is small per connection but multiplies across millions of concurrent connections — a chat server handling 50,000+ WebSocket connections must avoid per-message allocation and per-connection polling in favor of an event-driven, epoll/kqueue-backed I/O model (.NET's `Kestrel` with `System.Net.Sockets` async I/O, not a thread-per-connection model, which would exhaust the thread pool long before exhausting memory).
+
+**Memory:** Connection state (socket buffers, per-connection metadata, subscription state) is the dominant memory driver at scale — §12's estimation puts this at ~40 KB/connection, meaning 100,000 connections per server costs ~4 GB, a number that must be measured against real per-connection overhead (including any per-connection application-level state like typing-indicator debouncing) rather than assumed from the socket alone.
+
+**GC/Allocations:** A message-send/fan-out hot path that allocates a new object per recipient (a new DTO, a new byte buffer) per message generates severe Gen-0 pressure at group-chat fan-out volumes (§3.5's 500-member group example: 1,250 deliveries from one send) — batching serialization once per message and reusing pooled buffers for the fan-out loop avoids this; the "fan out to connection servers, not devices" optimization (§12 §3.5) is also a GC optimization, not just a network one, since it collapses 1,250 allocation-and-send operations into ~200.
+
+**Latency:** The two latency numbers that matter are tracked separately (§12 Step 4) — send-to-ACK (durability path) and ACK-to-delivery (fan-out path) — because they have different bottlenecks and different owners; blending them into one "message latency" metric hides which half of the pipeline actually needs attention when the SLO is missed.
+
+**Throughput:** Delivery throughput, not send throughput, is the dominant load (§12's estimation: 40,000 sends/s but ~320,000 deliveries/s from fan-out) — capacity planning that sizes only for send QPS will under-provision the fan-out/connection tier by nearly an order of magnitude.
+
+**Benchmarking:** Load-test with a **realistic group-size distribution** (a heavy tail of large groups, not a uniform small-group assumption) — §12 §3.5's straggler-style fan-out cost is invisible in a benchmark built only from 1:1 conversations, mirroring the instrument-mix blind spot the portfolio-risk-engine module's Production Debugging incident demonstrates in a different domain.
+
+**Caching:** The connection registry (Redis) is itself a cache in the broad sense — a userId→server mapping that trades a small amount of staleness tolerance (§12 §3.4) for avoiding a full connection-table scan on every message send; its hit/stale rate is a first-class metric, not an afterthought.
+
+## 8. Security
+
+**Threats:** A chat system's threat surface centers on impersonation (sending as another user), message interception/tampering in transit, unauthorized access to another user's or group's message history, and abuse (spam/harassment) at connection-sustained volumes that ordinary per-request rate limiting doesn't naturally bound (§10 Intermediate Q8).
+
+**Mitigations:** TLS for every WebSocket connection (`wss://`, never plaintext `ws://`); per-connection authentication at connect time (a short-lived token, re-validated on reconnect, not merely checked once at initial handshake and trusted indefinitely for a long-lived connection); server-side authorization on every message send verifying the sender is genuinely a member of the target conversation, not merely authenticated in general — a distinct check from authentication, and the one most often skipped because "they're already connected" is mistaken for "they're allowed to post here."
+
+**OWASP mapping:** **API1:2023 Broken Object-Level Authorization** is the dominant risk on the message-history read path — a user authenticated for their own conversations must not retrieve another conversation's history by manipulating a `conversationId` (the IDOR pattern, directly relevant to §12's `GET /v1/conversations/{id}/messages` endpoint, which must verify conversation membership server-side on every call, not merely trust a client-supplied ID). **API4:2023 Unrestricted Resource Consumption** applies to the sustained-connection rate-limiting concern above.
+
+**AuthN/AuthZ:** Authentication establishes *who* is connected; authorization must be re-checked **per message and per conversation**, since group membership changes over the lifetime of a long-lived connection (a user removed from a group mid-session must not be able to continue sending to it merely because their WebSocket connection is still open) — a real gap distinct from, and easy to miss relative to, the initial connection-time auth check.
+
+**Secrets:** Connection tokens should be short-lived and refreshed via the same reconnect flow that already exists for §12 §3.6's reconnect-storm handling, rather than being long-lived credentials embedded in the client — reusing existing infrastructure (reconnect) for token refresh avoids adding a second, parallel credential-management path.
+
+**Encryption:** End-to-end encryption (out of scope per §12 Step 1's dialogue) is a materially different security posture from transport-level (TLS) encryption alone — TLS protects data in transit between client and server, but the server itself can read plaintext; E2E means even the server cannot, which — as §10 Intermediate Q7 notes — eliminates server-side search/moderation as previously designed and must be explicitly called out as a scope decision, not silently assumed.
+
+## 9. Scalability
+
+**Horizontal scaling:** The connection tier scales horizontally by adding servers that accept **new** connections (§10 Advanced Q9) — critically, this does not automatically rebalance *already-established* connections, which is the genuinely distinct scaling story this system carries relative to a stateless REST API.
+
+**Vertical scaling:** Relevant primarily for the per-server connection-count ceiling (§12's ~100,000 connections/server assumption) — a larger instance raises this ceiling but doesn't change the fundamental "new connections only" scaling limitation above.
+
+**Caching:** The connection registry is the system's core scaling-enabling cache (§2.2) — without it, horizontal scaling of the connection tier would be impossible without sticky sessions (which carry their own correctness/rebalancing risk).
+
+**Replication/Partitioning:** The message store is partitioned by `conversation_id` (§12's data model) — this is the correct shard key because the dominant query is always conversation-scoped, keeping the "load this conversation's history" query single-shard; sharding by `user_id` instead would scatter every conversation's messages across multiple shards for no benefit (§10 Basic Q9).
+
+**Load balancing:** Connection-aware (not purely round-robin) load balancing is required at the WebSocket tier — a load balancer must route a *new* connection to any available server, but must never attempt to "rebalance" an *existing* connection by routing its subsequent messages to a different server, since the connection itself is pinned to whichever server accepted it.
+
+**High Availability:** A chat server crash drops its connections; clients reconnect (with jittered backoff, §12 §3.6) to a different, healthy instance, re-registering in the connection registry — a self-healing pattern that depends entirely on the registry's TTL-based staleness handling (§12 §3.4) to route around the dead server rather than continuing to attempt delivery to it.
+
+**Disaster Recovery:** Because message ordering and durability depend on the per-conversation sequence number being assigned exactly once (§2.4), a DR failover to a standby region must not allow **two** sequencers (primary and standby) to be simultaneously active for the same conversation — a split-brain sequencer would violate the single-authority-per-conversation invariant the entire ordering guarantee rests on, requiring the same fencing/leader-election discipline this course applies to any single-writer component during failover.
+
+**CAP theorem:** Message *history reads* can favor availability (a slightly stale view during a partition is tolerable — the recipient will resync, §12 §3.3) while message *sequencing* (the write path assigning the authoritative order) must favor consistency — the same per-consumer, per-operation CAP-posture split this course establishes generally, here drawn along the read/write boundary rather than across different consumer types.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -119,6 +169,28 @@ graph TB
  **A:** Adding more stateless REST API replicas (the default scaling lever) works because any replica can serve any request — but a new chat server has **no existing connections** to serve; it only helps if it can accept *new* incoming connections (spreading future connection load) while the *existing* connections (and their associated registry entries) remain correctly routed to whichever servers already hold them — "add more servers" for a chat system scales *new connection capacity* directly, but doesn't rebalance *already-established* connections without additional mechanisms (e.g., periodically asking a subset of clients to gracefully reconnect, spreading them across the now-larger server fleet) — a genuinely more nuanced scaling story than the stateless-replica case this course has otherwise emphasized as the default.
 10. **Q: As a Principal Engineer, how would you decide whether a genuinely stronger, formally-verified exactly-once delivery guarantee (beyond at-least-once-plus-deduplication) is worth the substantially higher engineering investment for a specific chat product?**
  **A:** Weigh the actual, demonstrated user-facing cost of the at-least-once-plus-deduplication approach's edge cases (are duplicate-message UI glitches actually occurring and bothering users in practice, or is this a theoretical concern with no real observed impact) against the very substantial engineering cost of building/operating a more rigorous distributed-consensus-based delivery mechanism (a much larger, riskier undertaking) — for the overwhelming majority of chat products, at-least-once-plus-idempotent-deduplication is an entirely adequate, well-understood, and far simpler approach that real, large-scale chat systems (WhatsApp, Slack) actually use in production — recommend investing in the simpler, proven approach unless a specific, demonstrated product requirement (not a theoretical purity concern) justifies the dramatically higher cost of a more rigorous alternative, directly this course's recurring "match engineering investment to demonstrated need, not theoretical completeness" discipline.
+
+### Expert (10)
+1. **Q: A bank's trader-to-trader chat platform (subject to regulatory record-retention and surveillance requirements, e.g. MiFID II/Dodd-Frank communications rules) must guarantee that every message is captured for compliance archival, even ones the sender or recipient later "deletes" client-side. Design this without breaking the at-least-once-plus-dedup delivery model.**
+ **A:** Compliance archival must happen at the **same durable-write step** that assigns the sequence number (§2.4/§12's "persist before ACK" ordering) — a dedicated, immutable compliance-archive write occurs as part of the same transaction/pipeline stage that writes to the conversation's durable store, *before* the message is ever fanned out or ACKed, so there is no code path where a message reaches a recipient without also having reached the archive. Client-side "delete" must be implemented as a display-layer soft-delete only (hiding the message from the UI) with the archive record permanently retained and never mutated — conflating "delete from my view" with "delete from the record of what was sent" is precisely the mistake that turns a UX feature into a regulatory violation.
+2. **Q: Design message search for this chat system without violating the E2E-encryption scope decision (§10 Intermediate Q7) if E2E is later added — i.e., how can search work when even the server cannot read message content?**
+ **A:** Server-side full-text search over plaintext becomes impossible under genuine E2E; the standard approach shifts search to the **client**, building a local, on-device search index over messages as they're decrypted and displayed, trading server-side search's cross-device consistency and computational efficiency for confidentiality — a device holds its own index, built from what it has already decrypted, meaning search results are necessarily scoped to what that specific device has synced. An alternative some products use — client-side-encrypted search indices uploaded to the server (searchable encryption) — exists but carries real cryptographic complexity and weaker guarantees than plaintext-server search; the honest answer names the trade-off rather than claiming E2E and full server-side search coexist for free.
+3. **Q: Your chat platform's connection registry (Redis) experiences a brief network partition separating half the chat-server fleet from Redis. Design the fleet's behavior during the partition, and justify it against the CAP posture from §9.**
+ **A:** The partitioned chat servers should **continue serving already-established connections locally** (their existing WebSocket connections remain open and can still send/receive to co-located peers) but must treat their own registry writes/reads as unreliable during the partition — new connection registrations may not propagate, and lookups for users on the *other* side of the partition will fail or return stale data. Per §9's CAP posture (sequencing favors consistency; delivery favors availability), the correct behavior is: message *persistence and sequencing* continue unaffected (the durable store's availability doesn't depend on the registry), but *cross-partition delivery* degrades gracefully to the offline-queue path (§12 §3.3's cursor-based sync) rather than being blocked — the recipient will catch up via sync once the partition heals, which is exactly why making live delivery "an optimization over a correct sync protocol" (§12 §3.4's key insight) is what makes this partition survivable at all rather than a correctness incident.
+4. **Q: A large bank's internal chat platform must support "message recall" (a regulatory-compliant sender-initiated retraction visible to recipients, distinct from the compliance-archive requirement in Expert Q1). Design this without violating message ordering.**
+ **A:** A recall is itself a new, sequenced message (§10 Intermediate Q3's read-receipt pattern, generalized) — `RECALL{target_seq}` — flowing through the same authoritative-sequence-then-fan-out pipeline as any other message, never implemented as an out-of-band mutation of the original message record (which would violate the append-only, auditable nature the compliance-archive requirement depends on). Clients render the original message as recalled/hidden once they've processed the `RECALL` event in sequence order, but the compliance archive (Expert Q1) retains **both** the original and the recall event permanently — "recall" is a display-layer effect for ordinary users, never a deletion from the system of record.
+5. **Q: Design cross-region conversation migration — a globally-mobile trading desk moves its "home region" designation for a conversation (§10 Advanced Q6) from Region A to Region B. What breaks if this is done naively, and how do you do it correctly?**
+ **A:** Naively switching which region's sequencer is authoritative mid-conversation risks a brief window where **two** sequencers could both believe they're authoritative (the same split-brain risk §9's DR discussion raises), producing duplicate or conflicting sequence numbers. The correct approach: the old region's sequencer must be explicitly fenced (refuse to assign further sequence numbers) and drain in-flight messages *before* the new region's sequencer begins assigning numbers continuing from the last confirmed sequence — a coordinated handoff protocol, not an instantaneous cutover, mirroring the same fencing discipline required for any single-writer leader-election failover.
+6. **Q: Critique a proposed optimization: cache each user's recent conversation list and unread counts in the connection-holding chat server's local memory (not Redis) for faster access, invalidated on each new message.**
+ **A:** This reintroduces exactly the problem the connection registry was built to solve (§2.2) — local, server-instance-scoped state that becomes incorrect the moment a user's connection moves to a different server (a reconnect, a deploy-triggered rebalance, §12 §3.6), and worse, "invalidated on each new message" requires every message-fan-out path to know and update every affected user's potentially-remote local cache, adding a new cross-server coordination requirement for a feature (unread counts) that doesn't need sub-millisecond latency in the first place. The fix: keep unread counts and conversation-list metadata in the shared, durable store (or a shared Redis cache with the same TTL/staleness discipline as the connection registry), accepting the small latency cost in exchange for not reintroducing a stateful-per-instance correctness hazard for a low-latency-tolerant feature.
+7. **Q: A product manager asks for "seen by" indicators showing exactly which of a 500-member group's members have read a message, not just an aggregate watermark. Evaluate the request against §12 §3.5's read-receipt design and propose a resolution.**
+ **A:** Per-member "seen by" at 500-member scale reintroduces exactly the amplification problem §12 §3.5 designed the watermark specifically to avoid (500× per-message receipt fan-out) — the correct resolution is not to reject the feature but to **decouple its cost from the hot path**: maintain per-member read-watermarks (already tracked for the aggregate case) but compute the detailed "seen by whom" view **on-demand, lazily, only when a user actually opens that UI** (a pull-based query over stored per-member watermarks) rather than push-fanning-out a detailed per-member update on every message — giving the product the feature it wants without paying its cost on every single send, the same bimodal-distribution/pull-vs-push principle §12 §3.5 already applies to very large groups generally.
+8. **Q: Design monitoring that distinguishes "the chat platform is slow" from "the chat platform is silently losing/misordering messages" — the same slow-vs-wrong asymmetry raised for the portfolio risk engine, applied here.**
+ **A:** *Slow* has natural signals: connect latency, send-to-ACK p99, ACK-to-delivery p99, reconnect storm rate. *Wrong* has no natural signal and must be actively constructed: a continuous synthetic multi-participant canary conversation asserting every participant observes identical message order (§10 Advanced Q8's synthetic canary), a client-reported "sequence gap" metric (a device receiving `seq` 43 without ever receiving 42 within a timeout, forcing a resync) tracked as a first-class rate rather than a debug log line, and periodic reconciliation between the compliance archive (Expert Q1, an independent write path) and the primary message store — a divergence between the two is a correctness signal no ordinary latency dashboard would ever surface, exactly because both paths can individually report success while disagreeing with each other.
+9. **Q: As a Principal Engineer, you inherit a chat platform where the connection registry and the durable message store are operated by two different teams with different on-call rotations and different deploy cadences. What organizational risk does this create, and how do you mitigate it?**
+ **A:** The risk is that the two teams can independently make locally-reasonable changes that jointly violate a cross-cutting invariant neither team fully owns — e.g., the registry team shortens the heartbeat TTL for their own latency reasons without realizing it changes the failure-detection window the message-store team's offline-queuing logic implicitly depends on (§12 §3.4). Mitigation: make the cross-cutting invariants (registry staleness bound, sequence-before-fan-out ordering, compliance-archive-before-ACK) **explicit, contract-tested** properties — automated tests that fail the build if either team's change violates them — rather than relying on institutional knowledge of "how the other team's system behaves," directly this course's recurring "mechanically enforce, don't rely on memory across a team boundary" discipline, now applied to inter-team architectural coupling specifically.
+10. **Q: Synthesize: what makes correctness in a chat/messaging system harder to verify than correctness in a typical CRUD API, and how does that shape where engineering investment should go?**
+ **A:** A CRUD API's correctness is largely verifiable per-request (a single write either succeeded or didn't, observable synchronously); a chat system's core correctness property — "every participant in a conversation converges on the same total order, with nothing lost" — is a property of the **system over time and across multiple independent delivery paths**, not of any single request, meaning it can only be verified by comparing multiple observers' views against each other (exactly what the group-ordering incident in §4 and the synthetic canary in Expert Q8 both do). The engineering-investment implication: a chat system deserves disproportionate investment in cross-path reconciliation and multi-observer synthetic verification relative to its request volume, because — unlike a CRUD API — passing every individual request's own success check provides almost no evidence that the system-level property the product actually promises (consistent, ordered, lossless delivery) is holding.
 
 ---
 
@@ -487,9 +559,150 @@ Mitigations, all of which must be designed in rather than discovered: **jittered
 
 ---
 
-## 13–17. LLD / Debugging / Decision / Case Study / Principal
+## 13. Low-Level Design
 
-*(This module predates the full 16-section template; its incident, worked exercises, and Advanced-tier Q&A collectively carry this content. §12 above was authored to the four-step standard on 2026-08-09.)*
+**Requirements tied to §12's design:** a message must never be fanned out before its sequence number is durably assigned; recipients must render strictly in sequence order and buffer/resync on a gap; the connection registry must tolerate staleness without breaking correctness (§12 §3.4); and adding a new ephemeral (typing indicator) or durable-but-different-shape (read receipt, recall) message type must not require touching the core send/sequence/fan-out pipeline.
+
+**Class diagram:**
+```mermaid
+classDiagram
+    class ChatMessageService {
+        +SendMessageAsync(conversationId, senderId, content) Message
+    }
+    class ISequencer {
+        <<interface>>
+        +AppendMessageAsync(conversationId, senderId, content) long
+    }
+    class IConversationStore {
+        <<interface>>
+        +AppendAsync(message) Task
+        +GetMembersAsync(conversationId) IEnumerable~string~
+    }
+    class IConnectionRegistry {
+        <<interface>>
+        +LookupAsync(userId) ConnectionLocation
+        +HeartbeatAsync(userId, serverId) Task
+    }
+    class IFanOutStrategy {
+        <<interface>>
+        +DeliverAsync(message, members) Task
+    }
+    class OnlineFanOut
+    class OfflineQueueFanOut
+    class Message {
+        +string ConversationId
+        +long Seq
+        +string SenderId
+        +string Content
+        +string ClientMsgId
+    }
+    class ClientMessageDeduplicator {
+        +ShouldDisplay(IncomingMessage) bool
+    }
+
+    ChatMessageService --> ISequencer
+    ChatMessageService --> IConversationStore
+    ChatMessageService --> IFanOutStrategy
+    IFanOutStrategy <|.. OnlineFanOut
+    IFanOutStrategy <|.. OfflineQueueFanOut
+    OnlineFanOut --> IConnectionRegistry
+    ChatMessageService --> Message
+```
+
+**Sequence diagram — one send, mirroring §12 Step 2's numbered walkthrough and §11's "Hard" exercise:**
+```mermaid
+sequenceDiagram
+    participant C as Sender Client
+    participant Svc as ChatMessageService
+    participant Seq as ISequencer
+    participant Store as IConversationStore
+    participant Fan as IFanOutStrategy
+    participant Reg as IConnectionRegistry
+    participant R as Recipient Client
+
+    C->>Svc: SEND{client_msg_id, conversationId, content}
+    Svc->>Svc: check client_msg_id for prior write (dedup)
+    Svc->>Seq: AppendMessageAsync (atomic, single writer)
+    Seq-->>Svc: seq
+    Svc->>Store: persist Message(seq, ...)
+    Svc-->>C: ACK{client_msg_id, server_msg_id, seq}
+    Svc->>Fan: DeliverAsync(message, members)
+    Fan->>Reg: LookupAsync(recipientId)
+    alt online
+        Fan->>R: MESSAGE{seq, ...}
+        R->>R: buffer/render strictly by seq
+    else offline
+        Fan->>Fan: enqueue for cursor-based sync + push
+    end
+```
+
+**Design patterns used:** **Strategy** — `IFanOutStrategy` separates online (push over an open connection) from offline (cursor-queue + push-notification) delivery, and typing indicators/read-receipts use different, lighter-weight strategies (§10 Advanced Q4) without touching the sequencer. **Template Method** — `SendMessageAsync`'s fixed step order (dedup-check → sequence → persist → ACK → fan-out) is the structural fix from §11's "Hard" exercise: the order is baked into the method, not left to caller discipline. **Observer** — the connection registry's Pub/Sub delivery to a recipient's connection server is a publish/subscribe relationship. **Facade** — `ChatMessageService` hides the sequencer/store/fan-out machinery behind one call. **Decorator** — the client-side `ClientMessageDeduplicator` wraps incoming-message handling without the transport layer needing to know deduplication is happening.
+
+**SOLID mapping:** **Single Responsibility** — sequencing, persistence, and fan-out are separate types; `ChatMessageService` only orchestrates their fixed order. **Open/Closed** — a new message type (recall, §10 Expert Q4) is added as a new payload flowing through the *same* sequence-then-fan-out pipeline, not a new pipeline. **Liskov Substitution** — every `IFanOutStrategy` must honor "never called before sequencing," the same substitutability contract Module 04's `ITierStrategy` carries for its own hot-path invariant. **Interface Segregation** — `ISequencer` (write-path, single responsibility: assign order) is separate from `IConversationStore` (broader persistence/membership), so a sequencer implementation swap (e.g., Cassandra LWT vs. a per-shard Postgres sequence) doesn't touch storage code. **Dependency Inversion** — `ChatMessageService` depends on `IConnectionRegistry`, never a concrete Redis client, which is what makes the registry's TTL/staleness behavior (§12 §3.4) an implementation detail rather than a structural assumption baked into the service.
+
+**Extensibility:** Read receipts and recalls (§10 Intermediate Q3, Expert Q4) are added as new message payload types flowing through the unchanged core pipeline — proof the Template Method structure generalizes. Typing indicators are added as a *different* `IFanOutStrategy` (Pub/Sub, no sequencing) specifically because they don't need the durability/ordering guarantee the core pipeline exists to provide (§10 Advanced Q4) — the extensibility model is "pick the right strategy for the guarantee actually needed," not "force everything through one path."
+
+**Concurrency/thread safety:** `ISequencer.AppendMessageAsync` is the system's one serialization point per conversation — implemented as a single atomic operation (Cassandra lightweight transaction, or a per-conversation single-writer) so concurrent sends to the same conversation cannot produce duplicate or out-of-order sequence numbers, the same lost-update hazard this course flags for any naive read-modify-write counter. `ChatMessageService` instances themselves are stateless and safely handle concurrent sends across *different* conversations with no shared mutable state — concurrency safety is entirely concentrated in the sequencer, by design, rather than spread across the pipeline.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** A private bank's relationship-manager-to-client secure messaging platform (used for trade instructions and account communications, subject to record-retention rules) began showing an intermittent, client-visible symptom: a relationship manager would send a message, see it appear immediately in their own conversation view, but the client on the other end would sometimes see it arrive **10–40 seconds late**, occasionally after a *later* message the RM had sent in the same conversation — visually appearing out of order despite §12's sequencing design being correctly implemented and enforced.
+
+**Investigation:** The synthetic ordering canary (§10 Advanced Q8) was green throughout — every canary conversation's participants converged on identical order, just as designed, ruling out the §4 incident class. Pulling per-message traces for affected conversations showed the sequence numbers themselves were correct and monotonic; the *delay* was isolated to the fan-out step specifically for clients on a particular mobile carrier's network, and only during that carrier's known peak-congestion hours. Cross-referencing the connection registry showed those clients' connections were flapping — brief, repeated disconnect/reconnect cycles under carrier network congestion — and each reconnect triggered a full `SYNC_REQ` catch-up rather than the client simply buffering through a momentary blip. Because sync requests were **not prioritized** relative to ordinary new-message delivery in the fan-out queue, a client stuck in a reconnect loop kept re-requesting sync, and each sync response competed with real-time deliveries for the same per-connection-server send queue, creating a growing backlog specifically for these flapping connections.
+
+**Tools:** Per-message, per-recipient delivery tracing (correlating `server_msg_id` to actual delivery timestamp, not just fan-out-initiated timestamp); connection registry churn rate per user, segmented by client network metadata; queue-depth monitoring on the per-connection-server outbound send queue, which had never been split by request type (sync vs. real-time) and therefore looked merely "somewhat busy" in aggregate rather than revealing the specific backlog.
+
+**Fix:** Two changes: (1) split the outbound delivery queue per connection server into two priority lanes — real-time message delivery (high priority) and sync-catch-up delivery (lower priority, rate-limited per connection) — so a flapping connection's repeated sync requests could no longer crowd out real-time delivery to healthy connections sharing the same server; (2) added client-side reconnect debouncing (a short grace period before declaring a connection lost and initiating a fresh WebSocket handshake, rather than reconnecting on the first transient network hiccup), directly reducing how often the sync-catch-up path was triggered in the first place, the same jittered-backoff-style discipline §12 §3.6 applies to the reconnect-storm scenario, now applied to prevent the storm's much smaller-scale cousin: one flapping connection generating disproportionate load.
+
+**Prevention:** (1) Prioritized, separately-monitored delivery lanes per request type (real-time vs. sync) on every connection server, so one lane's backlog is visible and cannot silently starve the other — a queue-depth dashboard that blends both had exactly zero chance of surfacing this. (2) An explicit SLO and alert on **sync-request rate per connection**, since an unusually high per-user sync rate is a direct, early signal of exactly this flapping-connection pattern, well before it manifests as a client complaint. (3) Extend the synthetic canary (§10 Advanced Q8) to simulate a flapping/reconnecting participant specifically, not only stable, well-connected ones — the canary that existed proved ordering correctness under normal connectivity but had no coverage for degraded-connectivity delivery-latency behavior, which is precisely where this incident lived.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Choosing how offline/reconnecting recipients catch up on missed messages — the decision §12 §3.3 already reaches (cursor-based sync over a per-device offline queue), restated here as a formal options comparison.
+
+**Option A — Per-user offline queue (durable queue of undelivered messages per user, drained on reconnect):**
+*Advantages:* Conceptually simple; a natural extension of "deliver, and if delivery fails, retry later"; easy to reason about for a single-device user.
+*Disadvantages:* Breaks down under multi-device (§12 §3.3) — five devices consuming from one queue either race for the same messages or require a separate queue per device, and a device offline for months accumulates an unboundedly large queue with no natural truncation point.
+*Cost:* Additional durable queue infrastructure per user (or per device, multiplying storage) beyond the message store that already exists.
+*Complexity:* Moderate. *Maintainability:* Degrades as multi-device and long-offline-duration edge cases accumulate special-casing. *Scalability:* Poor at the long-tail-offline extreme.
+
+**Option B — Cursor-based sync over the durable, already-sequenced message log (recommended, §12's choice):**
+*Advantages:* No new durable structure — the message store already exists and is already ordered by `seq`; naturally multi-device (each device tracks its own cursor independently); idempotent under repeated sync; a device offline for a year is handled identically in kind to one offline for a minute (just a larger `seq` range), with a truncated "load older" affordance bounding the worst case.
+*Disadvantages:* Requires the message store to support efficient range-scans by `seq` per conversation (already required for ordinary history pagination, so not genuinely new cost) and requires every device to correctly persist and advance its own cursor.
+*Cost:* Lower — reuses existing storage rather than adding a parallel queue.
+*Complexity:* Lower once the message store's `seq`-ordered structure exists (which §12's data model already requires for other reasons). *Maintainability:* High. *Scalability:* Excellent — this is precisely why §12 chose it.
+
+**Option C — Client polls for "anything new" on a fixed interval, no cursor, no queue:**
+*Advantages:* Trivial to implement; no server-side per-user state at all.
+*Disadvantages:* Cannot distinguish "nothing new" from "I don't know what I've already seen" without a cursor — either re-delivers everything on every poll (wasteful, and reintroduces the client-side dedup burden at a much larger scale) or silently misses messages sent between polls if not implemented carefully; polling interval directly trades latency against load in a way push-based delivery avoids entirely.
+*Cost:* Low infrastructure cost, high wasted-bandwidth cost at scale.
+*Complexity:* Lowest. *Maintainability:* High. *Scalability:* Poor — polling load scales with user count regardless of actual message activity, unlike Option B where sync cost scales with actual backlog.
+
+**Recommendation: Option B**, exactly as §12 §3.3 designs it. The decisive argument is the one Option A structurally cannot answer well: a chat product must support multiple devices per user as a baseline requirement (§12 Step 1's dialogue: "up to 5 devices per user, all must stay in sync"), and only a per-device cursor over an already-ordered, already-durable log handles that requirement without either duplicating storage per device (Option A) or reinventing ordering/delivery guarantees from scratch (Option C). §14's incident is itself evidence that sync is a real, load-bearing part of the system in production, not a rarely-exercised edge case — reinforcing that it deserves the first-class design (priority lanes, monitoring, canary coverage) §14's prevention list adds, on top of the mechanism §12 already chose correctly.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** A chat platform's business value is almost entirely trust-based — every message a user sends, they trust will arrive, in order, without being silently dropped. Unlike many systems where a degraded experience is merely inconvenient, a lost or misordered message in a financial-services context (a trade instruction, a client communication with retention obligations, §10 Expert Q1) can carry direct financial or regulatory consequence, not just a UX complaint — a framing a Principal Engineer should make explicit when justifying investment in the ordering/durability machinery that a simpler design would skip.
+
+**Engineering trade-offs:** The load-bearing trade-off across this module is **fan-out speed versus ordering correctness** (§2.5, §4's incident, §14's incident) — every optimization proposed (speculative delivery, per-recipient independent fan-out, unprioritized sync queues) tends to improve one at the direct expense of the other, and a Principal Engineer's job is recognizing that this is the *same* trade-off recurring in different guises throughout the system, not a series of unrelated performance bugs.
+
+**Technical leadership:** §14's incident is a useful teaching case for a team: every individual component (sequencer, registry, canary) was working exactly as designed, and the bug lived entirely in an *interaction* (queue prioritization) nobody had modeled explicitly. A Principal Engineer's specific contribution in a postmortem like this is pushing the team past "which component was broken" (none were) toward "which interaction between correctly-functioning components wasn't designed at all" — a harder, more valuable question that generalizes to the next incident rather than just fixing this one.
+
+**Cross-team communication:** The connection tier, the durable message store, and the client mobile apps are plausibly three different teams' ownership — §14's fix required changes on both the server (priority lanes) and the client (reconnect debouncing) sides, and neither team's telemetry alone would have revealed the full picture (the server saw "somewhat busy," the client saw "sometimes slow," and only correlating both against carrier network conditions revealed the mechanism). A Principal Engineer should ensure cross-team incident review explicitly asks "what does the *other* team's telemetry show for this same time window," rather than each team investigating their own metrics in isolation and separately concluding "not us."
+
+**Architecture governance:** The sequence-before-fan-out invariant (§2.5, §4) and the pinned-snapshot-style "make the failure inexpressible" discipline it embodies should be documented as an ADR specifically because a well-intentioned future "latency optimization" (independent per-recipient fan-out, exactly what caused §4's original incident) is a plausible, recurring temptation — the ADR's job is preserving *why* the current design rejects that seemingly-reasonable optimization, for an engineer who wasn't present for the original incident.
+
+**Cost optimization:** The dominant cost lever is connection-tier sizing (§12's ~200 servers at ~100,000 connections each) — over-provisioning here is a direct, continuous infrastructure cost, while under-provisioning risks the reconnect-storm failure mode (§12 §3.6); the priority-lane fix from §14 is itself a cost optimization in disguise, since it recovers headroom that would otherwise require adding more connection-server capacity to compensate for one class of traffic (sync catch-up) starving another (real-time delivery) on the same shared resource.
+
+**Risk analysis:** The two risk classes this module surfaces are structurally different, echoing the same distinction drawn for the rate-limiter module: **capacity/scale risk** (the reconnect-storm scenario, §12 §3.6) is caught by load-testing the specific triggering condition; **cross-recipient correctness risk** (§4's ordering incident) and **interaction risk between individually-healthy components** (§14's queue-starvation incident) require dedicated, actively-constructed detection (the synthetic canary, per-lane queue monitoring) because neither produces a natural error signal — a risk register for this system should track all three independently.
+
+**Long-term maintainability:** The artifact most likely to silently rot is the synthetic canary's coverage (§10 Advanced Q8, extended in §14) — a canary that once covered "normal connectivity" but not "flapping connectivity" gave a false sense of complete correctness verification for months. Canary and monitoring coverage should be explicitly reviewed and extended after every incident that reveals a gap in what it was actually testing, rather than assumed to remain comprehensive once written.
 
 ## 18. Revision
 **Key takeaways**: WebSockets provide genuine bidirectional communication chat requires; SSE/long-polling are insufficient alone. WebSocket connections are inherently stateful, requiring a distributed connection registry (Redis) to enable horizontal scaling despite this — a direct architectural accommodation for a class of system that doesn't fit the default stateless-replica assumption. Delivery guarantees must be precisely defined: at-least-once-plus-client-generated-ID-deduplication is the practical, standard approximation of "exactly-once." Message ordering requires a single, authoritative per-conversation sequence number assigned as a genuine prerequisite gate **before** fan-out — fanning out independently per-recipient before sequencing is the root cause of cross-recipient ordering discrepancies under concurrent load, invisible at low concurrency and real under production traffic, precisely this course's recurring dangerous bug shape.

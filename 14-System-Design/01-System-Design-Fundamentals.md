@@ -100,6 +100,58 @@ graph TB
 
 ---
 
+## 7. Performance Engineering
+
+### 7.1 A latency budget is an allocation, not an aspiration
+Stating "p99 < 200ms" is not a performance requirement until it's been **allocated** across every hop the request actually makes — network, load balancer, auth, cache, database — because a component that silently consumes 40% of the budget while everyone else assumes it costs "a few ms" is invisible until the system is under load and the budget blows. §Advanced Q2's worked example (2ms LB + 10ms auth + 5ms cache + 183ms reserved for the cache-miss database path) is the general method: allocate the *majority* of the budget to the slowest, least-predictable component, not evenly across all components, and validate the allocation under real load rather than trusting the arithmetic alone — a connection pool that's fine at 10 req/s can add double-digit milliseconds of queueing wait at 10x that rate, and that queueing cost doesn't show up in a single-request benchmark.
+
+### 7.2 Throughput and latency are the same resource, viewed two ways
+Every component has a maximum sustainable throughput; pushing load past it doesn't fail cleanly, it degrades latency first (queueing) and only fails outright once queues themselves saturate. This is why "we have headroom" claims must be backed by an actual load test at the target QPS, not by CPU utilization sitting comfortably at 40% at *current* traffic — CPU-bound headroom and queueing-bound headroom are different failure curves, and a system can look fine on a CPU graph while its p99 is already climbing because a downstream connection pool is the real bottleneck.
+
+### 7.3 Caching is the highest-leverage performance lever — quantify it, don't assert it
+A cache's value is entirely a function of its **hit rate**, and hit rate is a function of the access pattern's actual skew, not a property of "having a cache." §12 Step 1's hot-working-set calculation (20% of posts serve 80% of reads → a 54GB working set that fits comfortably in a 96GB Redis cluster) is the general discipline: before proposing a cache, estimate the working set and the expected hit rate from the read distribution — a cache over a uniformly-random access pattern with no skew provides close to zero benefit while still paying invalidation and operational complexity, which is exactly §Advanced Q5's "just add a cache" critique.
+
+### 7.4 Benchmark the real access pattern, not a synthetic uniform one
+A load test run against synthetically-uniform keys will never surface a hot-partition or hot-key problem that a real, power-law-shaped production access pattern produces (a single celebrity account, a single frequently-viewed product) — load testing must replay or approximate the actual skew of production traffic, or it validates a system that doesn't exist. This is the same failure mode as the risk-engine's exotic-options straggler (Module 09 §14): a uniform synthetic benchmark hides exactly the tail-latency problem that a skewed real workload exposes.
+
+### 7.5 GC pauses and connection-pool exhaustion are p99 killers, not p50 killers
+Both are invisible in a mean/p50 latency graph and dominant in p99/p999 — a stop-the-world GC pause or a request queued behind an exhausted connection pool adds tens to hundreds of milliseconds to a small fraction of requests while leaving the bulk of requests untouched, which is exactly why this course insists on plotting the full latency distribution (§Intermediate Q2) rather than a single average, and why capacity planning must size pools and heap headroom for **peak**, not average, load.
+
+## 8. Security
+
+### 8.1 Defense in depth, mapped explicitly to the architecture diagram
+§Advanced Q3's per-layer checklist is the operating discipline: for every box in the diagram (CDN/edge, load balancer, application servers, cache, database, message queue), require an explicit, documented answer to what authenticates at this hop, whether traffic is encrypted here, what rate-limiting exists here, and what the blast radius is if this component is compromised. A system that has "security" only as a bullet point on the app-server layer and nothing stated for the cache or queue has a real, unexamined gap — a compromised cache node or an unauthenticated internal queue is frequently how a breach actually propagates laterally, not through the perimeter that got all the review attention.
+
+### 8.2 Reject cheaply, as early as possible
+Rate limiting and authentication belong at the edge (CDN/API gateway/load balancer) specifically so abusive or malformed traffic is rejected before it consumes application-server or database capacity — §Intermediate Q7's architectural framing. This is both a security control (limits the blast radius of a credential-stuffing or scraping attack) and a performance control (§7.1's latency budget for legitimate traffic is protected from being consumed by illegitimate traffic) — the same mechanism serving two non-functional properties at once, mirroring the CDN's dual latency/load-reduction role (§Intermediate Q9).
+
+### 8.3 Encryption, secrets, and the data model's own security decisions
+TLS terminates at the load balancer at minimum, with internal service-to-service traffic encrypted too wherever it crosses a trust boundary (not just the public edge) — a common gap is assuming "internal" traffic is safe by virtue of being inside a VPC, which fails the moment a single compromised host inside that VPC can sniff plaintext internal traffic. Secrets (database credentials, API keys for third-party integrations) belong in a managed secrets store with rotation, never in configuration files or environment variables checked into source control — and PII/financial data fields in the data model itself (a `post` table's author PII, a payment system's account numbers) should be identified explicitly at design time so encryption-at-rest and field-level access control decisions are deliberate, not an afterthought discovered during a compliance audit.
+
+### 8.4 Authorization must be re-checked at read time, not trusted from write time
+A precomputed/cached result (§12's feed cache, any materialized view) reflects the authorization state **at the time it was computed** — if that state changes later (a permission revoked, a record marked private, an account deactivated), a stale cached entry can incorrectly remain visible unless the read path re-verifies current authorization rather than trusting the cache's historical write-time decision. This is the same principle as Module 02 §Intermediate Q4's private-account/blocked-user case, generalized: **caching a result never caches the permission to see it.**
+
+## 9. Scalability
+
+### 9.1 The database-scaling ladder, in full, climbed in order
+1. **Vertical scaling / query & index optimization** — the cheapest, least risky lever, and the one most often skipped in favor of something more architecturally interesting; a missing index or a poorly-written query is frequently the actual bottleneck, not insufficient hardware.
+2. **Read replicas** — for read-heavy workloads, offloading reads from the primary; introduces replication lag, which forces the read-your-own-writes design discussed in §12 §3.1.
+3. **Caching** — for repeated reads of relatively stable data (§7.3); the highest-leverage lever *when the access pattern has genuine skew*.
+4. **Sharding/partitioning** — the last resort, because a shard key is the hardest architectural decision to reverse (§Intermediate Q4); only justified once the earlier, cheaper levers are genuinely exhausted, not adopted preemptively.
+
+Each rung should be justified by an actual, measured bottleneck (§Advanced Q7's design-time-vs-actual comparison discipline), not adopted because it's the "more scalable-sounding" choice.
+
+### 9.2 Horizontal scaling requires statelessness as a precondition
+An application server can only be added or removed safely by a load balancer if it holds no request-affinity state in process (§Intermediate Q5) — session state, in-memory caches tied to one instance, and in-flight background work not tracked externally all break this. Statelessness isn't a nice-to-have architectural preference; it's the specific property that makes auto-scaling, rolling deploys, and graceful instance replacement all safe operations rather than correctness risks.
+
+### 9.3 High availability and disaster recovery are different budgets
+**HA** (surviving a single component failure — a replica dying, an AZ outage) is usually solved by redundancy within a region: multiple AZs, replicated data, automated failover, and is what a 99.9–99.99% target is actually built from. **DR** (surviving a full regional loss) requires cross-region replication and a defined **RPO** (how much data loss is acceptable — determined by replication lag, since cross-region replication is fundamentally asynchronous per §Intermediate Q6) and **RTO** (how long recovery takes — determined by whether failover is automated or requires a manual runbook). Conflating these two budgets is a common mistake: a system with excellent single-AZ HA can still have an undefined, untested DR posture, and "we're highly available" is not evidence that a regional failure has ever been rehearsed.
+
+### 9.4 CAP theorem, applied per data type, is the scalability decision framework
+As §2.5 establishes, scaling decisions are ultimately CAP trade-offs made concrete: a read-heavy, staleness-tolerant data type (a content feed) scales via replicas and caching (AP-leaning); a write-critical, correctness-sensitive data type (a financial ledger entry, an inventory count at checkout) scales via careful primary-only writes with strong consistency, accepting the throughput ceiling that implies (CP-leaning) — and a system's overall scalability story should name which of its data types sit where on this spectrum, rather than presenting one uniform "how we scale" narrative for a system that actually contains several genuinely different consistency requirements.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -147,6 +199,28 @@ graph TB
  **A:** Push back on blanket, unexamined application of the most complex, most expensive architecture pattern available — active-active multi-region deployment introduces substantial complexity (conflict resolution for concurrent writes across regions, cross-region data-consistency trade-offs, meaningfully higher infrastructure cost) that's only justified for services with a **demonstrated, current** need for that level of availability/geographic distribution; recommend the same "climb the scaling ladder progressively, driven by actual demonstrated need" discipline applied here — most new services should start simpler (single-region, well-architected for their actual current scale) and evolve toward multi-region specifically when growth *actually* demands it, not preemptively "future-proofing" against growth that may never materialize, exactly this course's recurring "don't design for hypothetical future requirements" principle (stated in this course's very first guidance) now applied at the full-system-architecture scale.
 10. **Q: As a Principal Engineer, how would you teach a team to conduct requirements-gathering rigorously for system design, given how easy it is to skip or rush given interview/deadline time pressure?**
  **A:** Provide a standing, concrete checklist (this course's recurring shared-template governance pattern) of the specific non-functional dimensions that must be explicitly addressed for any new system/feature (scale, latency per operation type, availability target, consistency per data type, read/write ratio) — framed not as a bureaucratic formality but as **directly preventing the exact class of incident this module's demonstrates** (an unexamined default causing a real, costly production problem) — and pair this with training that explicitly walks through as a case study, since a concrete, memorable incident ("we skipped this exact step and it cost us X") is far more effective at building genuine behavioral change than an abstract "always gather requirements" instruction alone, directly the same pedagogical principle this course has applied throughout (pairing every principle with both a production incident demonstrating its violation and a concrete fix).
+
+### Expert (10)
+1. **Q: A payments platform's design review states "we use eventual consistency for the ledger because it improves availability." Evaluate this as a Principal Engineer sitting on the review.**
+ **A:** Reject the framing outright before discussing mechanics. A ledger's defining property is that every debit has a matching credit and the running balance is never observably wrong — that's a correctness invariant, not a staleness tolerance, and CAP's "eventual consistency" trade is about *how long a stale read can be tolerated*, not about whether the write itself can be lost, reordered, or double-applied. The reviewer should ask the concrete question the statement dodges: "if two concurrent debits both read the same starting balance and both commit, what prevents the account going negative?" — if the answer is "eventual consistency resolves it," that's wrong; eventual consistency describes read staleness, not write-write conflict resolution. A ledger needs CP writes (a transactional primary, or an appropriately fenced distributed-transaction pattern) even if downstream *read* views (a dashboard showing "recent transactions") can legitimately be eventually consistent — the same "consistency per data type/operation, not per system" discipline (§9.4), but the reviewer's job here is to catch a case where that discipline is being invoked to justify something it doesn't actually permit.
+2. **Q: Design the specific mechanism by which a system proves — to an auditor, not just to itself — that its stated availability SLO (99.95%) was actually met over the last quarter, rather than merely asserting it.**
+ **A:** Availability must be measured from the client's vantage point, not the server's — a server reporting 100% uptime while its load balancer's health checks were failing, or while a specific region was unreachable due to a DNS/network issue upstream of the server, is not evidence of client-observed availability. The mechanism: synthetic external probes (from multiple independent network vantage points, not from inside the same cloud provider/region) hitting the actual public endpoint at a fixed interval, logging success/failure and latency, with the SLO computed from that external, tamper-resistant log — plus an explicit, pre-agreed definition of what counts as a "failure" (a 5xx response? a timeout past what threshold? a degraded-but-200 response?) since ambiguity here is exactly where a post-hoc SLO dispute happens. An auditor accepts this because the measurement is independent of the system being measured — a server self-reporting its own uptime is grading its own exam.
+3. **Q: A team proposes a single, shared Redis cluster serving both a latency-critical, low-volume payment-authorization cache and a high-volume, latency-tolerant content-feed cache, to "save infrastructure cost." Evaluate this.**
+ **A:** Reject on isolation grounds, independent of raw capacity math. A shared cache means the feed cache's traffic pattern (high volume, bursty, tolerant of eviction) can starve the authorization cache's working set out of memory under eviction pressure, or a feed-driven traffic spike can saturate the cluster's connection/CPU budget and add queueing latency to the authorization path — turning a low-stakes system's load spike into a high-stakes system's latency incident. This is the same "a cache whose loss takes down something load-bearing is not a cache, it's a load-bearing dependency wearing a cache costume" lesson (Module 02 §3.4), generalized to noisy-neighbor risk between two *different* workloads sharing one resource pool rather than one workload's cache dependency. The infrastructure-cost savings from one shared cluster are real but small relative to the blast-radius risk; recommend physically separate cache resources (or at minimum separate resource pools/quotas within the cluster) for workloads with materially different criticality, exactly the bulkhead pattern.
+4. **Q: Explain why "we tested this and it handled 10x our current peak load" can still be a false sense of security, and design a load test that would actually validate it.**
+ **A:** A load test that simply replays 10x the current *request volume* against the *current* data shape validates throughput but not the failure modes that actually take systems down — it typically uses uniformly-distributed synthetic keys (missing hot-key/hot-partition effects, §7.4), runs for a short duration (missing slow leaks — connection pool exhaustion, memory growth, cache-eviction-driven hit-rate decay that only manifests after sustained load), and rarely exercises the failure paths concurrently with load (does auto-scaling actually trigger fast enough under *this* specific load-ramp shape, per §Intermediate Q8?). A load test that actually validates 10x readiness replays the *real* skewed access pattern, runs long enough to expose slow degradation, and includes at least one injected failure (a replica killed, a cache node dropped) mid-test to validate that the failure-handling paths (§12 §3.4-style) work under load, not just in isolation at idle.
+5. **Q: A Staff engineer argues a new internal service should skip authentication entirely because "it's only called by other internal services inside our VPC, and the perimeter is already authenticated." As a Principal Engineer, how do you respond?**
+ **A:** Push back — "inside the VPC" is a network-topology property, not an identity property, and conflating the two is exactly §8.3's "internal traffic is safe by default" gap. A compromised host anywhere inside that VPC (a dependency-confusion attack against one unrelated service, a misconfigured debug endpoint left open) can now call this unauthenticated internal service with zero additional effort — the perimeter authenticating *external* traffic says nothing about *lateral* movement once any single internal host is compromised. The recommendation is mutual service-to-service authentication (mTLS or signed service tokens) as a standing default for any service handling non-trivial data or state changes, treating "internal" as a convenience for network routing, never as a substitute for authorization — this is precisely the zero-trust argument, and it should be made concrete with "which specific internal service, if compromised, would this decision let move laterally to *this* one" rather than an abstract policy statement.
+6. **Q: Design the capacity-planning process for a system whose load is driven by an external, uncontrollable event (a market-moving news event for a trading platform, a viral post for a social platform) rather than steady organic growth.**
+ **A:** Steady-growth capacity planning (extrapolate last quarter's trend) fails here because the relevant load spikes are step-functions triggered by events with no advance warning and no historical growth curve to extrapolate from — the planning question changes from "how much capacity will we need next quarter" to "what is our largest plausible instantaneous multiplier over baseline, and can we absorb it." The answer combines: (a) auto-scaling with pre-warmed capacity for the *known* fast-reacting components (§Intermediate Q8's cold-start concern is amplified here — scaling reactively to a true step-function spike is often too slow), (b) an explicit, tested **load-shedding** policy at the edge (§8.2) that degrades gracefully — serving cached/stale responses, rejecting non-critical traffic — rather than allowing every component to degrade uncontrollably together, and (c) treating the historically-largest observed spike multiplier as a standing, revisited input to capacity headroom planning (was our worst day 8x baseline? then headroom should target meaningfully above 8x, not "current average plus a comfortable margin").
+7. **Q: A system's design document states "the database is our source of truth" but the system also maintains a search index, a cache, and a data warehouse copy of the same data. Explain the specific failure mode this invites if not addressed explicitly, and how you'd address it.**
+ **A:** "Source of truth" stated once, in prose, doesn't prevent the derived copies from silently drifting from that source over time (a failed cache invalidation, a search-indexer consumer that fell behind and silently stopped, an ETL job into the warehouse that partially failed) — and because each derived copy usually *looks* internally consistent (the search index returns *something*, just possibly stale or wrong), drift is invisible until a user notices a discrepancy or a reconciliation job explicitly checks. The fix is to make "source of truth" an *enforced*, monitored property, not a documentation claim: every derived copy's update path should be driven by the same durable event stream (the outbox pattern, §12's `PostCreated` outbox row) rather than a best-effort direct write, and a standing reconciliation job should periodically sample-compare the derived copies against the source and alert on divergence beyond a small tolerance — converting "we assume these stay in sync" into "we verify these stay in sync," the same reconciliation discipline recurring across this course's data-consistency treatments.
+8. **Q: As a Principal Engineer evaluating a proposed architecture, how do you distinguish a genuinely necessary complexity (e.g., the hybrid fan-out model in Module 02) from unnecessary, prematurely-adopted complexity, given that both are justified in the design document with plausible-sounding reasoning?**
+ **A:** Demand that the complexity be justified by a **specific, quantified, currently-true** constraint from the actual estimation (§12 Step 1's numbers), not a hypothetical or a "we might need this eventually" — Module 02's hybrid model is justified by an actual, stated follower-count distribution and an actual write-amplification calculation showing pure push breaks (166 seconds to propagate one celebrity post while starving all other traffic); a design proposing that same complexity "in case we get a viral account someday" without a current distribution to point to is adopting the same complexity on speculation, and speculation is exactly what §Advanced Q9 in this module argues against (active-active multi-region "for maximum availability... to future-proof"). The test: ask the proposer to show the specific number from *their* system's actual or credibly-projected estimation that the simpler design fails on — if they can't produce one, the complexity is premature.
+9. **Q: A production incident review concludes "the root cause was a bug in the retry logic." As a Principal Engineer, why is this conclusion usually incomplete, and what question do you ask next?**
+ **A:** "A bug in the retry logic" identifies the *proximate* mechanism but not why the system's design allowed that mechanism's failure to cause the actual customer-facing incident — the next question is "what made this retry bug's blast radius as large as it was," which usually surfaces a genuine architectural gap: no circuit breaker to stop the retries once the downstream was clearly failing, no bulkhead isolating this retry storm's resource consumption from unrelated traffic, no rate limit on retry volume, or a downstream with no independent capacity headroom to absorb the retry amplification. Stopping at "fix the retry bug" fixes this specific incident's trigger while leaving the structural gap (nothing bounds the blast radius of *any* single component's misbehavior) available for the next, differently-triggered incident — a Principal-level postmortem review pushes past the proximate cause to the structural, reusable prevention, exactly the pattern this course's incident analyses consistently apply (root cause *and* the systemic safeguard that should have contained it).
+10. **Q: Design the review process a Principal Engineer would run for any new system-design document before it's approved for build, distilled to the smallest set of questions that catches the largest fraction of real-world design failures.**
+ **A:** Five questions, each mapped to a documented failure mode in this module: (1) "For each major data type, is the consistency requirement stated explicitly, and is it justified by an actual stated need rather than a default?" (§4's incident). (2) "Where are the actual capacity numbers, and what specific number in this design would break first as load grows — and by how much before it does?" (§12 Step 1, §9.1). (3) "For every component in the diagram, what happens to the rest of the system when *this one* fails or degrades?" (§Advanced Q6, §12 §3.4). (4) "Where does this design add complexity beyond the simplest version that meets the stated requirements, and what specific, current constraint justifies that complexity?" (§Expert Q8). (5) "How will we know, in production, if any of the above assumptions turn out to be wrong?" (§Advanced Q7's actual-vs-estimated monitoring discipline). A document that can't answer all five concretely isn't ready for build regardless of how polished its architecture diagram is — the diagram was never what was being evaluated.
 
 ---
 
@@ -481,9 +555,145 @@ The module's central lesson (§2.5, §4) applied concretely: **content reads are
 
 ---
 
-## 13–17. LLD / Debugging / Decision / Case Study / Principal
+## 13. Low-Level Design
 
-*(This module predates the full 16-section template; its production example, worked exercises, and extensive cross-referencing collectively carry this content. §12 above was authored to the four-step standard on 2026-08-09.)*
+**Requirements**: the read path from §12 Step 2 — CDN → app server → cache-aside → replica, with the read-your-own-writes correction from §12 §3.1 — implemented so the sticky-primary window and cache invalidation are enforced consistently regardless of which app-server replica handles a given request, and so the stampede-protection lock (§12 §3.2) is correct under concurrent misses on the same key.
+
+**Class diagram:**
+```mermaid
+classDiagram
+ class PostReadRequest {
+ +string PostId
+ +string UserId
+ }
+ class IPostCache {
+ <<interface>>
+ +GetAsync(postId) Post
+ +SetAsync(postId, post, ttl) Task
+ +InvalidateAsync(postId) Task
+ }
+ class IStickyWriteTracker {
+ <<interface>>
+ +RecordWriteAsync(userId) Task
+ +ShouldRouteToPrimary(userId) bool
+ }
+ class IReadRouter {
+ <<interface>>
+ +ResolveDataSource(userId) DataSource
+ }
+ class ICacheStampedeLock {
+ <<interface>>
+ +TryAcquireAsync(key) bool
+ +ReleaseAsync(key) Task
+ }
+ class PostReadService {
+ -IPostCache cache
+ -IStickyWriteTracker writeTracker
+ -IReadRouter router
+ -ICacheStampedeLock lock
+ +HandleAsync(PostReadRequest) Post
+ }
+ PostReadService --> IPostCache
+ PostReadService --> IStickyWriteTracker
+ PostReadService --> IReadRouter
+ PostReadService --> ICacheStampedeLock
+```
+
+**Sequence diagram** (cache miss, post-write sticky window active):
+```mermaid
+sequenceDiagram
+ participant Client
+ participant Service as PostReadService
+ participant Tracker as IStickyWriteTracker
+ participant Cache as IPostCache
+ participant Lock as ICacheStampedeLock
+ participant Router as IReadRouter
+ participant DB
+
+ Client->>Service: GetPost(postId, userId)
+ Service->>Tracker: ShouldRouteToPrimary(userId)?
+ Tracker-->>Service: true (recent write, window not expired)
+ Service->>Cache: GetAsync(postId)
+ Cache-->>Service: miss
+ Service->>Lock: TryAcquireAsync(postId)
+ Lock-->>Service: acquired
+ Service->>Router: ResolveDataSource -- forced to PRIMARY (sticky)
+ Router-->>Service: Primary
+ Service->>DB: Query primary
+ DB-->>Service: Post
+ Service->>Cache: SetAsync(postId, post, jitteredTtl)
+ Service->>Lock: ReleaseAsync(postId)
+ Service-->>Client: Post
+```
+
+**Design patterns used**: **Strategy** (`IReadRouter` — primary vs. replica selection is swappable and independently testable from the rest of the read path); **Decorator** (cache-aside wraps the underlying data-access call rather than being baked into it, so the stampede lock can be layered on independently); **Lock/Mutex-via-cache** (`ICacheStampedeLock`, implemented as Redis `SET NX PX`, §12 §3.2); **Circuit Breaker** (implicit at `IPostCache` — a cache-unavailable exception routes to the fallback data path from §12 §3.4, rather than propagating).
+
+**SOLID mapping**: Single Responsibility (the tracker only tracks recency of writes, the router only resolves which data source to use, the cache only caches — none overlap, exactly why the sticky-window logic can be unit-tested without a real cache or database); Open/Closed (swapping the sticky-window strategy for a replica-lag-token strategy, §12 §3.1's third option, means implementing a new `IReadRouter` without touching `PostReadService`); Liskov (any `IPostCache` implementation must honor "a miss returns null, never throws for a routine miss" — a Redis-backed and an in-memory-fallback implementation must be interchangeable under this contract); Interface Segregation (`IPostCache` doesn't expose administrative operations like flush/scan that only an ops tool needs); Dependency Inversion (`PostReadService` depends on the four interfaces, never on `RedisClient` or `SqlConnection` directly — enabling the entire read path to be tested with in-memory fakes).
+
+**Extensibility**: adding the replica-lag-token approach (§12 §3.1's third, most precise option) is a new `IReadRouter` implementation plus a small addition to the write path to return the primary's LSN — no change to `PostReadService`, `IPostCache`, or the stampede lock.
+
+**Concurrency/thread safety**: the stampede lock is the only place concurrent correctness is genuinely at risk — implemented as an atomic `SET NX PX` against Redis (not an in-process lock, since requests are served by many stateless replicas), it guarantees only one concurrent miss on a given key populates the cache while others either wait briefly or serve a stale value, per §12 §3.2. The sticky-write tracker is read-heavy and eventually-consistent-tolerant itself — a tracker read that's a few hundred milliseconds stale merely widens the effective sticky window slightly, which is safe in the direction that matters (never *shorter* than intended).
+
+---
+
+## 14. Production Debugging
+
+**Incident**: A content platform (the system from §12) began receiving a low but steady stream of user complaints: "I published a post and it briefly disappeared, then came back." Support initially dismissed it as a client-side rendering glitch. It persisted for weeks, concentrated in reports from users on mobile networks.
+
+**Root cause**: The sticky-primary window (§12 §3.1) was implemented as a client-side cookie flag, not a server-tracked value — the read path checked "does this request carry a `recent_write=true` cookie" to decide whether to route to the primary. Mobile clients on cellular networks frequently switch between CDN edge PoPs and, in a specific edge case, retried a request without the cookie after a network hiccup (a standard mobile HTTP client behavior under connection re-establishment) — silently falling back to the default replica-read path mid-window, hitting a replica that hadn't yet caught up, and rendering the post as briefly missing before a subsequent, cookie-bearing request self-corrected.
+
+**Investigation**: Client-side rendering was ruled out first (the team could not reproduce on any single stable connection) — the pattern only appeared once request logs were correlated by `user_id` across consecutive requests, revealing that the "missing" read was consistently a request **without** the sticky cookie, sandwiched between two requests that had it. Cross-referencing with mobile-network telemetry confirmed the missing-cookie requests correlated with connection re-establishment events, not with any specific device or app version — ruling out a client bug and pointing at the mechanism carrying the sticky signal itself.
+
+**Tools**: request-log correlation by `user_id` across a short time window (not single-request tracing, since the bug only appears *across* a sequence of requests); mobile network telemetry cross-reference; a synthetic repro harness that simulated a cookie-dropped retry against the real read path, which reproduced the missing-post behavior deterministically once the hypothesis was formed.
+
+**Fix**: moved the sticky-write signal server-side — keyed by `user_id` in a small, fast, short-TTL store (the same Redis cluster, a `sticky:{user_id}` key set on write, checked on read) rather than trusting a client-supplied cookie to survive an unreliable mobile network round-trip. The read path now derives the routing decision entirely from server state, making it immune to any client-side signal loss.
+
+**Prevention**: (1) never place a correctness-load-bearing signal (as opposed to a pure optimization hint) in client-controlled state that can be dropped by network conditions outside the server's control — a lesson generalizable well beyond this incident. (2) Added a synthetic monitor that periodically writes as a synthetic user and immediately reads, alerting if the read-your-own-writes guarantee is ever violated in production, converting a support-ticket-driven discovery into an automatically-detected one. (3) Documented the sticky-window mechanism's trust boundary explicitly in the design doc, so a future engineer modifying the read path sees the constraint rather than rediscovering it via a second incident.
+
+---
+
+## 15. Architecture Decision
+
+**Context**: extending §12 §3.1's three-option table into a full comparison, since the choice of how to guarantee read-your-own-writes is the single decision that determines both the correctness story and the operational complexity of the entire read path.
+
+**Option A — Always read from the primary:**
+*Advantages*: Trivially correct — no staleness window to reason about, no client- or server-side sticky state to maintain, nothing to get wrong the way §14's incident got wrong.
+*Disadvantages*: Discards the entire purpose of having read replicas — at 1,800 reads/s peak (§12 Step 1), routing every read to one primary reintroduces the exact bottleneck replicas exist to remove, and the design's read-scaling story collapses to "we don't scale reads."
+*Cost*: Low engineering cost, high infrastructure cost (a much larger primary, or a primary that becomes the ceiling on read throughput). *Complexity*: Very low. *Maintainability*: Very high. *Scalability*: Poor — reintroduces a single-instance bottleneck for the platform's dominant traffic.
+
+**Option B — Sticky-primary window (recommended, as in §12):**
+*Advantages*: Routes only the small fraction of reads that are actually at risk (a user reading immediately after their own write) to the primary; the vast majority of read traffic still benefits fully from replicas and cache. Cheap to implement once state is server-side (§14's fix).
+*Disadvantages*: Introduces a window parameter that must be sized from *observed* replication lag and kept correct as that lag drifts (§12 §3.1's monitoring requirement); a naive client-side implementation is fragile, as §14 demonstrates.
+*Cost*: Low infrastructure cost (a small Redis key per active writer); moderate engineering cost (getting the state-tracking mechanism right). *Complexity*: Moderate. *Maintainability*: High, contingent on the window being monitored against actual lag rather than set once and forgotten. *Scalability*: Excellent — cost scales with write rate (§12's 18 writes/s peak), not read rate.
+
+**Option C — Replica-lag token (LSN/WAL-position handoff):**
+*Advantages*: The most precise option — a read is routed to *any* replica that has caught up past the write's exact position, rather than unconditionally to the primary for a fixed window; no wasted primary reads once a replica catches up early.
+*Disadvantages*: Requires the client (or a client-transparent proxy) to carry the token across requests, and requires the read path to query replica replay position before routing — meaningfully more moving parts than a window, and a bug in the token-plumbing has the same "silent correctness violation" failure shape as §14's incident, just in a different mechanism.
+*Cost*: Low infrastructure cost; highest engineering cost of the three. *Complexity*: High. *Maintainability*: Moderate — correctness depends on the token surviving every hop, an assumption that must be actively defended (§14's lesson generalized: any correctness-load-bearing token needs a server-side, not purely client-relayed, source of truth wherever possible). *Scalability*: Excellent, and marginally better than B under very bursty write patterns from a single user.
+
+**Recommendation**: **Option B**, server-side, as corrected in §14 — it captures nearly all of Option C's benefit (only a small fraction of reads pay the primary-routing cost) at meaningfully lower engineering and operational complexity, and its one real risk (a window sized wrong, or a state-tracking bug) is fully mitigated by keeping the signal server-side and monitoring the window against observed replication lag. Option C is worth proposing as a *future* evolution if the platform's write pattern becomes bursty enough that a fixed window starts wasting meaningful primary capacity — but adopting it now, before that constraint is demonstrated, would be exactly the premature-complexity pattern §Expert Q8 warns against.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact**: requirements-gathering discipline and read/write consistency correctness are invisible when done right and extremely visible (in the form of user-facing bugs, like §14's disappearing posts, or capacity incidents, like §4's) when skipped — a Principal Engineer's case for investing time in this module's practices is best made concrete: "the incident like §4 cost us a primary-database-wide latency degradation affecting unrelated, revenue-critical traffic; the fifteen minutes of requirements discussion that would have prevented it costs fifteen minutes." Business stakeholders fund prevention far more readily when it's anchored to a specific, previously-paid cost rather than an abstract "best practice."
+
+**Engineering trade-offs**: the recurring trade-off across this entire module is between the **simplest correct design** and the **most scalable design** — Option A vs. B vs. C in §15 is one concrete instance, and the database-scaling ladder (§9.1) is the general form of the same trade-off, climbed one rung at a time as actual, measured need demonstrates it, never preemptively. A Principal Engineer's specific value is holding this line under pressure from engineers who want to build the more sophisticated version because it's more technically interesting, not because the numbers demand it.
+
+**Technical leadership**: the practices that prevent the incidents in this module (requirements checklists, per-layer security review, monitored capacity assumptions) share a property that makes them organizationally fragile — they cost continuous discipline and produce nothing visible when working, exactly as Module 09 §17 notes for its own domain. A Principal Engineer's job is making these mechanically enforced (a required section in every design doc template, an automated synthetic monitor like §14's fix) rather than reliant on any individual engineer remembering to apply them.
+
+**Cross-team communication**: a system-design decision's non-functional trade-offs (staleness tolerance, availability target, consistency guarantee) are frequently invisible to the product stakeholders who set the original requirement — translating "we chose eventual consistency for the feed" into "content may take a few seconds to appear everywhere, but the site stays fast and available even under heavy load" (§Expert Q10's translation discipline) is what lets a non-technical stakeholder actually evaluate whether the trade-off is acceptable, rather than rubber-stamping a decision they didn't understand.
+
+**Architecture governance**: every non-obvious decision in this module's worked example (why PostgreSQL over a NoSQL migration, why the sticky window over always-primary, why the CDN split from the app tier) should be recorded as an ADR with its numeric justification (§12 Step 1's actual estimation), specifically because each will look like unnecessary caution to a future engineer facing pressure to "just make it faster" without the original numbers in front of them.
+
+**Cost optimization**: the highest-leverage cost decision in this module's worked system is routing media bytes around the application tier entirely (§12 Step 2's pre-signed-upload-URL decision) — a single architectural choice that removes 4.3 Gbps of egress from the app tier's cost and capacity envelope. Principal-level cost optimization is usually found in decisions like this one (what doesn't need to touch expensive compute at all) far more often than in tuning the expensive compute that remains.
+
+**Risk analysis**: the dominant risk pattern across this module is **silent correctness drift** — an assumption (follower distribution, replication lag, a client-carried cookie's reliability) that was true when the system launched becoming false as the system evolves, with no mechanism to detect the drift until a user or an incident surfaces it. A Principal Engineer's risk register for any system built on this module's patterns should weight "do we have an automated check that our core assumptions still hold" above almost any other line item, because that single class of gap explains both incidents documented in this module and its sibling.
+
+**Long-term maintainability**: the artifacts most likely to decay silently are exactly the ones with no natural trigger to revisit them — a sticky-window duration set from lag observed at launch, a capacity plan sized from year-one traffic, a security review conducted once before the initial ship. Each needs an explicit owner and a recurring review cadence tied to a measurable signal (observed lag, observed QPS, time since last review) rather than being revisited only when something breaks.
+
+---
 
 ## 18. Revision
 **Key takeaways**: Requirements-gathering (especially non-functional requirements — scale, latency, availability, consistency, read/write ratio) is the single highest-leverage system-design skill, and skipping it is the most common, most costly real-world mistake. Back-of-envelope capacity estimation should drive architecture choices, preventing both over- and under-engineering. CAP theorem is the theoretical foundation underlying every consistency-model decision across this course's data-layer modules (PostgreSQL, MongoDB, DynamoDB) — recognize these as instances of one underlying trade-off, not separate concerns. The database-scaling ladder (vertical/query-optimization → read replicas → caching → sharding) should be climbed progressively, driven by demonstrated need, not preemptively. Latency budgets, defense-in-depth security review, and graceful-degradation/failure-mode planning should be explicit, addressed-per-component parts of any system-design answer, not afterthoughts.

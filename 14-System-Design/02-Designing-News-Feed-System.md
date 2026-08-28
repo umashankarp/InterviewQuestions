@@ -238,6 +238,53 @@ graph TB
 
 ---
 
+## 7. Performance Engineering
+
+### 7.1 The write side and the read side have opposite cost profiles — budget each separately
+Fan-out (write) cost is proportional to **follower count**; feed assembly (read) cost is proportional to **following count plus merge/rank work**. Treating "feed system performance" as one undifferentiated concern misses that these are optimized independently and can regress independently — a slow ranking model degrades read latency without touching fan-out throughput at all, while a celebrity post degrades fan-out without touching any single read's latency. §12 Step 1's estimation (100,000 sustainable fan-out writes/s vs. 40,000 peak reads/s) exists precisely to size these two budgets separately rather than as one number.
+
+### 7.2 Mean latency hides exactly the failure this system is prone to
+§12 Step 4's wrap-up names it directly: fan-out job **duration distribution**, not mean, is the metric that would have caught §4's incident — a handful of multi-minute celebrity fan-out jobs barely move an aggregate mean computed over millions of ordinary-sized jobs, while those same jobs monopolize the shared worker pool for their entire duration. Any performance dashboard for a fan-out system that surfaces only p50/mean is structurally blind to its most damaging failure mode; p99 and max, segmented by job size, are the metrics that matter here.
+
+### 7.3 The k-way merge is a real, measurable cost — not free just because both inputs are sorted
+At 40,000 reads/s (§12 Step 1), merging a precomputed stream with N pulled celebrity streams costs O(n log k) per read where k is the number of sources — small, but not zero, and it scales with how many celebrities a given user follows (§Advanced Q7's "reverse celebrity problem," a power-user following thousands of accounts). A user following an unusually large number of celebrities turns a cheap merge into a genuinely more expensive one; this should be captured in a per-request cost budget, not assumed uniform across all users.
+
+### 7.4 Hot-key reads are the read-side mirror of the celebrity write problem
+§12 §3.5 names it explicitly: `author_posts:{id}` for a popular celebrity is read by every one of their followers on every feed load, concentrating tens of thousands of reads per second on a single Redis key/shard — a performance problem structurally distinct from, but exactly as damaging as, the write-side celebrity problem, and easy to miss because it doesn't show up in aggregate cache-hit-rate metrics (the key is still a hit, just a dangerously concentrated one). Sharded replication of hot keys, or a short in-process TTL cache in front of them, is the standard mitigation.
+
+### 7.5 Benchmark with the real follower-count distribution, not a synthetic uniform one
+A load test using synthetic accounts with uniform, moderate follower counts will never surface either celebrity problem — it validates a system that doesn't resemble production. Load tests for this system must explicitly include a small number of synthetic "celebrity" accounts at the actual observed tail follower count, exactly mirroring §7.4's general principle from Module 01 applied to this system's specific skew.
+
+## 8. Security
+
+### 8.1 Privacy and blocking must be enforced at read time, never trusted from push time
+§Intermediate Q4 states the core risk precisely: a precomputed feed entry reflects the authorization state *at push time* — if a user later blocks the author, or the author's account becomes private, a stale pushed entry could remain visible unless the read path re-verifies current visibility rules before returning any result, pulled or pushed. This is Module 01 §8.4's caching/authorization principle applied to this system's specific derived-cache shape, and it must be checked on **every** read, not only reads served from the pull path — the pushed path is equally capable of surfacing stale-but-technically-cached content a user is no longer entitled to see.
+
+### 8.2 Content moderation timing changes fundamentally under fan-out-on-write
+As §Intermediate Q5 notes, once a post is pushed, it may already be sitting in millions of followers' feed caches before a post-hoc moderation review completes — unlike a pull-model system where un-surfaced flagged content is simply never fetched. This means moderation (automated classifiers, at minimum) needs to run **before or during** fan-out for accounts above a risk threshold, or the design needs an explicit, fast **retraction** path (a "delete propagates via the same fan-out-style mechanism, or is enforced as a read-time filter against a moderation-flag lookup") — treating post-hoc-only moderation as sufficient is a security/trust gap specific to the push architecture.
+
+### 8.3 Rate limiting post creation protects the fan-out tier, not just the endpoint
+§Intermediate Q9's point generalized: because a single post from a high-follower account triggers disproportionate downstream cost, rate-limiting post creation is protecting shared fan-out infrastructure capacity from a small number of expensive operations, not merely preventing spammy posting behavior at the API layer — the same "reject cheaply, as early as possible" principle (Module 01 §8.2), applied here specifically to protect a downstream, shared resource from a single account's abuse rather than just the immediate endpoint.
+
+### 8.4 The follow graph itself is sensitive data with its own access-control surface
+Who follows whom, and who a user follows, is itself PII-adjacent data (revealing relationships, interests, and in some jurisdictions legally protected associations) — the "assume you can query `followers(x)` and `following(x)`" scoping from §12 Step 1's dialogue elides that this API needs its own authorization model (can any caller query any user's full follower list, or only the user themselves and, at reduced granularity, the public), a decision that was deliberately out of scope for the fan-out design but must not be silently deferred to "someone else's problem" when the system actually ships.
+
+## 9. Scalability
+
+### 9.1 The hybrid model is a scalability decision derived from data, not chosen by default
+§12 §3.1 shows the threshold is derived from actual fan-out capacity and an acceptable-monopolization ceiling (≈100,000 followers, from 300,000 writes/s capacity and a 10%-for-5s tolerance) — this is the general scalability discipline (Module 01 §9.1: justify each rung of complexity with a measured constraint) applied to this specific architecture. A team adopting the hybrid model without deriving its own threshold from its own fan-out capacity is copying an architecture pattern without copying the reasoning that makes it correct for their scale.
+
+### 9.2 Horizontal scaling of the fan-out tier requires partition-aware worker design
+Fan-out workers must be partitioned (by the Kafka partition key, `author_id` per §12 Step 2) so that a single expensive job (one celebrity's fan-out) cannot block unrelated jobs queued behind it on a different partition — this is the direct mechanism behind §12 §3.4's "detect on consumer lag per partition, not aggregate" failure-handling guidance, and it's what makes the worker tier horizontally scalable in a way that's resilient to the very skew (§7.5) that makes this system's load pattern unusual.
+
+### 9.3 The feed store's scalability rests on being a bounded, evictable, derived cache
+§12 Step 2's "the feed is not in a database" decision is the load-bearing scalability property: because feed entries are recomputable from posts plus the follow graph, the store can be sized generously but not infinitely (the 800-entry trim, §12's data model), evicted under memory pressure, and rebuilt on a cache-node loss (§12 §3.4) rather than requiring durable, backed-up storage sized for permanent retention — a materially cheaper and more horizontally scalable posture than if feed entries were treated as a system of record.
+
+### 9.4 Availability of the read path and the write path have different targets, for a reason
+§12 Step 1 states 99.99% for reads and 99.9% for writes, and the deep dive (§12 §3.4) shows exactly why this is achievable: a primary-database failover makes writes briefly unavailable, but reads keep serving from cache and the surviving fan-out output, so the two availability numbers are not aspirational — they follow directly from which components each path actually depends on. Any scalability/HA discussion of this system should state which specific components sit on each critical path, since that dependency mapping is what makes an availability target true or merely hopeful (Module 01 §9.3's HA-vs-DR distinction, applied per-path here rather than per-system).
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -285,6 +332,28 @@ graph TB
  **A:** Reject this approach — silently dropping fan-out writes for some followers means those followers simply never see the celebrity's post in their feed at all (not "eventually, with some delay," but genuinely never, unless they separately visit that account's profile), a real, user-facing functional regression, not merely a performance optimization; the hybrid pull-model approach is specifically designed to serve *every* follower correctly, just via a different mechanism (real-time pull) for the specific accounts where push doesn't scale — recommend rejecting any "solution" that silently sacrifices functional correctness (some users never seeing content they're entitled to see) in the name of a performance fix, exactly the same "don't ship based on an unverified assumption that a shortcut is acceptable" discipline §Advanced Q9.
 10. **Q: As a Principal Engineer, how would you present the fan-out architecture decision (push vs. pull vs. hybrid) to non-technical product stakeholders who want to understand why this is a genuinely hard problem, not just an engineering implementation detail?**
  **A:** Frame it concretely: "if we make posting instant and cheap for everyone, we pay a cost every time someone reads their feed, which happens far more often than posting — but if we make reading instant and cheap, a single post from a very popular account could overwhelm our systems trying to deliver it to every one of their millions of followers all at once; we use a hybrid approach that gives most users the fast, cheap experience while handling popular accounts differently behind the scenes, so both problems are avoided" — translating the technical push/pull trade-off into the concrete, relatable "who pays the cost, and when" framing makes the genuine engineering complexity legible to stakeholders without requiring them to understand fan-out mechanics directly, directly this course's recurring "translate technical trade-offs into business-relevant terms" communication discipline.
+
+### Expert (10)
+1. **Q: Derive the hybrid fan-out threshold from first principles for a platform with 500,000 sustainable fan-out writes/s, requiring that no single account's post consume more than 15% of that capacity for more than 3 seconds. Show the arithmetic, and explain what changes if the platform later doubles its worker fleet.**
+ **A:** Budget = 500,000 × 15% = 75,000 writes available for a single job; over a 3-second window that's 75,000 × 3 = 225,000 writes as the maximum a single fan-out job may perform before crossing the tolerance — so the threshold is **~225,000 followers**, not an arbitrary round number. If the worker fleet doubles (capacity → 1,000,000 writes/s), the threshold recalculates to 450,000 followers — the threshold is a *function* of current fan-out capacity, not a fixed architectural constant, which is exactly why §12 §3.1 insists it be continuously recomputed and monitored rather than hardcoded: a team that doubles its infrastructure without revisiting this derived value is silently leaving performance headroom unused (over-migrating mid-tier accounts to the more expensive pull path unnecessarily) rather than gaining the capacity increase's actual benefit.
+2. **Q: A monitoring dashboard shows fan-out job p99 duration is stable, but user complaints of "my post took a long time to show up in friends' feeds" are increasing. Diagnose the discrepancy.**
+ **A:** p99 *job duration* measures how long a fan-out job takes once it starts running — it says nothing about **queueing delay** before the job starts. If consumer lag (§12 §3.4's per-partition lag metric) is growing — because overall post-creation volume grew, or because a specific partition (a specific `author_id` hash range) has accumulated a backlog of jobs behind one or more large ones — a post can sit queued for a long time before its fan-out job even begins, and that queueing delay is invisible to a dashboard that only measures execution duration once started. The fix is measuring **end-to-end propagation latency** (post-created timestamp to feed-visible timestamp, sampled) as the actual user-facing SLI, with job duration and queue depth as its two contributing diagnostic signals — exactly the "the metric users experience and the metric that's easy to instrument are not automatically the same metric" trap.
+3. **Q: Design the specific mechanism for detecting and correcting a case where the merge step (§12 §3.2) silently drops a post that should have appeared in a user's feed, given that the failure would look identical to "the post simply wasn't popular/relevant" to any downstream observer.**
+ **A:** This class of bug is dangerous precisely because a dropped post produces no error, no exception, and no obviously anomalous metric — the feed just renders successfully with one fewer item. Detection requires an active, synthetic verification: periodically, for a sample of (author, follower) pairs known to have a fresh, qualifying post, query the follower's actual served feed and assert the post is present within the propagation SLA (§Expert Q2's metric) — a real-content canary check, not a passive metrics dashboard, because passive metrics cannot distinguish "correctly absent because irrelevant" from "incorrectly dropped by a merge bug." This mirrors Module 01 §14's fix (a synthetic write-then-read monitor) applied to this system's specific silent-drop failure mode.
+4. **Q: A competitor's outage post-mortem attributes an incident to "our feed cache and our post database disagreed after a partial deploy rollback." Explain the specific failure mode this describes for a system architected like §12's, and the safeguard that prevents it.**
+ **A:** A partial rollback (some services rolled back to a prior version, others not) can leave the fan-out worker writing feed-cache entries using a data format or scoring logic from a *different* code version than the one the feed-read service expects to parse — silently producing malformed or misinterpreted cache entries rather than an outright error. Because §12 establishes the feed cache as a derived, non-authoritative store, the safeguard is structural: version the cache entry schema explicitly (a `schema_version` field per entry, or a versioned key prefix), and have the read service reject/ignore entries from an incompatible version rather than attempt to parse them — falling back to the "derived cache miss" rebuild path (§12 §3.4) rather than serving corrupted data. This is why "the feed is a derived cache, not a system of record" (§12 Step 2) is not merely a cost argument — it's what makes this exact failure mode recoverable instead of a lasting data-corruption incident.
+5. **Q: A finance-adjacent variant of this system (an activity feed showing account-level events — trades executed, transfers completed — to a small set of authorized viewers per account, not a public follower graph) is proposed to reuse this module's hybrid fan-out architecture. Evaluate the reuse.**
+ **A:** Reject reusing the *hybrid celebrity-threshold* mechanism specifically — it exists to solve a povwer-law follower-count skew that a small, bounded, per-account authorized-viewer list (typically single digits to low hundreds, not millions) will never produce; adopting the hybrid model's complexity here is exactly §Expert Q8's (Module 01) premature-complexity pattern, since there's no celebrity-scale skew to justify it. What *does* transfer usefully: the derived-cache-not-source-of-truth principle (§12 Step 2, since the event feed can always be rebuilt from the authoritative transaction/event log), the outbox-driven fan-out mechanism for durability (§12 Step 2's `PostCreated` outbox), and the read-time authorization re-check discipline (§8.1) — which for this variant becomes *more* critical, not less, since account-event visibility is exactly the kind of access-control-sensitive data where a stale, over-broadly-cached entry is a real compliance/privacy exposure, not merely a stale social post.
+6. **Q: Explain why "exactly-once fan-out delivery" is the wrong framing for this system's write path, and what guarantee is actually being provided instead.**
+ **A:** True exactly-once delivery across a distributed fan-out (post-created event → queue → worker → cache write) is not achievable as a delivery guarantee in the general case (§the standard distributed-systems result: at-least-once delivery plus idempotent processing is the achievable combination, not literal exactly-once transport) — what this design actually provides is **at-least-once fan-out with an idempotent write** (`ZADD` on a sorted set is naturally idempotent — adding the same `post_id` twice has no additional effect beyond the first write), so a redelivered or retried fan-out job is safe rather than causing a duplicate feed entry. Stating the guarantee correctly as "at-least-once delivery, made safe by idempotent writes" rather than "exactly-once" is not pedantry — a design that assumes true exactly-once delivery and therefore skips making its writes idempotent will produce visible duplicate feed entries the first time a worker retries after a partial failure.
+7. **Q: Design the specific data needed to distinguish, during an incident, whether a feed-propagation-latency spike is caused by (a) fan-out worker capacity exhaustion, (b) a specific hot partition/celebrity account, or (c) a downstream dependency (Redis, the post store) degrading — three causes that could all initially present identically as "feeds are slow to update."**
+ **A:** (a) is diagnosed by aggregate consumer-group lag climbing **uniformly across partitions** combined with worker CPU/concurrency metrics at ceiling; (b) is diagnosed by lag concentrated on **one or a few specific partitions** (§12 §3.4's per-partition lag metric) while others are healthy, cross-referenced against which `author_id`s hash to those partitions; (c) is diagnosed by worker-side error rates or write-latency-per-operation spiking while queue depth and CPU both look otherwise normal, pointing at the dependency rather than the fan-out tier itself. The single most useful piece of instrumentation for distinguishing all three quickly is **per-partition consumer lag alongside per-operation dependency latency**, logged and dashboarded together — without both, an on-call engineer is reduced to guessing among three structurally different incidents that share one symptom.
+8. **Q: A team proposes eliminating the celebrity registry's periodic recomputation (§12 §3.1) and instead marking an account as "celebrity" permanently, once, the first time it crosses the threshold — arguing this simplifies the system. Evaluate this as a Principal Engineer.**
+ **A:** Reject the "permanent once crossed" half but accept that a one-directional promotion is *safer* than a naive bidirectional toggle — the real problem with permanence is that it never handles an account's *initial* growth into celebrity territory correctly if the recomputation job is removed entirely (no mechanism ever promotes a newly-viral account in the first place), which reintroduces exactly the §4 incident this design exists to prevent. The correct simplification, if reducing operational complexity is the actual goal, is to keep continuous *promotion* (cheap: it's just a threshold check against a periodically-refreshed follower count) while making *demotion* deliberately conservative — requiring the grace-period read-time pull-fallback (§12 §3.1's transition handling) to persist longer, since a false demotion is more damaging (missing posts) than a false non-demotion (paying a slightly unnecessary pull cost). Simplify the direction that's genuinely safe to simplify; don't simplify away the mechanism that exists specifically because the underlying data changes.
+9. **Q: How would you extend this system's design to support a "close friends" or "private circle" sub-feed — a second, smaller, higher-trust distribution list per author — without duplicating the entire fan-out/read architecture?**
+ **A:** Reuse the existing push/pull machinery with an additional dimension rather than a parallel system: tag each post with a `visibility` scope (already present in §12's data model as an enum) extended to include a circle identifier, and have the fan-out worker consult the circle membership (a small, bounded list — structurally nothing like the celebrity-scale follower list, so no hybrid complexity needed here) when deciding which followers' feeds receive the entry; the read path's existing read-time authorization re-check (§8.1) is exactly the mechanism that must also verify current circle membership, not just block/privacy status, before rendering a circle-scoped post. The key design insight is that "close friends" is a *visibility* concern layered onto the same fan-out/merge/rank pipeline, not a reason to build a second, parallel feed system — reusing the pipeline is what §2.5's "ranking is separable from fan-out" discipline generalizes to: visibility, like ranking, is a filter/decoration on the same underlying candidate-gathering mechanism.
+10. **Q: As a Principal Engineer being asked to sign off on this architecture for production, what is the single question you'd insist the team answer with real, measured data before approval — not estimated, not assumed?**
+ **A:** "What is our actual current follower-count distribution's tail — specifically, our largest account's follower count and the count of accounts above our proposed threshold — measured from real data, not the launch-time estimate?" Every other decision in this design (the threshold derivation, the fan-out capacity sizing, the worker partitioning) is downstream of this one number, and §4's entire incident is a story of this number changing silently after launch with nothing tracking it. A design review that approves the architecture's *shape* without demanding the team show the current, measured distribution behind its central parameter is approving a diagram, not a system — exactly Module 01 §Expert Q10's fifth review question, applied to this system's specific load-bearing assumption.
 
 ---
 
@@ -642,9 +711,175 @@ This is worth naming because it is the *second* celebrity problem — the write-
 
 ---
 
-## 13–17. LLD / Debugging / Decision / Case Study / Principal
+## 13. Low-Level Design
 
-*(This module predates the full 16-section template; its incident, worked exercises, and Advanced-tier Q&A collectively carry this content. §12 above was authored to the four-step standard on 2026-08-09.)*
+**Requirements**: tied directly to §12's hybrid architecture — post creation must synchronously update the author's own timeline (read-your-own-writes) and asynchronously trigger fan-out for non-celebrity authors; the feed-read path must merge precomputed and live-pulled sources via an efficient k-way merge, deduplicate, apply ranking, and remain correct as accounts transition across the celebrity threshold (§12 §3.1).
+
+**Class diagram:**
+```mermaid
+classDiagram
+ class Post {
+ +string PostId
+ +string AuthorId
+ +DateTime CreatedAt
+ +Visibility Visibility
+ }
+ class IFollowGraph {
+ <<interface>>
+ +GetFollowersAsync(authorId) IAsyncEnumerable~string~
+ +GetFollowingAsync(userId) IEnumerable~string~
+ +GetCelebrityFollowsAsync(userId) IEnumerable~string~
+ }
+ class ICelebrityRegistry {
+ <<interface>>
+ +IsCelebrity(authorId) bool
+ +RecomputeAsync() Task
+ }
+ class IFanOutStrategy {
+ <<interface>>
+ +ExecuteAsync(Post, IEnumerable~string~ followers) Task
+ }
+ class PushFanOutStrategy {
+ +ExecuteAsync(Post, followers) Task
+ }
+ class SkipFanOutStrategy {
+ +ExecuteAsync(Post, followers) Task
+ }
+ class IFeedStore {
+ <<interface>>
+ +GetPrecomputedAsync(userId, count) IEnumerable~FeedEntry~
+ +AddEntryAsync(userId, postId, score) Task
+ +TrimAsync(userId, maxSize) Task
+ }
+ class IFeedMerger {
+ <<interface>>
+ +Merge(precomputed, pulled) IEnumerable~FeedEntry~
+ }
+ class IRankingService {
+ <<interface>>
+ +Rank(candidates) IEnumerable~FeedEntry~
+ }
+ class FanOutService {
+ -ICelebrityRegistry registry
+ -IFollowGraph followGraph
+ -IFanOutStrategy pushStrategy
+ -IFanOutStrategy skipStrategy
+ +HandlePostCreatedAsync(Post) Task
+ }
+ class FeedReadService {
+ -IFeedStore store
+ -IFollowGraph followGraph
+ -IFeedMerger merger
+ -IRankingService ranker
+ +GetFeedAsync(userId, count) IEnumerable~FeedEntry~
+ }
+
+ FanOutService --> ICelebrityRegistry
+ FanOutService --> IFollowGraph
+ FanOutService --> IFanOutStrategy
+ IFanOutStrategy <|.. PushFanOutStrategy
+ IFanOutStrategy <|.. SkipFanOutStrategy
+ FeedReadService --> IFeedStore
+ FeedReadService --> IFeedMerger
+ FeedReadService --> IRankingService
+```
+
+**Sequence diagram** (feed read, hybrid merge — expands §12's read walkthrough):
+```mermaid
+sequenceDiagram
+ participant Client
+ participant Svc as FeedReadService
+ participant Store as IFeedStore
+ participant Graph as IFollowGraph
+ participant Merger as IFeedMerger
+ participant Ranker as IRankingService
+
+ Client->>Svc: GetFeed(userId, count)
+ par
+ Svc->>Store: GetPrecomputedAsync(userId)
+ Store-->>Svc: pushed entries (sorted)
+ and
+ Svc->>Graph: GetCelebrityFollowsAsync(userId)
+ Graph-->>Svc: celebrity author IDs
+ Svc->>Store: recent posts per celebrity
+ Store-->>Svc: pulled entries (sorted)
+ end
+ Svc->>Merger: Merge(pushed, pulled)
+ Merger-->>Svc: deduplicated, timestamp-ordered candidates
+ Svc->>Ranker: Rank(candidates)
+ Ranker-->>Svc: ranked feed
+ Svc-->>Client: page + cursor
+```
+
+**Design patterns used**: **Strategy** (`IFanOutStrategy` — push vs. skip-for-pull, selected per author via `ICelebrityRegistry`, exactly the mechanism that makes the threshold's promotion/demotion transitions a matter of swapping strategy rather than rewriting the pipeline, §Expert Q8); **Bulkhead** (fan-out worker partitioning by `author_id`, §9.2, isolates one expensive job's resource consumption from unrelated jobs); **Chain of Responsibility / Pipeline** (read path: fetch → merge → dedup → rank → hydrate, each stage independently replaceable, exactly §2.5's separable-concerns argument made structural); **Observer** (the outbox/event-driven fan-out trigger — `FanOutService` reacts to `PostCreated` rather than being called synchronously from post creation).
+
+**SOLID mapping**: Single Responsibility (`FanOutService` decides *whether and how* to fan out; `IFeedStore` only stores; `IFeedMerger` only merges; `IRankingService` only ranks — §2.5's separation enforced at the interface level, not just conceptually); Open/Closed (a new ranking model is a new `IRankingService` implementation; a new fan-out threshold-derivation strategy, §Expert Q1, is a new `ICelebrityRegistry` implementation — neither touches `FeedReadService`'s orchestration logic); Liskov (`PushFanOutStrategy` and `SkipFanOutStrategy` must both satisfy "returns once the author's post is durably queued for eventual visibility," so callers never need to know which one is in play); Interface Segregation (`IFollowGraph` separates `GetFollowersAsync` — used only by the write-side fan-out — from `GetCelebrityFollowsAsync` — used only by the read-side pull — rather than one bloated graph interface); Dependency Inversion (`FeedReadService` depends on `IFeedMerger` and `IRankingService` abstractions, letting §Expert Q6's k-way-merge implementation be swapped or benchmarked against a naive concatenate-and-sort without touching the orchestration).
+
+**Extensibility**: adding the "close friends" sub-feed (§Expert Q9) extends `Post.Visibility` and adds a membership check consulted by both `PushFanOutStrategy` (who receives the push) and the read path's authorization re-check (§8.1) — no new top-level service required, exactly because visibility was designed as a filter layered on the existing pipeline rather than a parallel system.
+
+**Concurrency/thread safety**: fan-out batches (`ZADD` pipelined per 1,000 followers, §12 Step 2) are idempotent by construction (§Expert Q6) — a redelivered fan-out job re-adds the same `post_id` with no corruption, which is what makes at-least-once delivery safe without a distributed lock. The celebrity registry's recomputation (§12 §3.1) runs on its own schedule, decoupled from any individual fan-out job, and reads of the registry are eventually-consistent-tolerant (a job briefly seeing a stale celebrity flag is safe in both directions — worst case, one post is fanned out or skipped one cycle later than ideal, never incorrectly).
+
+---
+
+## 14. Production Debugging
+
+**Incident**: Following a marketing push, several previously-ordinary accounts crossed into the low tens of thousands of followers within days. Weeks later, on-call was paged for a sustained spike in `feed-read` p99 latency, with no corresponding spike in fan-out-service alerts, no elevated error rate, and CPU on the feed-read tier within normal range.
+
+**Root cause**: The celebrity registry's threshold (§12 §3.1, derived at ~100,000 followers) had not been crossed by any of these accounts — they remained on the push path, correctly. But their followers had grown enough that fan-out batching (1,000 followers/batch) now took noticeably longer per post, and — the actual root cause — several of these accounts' followers overlapped heavily with each other (a common marketing-driven audience), meaning a burst of near-simultaneous posts from this cohort caused many followers' precomputed feed sets to receive several `ZADD`s in quick succession, each triggering the mandatory `ZREMRANGEBYRANK` trim (§12's data model: "the trim is not optional"). The trim, run once per write rather than batched, was the actual CPU cost multiplying under this specific overlap pattern — invisible in aggregate fan-out metrics because no single job was slow, and invisible in feed-read metrics' CPU average because the cost was on the **write** side, manifesting as elevated write-queue depth that delayed the outbox publisher, which in turn delayed cache population that reads were waiting on.
+
+**Investigation**: Standard fan-out job-duration and feed-read CPU dashboards showed nothing anomalous (both consistent with §7.2's warning about aggregate metrics). The actual signal came from Redis's own command-latency histogram, which showed `ZREMRANGEBYRANK` — not `ZADD` — as the dominant contributor to command latency during the incident window; correlating the timing against post-creation logs surfaced the overlapping-audience cohort as the common factor.
+
+**Tools**: Redis `SLOWLOG` and per-command latency histograms (not application-level dashboards, which were all measuring the wrong layer); post-creation timestamp correlation against the affected follower cohort; a targeted repro that replayed the same burst pattern against a staging Redis cluster, reproducing the `ZREMRANGEBYRANK` latency spike deterministically.
+
+**Fix**: batched the trim to run once per follower per fan-out cycle rather than once per `ZADD` (accumulate the batch's writes for a given feed key, then trim once at the end of the batch) — removing the redundant repeated trims against the same key within a single fan-out pass. Feed-read latency returned to baseline immediately, with no fan-out throughput change required.
+
+**Prevention**: (1) added Redis command-level latency to the standing dashboard set (§7.2's principle: measure the actual operation, not just the service-level aggregate around it). (2) Added a load-test scenario specifically modeling overlapping-audience bursts (§7.5's real-distribution benchmarking principle extended to a second dimension — not just follower-count skew, but *audience overlap* skew), which the existing uniform-synthetic-account load test had never exercised. (3) Documented the batched-trim requirement explicitly in the fan-out worker's design notes, since it's exactly the kind of "looks correct, degrades only under a specific traffic shape" optimization a future refactor could silently regress.
+
+---
+
+## 15. Architecture Decision
+
+**Context**: extending §2.2–§2.4's push/pull/hybrid comparison into a full architecture-decision format, since this is the module's central, hardest-to-reverse choice.
+
+**Option A — Pure fan-out-on-write (push only):**
+*Advantages*: Feed reads are O(1) — a single `ZREVRANGE` — which is ideal given the 500:1 read:write ratio (§12 Step 1) and keeps read latency both low and trivially predictable.
+*Disadvantages*: The celebrity problem (§2.2, §4) — a single high-follower-count post can consume the entire shared fan-out budget for minutes, degrading propagation for every other user's posts simultaneously (§12 Step 1's 166-second calculation). Fundamentally unsafe for any platform with a power-law follower distribution.
+*Cost*: Fan-out infrastructure sized for worst-case follower count, which is wasteful for the 99.9%+ of accounts that never approach it. *Complexity*: Low — one code path. *Maintainability*: High, until a celebrity account appears, at which point it becomes an operational emergency rather than a maintainability question. *Scalability*: Breaks specifically at the tail, not the average — the dangerous kind of scaling failure because average-case load testing won't surface it (§7.5).
+
+**Option B — Pure fan-out-on-read (pull only):**
+*Advantages*: No celebrity problem at all — posting cost is O(1) regardless of follower count, since nothing is pushed anywhere.
+*Disadvantages*: Every one of the 40,000 peak reads/s (§12 Step 1) pays a scatter-gather cost proportional to following count — for the dominant, read-heavy traffic pattern this system actually has, that inverts the cost onto the far more frequent operation. A "reverse celebrity problem" emerges for power-users following unusually many accounts (§Advanced Q7).
+*Cost*: No fan-out infrastructure needed, but read infrastructure must absorb continuous scatter-gather load at 40,000/s scale — typically more total infrastructure cost than A for this system's actual read:write ratio. *Complexity*: Low — one code path, but a more expensive one given this platform's ratio. *Maintainability*: High. *Scalability*: Poor specifically for this workload's ratio; would be the *better* choice for a hypothetically write-heavy, read-light platform, which this platform is not.
+
+**Option C — Hybrid, threshold-derived (recommended, as in §12):**
+*Advantages*: Combines A's O(1) reads for the overwhelming majority of accounts with B's O(1) writes for the tail that would break A — directly eliminates both failure modes rather than trading one for the other.
+*Disadvantages*: Meaningfully more implementation and operational complexity — a merge step, a continuously-recomputed threshold (§Expert Q1), transition handling for accounts crossing the boundary (§12 §3.3), and two code paths to test and monitor instead of one.
+*Cost*: Moderate — fan-out infrastructure sized for the non-celebrity population only (a large cost reduction versus A), plus a small amount of additional read-time merge cost (§7.3) versus pure push.
+*Complexity*: High. *Maintainability*: Moderate, contingent on the threshold being actively monitored (§9.1) rather than set once — exactly the pattern §4's incident violated. *Scalability*: Excellent — the only option whose cost profile doesn't have a structural failure mode at either extreme of the follower-count distribution.
+
+**Recommendation**: **Option C**, exactly as built in §12, and the justification is the same one that makes it non-optional rather than merely "best": this system's stated 500:1 read:write ratio combined with a confirmed power-law follower distribution (§12 Step 1's dialogue) means both A and B have a *specific, demonstrated, current* failure mode — not a hypothetical one — which is precisely the bar §Expert Q8 (Module 01) sets for justifying additional architectural complexity. A platform that later confirms it genuinely lacks any high-follower-count accounts (a closed enterprise tool with a flat organizational follow structure, say) would have grounds to simplify to Option A — but that would be a decision made from that platform's own measured distribution, not a default.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact**: the celebrity problem is not an abstract engineering curiosity — §4's incident degraded posting for *every* user, not just the celebrity's followers, meaning a platform's decision to court high-profile accounts (a business/growth decision) directly creates an engineering risk that must be sized and mitigated in proportion to that business strategy. A Principal Engineer should flag this dependency explicitly when a growth or partnerships team is negotiating a deal with a very-high-follower-count account: "onboarding this account changes our fan-out capacity requirements" is a legitimate, quantifiable input to that business conversation, not an engineering objection to be routed around.
+
+**Engineering trade-offs**: the core trade-off recurring through this module is **where the cost is paid** — at write time (proportional to follower count) or at read time (proportional to following count) — and the hybrid model doesn't eliminate this trade-off, it *routes* each account to whichever side of it that account's own shape makes cheaper. Recognizing that the hybrid model is a routing decision, not an elimination of the underlying cost, is what separates an engineer who can defend the threshold's specific value (§Expert Q1) from one who can only describe the architecture's shape.
+
+**Technical leadership**: the celebrity registry's continuous recomputation and the batched-trim discipline (§14) are both examples of correctness/performance properties that are invisible when working and only visible when they silently stop — a Principal Engineer's specific contribution is ensuring these are tested with realistic, skewed synthetic data (§7.5, §14's audience-overlap load test) as a standing part of the test suite, not merely something an individual engineer happens to remember to check before each release.
+
+**Cross-team communication**: explaining the hybrid model to non-engineering stakeholders (§Advanced/Expert Q10's "who pays the cost, and when" framing) is a recurring need — product wants faster feature velocity on ranking (a call this design deliberately decouples from fan-out, §2.5), while infrastructure/SRE wants confidence that a single account's growth won't page anyone at 3am (§Expert Q1's continuously-derived threshold gives them a concrete, checkable number rather than a vague assurance) — a Principal Engineer translates the same architecture into the specific concern each audience actually has.
+
+**Architecture governance**: the fan-out threshold, the follower-count distribution it's derived from, and the batched-trim requirement (§14) are exactly the kind of decisions that should be captured as ADRs with their numeric justification recorded — not because the numbers won't change, but because *when* they change, the team needs the original reasoning to know whether the threshold needs recomputing or the architecture itself needs revisiting.
+
+**Cost optimization**: the hybrid model's single biggest cost lever is that it sizes fan-out infrastructure for the **non-celebrity population only** (§15's Option C cost note) rather than for worst-case follower count across the entire platform — a Principal Engineer evaluating this system's infrastructure spend should confirm this sizing assumption is still true as the platform's account-size distribution evolves, since a platform that accumulates many more mid-tier (30k–90k follower) accounts over time can grow its "normal" fan-out cost substantially even while the celebrity threshold itself stays fixed.
+
+**Risk analysis**: as in Module 01, the dominant risk here is silent assumption drift — the follower-count distribution, the batched-trim behavior under overlapping audiences, and the threshold's calibration against current fan-out capacity are all assumptions that were true at some point and require active monitoring to remain true. The risk register for this system should treat "is our core distributional assumption still what the architecture assumes" as a standing, reviewed line item, not a one-time launch check.
+
+**Long-term maintainability**: the feed-read pipeline's deliberate separation of gather/merge/dedup/rank (§13's pipeline pattern) is what keeps this system maintainable as ranking logic evolves independently of fan-out mechanics — a design that entangled these concerns would force every ranking-model change to be re-validated against fan-out correctness, and vice versa. Preserving that separation under future feature pressure (a tempting shortcut: "just filter during fan-out instead of a separate read-time step") is a specific, recurring discipline a Principal Engineer should watch for erosion of during code review.
+
+---
 
 ## 18. Revision
 **Key takeaways**: The fan-out decision (push vs. pull vs. hybrid) is the defining architectural choice for any feed/timeline system, determined primarily by the actual follower-count distribution — a non-functional requirement that can silently change as a platform grows (the celebrity problem). Ranking is a separable concern from candidate-gathering/fan-out — don't conflate the two design axes. Precomputed feed caches need explicit bounding/trimming (Redis ZSet + `ZREMRANGEBYRANK`), directly paralleling the unbounded-embedding lesson. Merging precomputed and live-pulled results should use an efficient k-way merge (both streams already sorted), not a full re-sort. Asynchronous, queue-based fan-out processing absorbs traffic bursts as monitorable backpressure rather than overwhelming the write path directly.

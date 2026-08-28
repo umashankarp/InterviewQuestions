@@ -84,6 +84,60 @@ graph TB
 
 ---
 
+## 7. Performance Engineering
+
+**CPU:** Transcoding is the CPU/GPU-bound workload in this system — each rendition is effectively a compressed-video encode loop, and encoder efficiency (x264/x265/AV1 preset choice) trades CPU-seconds directly against output bitrate for a given perceptual quality. A "slower" encoder preset produces a smaller file at the same quality, which then lowers egress cost for the life of the video — meaning the CPU/cost trade-off here is made once at transcode time but paid (or saved) on every subsequent view, often thousands of times over. Profile at the codec/kernel level (frames-per-second per core for a given preset/resolution), not at the service level, since "the transcode service is CPU-bound" is a fact everyone already knows and tells you nothing about where the next optimization is.
+
+**Memory:** A worker must never hold a full source file in memory — streaming/chunked decode (feeding the encoder a bounded window of frames rather than the whole file) keeps memory flat regardless of video length, which is exactly what §14's incident got wrong. Manifest and metadata services are comparatively memory-trivial; the CDN edge tier's memory profile is dominated by its own cache-eviction policy (typically LRU/LFU-hybrid), not by this system's code.
+
+**GC/Allocations:** Transcode workers are usually thin C#/Go/Rust orchestration wrapping a native encoder (ffmpeg/libx264) via process invocation or a P/Invoke boundary — the managed-heap allocation profile that matters is in the *orchestration* layer (job polling, chunk-boundary bookkeeping, metadata updates), not the encode loop itself, which runs outside the GC entirely. The view-count aggregator (§2.5) is the genuine managed-allocation hot path — its `dirty-view-counts` batching (§11's Expert exercise) exists specifically to bound allocation and flush cost to actual activity rather than total catalog size.
+
+**Latency:** Two distinct latency metrics, easily conflated: **time-to-first-frame** (manifest fetch + first segment download, a read-path number, target sub-2s) and **time-to-first-rendition** (upload-complete to first watchable quality, a write-path number, target minutes). Optimizing one does nothing for the other — a common interview trap is treating "video platform latency" as a single number.
+
+**Throughput:** Transcode fleet throughput = `workers × (frames/sec per worker)`; capacity-plan with Little's Law against upload arrival rate, sized for burst (a coordinated creator upload event, §4) rather than average upload rate — average-rate sizing is precisely what the §4 incident's queue backlog exposed. CDN throughput is not a capacity-planning concern of this system at all — it is the CDN vendor's, which is exactly why egress being "the system" (§12 Step 1) means vendor contract terms are a first-class architectural input, not a procurement afterthought.
+
+**Benchmarking:** Benchmark the transcode fleet against a realistic **duration and codec mix**, not a synthetic uniform corpus — a benchmark built entirely from short, simple-content clips will never surface the long-tail cost of feature-length or highly-detailed (high-motion, high-entropy) source video, which can be an order of magnitude more expensive per second to encode at a given quality target.
+
+**Caching:** The CDN cache-hit ratio is the single most important performance number in the whole system (§12's "CDN offload ratio" metric) — segment keys are immutable and cacheable near-indefinitely, so a low hit ratio almost always indicates either an origin-shield misconfiguration or a genuinely cold-and-scattered catalog (many videos, each rarely viewed) rather than a cacheability problem with the content itself.
+
+---
+
+## 8. Security
+
+**Threats:** Unauthorized redistribution/scraping of paid or access-restricted content; leaked or brute-forceable signed URLs granting unintended access; malicious/malformed uploads designed to exploit the transcoder (a crafted file targeting a codec-library vulnerability — a real, recurring CVE class in video-processing libraries); DDoS against the origin/manifest tier; and content-moderation evasion (copyright-infringing or policy-violating uploads slipping past automated matching, §12 Step 4's "what we left out").
+
+**Mitigations:** Signed, time-limited URLs (§11's Hard exercise) for any access-restricted content, with the signing key never exposed to a CDN edge in plaintext form; transcode workers run the actual decode/encode in a sandboxed, resource-limited container (CPU/memory/time caps) specifically because the input is untrusted, attacker-controllable binary data — treat every uploaded file as hostile input until transcoded, the same discipline as never trusting client-supplied data in any other system; rate-limit the upload endpoint per account to bound the blast radius of a compromised or abusive account; run content-fingerprint matching (§12 Step 4) as a background, non-gating check so moderation doesn't have to choose between speed and safety.
+
+**OWASP mapping:** Broken Object-Level Authorization is the dominant risk for unlisted/private video access — a client that can enumerate or guess `video_id`s and receive a valid manifest for a video it isn't authorized to view is a BOLA finding, not a theoretical one; this is exactly why `GET /v1/videos/{id}`'s `manifest_url` must be gated by the same authorization check the API layer applies, never derivable purely from a guessable ID.
+
+**AuthN/AuthZ:** Upload and management endpoints require standard session/token auth; playback authorization for restricted content is enforced **at manifest-issuance time** (the manifest itself embeds a short-lived signed URL scoped to that viewer's session) rather than relying on the CDN to independently re-check authorization per segment request — the CDN edge should never need to understand the platform's authorization model at all, only validate a signature it was handed.
+
+**Secrets:** The URL-signing key (§11's Hard exercise) is the single most sensitive secret in the read path — its compromise grants indefinite forgeable access to every asset it can sign for, which is why it lives in a managed secrets store with rotation support, and why signature validation uses constant-time comparison (`FixedTimeEquals`, §11) rather than a naive equality check that leaks timing information.
+
+**Encryption:** Source and rendition assets encrypted at rest in object storage (standard for any object-storage-backed system at this scale); in-transit encryption (TLS) for both upload and CDN-served segments is non-negotiable given upload/download traffic traverses public networks; DRM (out of scope per §12 Step 1, but worth naming) would add per-segment content encryption with license-server-mediated key delivery — a materially larger architectural addition, not a configuration toggle.
+
+---
+
+## 9. Scalability
+
+**Horizontal scaling:** Both halves of the system scale horizontally and independently — transcode workers scale with queue depth (stateless, pull-based, per §3's priority-queue design), and CDN edges scale by the vendor's own global footprint, which is precisely why §12 Step 1 concludes egress cannot be solved by *this system* scaling at all — it has to be delegated.
+
+**Vertical scaling:** Relevant mainly for the highest-tier renditions (4K/GPU-accelerated encode benefits from larger, GPU-equipped instances) — not a primary lever for the metadata or manifest tiers, which are throughput-bound by request volume, not per-request compute.
+
+**Caching:** The CDN *is* the scaling mechanism for the read path, not an optimization layered onto it (§2.4) — origin shielding (§12 §3.4) is what prevents a popularity spike from translating into an origin-storage stampede, collapsing N simultaneous edge cache-misses into one origin fetch.
+
+**Replication/Partitioning:** Object storage partitions naturally by key (`{video_id}/...`, §12's storage layout) with no manual sharding required; the metadata database partitions by `video_id` if it ever outgrows a single primary — unlikely relative to the media-bytes volume, since metadata rows are tiny compared to the assets they describe.
+
+**Load balancing:** Pull-based work distribution for transcode jobs (workers pull from priority queues) rather than push-assignment, which naturally load-balances heterogeneous job costs (a 240p job and a 4K job) across a heterogeneous worker fleet without a central scheduler needing to predict job duration in advance.
+
+**High Availability:** Losing a transcode worker mid-job loses at most one chunk of work (§12 §3.2's chunk-granularity design) — trivially re-queued. Losing the manifest/metadata tier is more serious since it gates new playback starts (already-buffered playback continues from CDN cache); it should run multi-AZ with automated failover, consistent with any other read-critical metadata service in this course.
+
+**Disaster Recovery:** Object storage's own cross-region replication is the DR mechanism for media bytes (11-nines durability, §12); the metadata database needs standard backup/PITR since it's comparatively small but is the only record of which renditions exist and where — losing it without a backup effectively orphans the media bytes even though they physically survive.
+
+**CAP theorem:** The metadata/video-state store favors consistency (a video's status transition, e.g., `PARTIALLY_READY` → `READY`, must not be read as stale by the client polling for availability) while the view-count store favors availability (§2.5 — an approximate, eventually-consistent count is an explicit, accepted trade-off) — two data types in the same system, deliberately opposite CAP postures, chosen per-store rather than uniformly.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -136,6 +190,28 @@ graph TB
  **A:** The client's adaptive-bitrate logic should also maintain a small local buffer of upcoming segments (a few seconds ahead of current playback position) specifically to absorb brief network hiccups without an immediately visible playback stall — the buffer size itself is a genuine trade-off (a larger buffer better tolerates brief network drops but increases startup latency and memory usage, and delays the client's own reaction time to a *sustained* quality-appropriate-rendition switch) — a complete answer addresses both the quality-switching mechanism and this buffering trade-off together, since they jointly determine the actual viewer-perceived resilience to changing network conditions.
 10. **Q: As a Principal Engineer, how would you decide whether to build a custom CDN/edge infrastructure versus using a third-party CDN provider for a growing video platform?**
  **A:** Weigh the platform's actual scale/growth trajectory (a third-party CDN's pay-as-you-go model is typically far more cost-effective and operationally simpler at low-to-moderate scale) against the potential for custom infrastructure to provide meaningfully better cost-efficiency or control at truly massive, sustained scale (which is why YouTube, Netflix, and similarly enormous platforms have historically built significant custom CDN/edge infrastructure) — recommend starting with a mature third-party CDN provider by default (directly this course's recurring "don't build custom infrastructure without a demonstrated, measured need the off-the-shelf option can't meet," §Advanced Q9/ §Advanced Q8's recurring theme), revisiting the build-vs-buy decision only once actual, sustained scale and cost data justify the very substantial investment custom CDN infrastructure requires.
+
+### Expert (10)
+1. **Q: The back-of-the-envelope estimation (§12 Step 1) concludes egress, not storage or compute, is "the system." Walk through why a candidate who instead optimizes storage cost first has misread the problem, and what interview signal that mistake sends.**
+ **A:** At ~125 Tbps sustained egress against ~1.8 EB/year of storage growth, egress is the number with no path to being solved by *this system's own* engineering — it can only be delegated to a CDN vendor, which reframes nearly every subsequent decision (URL structure, cache-control, origin shielding, popularity-driven rendition generation) around minimizing origin traffic and maximizing edge cache-hit ratio. A candidate who leads with storage-tiering optimizations has correctly identified a real cost lever (§12 Step 1's third conclusion) but the wrong *primary* one — it signals they can optimize a component without first establishing which component the estimation says actually dominates, exactly the "estimate first, then let the estimate choose the hard problem" discipline this format is built to test.
+2. **Q: Design a strategy for migrating an existing catalog of billions of already-transcoded videos to a new, more efficient codec (e.g., AV1) without a "stop the world" re-transcode of the entire library, given the popularity-driven ladder means most videos were never transcoded to every tier.**
+ **A:** Treat codec migration as an extension of the popularity-driven ladder decision (§12 §3.5), not a separate project — re-transcode into the new codec on the same view-triggered schedule already governing rendition generation (hot content migrates first, naturally, as it crosses view thresholds and gets re-requested), while cold, rarely-viewed content is migrated lazily on next-request or left on the legacy codec indefinitely if it never crosses the threshold again. The player/manifest must support serving mixed-codec renditions during the multi-year transition window (client capability negotiation via the manifest, offering the new codec only to clients that declare support), and the metadata schema's `rendition` table (§12) needs a `codec` column from day one specifically so this migration doesn't require a schema change under pressure later.
+3. **Q: A regulator or court order requires a specific video be made permanently unavailable in one country but not others. Design this given the CDN-primary delivery model where content, once cached at an edge, is largely outside your direct control.**
+ **A:** Geo-restriction must be enforced at the manifest layer, not relied upon at the CDN edge alone — the manifest service checks the requesting client's region against a per-video restriction list before returning `manifest_url`, so a restricted region never receives a playable manifest regardless of what's cached at nearby edges; additionally, issue a CDN purge/invalidation for the specific segment keys in the affected region's edge nodes (most CDN vendors support geo-scoped invalidation) so already-cached copies don't continue serving stale, unrestricted access during the TTL window. The genuinely hard residual risk — a client that already downloaded/cached segments locally before the restriction took effect — is out of this system's control entirely and should be explicitly named as a limitation, not silently assumed solved.
+4. **Q: Explain why "time-to-first-rendition" (§7) is fundamentally a queueing-theory problem, and derive what happens to it during the §4 incident's upload burst using Little's Law.**
+ **A:** Time-to-first-rendition is dominated by queue wait time, not encode time, once the system is under load — Little's Law (`L = λW`, average jobs in system = arrival rate × average time in system) means that if arrival rate `λ` (uploads/sec) exceeds the fleet's sustained service rate even briefly, queue length `L` grows unboundedly for the duration of the burst, and every job's wait time `W` grows with it — which is exactly why §4's fix (splitting into independent, priority-ordered per-rendition jobs) doesn't reduce total work at all, it only reorders the queue so the *cheapest* jobs' wait time stays bounded even while the queue overall is backed up, trading fairness for the metric that actually matters to viewers (can I watch *something* soon).
+5. **Q: Design the monitoring and alerting that would have caught the §4 monolithic-job incident before it became user-visible, going beyond "queue depth is high."**
+ **A:** A single aggregate queue-depth metric is exactly what would have stayed misleadingly normal-looking during the incident (total throughput wasn't zero, it was just badly ordered) — the actionable signal is **queue depth and wait-time percentile, segmented by rendition tier**, specifically watching for the 240p queue's P95 wait time diverging upward from its historical baseline even while aggregate throughput looks healthy; alerting on that divergence (not on an absolute threshold) catches the head-of-line-blocking failure mode structurally, the same "segment before you alert, don't trust the aggregate" discipline as the risk-engine module's straggler incident (task-duration distribution skew, not mean).
+6. **Q: A Principal Engineer is asked to justify, to a finance stakeholder skeptical of infrastructure spend, why the platform should invest in origin-shield caching (§12 §3.4) before a single incident has occurred. Construct that argument.**
+ **A:** Frame it as bounding a known, quantifiable tail risk rather than a speculative improvement: without origin shielding, a viral video's cold-start moment produces a fan-out of simultaneous origin requests proportional to the number of distinct edge locations receiving first-time traffic — a number that scales with the CDN's own footprint, not with anything this system controls — meaning the worst-case origin load is effectively unbounded by design. Origin shielding caps that fan-out at "one origin fetch per shield region regardless of edge count," converting an open-ended tail risk into a fixed, budgeted cost — the argument is the same one made for circuit breakers and bulkheads elsewhere in this course: the investment is insurance against a rare, severe, and otherwise-uncapped failure mode, not a routine efficiency gain, and its value is realized precisely on the one day it's needed.
+7. **Q: Compare fan-out-on-write (push every rendition to every configured CDN region proactively) versus the pull/cache-miss model this design uses, for the transcoding-to-delivery handoff specifically.**
+ **A:** Proactively pushing every rendition to every CDN region on completion guarantees zero cold-start latency anywhere but multiplies transfer cost by the number of regions for content that, per §12 Step 1's third conclusion, mostly will never be watched in most of those regions — nearly all of that push traffic would be wasted. The pull/cache-miss model (this design's default) pays a one-time, per-region cold-start cost only for regions that actually request the content, which is strictly cheaper in aggregate given the power-law popularity distribution — push is justified only as the targeted pre-warming exception (§12 §3.4) for content with *known*, high-confidence anticipated demand (a scheduled premiere), never as the default delivery mechanism, exactly mirroring the fan-out-on-write-vs-read trade-off from the news-feed module now applied to CDN distribution instead of follower feeds.
+8. **Q: The view-count pipeline (§2.5, §11) uses Redis `INCR` plus a "dirty set" batched flush. Identify the failure mode if a Redis node is lost between an `INCR` and the next flush cycle, and design the fix.**
+ **A:** Any views accumulated in that Redis node's counter since the last successful flush are lost outright — Redis's default configuration prioritizes throughput over durability for exactly this kind of hot counter, and the batching window (30s, §11) is also the exposure window for data loss on node failure. Since view counts are explicitly an approximate, eventually-consistent metric (§2.5's stated trade-off), the pragmatic fix is not to make the counter durable (which would reintroduce the synchronous-write bottleneck this design exists to avoid) but to make loss bounded and recoverable: enable Redis AOF persistence with a short fsync interval to shrink the exposure window, and retain the raw view-event stream (Kafka, §12 §3.6) independently so counts can be *recomputed* from the durable event log if a divergence is detected — the counter is a fast, lossy cache of a truth that lives elsewhere, not the truth itself.
+9. **Q: As a Principal Engineer, how would you decide whether per-title/per-scene encoding optimization (§12 Step 4's "next largest cost win") is worth building, versus continuing to ship a fixed rendition ladder?**
+ **A:** The fixed ladder encodes every video in a content category at the same bitrate targets regardless of actual visual complexity, meaning simple, low-motion content (a static talking-head video) is measurably over-provisioned relative to what its perceptual quality actually requires — per-title encoding closes that gap but requires a materially more complex, per-video encoding-parameter search (or a trained model predicting good parameters) rather than a fixed preset, meaningfully increasing transcode-pipeline engineering complexity and per-video encode time. The Principal-level judgment: **quantify the gap first** — measure aggregate bitrate savings achievable on a representative sample before committing engineering investment, exactly the same "don't build custom infrastructure without a demonstrated, measured need" discipline (§Advanced Q10) applied to an encoding optimization rather than a build-vs-buy CDN decision — if the sample shows a large, broad-based savings (as Netflix's public per-title encoding results have shown), the investment is justified; if savings concentrate in a narrow content category, a narrower, lower-complexity fix targeting just that category may capture most of the value at a fraction of the cost.
+10. **Q: Synthesize this module's central lesson (independent, decomposed jobs) with the news-feed module's fan-out lesson and the risk-engine module's straggler incident. What single principle do all three share, and why does it recur across such different systems?**
+ **A:** All three are instances of the same underlying principle: **a system's unit of work should match the actual, independent grain of the problem, not an administratively convenient bundling of it** — a monolithic per-video transcode job bundles genuinely independent renditions (this module, §4); naive synchronous fan-out bundles a celebrity's millions of independent follower-feed writes into one blocking operation (the news-feed module); and position-count-based task partitioning bundled a handful of 4,000×-more-expensive exotic-option positions into ordinary-sized blocks, hiding a severe cost skew inside an innocuous-looking count (the risk-engine module). It recurs because "bundle by what's administratively easy to enumerate" (one video, one fan-out call, one position count) is almost always the first design that gets built, and only reveals its head-of-line-blocking or straggler failure mode once real-world skew (in cost, in popularity, in complexity) appears in production — meaning the fix is rarely "add more capacity" and is almost always "decompose the unit of work along the dimension that's actually skewed."
 
 ---
 
@@ -541,9 +617,150 @@ Client beacons → Kafka → windowed aggregation → periodic flush of batched 
 
 ---
 
-## 13–17. LLD / Debugging / Decision / Case Study / Principal
+## 13. Low-Level Design
 
-*(This module predates the full 16-section template; its incident, worked exercises, and Advanced-tier Q&A collectively carry this content. §12 above was authored to the four-step standard on 2026-08-09.)*
+**Requirements:** A video's renditions must publish independently as each completes (§12 Step 1's "low resolutions may publish before high ones"); a failed rendition must never block sibling renditions; job cost must be schedulable by priority; the design must support the popularity-driven ladder (§12 §3.5) without special-casing it into the core pipeline.
+
+**Class diagram:**
+```mermaid
+classDiagram
+    class Video {
+        +VideoId Id
+        +VideoStatus Status
+        +SourceKey Source
+        +MarkPartiallyReady()
+        +MarkReady()
+    }
+    class Rendition {
+        +VideoId VideoId
+        +Resolution Resolution
+        +RenditionStatus Status
+        +string PlaylistKey
+    }
+    class TranscodeJob {
+        +VideoId VideoId
+        +Resolution Resolution
+        +int ChunkIndex
+        +int Priority
+        +Execute() ChunkResult
+    }
+    class ITranscodeWorker {
+        <<interface>>
+        +TranscodeAsync(job) Task~ChunkResult~
+    }
+    class TranscodeOrchestrator {
+        +SplitIntoJobs(video) IEnumerable~TranscodeJob~
+        +OnChunkComplete(result)
+    }
+    class IRenditionStore {
+        <<interface>>
+        +MarkChunkReadyAsync(job)
+        +MarkRenditionReadyAsync(videoId, resolution)
+    }
+    class PriorityJobQueue {
+        +Enqueue(job, priority)
+        +TryDequeue() TranscodeJob
+    }
+
+    TranscodeOrchestrator --> TranscodeJob : creates
+    TranscodeOrchestrator --> PriorityJobQueue
+    ITranscodeWorker --> TranscodeJob : executes
+    ITranscodeWorker --> IRenditionStore : reports completion
+    Rendition --> Video
+    TranscodeJob --> Rendition
+```
+
+**Sequence diagram:** upload-complete → publish, showing why progressive availability falls out of the object model rather than special-case logic:
+
+```mermaid
+sequenceDiagram
+    participant U as Upload Service
+    participant O as Orchestrator
+    participant Q as PriorityJobQueue
+    participant W as Worker
+    participant S as RenditionStore
+    participant M as Metadata/Manifest
+
+    U->>O: video uploaded (source probed)
+    O->>O: SplitIntoJobs (per rendition x per chunk)
+    O->>Q: enqueue jobs (240p/480p/720p high priority, 1080p/4K low)
+    loop per chunk job, in priority order
+        Q->>W: dequeue job
+        W->>W: transcode chunk
+        W->>S: MarkChunkReadyAsync(job)
+    end
+    S->>S: all chunks for a rendition ready?
+    S->>M: MarkRenditionReadyAsync(videoId, resolution)
+    M->>M: Video.Status -> PARTIALLY_READY (first rendition ready)
+    Note over M: manifest republished, listing only READY renditions
+```
+
+**Design patterns used:** Fork-Join (per-rendition, per-chunk fan-out and completion aggregation, directly the same shape as the risk-engine grid's task fan-out); Strategy (`ITranscodeWorker` implementations swappable per codec — x264/x265/AV1 — without touching the orchestrator); State (`Video.Status`'s `UPLOADING → UPLOADED → TRANSCODING → PARTIALLY_READY → READY | FAILED` lifecycle, each transition guarded so an invalid jump, e.g. `READY` before any rendition completes, is structurally unrepresentable); Priority Queue / Scheduling pattern (§12 §3.2's cost-separated queues); Observer (rendition-completion events driving both the manifest republish and, independently, the popularity-tracking pipeline that decides when to enqueue 1080p/4K, without those two concerns being coupled to each other).
+
+**SOLID mapping:** Single Responsibility (`TranscodeOrchestrator` splits and schedules; `ITranscodeWorker` only transcodes; `IRenditionStore` only persists state — none overlap, mirroring the risk-engine's task/aggregator/store separation); Open/Closed (a new codec adds an `ITranscodeWorker` implementation; a new rendition tier adds a ladder entry — neither requires touching the orchestrator's splitting logic); Liskov (every `ITranscodeWorker` implementation must honor the same chunk-idempotency contract — a retried chunk must produce an equivalent result — or the priority-queue retry logic silently corrupts output); Interface Segregation (`IRenditionStore`'s chunk-completion write path is separate from the read path the manifest service uses, since the manifest service should never need write access); Dependency Inversion (the orchestrator depends on `ITranscodeWorker` and `IRenditionStore` abstractions, never a concrete codec library or storage SDK, which is what let §14's fix swap the decode strategy without touching orchestration).
+
+**Extensibility:** Adding a new rendition tier (e.g., 8K) is a ladder-configuration change plus a new `ITranscodeWorker` registration — no change to job splitting, priority scheduling, or the progressive-publish logic, since those already operate generically over "some set of renditions." Adding the popularity-driven on-demand ladder (§12 §3.5) required no change to this core model at all — it is implemented entirely as an additional producer of `TranscodeJob`s triggered by a view-threshold event, reusing the exact same queue and worker infrastructure as the initial upload-triggered jobs.
+
+**Concurrency/thread safety:** Jobs are independent and share no mutable state — workers require no locking between each other. The one shared-state concern is "has every chunk of this rendition completed," which must be an atomic, race-free check (a chunk-count decrement or an atomic set-membership check) since two workers could complete a rendition's last two chunks concurrently and both observe "all chunks ready" simultaneously without it — the fix is the same idempotent, atomic-completion-check discipline as the risk engine's append-only result store: completion is derived by querying current state, not by trusting a single worker's local view of it.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** Transcode workers began being OOM-killed in clusters, concentrated on jobs processing 4K source uploads, during a period when a popular creator tier started uploading longer-form, higher-resolution content. The OOM kills were not correlated with any single video but recurred whenever multiple 4K transcode jobs landed on the same worker node concurrently — a pattern that took longer to see than it should have, because each individual job's logs showed nothing unusual up to the moment of the kill.
+
+**Root cause:** The transcode worker's decode step read the **entire source file into an in-memory buffer** before beginning the encode loop, rather than streaming frames through a bounded decode window — a design that "worked" for the 480p/720p content the pipeline was originally built and load-tested against, where a full source file fit comfortably in a worker's memory budget even a few times over. A multi-gigabyte 4K source file, multiplied by two or three such jobs scheduled concurrently on the same node (the scheduler had no per-job memory-cost awareness, only CPU-slot awareness), exceeded the container memory limit and triggered the kernel OOM killer — mid-job, with no graceful shutdown, no partial-chunk checkpoint, and no distinguishing log line, because the process was killed externally rather than failing internally.
+
+**Investigation:** Container orchestrator event logs showed OOM-kill events clustering on specific nodes, not specific videos — the first clue that this was a *co-scheduling* problem, not a single-video problem. Correlating killed-job metadata against source resolution showed every incident involved at least one 4K source job. A memory profile of a single, isolated 4K transcode job (run deliberately in isolation to reproduce) showed peak resident memory several times larger than the container limit divided by the node's normal per-job concurrency — confirming the full-file-buffering behavior directly, once someone thought to check memory shape rather than assuming "transcoding is just CPU-bound" (§7's stated risk of profiling only at the service level).
+
+**Tools:** Container/orchestrator OOM-kill event logs (the primary signal); per-job memory profiling in isolation to confirm peak resident set size; job-scheduling logs cross-referenced against node placement to confirm the co-scheduling pattern; source-resolution metadata joined against failure records.
+
+**Fix:** Replaced full-file buffering with a streaming decode (piping the source through the encoder in a bounded window of frames, memory flat regardless of source file size or duration) and added a per-job estimated-memory-cost tag (derived from source resolution and duration, the same idea as the risk engine's cost-based task partitioning) that the scheduler uses to bound *concurrent memory commitment* per node, not just concurrent CPU-slot count — a 4K job now reserves proportionally more of a node's scheduling budget than a 240p job, preventing the co-scheduling collision that caused the cluster.
+
+**Prevention:** (1) Load-test the transcode fleet against a realistic **resolution and duration mix** including the heaviest real content (§7's benchmarking guidance), not a corpus that happens to match what the pipeline was originally built for. (2) Alert on per-node memory headroom trending toward the limit under normal job mix, not only on OOM-kill events after the fact — headroom erosion is the leading indicator, the kill is the lagging one. (3) Require any new transcode-worker code path handling source files to declare its memory-scaling behavior (flat/streaming vs. proportional-to-file-size) explicitly in review, since "reads the whole file" is exactly the kind of quietly-reasonable-until-it-isn't decision that a targeted review checklist item catches far more reliably than hoping someone notices during a code read.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Deciding how many rendition tiers to generate, and when, for each uploaded video — the decision with the largest compute-cost and storage-cost consequences in the entire system (§12 Step 1's third conclusion).
+
+**Option A — Generate the full ladder (240p through 4K) for every upload, upfront:**
+*Advantages:* Simplest possible mental model — every video has every rendition available the moment transcoding finishes; no popularity-tracking machinery, no on-demand job triggering, no risk of a viewer requesting a rendition that doesn't exist yet.
+*Disadvantages:* Spends the most expensive compute (4K/1080p encoding) and the most expensive storage on the overwhelming majority of uploads that, per the estimation, will receive near-zero views — the single largest cost inefficiency available in this design.
+*Cost:* Very high compute and storage. *Complexity:* Low. *Maintainability:* High. *Scalability:* Poor — cost scales linearly with upload volume regardless of actual demand.
+
+**Option B — Popularity-driven, on-demand ladder generation (recommended, and the design §12 §3.5 adopts):**
+*Advantages:* Generates expensive renditions only for content that demonstrably earns them (crosses a view threshold), which given the power-law view distribution captures the large majority of the cost savings available; cheap renditions still publish immediately (§4's fix preserved), so time-to-watchable is unaffected.
+*Disadvantages:* Requires view-tracking and threshold-triggering infrastructure; the first viewers of what becomes a hit see a lower ceiling on quality until the threshold is crossed and the higher tier finishes generating — a real, user-visible trade-off that must be stated, not hidden.
+*Cost:* Moderate compute (most of the savings realized), moderate storage. *Complexity:* Moderate — additional event-driven trigger logic layered on the existing job infrastructure, not a parallel system. *Maintainability:* Good, since it reuses the exact same queue/worker infrastructure as upload-triggered jobs (§13's extensibility point). *Scalability:* Excellent — cost tracks actual demand rather than upload volume.
+
+**Option C — Fully on-demand, just-in-time transcoding per playback request (no pre-generated ladder at all):**
+*Advantages:* Zero wasted compute — nothing is ever generated that isn't immediately requested; theoretically minimal storage footprint.
+*Disadvantages:* Introduces transcode latency into the *read path* for every first-time-quality-request, directly violating the sub-2-second playback-start non-functional requirement (§12 Step 1) for any rendition not already cached; makes the read path's latency depend on the write path's compute availability, breaking the deliberate read/write decoupling this design is built around (§12 Step 2's opening framing).
+*Cost:* Potentially lower storage, but unpredictable and spiky compute demand tied directly to viewing traffic. *Complexity:* High — requires a low-latency transcode path fundamentally different from the batch pipeline, essentially two transcoding systems. *Maintainability:* Poor. *Scalability:* Fails the latency requirement outright at meaningful concurrent-viewer counts.
+
+**Recommendation: Option B.** Option A's simplicity is real and defensible at small scale — a platform with modest upload volume and a compute budget that can absorb generating every tier for every video should not build the additional popularity-tracking machinery Option B requires, exactly the same "is this within budget" threshold question the risk-engine module's Architecture Decision poses for full-recomputation-versus-incremental. At this module's estimated scale (§12 Step 1), Option A's cost is prohibitive and Option C's latency violation is disqualifying on its own, making Option B's threshold-triggered middle ground the only one that satisfies both the cost constraint and the sub-2-second playback requirement simultaneously.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** This system's economics are dominated by a single line item — egress — meaning the platform's unit economics per view are set largely by CDN contract terms and encoding efficiency, not by feature velocity. A Principal Engineer framing investment here should lead with "this reduces cost-per-view by X%," a number a finance stakeholder can directly compare against subscriber/ad revenue per view, rather than "this makes transcoding faster," which has no obvious revenue connection on its own.
+
+**Engineering trade-offs:** The defining trade-off, recurring through §7, §12 §3.5, and §15, is compute/storage cost versus content availability completeness — generating every rendition for every video buys simplicity and completeness at a cost that doesn't scale; generating on-demand buys cost-proportionality at the price of a stated, real degradation for early viewers of soon-to-be-popular content. Recognizing this as a spectrum with a genuine threshold (not a binary build-everything-or-nothing choice) is the senior insight; treating "more available renditions" as an unqualified good is the junior one.
+
+**Technical leadership:** The controls that prevent this system's worst failure modes — chunk-level idempotency, per-rendition independence, cost-aware scheduling — share the property that they cost engineering discipline continuously and are invisible when working, exactly like the risk-engine module's reconciliation controls. A Principal Engineer's job is ensuring a future "let's simplify the job model, it's overcomplicated" refactor doesn't quietly reintroduce the monolithic-job or full-file-buffering failure modes this module's two incidents already paid to discover.
+
+**Cross-team communication:** Creators, viewers, finance, and legal/moderation are four audiences with different definitions of "the system working" — a creator wants fast time-to-watchable regardless of resolution tier; a viewer wants their specific requested quality available; finance wants egress and compute cost bounded; moderation wants content-ID and policy checks to run without becoming a publish bottleneck. §12 Step 1's dialogue exists precisely to surface which of these the interviewer (standing in for a real stakeholder) actually prioritizes before design work begins, rather than discovering the conflict after building something that serves the wrong one.
+
+**Architecture governance:** The popularity-threshold values (§12 §3.5) and the rendition-priority ordering (§12 §3.2) are exactly the kind of decision that looks like an arbitrary tuning parameter to a future engineer and is in fact load-bearing — these should be recorded as ADRs with the cost/quality trade-off data that justified the specific threshold chosen, so a future "let's just lower the threshold, more quality is better" change is made with the original cost analysis in hand, not against a blank slate.
+
+**Cost optimization:** Beyond the popularity-driven ladder itself, the highest-leverage remaining levers are per-title/per-scene encoding (§10 Expert Q9) and storage tiering by access recency — both are modeling/policy changes rather than infrastructure spend, and both should be quantified against a representative content sample before investment, the same discipline applied throughout this course to distinguish a justified optimization from a speculative one.
+
+**Risk analysis:** The dominant risk class here is not outage but **silent cost or quality drift** — a codec regression that quietly increases average bitrate 10%, a popularity threshold that's drifted wrong as the catalog's view distribution shifts, a CDN cache-hit ratio degrading gradually as content ages past its shield TTL — each produces no user-visible failure and no alert unless specifically instrumented for, and each compounds continuously at this system's scale. A Principal Engineer's risk register for this system should weight these drift metrics at least as heavily as availability, which is a genuinely counter-intuitive prioritization to defend to stakeholders trained to think of "risk" as "outage."
+
+**Long-term maintainability:** The artifacts most likely to decay silently are the popularity thresholds (as the catalog's overall view distribution shifts with platform growth), the codec/rendition ladder itself (as client device capabilities and network conditions evolve over years), and the cost-estimation model feeding the scheduler's memory-aware placement (§14's fix) as new codecs and resolutions are added. Each needs an owner and a periodic review cadence — without one, the system's cost efficiency erodes gradually enough that no single change looks alarming, exactly the shape of drift a purely incident-driven operating model will miss until the aggregate cost impact is large.
 
 ## 18. Revision
 **Key takeaways**: Video platforms are fundamentally a large-binary-content problem, requiring chunked/resumable upload, an asynchronous, independently-job-per-rendition transcoding pipeline (never monolithic —), and CDN-primary (not CDN-as-cache) delivery. Adaptive bitrate streaming is client-driven, requiring pre-generated discrete quality renditions, not server-side dynamic encoding. View-count and similar high-frequency counters must be batched/aggregated asynchronously (Redis counters + periodic flush), never synchronously written per-event. Storage tiering by access-frequency/popularity (a power-law distribution, directly paralleling the celebrity-account skew) is an economic necessity at this scale, not an optional optimization.

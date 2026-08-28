@@ -3,101 +3,6 @@
 > Domain: System Design | Level: Beginner → Expert | Prerequisite: [[01-System-Design-Fundamentals]], [[../03-REST-APIs/02-API-Security-Rate-Limiting]] (rate-limiting algorithms), [[../01-CSharp/02-Async-Await-Internals]] §Expert Q6 (the original distributed rate limiter introduced early in this course)
 
 ---
-# Distributed Rate Limiter & API Gateway (AWS)
-
-```mermaid
-flowchart LR
-
- Client[Client]
-
- Client --> CloudFront[CloudFront]
-
- CloudFront --> WAF[AWS WAF]
-
- WAF --> APIGateway[API Gateway]
-
- APIGateway --> Auth[Cognito / JWT]
-
- Auth --> RateLimiter[Rate Limiter]
-
- RateLimiter --> Redis[(ElastiCache Redis)]
-
- RateLimiter -->|Allowed| ALB[Application Load Balancer]
-
- RateLimiter -->|429 Too Many Requests| Reject[Reject Request]
-
- ALB --> ECS[ECS / EKS Microservices]
-
- ECS --> Aurora[(Aurora)]
-
- ECS --> DynamoDB[(DynamoDB)]
-
- ECS --> EventBridge[EventBridge]
-
- EventBridge --> SNS[SNS]
-
- SNS --> SQS[SQS]
-
- ECS --> CloudWatch[CloudWatch]
-```
-
-## Request Flow
-
-```
-Client
- │
- ▼
-CloudFront
- │
-AWS WAF
- │
-API Gateway
- │
-Authentication
- │
-Rate Limiter (Redis)
- │
- ┌──────────────┐
- │ Allowed? │
- └──────┬───────┘
- │Yes
- ▼
- Load Balancer
- │
- ECS / EKS Services
- │
-Aurora / DynamoDB
- │
- EventBridge
- │
- SNS → SQS
-```
-
-### AWS Services Used
-
-- CloudFront
-- AWS WAF
-- API Gateway
-- Amazon Cognito
-- ElastiCache (Redis)
-- Application Load Balancer
-- ECS / EKS
-- Aurora
-- DynamoDB
-- EventBridge
-- SNS
-- SQS
-- CloudWatch
-
-**Interview explanation (30 seconds):**
-1. Client requests go through **CloudFront** and **AWS WAF** for caching and protection.
-2. **API Gateway** authenticates the request using **Cognito/JWT**.
-3. A **distributed rate limiter** checks request counts in **Redis**.
-4. If the limit is exceeded, the client receives **HTTP 429**.
-5. Valid requests are routed through the **ALB** to **ECS/EKS microservices**.
-6. Services store data in **Aurora/DynamoDB**, publish events to **EventBridge**, and send asynchronous notifications using **SNS + SQS**.
-7. **CloudWatch** monitors logs, metrics, and alarms.
-
 ## 1. Fundamentals
 
 ### What is an API Gateway, and why does the rate limiter belong inside it architecturally?
@@ -151,6 +56,61 @@ graph TB
  GW1 -.->|"429 + Retry-After"| RejectedClient["Rejected request<br/>(never reaches backend)"]
 ```
 
+### 3.1 Concrete AWS Reference Architecture
+
+The generic diagram above names the roles (gateway fleet, shared rate-limit state, service discovery); this subsection pins those roles to a concrete AWS stack, useful for grounding the design in services an interviewer will recognize.
+
+```mermaid
+flowchart LR
+ Client[Client] --> CloudFront[CloudFront]
+ CloudFront --> WAF[AWS WAF]
+ WAF --> APIGateway[API Gateway]
+ APIGateway --> Auth[Cognito / JWT]
+ Auth --> RateLimiter[Rate Limiter]
+ RateLimiter --> Redis[(ElastiCache Redis)]
+ RateLimiter -->|Allowed| ALB[Application Load Balancer]
+ RateLimiter -->|429 Too Many Requests| Reject[Reject Request]
+ ALB --> ECS[ECS / EKS Microservices]
+ ECS --> Aurora[(Aurora)]
+ ECS --> DynamoDB[(DynamoDB)]
+ ECS --> EventBridge[EventBridge]
+ EventBridge --> SNS[SNS]
+ SNS --> SQS[SQS]
+ ECS --> CloudWatch[CloudWatch]
+```
+
+**Request flow, restated as a linear trace through that stack:**
+
+```
+Client
+ │
+ ▼
+CloudFront          -- edge caching, static/semi-static content, absorbs volumetric noise
+AWS WAF              -- layer-7 filtering (SQLi/XSS/bot signatures) BEFORE any app logic runs
+API Gateway           -- TLS termination, request validation, throttling primitives
+Authentication (Cognito/JWT)  -- caller identity resolved here, feeds the rate-limit key
+Rate Limiter (ElastiCache Redis) -- the atomic, multi-tier check (§2.3, §3.1 Lua script in §12)
+ │
+ ┌──────────────┐
+ │   Allowed?    │
+ └──────┬───────┘
+        │ Yes                                   │ No -> 429 + Retry-After, never reaches ALB
+        ▼
+ Application Load Balancer
+        │
+ ECS / EKS Services
+        │
+ Aurora (transactional) / DynamoDB (high-throughput key-value)
+        │
+ EventBridge -> SNS -> SQS   -- async fan-out for downstream consumers
+        │
+ CloudWatch                  -- logs, metrics, alarms across every hop above
+```
+
+**Mapping AWS services to the generic components:** CloudFront + WAF sit in front of the "Load Balancer" box in the generic diagram, absorbing volumetric/edge-layer load before it ever reaches a gateway instance; API Gateway plus the Rate Limiter/ElastiCache pairing together are the "Gateway Instance" + "Redis Cluster" boxes; ECS/EKS behind the ALB are the backend services the gateway protects; EventBridge/SNS/SQS are how those backends decouple from synchronous request/response once inside the trust boundary. CloudWatch is the observability plane spanning every hop — the practical instantiation of §9's monitoring requirement.
+
+**Why CloudFront + WAF precede the rate limiter, not the other way around:** a volumetric (network-layer) flood must be absorbed at the edge, before it costs a single Redis round-trip — this is the concrete version of the Intermediate-tier "DDoS resilience requires more than application-level rate limiting alone" answer below: WAF/CloudFront are the infrastructure-level layer that answer presupposes.
+
 ## 4. Production Example
 **Scenario**: A platform's API gateway enforced per-tenant rate limits correctly, but during a major, unexpected traffic spike (a viral marketing event driving a huge surge of legitimate, well-behaved traffic from many different tenants simultaneously, each individually well within their own per-tenant limit), the **aggregate** request volume across all tenants combined overwhelmed the backend services' actual capacity — no individual tenant was "at fault" or exceeding their own limit, but the sum of many tenants' legitimate, within-limit traffic exceeded what the backend fleet could handle, causing widespread latency degradation and errors across the entire platform, affecting even tenants who were sending very little traffic themselves. **Investigation**: confirmed via gateway logs that per-tenant rate limits were all correctly enforced and none were being exceeded — the gap was the **absence of a global, aggregate rate-limit tier** that would have proactively shed excess load (via 429s to some requests) once total system-wide load approached backend capacity, regardless of how that load was distributed across individual tenants. **Fix**: added a global rate-limit tier (checked in addition to, not instead of, the existing per-tenant tiers) sized to the backend fleet's actual measured capacity, with a graceful-degradation policy (§Advanced Q6) shedding load proportionally across tenants once the global limit is approached, rather than allowing unconstrained aggregate growth to overwhelm the backend regardless of per-tenant compliance. **Lesson**: multi-tier rate limiting isn't merely a "more thorough" version of single-tier limiting — the global tier specifically protects against a failure mode (aggregate overload from many individually-compliant sources) that no combination of per-tenant/per-user limits alone can prevent, directly demonstrating why "AND across all applicable tiers" must genuinely include a global tier, not just business-relevant per-tenant/per-user tiers, for the gateway to actually protect the backend's real, finite capacity.
 
@@ -165,6 +125,56 @@ graph TB
 - Implementing rate-limit checks via multiple sequential Redis round-trips instead of one atomic Lua script, multiplying unnecessary latency across every request.
 - Treating the gateway as a single, non-scaled instance, making it a genuine availability bottleneck for the entire system.
 - Placing rate-limiting logic deep inside individual backend services rather than centrally at the gateway, both duplicating logic across services and failing to reject over-limit requests before they consume backend capacity.
+
+---
+
+## 7. Performance Engineering
+
+**CPU:** The gateway's own CPU cost is dominated by TLS handshake/decryption (mitigated by session resumption and keep-alive, amortizing the cost across many requests per connection) and JSON/header parsing — both cheap per request but, per §2.1's "multiplied across every request" principle, worth profiling at the gateway tier specifically rather than assuming backend profiling covers it. JWT verification against a **cached JWKS** (never a per-request network fetch to the identity provider) keeps auth CPU-bound and local rather than I/O-bound and remote.
+
+**Memory:** Per-connection state (TLS session, HTTP/2 stream state, in-flight request buffers) is the dominant per-instance memory driver at high connection counts; service-discovery and policy caches (in-memory maps of healthy backends and rate-limit configuration) are small relative to connection state but must be sized for worst-case fleet topology (many backend services × many instances each), not just the common case.
+
+**GC/Allocations:** A gateway processing 50,000+ req/s cannot tolerate per-request allocation churn on the hot path — request/response objects, header dictionaries, and rate-limit key strings should be pooled or built from `Span<T>`/`ReadOnlyMemory<T>` slices over an underlying buffer rather than newly allocated per request; a gateway that allocates a new string for every rate-limit key composition (`$"tenant:{tenantId}:endpoint:{path}"` per request) generates Gen-0 pressure that is invisible in isolation but material at full fleet throughput.
+
+**Latency:** The rate-limit check itself is the single largest controllable latency contributor on the hot path (§2.2) — one atomic Lua script per request, never multiple sequential Redis round-trips. Beyond the limiter, service-discovery lookups must be **in-memory, not network calls** (a network hop to a discovery service per request would itself blow the same latency budget the Lua-script consolidation was designed to protect).
+
+**Throughput:** Gateway throughput scales horizontally and near-linearly with instance count as long as the shared Redis backing rate-limit state doesn't itself saturate — Redis Cluster sharding (by hashing the rate-limit key) is what keeps the shared-state dependency from becoming the throughput ceiling as the gateway fleet grows.
+
+**Benchmarking:** Load-test the gateway with a **realistic multi-tenant traffic mix** (many distinct tenant/user identities, not one synthetic load-generating identity) — a single-identity load test only exercises the per-tenant/per-user tiers and can never reproduce the aggregate-overload failure mode §4's incident describes, since that failure specifically requires many *different*, individually-compliant identities summing past capacity.
+
+**Caching:** Cacheable GET responses (a frequently-requested, infrequently-changing resource) served directly from the gateway tier avoid a backend round-trip entirely — a genuine latency and load-reduction win beyond what a CDN alone provides for dynamic-but-cacheable API responses, but every cached response must carry an explicit TTL/invalidation strategy tied to the backend's actual data-change cadence, or the gateway becomes a source of the read-your-own-writes staleness class of bug at the very edge of the system.
+
+## 8. Security
+
+**Threats:** As the system's single mandatory entry point, the gateway is the highest-value target in the architecture — credential stuffing and brute-force attacks against the authentication step, request smuggling/header injection attempting to bypass rate-limit key derivation, and volumetric (network-layer) floods attempting to exhaust connection capacity before any application-level check runs.
+
+**Mitigations:** TLS termination at the edge with modern cipher suites and mandatory certificate rotation; WAF rules (§3.1) filtering known attack signatures (SQLi/XSS payloads, credential-stuffing patterns) **before** the request reaches the rate limiter, so malicious traffic is rejected as cheaply as possible; strict request-shape validation (size limits, header-count limits, content-type enforcement) as the very first pipeline stage (§11's "Expert" exercise), rejecting malformed requests before any authentication/rate-limiting work is spent on them.
+
+**OWASP mapping:** **API4:2023 Unrestricted Resource Consumption** is this module's core topic — rate limiting/quota enforcement is the direct mitigation. **API2:2023 Broken Authentication** applies to the gateway's auth step specifically, since a compromised gateway-level credential check compromises every backend behind it. **API8:2023 Security Misconfiguration** applies to the gateway's own configuration (an overly permissive CORS policy, a forgotten debug endpoint) given its uniquely high blast radius.
+
+**AuthN/AuthZ:** Authentication happens once, centrally, at the gateway (§1); authorization (does this authenticated caller have permission for *this specific* resource/action) is typically better left to the backend service that owns the resource, since the gateway usually lacks the fine-grained domain context to make that decision correctly — the gateway resolves and forwards a **signed internal identity assertion** (§11 Advanced Q3's pattern), and each backend makes its own authorization decision against that trusted assertion.
+
+**Secrets:** The gateway holds unusually sensitive secrets (TLS private keys, the JWKS signing trust chain, the internal-token signing key shared with backends) — these belong in a managed secrets store (AWS Secrets Manager/KMS, Azure Key Vault) with automatic rotation, never in gateway instance configuration files, given that a single compromised gateway instance with static long-lived secrets compromises the internal trust boundary for every backend service.
+
+**Encryption:** TLS 1.2+ in transit for every hop, including gateway-to-backend traffic inside the "trusted" network (defense-in-depth — internal networks are not inherently trustworthy); rate-limit keys and any PII embedded in them (a user email used as a rate-limit key, for instance) should be hashed rather than stored in plaintext within Redis, since Redis is a shared, high-fan-out dependency and a poor place to concentrate raw PII.
+
+## 9. Scalability
+
+**Horizontal scaling:** The gateway fleet itself scales horizontally and near-linearly (stateless instances behind a load balancer) — the genuine scaling constraint is the shared Redis backing rate-limit state, addressed via Redis Cluster sharding by rate-limit key.
+
+**Vertical scaling:** Marginal value for gateway instances beyond a point where TLS/CPU work is already well-parallelized across cores; more relevant for individual Redis nodes handling a hot shard (a single extremely high-traffic tenant's key), where a larger node delays the need to re-shard.
+
+**Caching:** Local, short-TTL caches of service-discovery results and rarely-changing policy configuration reduce both latency and load on the control-plane dependencies, at the cost of a bounded propagation delay for configuration changes — an explicit, accepted trade-off (§11 Advanced Q9's canary-rollout discipline exists specifically to manage the risk this propagation delay introduces).
+
+**Replication/Partitioning:** The Redis Cluster backing rate-limit state is sharded (partitioned) by rate-limit key, so no single node bears the full system's rate-limit-check volume; a single extremely hot tenant key is the one case partitioning alone doesn't fully solve, requiring either a dedicated shard for that tenant or a local-lease/batched-token approach (Module 40's own recommendation) to remove most of its traffic from the network round-trip entirely.
+
+**Load balancing:** Layer-4 or Layer-7 load balancing distributes client connections across the gateway fleet; within the gateway's own routing to backends, health-check-aware, least-connections-style balancing (rather than naive round-robin) avoids routing to an already-overloaded or draining backend instance.
+
+**High Availability:** The gateway fleet's availability ceiling is set by its **shared dependencies** (§2.5) — Redis Cluster HA (replicas per shard, automatic failover) and service-discovery HA are the components deserving the most rigorous availability engineering, since a gateway-fleet outage is a total-system outage regardless of how healthy any individual backend is.
+
+**Disaster Recovery:** Multi-AZ deployment of both the gateway fleet and the Redis Cluster is the minimum bar given the gateway's total-system-outage blast radius; a multi-region gateway deployment (§10 Intermediate Q6) trades added latency-locality benefit against the harder problem of keeping rate-limit state either regional (cheap, approximate globally) or globally consistent (expensive, exact) — a trade-off that must be made explicitly, not accidentally.
+
+**CAP theorem:** The rate limiter's shared Redis state is a clear instance of choosing availability and low latency over strict, immediate global consistency — an approximate, eventually-fleet-consistent count (tolerating brief over-admission during a network partition between gateway instances and a Redis replica) is preferred to blocking every request until strict consistency can be guaranteed, since blocking the entire system's traffic on a partition would itself be a worse outage than a brief, bounded over-admission.
 
 ---
 
@@ -239,6 +249,28 @@ graph TB
  **A:** Given the gateway's uniquely high blast radius (Advanced Q8), deploy rate-limiter logic changes with an especially conservative canary strategy — route a small percentage of gateway instances (or, more granularly, a small percentage of traffic via a feature-flag-gated code path within the existing gateway fleet) to the new logic first, monitoring error rates/latency/throttling-rate metrics closely before progressively increasing the rollout percentage — directly the API-versioning-deprecation gradual-rollout discipline and §Advanced Q9's "climb the scaling/change ladder progressively" principle, now applied specifically to the component whose failure mode is uniquely system-wide rather than scoped to one service.
 10. **Q: As a Principal Engineer, how would you structure an organization-wide "gateway feature request" process, given that every backend team will eventually want the gateway to handle some cross-cutting concern specific to their service?**
  **A:** Establish clear criteria for what belongs in the shared, central gateway (genuinely cross-cutting, applicable to many/most services — authentication, standard rate-limiting tiers, TLS termination) versus what belongs in a service-specific layer or the BFF tier (Advanced Q6) instead (business-logic-specific transformations, a single service's unusual authentication variant) — requiring any proposed gateway feature to demonstrate it's genuinely shared/cross-cutting, not a one-off need for a single team's convenience, since the gateway's uniquely high blast radius (Advanced Q8/Q9) makes it a poor place for narrow, single-service-specific logic that would otherwise unnecessarily grow the most critical, hardest-to-safely-change component in the entire system's complexity and risk surface.
+
+### Expert (10)
+1. **Q: Design multi-tier rate limiting for a payments gateway specifically, where one tier (the card-network-imposed limit, e.g. Visa/Mastercard's own throttle on a merchant's transaction-authorization rate) is not the gateway's own policy but a constraint imposed by an external, non-negotiable third party. How does this change the design?**
+ **A:** A card-network-imposed limit must be enforced **more conservatively than the network's own actual threshold** — the gateway should self-throttle at, say, 90% of the network's documented limit, because *exceeding* a card network's rate ceiling risks the network itself throttling or suspending the merchant's entire processing relationship, a consequence far more severe than an ordinary 429 to one caller. This requires a distinct tier (`network-imposed`) tracked separately from the gateway's own business tiers (global/tenant/user/endpoint), typically enforced with a stricter, more pessimistic algorithm (a leaky bucket smoothing bursts rather than a bursty token bucket) specifically because the cost of over-admission here is contractual/relationship risk with the network, not merely a backend capacity concern — directly extending §2.3's multi-tier logic with a tier whose "AND" condition exists for an entirely different reason (external contractual compliance) than the others (internal capacity/fairness).
+2. **Q: A payments API's rate limiter must distinguish between a legitimate retry of a failed payment authorization (which should NOT count against the caller's rate limit, or should count differently) and a genuinely new request. Design this.**
+ **A:** Attach the **idempotency key** (already required for the payment API's own correctness, per this course's recurring exactly-once pattern) to the rate-limit accounting decision: a request presenting an idempotency key matching a prior request within its dedup window is recognized as a retry-of-the-same-logical-operation and should either not consume a new rate-limit token at all, or consume from a separate, more generous "retry" allowance — distinct from a request with a new idempotency key, which is genuinely new work and consumes normally. Getting this wrong in either direction is a real production risk: charging full rate-limit cost for legitimate retries (during a transient backend blip, exactly when retries spike) can cascade a backend hiccup into a client-visible rate-limit outage, the worst possible time for the limiter to become the bottleneck.
+3. **Q: Design the rate limiter's behavior specifically for webhook delivery TO external parties (the gateway is now the caller, not the callee) — e.g., notifying a merchant's webhook endpoint of a payment status change. How does this differ from inbound rate limiting?**
+ **A:** Outbound webhook delivery must respect the **receiving party's** stated or observed rate limits (many merchant webhook endpoints are modest servers that cannot absorb an unthrottled burst) — this inverts the whole problem: instead of protecting your own backend from callers, you're protecting the external callee from your own system, requiring a per-destination outbound rate limiter (often paired with exponential backoff and a dead-letter queue for destinations that are persistently failing/throttling) rather than the per-caller inbound tiers this module otherwise designs around — a genuinely distinct control plane, frequently missed because "rate limiting" defaults to meaning "protect me from you" rather than "protect you from me."
+4. **Q: Your gateway's rate limiter uses a sliding-window-log algorithm for maximum accuracy on a compliance-sensitive endpoint (e.g., a KYC/AML screening API with a strict, audited per-minute cap mandated by a regulator). Justify this choice over a cheaper token bucket, and state the cost.**
+ **A:** A regulator-mandated cap is a **contractual/legal tier**, not a fairness/capacity tier (Expert Q1's distinction) — a token-bucket's burst tolerance (allowing short bursts above the nominal rate as long as the average holds) is precisely the behavior a strict regulatory cap cannot tolerate, since "we briefly exceeded the mandated limit but stayed within average" is not a defensible compliance posture. The sliding-window-log (storing every individual request timestamp within the window and counting exactly) provides exact enforcement with no burst tolerance, at the real cost of O(window size) memory per key instead of O(1) — an explicit, justified trade of memory/complexity for auditable exactness, applied *only* to the specific endpoint carrying that regulatory requirement, not uniformly across the gateway (uniform application would pay this cost everywhere for a guarantee only one endpoint actually needs).
+5. **Q: Design how the gateway's rate limiter should behave during a declared disaster-recovery failover (traffic cutting over from a failed primary region to a standby region), where the standby region's Redis Cluster starts with cold, empty rate-limit state.**
+ **A:** A cold-started limiter with no memory of the primary region's recent consumption will, if naively enforced, effectively **reset every caller's quota** at failover — for the abuse-prevention tiers this is a minor, acceptable side effect (§Advanced Q4's ±5% approximate-accuracy tolerance already accepts this class of imprecision), but for contractual/regulatory tiers (Expert Q1, Q4) a reset quota could allow a caller to exceed their true entitlement for the remainder of the window. The correct design: on failover, contractual tiers should **conservatively assume near-full prior consumption** (fail toward the stricter interpretation) until enough of the window has elapsed that the risk of exceeding the true entitlement has passed, while abuse tiers can safely reset — again the "different tiers, different failure posture" principle (§Advanced Q8's fail-open/fail-closed decision), now applied specifically to the DR-failover cold-start scenario rather than an ordinary Redis outage.
+6. **Q: A merchant integrating with your payments gateway complains their legitimate traffic is being rate-limited during a flash sale, while your system correctly protected itself from what looked identical to an abuse pattern from a different, actually-malicious caller. How do you design around this false-positive cost, specifically for a business-critical caller?**
+ **A:** This is fundamentally a **cost-of-false-positive** problem, not a purely technical one — for a known, contractually significant merchant, the gateway should support a pre-negotiated, elevated limit tier (an explicit "flash sale" quota increase requested and provisioned ahead of a known traffic event, via the policy/control-plane mechanism), rather than relying solely on the standard tiers to correctly distinguish "legitimate flash-sale burst" from "abuse pattern" after the fact — because at the moment of the burst, the two are frequently statistically indistinguishable from request-rate shape alone. The broader principle: rate limiting is a blunt, statistical control; genuinely important, predictable traffic spikes should be handled by **advance capacity negotiation**, not asked of the limiter to solve through cleverer real-time heuristics alone.
+7. **Q: Design a specific mechanism preventing a compromised or buggy backend service from itself becoming a source of cascading failure back through the gateway — e.g., a backend that starts responding successfully but extremely slowly, causing gateway-side connection/thread exhaustion despite the rate limiter admitting only "allowed" traffic.**
+ **A:** This is precisely why rate limiting alone is insufficient at the gateway — a slow-but-technically-successful backend passes every rate-limit check (the caller is within their quota) while still exhausting the gateway's own finite connection pool to that backend, per-route. The fix is a **bulkhead**: a dedicated, capped connection pool and concurrency limit per backend route, so a degraded backend's slowness saturates only its own pool, not the gateway's shared resources — a slow backend then produces fast, clean `503`s (pool exhausted) rather than the gateway itself becoming unresponsive to every route, including healthy ones. This is the gateway-tier instance of the same bulkhead discipline the portfolio-risk-engine module applies at the grid-worker-pool level: an admitted, individually-compliant request can still be the vector for a resource-exhaustion failure the rate limiter, by design, cannot see.
+8. **Q: Compare enforcing rate limits with a centralized Redis-backed limiter versus a fully decentralized approach (e.g., Envoy's local rate limiting with periodic global sync, or CRDT-based counters) for a gateway operating across three geographic regions with a shared global tenant quota. What does the CRDT alternative actually buy, and at what cost?**
+ **A:** A CRDT-based counter (e.g., a PN-counter) allows each region to increment its local replica of a tenant's usage count independently, without a synchronous cross-region round-trip per request, then merges counts eventually/asynchronously across regions — trading the centralized design's cross-region latency (a request in one region blocking on a Redis round-trip to another region's authoritative store) for **temporary global over-admission**: for a period bounded by the CRDT's merge/propagation interval, the true global count can exceed the configured limit by up to the sum of what each region admitted independently before the last sync. This is the same fundamental trade-off Module 04 (CRDTs) established generally — availability/low-latency now, versus a bounded, eventually-corrected consistency error — here applied specifically to a rate limiter, where the "error" is over-admission rather than a merge conflict; acceptable for abuse tiers, generally unacceptable for the contractual/regulatory tiers Expert Q1/Q4 describe, again the recurring "different tiers tolerate different consistency models" answer.
+9. **Q: As a Principal Engineer, a cost-optimization initiative proposes downsizing the Redis Cluster backing the rate limiter to save infrastructure spend, based on average utilization being well under capacity. Evaluate this proposal.**
+ **A:** Average utilization is the wrong metric for a component whose failure mode under-capacity is a full-system, all-traffic latency/availability event (§2.1, §2.5) — the correct sizing metric is **peak, not average**, with headroom specifically for the aggregate-overload failure mode (§4's incident) and for straggler/hot-shard behavior from a single very-high-traffic tenant. Push back on the proposal by reframing it in terms the cost-optimization initiative itself should care about: the Redis Cluster's infrastructure cost is a rounding error relative to the revenue-at-risk from a gateway-wide outage caused by under-provisioning the one shared dependency every request passes through — the same "cost of the safeguard vs. cost of what it prevents" framing a Principal Engineer should apply to any proposal to shrink a component whose failure mode is total-system, not partial.
+10. **Q: Design an end-to-end synthetic monitoring strategy that would detect a regression of §4's aggregate-overload incident class proactively, in production, continuously — not just via the load test designed in Advanced Q5.**
+ **A:** Run a continuous, low-volume synthetic-canary workload simulating **many distinct, low-individual-volume tenant identities** (not one canary identity, which only exercises per-tenant tiers) generating traffic at a rate calibrated to sit just below the configured global tier's threshold, and alert if actual production aggregate load combined with the canary's traffic ever approaches the global limit without a corresponding rise in `429` responses — the specific signal that would indicate the global tier is either misconfigured, disabled, or was silently removed in a deploy (the exact class of regression, since the failure mode is the *absence* of a control, which produces no natural error signal on its own, only an absence of an expected one). Pair this with the rising `503`:`429` ratio metric from Module 40 §12 Step 4 as a second, independent leading indicator that limits are set above the capacity they're meant to protect.
 
 ---
 
@@ -621,9 +653,162 @@ Two safeguards worth stating: **version every snapshot and expose the active ver
 
 ---
 
-## 13–17. LLD / Debugging / Decision / Case Study / Principal
+## 13. Low-Level Design
 
-*(This module predates the full 16-section template; its incident, worked exercises, and Advanced-tier Q&A collectively carry this content. §12 above was authored to the four-step standard on 2026-08-09.)*
+**Requirements tied to §12's design:** the pipeline must reject cheap, obviously-invalid requests before spending any expensive check; the multi-tier limiter must evaluate all four tiers atomically in one round trip; tiers must be independently configurable (a new tier, or a change to one tier's algorithm, must not require touching the others); and the failure-mode policy (fail open/closed) must be pluggable per tier, not hard-coded.
+
+**Class diagram:**
+```mermaid
+classDiagram
+    class GatewayPipeline {
+        +HandleAsync(HttpRequest) HttpResponseMessage
+    }
+    class IAuthenticator {
+        <<interface>>
+        +AuthenticateAsync(request) Principal
+    }
+    class IRateLimiter {
+        <<interface>>
+        +ShouldAllowAsync(RateLimitContext) RateLimitDecision
+    }
+    class RateLimitContext {
+        +string GlobalKey
+        +string TenantKey
+        +string UserKey
+        +string EndpointKey
+        +int Cost
+    }
+    class RateLimitDecision {
+        +bool Allowed
+        +int DenyingTier
+        +int RemainingInTier
+    }
+    class ITierStrategy {
+        <<interface>>
+        +CheckAndConsume(key, capacity, refillRate, now) bool
+    }
+    class TokenBucketStrategy
+    class SlidingWindowLogStrategy
+    class LeakyBucketStrategy
+    class IServiceDiscovery {
+        <<interface>>
+        +ResolveHealthyInstanceAsync(path) BackendInstance
+    }
+    class ICircuitBreaker {
+        <<interface>>
+        +ExecuteAsync(fn) T
+    }
+
+    GatewayPipeline --> IAuthenticator
+    GatewayPipeline --> IRateLimiter
+    GatewayPipeline --> IServiceDiscovery
+    IRateLimiter --> RateLimitContext
+    IRateLimiter --> RateLimitDecision
+    IRateLimiter --> ITierStrategy
+    ITierStrategy <|.. TokenBucketStrategy
+    ITierStrategy <|.. SlidingWindowLogStrategy
+    ITierStrategy <|.. LeakyBucketStrategy
+    IRateLimiter --> ICircuitBreaker
+```
+
+**Sequence diagram — one request through the pipeline (mirrors §11's "Expert" exercise and §12 Step 2's numbered walkthrough):**
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant GW as GatewayPipeline
+    participant Auth as IAuthenticator
+    participant RL as IRateLimiter
+    participant Redis as Redis Cluster
+    participant SD as IServiceDiscovery
+    participant BE as Backend
+
+    C->>GW: HTTP request
+    GW->>GW: validate shape (size/headers/content-type)
+    GW->>Auth: AuthenticateAsync(request)
+    Auth-->>GW: Principal(tenantId, userId)
+    GW->>RL: ShouldAllowAsync(context)
+    RL->>Redis: EVAL multi-tier Lua script (1 round trip)
+    Redis-->>RL: {allowed, denyingTier, remaining}
+    alt denied
+        RL-->>GW: Decision(false, tier)
+        GW-->>C: 429 + Retry-After + X-RateLimit-Scope
+    else allowed
+        RL-->>GW: Decision(true)
+        GW->>SD: ResolveHealthyInstanceAsync(path)
+        SD-->>GW: BackendInstance
+        GW->>BE: forward (signed internal token)
+        BE-->>GW: response
+        GW-->>C: response
+    end
+```
+
+**Design patterns used:** **Strategy** — `ITierStrategy` lets token-bucket, sliding-window-log, and leaky-bucket algorithms be swapped per tier (Expert Q4 uses a different strategy for a compliance-sensitive endpoint than the default abuse tiers use) without touching the pipeline. **Chain of Responsibility** — the pipeline itself (validate → authenticate → rate-limit → route → forward) is a sequence of gates, each able to short-circuit the chain, directly the "reject cheap and early" discipline. **Circuit Breaker** — wraps the limiter's own Redis dependency (§11 "Hard" exercise), preventing a degraded shared dependency from becoming the gateway's own bottleneck. **Facade** — `GatewayPipeline` presents one simple `HandleAsync` entry point over several independently complex subsystems. **Bulkhead** — per-route connection pools to backends (§Expert Q7), isolating one slow backend's resource consumption from every other route.
+
+**SOLID mapping:** **Single Responsibility** — authentication, rate-limiting, discovery, and forwarding are separate types; the pipeline only sequences them. **Open/Closed** — a fifth rate-limit tier, or a new algorithm for an existing tier, is added by implementing `ITierStrategy`/extending `RateLimitContext`, without modifying the pipeline's control flow. **Liskov Substitution** — every `ITierStrategy` implementation must honor the same check-then-consume atomicity contract; a strategy that consumes before confirming all tiers pass would violate the "check-all-then-commit-all" invariant §12 §3.1 establishes. **Interface Segregation** — `IRateLimiter` (hot path) is separate from the admin/policy-configuration interface (§12's `PUT /admin/v1/policies`), since the pipeline never needs write access to policy. **Dependency Inversion** — `GatewayPipeline` depends on `IAuthenticator`/`IRateLimiter`/`IServiceDiscovery` abstractions, never concrete Redis/Cognito/Consul types, which is what makes the AWS-specific stack in §3.1 a swappable implementation detail rather than a structural assumption.
+
+**Extensibility:** Adding the "network-imposed" tier from §10 Expert Q1 means adding one more key/limit pair to `RateLimitContext` and one more `ITierStrategy` invocation inside the atomic script — no change to `GatewayPipeline`, `IAuthenticator`, or `IServiceDiscovery`. Adding webhook-outbound rate limiting (§10 Expert Q3) is a *new*, separate `IRateLimiter` consumer (an outbound dispatcher), reusing the same `ITierStrategy` abstractions against a per-destination key rather than a per-caller key — proof the abstraction generalizes to "protect X from Y" in either direction.
+
+**Concurrency/thread safety:** `GatewayPipeline` instances are stateless and safely handle concurrent requests with no shared mutable state — the only shared mutable state in the whole design is inside Redis, and it is made safe not by locking but by the **atomicity of the Lua script** (a single-threaded, serialized execution inside Redis itself), the same technique §12's `checkAndConsume` script relies on. Locally cached policy/service-discovery data is swapped via an **immutable snapshot replacement** (§12 §3.5) rather than mutated in place, so readers on the hot path never take a lock and never observe a partially-updated policy.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** A bank's card-payments authorization gateway began intermittently returning `429 Too Many Requests` to a major merchant partner during otherwise-normal traffic, well below that merchant's contractual quota. The merchant's own dashboard showed request volume at roughly 60% of their configured limit. Support escalated it as "rate limiter bug," and the on-call engineer's first instinct — bump the merchant's limit — was correctly overruled by the incident commander, since the limit clearly wasn't the actual constraint.
+
+**Investigation:** CloudWatch metrics (§3.1) showed the merchant's per-tenant Redis key sitting well under its configured ceiling at every sampled point — the *steady-state* number looked fine. Pulling second-by-second granularity (rather than the default one-minute aggregation) revealed the actual pattern: the merchant's traffic arrived in **sharp, sub-second bursts** (a batch job on their side firing 200 authorization requests in a ~400 ms window, several times per hour), and the gateway's token-bucket implementation for that tier had a **very small bucket capacity with a fast refill rate** — mathematically averaging to the correct configured rate, but with essentially no burst tolerance. Every burst partially drained the bucket faster than requests could be admitted, producing a short run of 429s that fully resolved before the next one-minute metrics aggregation even captured it, which is why the dashboards had looked clean.
+
+**Tools:** Second-granularity Redis `INCR`/token-bucket state sampling (not the default coarser aggregation); a request-level trace correlating rejected requests to their exact arrival timestamps, revealing the sub-400ms clustering; replaying the merchant's actual traffic shape (not a uniform synthetic load) against a staging gateway to reproduce the bursts on demand.
+
+**Fix:** Reconfigured the merchant's tier from a small-bucket/fast-refill token bucket to a **larger bucket capacity sized to their known batch-burst size, with the same long-run average refill rate** — the average rate limit (and therefore the contractual quota and the abuse-protection intent) was unchanged, but the bucket could now absorb one full batch burst without rejecting any of it. This is precisely the token-bucket-vs-leaky-bucket distinction from the algorithms module: a token bucket's *capacity* parameter, not just its *rate*, must be deliberately sized against the caller's actual traffic shape, not left at a default tuned for smooth, evenly-spaced traffic.
+
+**Prevention:** (1) Require every new tenant's rate-limit tier to be provisioned with a **documented expected traffic shape** (smooth vs. bursty, and if bursty, the burst size), not just a target average rate — the same "advance capacity negotiation" principle from §10 Expert Q6, now applied to burst tolerance rather than peak volume. (2) Add second-granularity (not minute-granularity) dashboards for `429` rate per tenant specifically, since minute-level aggregation is provably blind to bursts shorter than the aggregation window — the exact reason this incident went undetected until a merchant complained. (3) Load-test new tenant onboarding against their *actual* traffic pattern sample, not a synthetic uniform-rate generator, mirroring §7's benchmarking guidance and §10 Advanced Q5's "test the actual failure-producing traffic shape" discipline.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Choosing the mechanism by which gateway instances enforce rate limits against shared, fleet-wide state — the decision §12 Step 3.2 already reaches, restated here as a formal options comparison.
+
+**Option A — Synchronous per-request Redis check (one round trip per tier, or one atomic multi-tier script per request):**
+*Advantages:* Exact, fleet-wide-accurate enforcement at all times; simplest mental model; no over-admission window of any size.
+*Disadvantages:* Every request pays a network round trip to Redis on the hot path (§12's arithmetic: ~2ms at p99 even consolidated into one script) — a hard, permanent latency floor and a hard dependency on Redis for every single request, with no graceful way to reduce load on Redis under its own stress short of failing open/closed.
+*Cost:* Redis ops/sec scale 1:1 with gateway request volume — moderate infrastructure cost, straightforward to reason about.
+*Complexity:* Low. *Maintainability:* High. *Scalability:* Good until Redis itself becomes the bottleneck, mitigated by sharding but not eliminated.
+
+**Option B — Local batched leases (gateway instances claim blocks of tokens from Redis, spend locally, re-claim when low) — recommended for abuse/global tiers:**
+*Advantages:* Removes the Redis round trip from the vast majority of requests (§12's example: 50,000 → ~500 Redis ops/sec with a lease size of 100); dramatically reduces both latency and Redis load; gateway continues operating for a bounded time even during a Redis outage, since leased tokens are already spent locally.
+*Disadvantages:* Bounded, computable over-admission (worst case = lease size × instance count) at window boundaries — unacceptable for tiers where exactness has contractual/regulatory weight (§10 Expert Q1, Q4).
+*Cost:* Lower Redis infrastructure cost per unit of gateway throughput than Option A.
+*Complexity:* Moderate — lease acquisition/expiry/re-claim logic, and lease-size tuning as remaining quota shrinks, is genuine additional machinery.
+*Maintainability:* Moderate. *Scalability:* Excellent — this is what lets the gateway fleet scale without Redis becoming a linear bottleneck.
+
+**Option C — Fully local, per-instance in-memory limiting with no shared state:**
+*Advantages:* Zero network dependency, lowest possible latency, trivially resilient to a Redis outage (because there is no Redis).
+*Disadvantages:* The effective fleet-wide limit multiplies by instance count (§10 Basic Q3) — a configured "1,000/min" limit becomes "15,000/min" across 15 instances unless traffic is perfectly, deterministically sharded to the same instance per caller (rarely true behind a standard load balancer). Structurally cannot support fleet-accurate contractual limits.
+*Cost:* Lowest. *Complexity:* Lowest. *Maintainability:* High. *Scalability:* Excellent, but the "scalability" is scaling an incorrect guarantee.
+
+**Recommendation: a hybrid — Option B (local batched leases) for global and abuse-prevention tiers, Option A (exact synchronous check) for contractual/regulatory tiers, and Option C is rejected outright for any tier that must be fleet-accurate.** This is not a compromise for its own sake: §12 Step 1's dialogue establishes that "contractual" and "abuse" limits have genuinely different correctness requirements, so paying Option A's latency/Redis-load cost only where money or regulatory exposure is actually at stake — and Option B's efficiency everywhere else — is the design that actually matches the requirement, rather than either uniformly over-paying for exactness nobody needs (pure A) or uniformly under-delivering the exactness some tiers require (pure B or C).
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** The gateway is invisible when working and catastrophic when not — its entire business value is *risk avoided* (a backend overwhelmed by unthrottled traffic, a contractual SLA breached, a card-network relationship jeopardized by exceeding an imposed throttle) rather than revenue directly generated. A Principal Engineer pitching gateway investment should frame it the same way insurance is framed: the cost is continuous and visible, the payoff is a catastrophe that (if the investment worked) never happens and is therefore never directly observed — a genuinely harder budget argument than a feature with a visible revenue line, and one that requires citing concrete incident cost-avoidance (§14's incident, or an industry-comparable one) rather than an abstract risk statement.
+
+**Engineering trade-offs:** The central, recurring trade-off across this entire module is **exactness versus latency/load**, resolved per-tier rather than uniformly (§15). A Principal Engineer's specific contribution here is recognizing this isn't one decision but N decisions — one per tier — and pushing back on any proposal (from either direction) to make it uniform for the sake of simplicity, since uniform-exact overpays and uniform-approximate under-delivers on exactly the tier that carries contractual or regulatory weight.
+
+**Technical leadership:** The gateway's uniquely high blast radius (§10 Advanced Q8/Q9) means its change-management discipline must be visibly stricter than an ordinary service's — canary rollouts, shadow-mode policy testing (§12's `SHADOW` enforcement mode) before any new limit goes live, and a bias toward reversibility (feature-flagged rate-limit logic changes) over cleverness. A Principal Engineer's job is making this discipline the path of least resistance for every team touching the gateway, not a rule enforced after the fact by a postmortem.
+
+**Cross-team communication:** Every backend team eventually wants the gateway to special-case something for them (§10 Advanced Q10) — a Principal Engineer must hold a clear, articulated line on what's genuinely cross-cutting (belongs centrally) versus what's service-specific (belongs in a BFF or the service itself), and communicate that line proactively, before a specific team's request forces an ad-hoc exception that becomes precedent for the next team's request.
+
+**Architecture governance:** Every tier's algorithm choice, capacity, and failure-mode policy (fail open/closed, §12 §3.4) should be a recorded, reasoned decision (an ADR), specifically because — as §14's incident shows — a misconfigured tier can look correct in aggregate metrics for a long time before its actual failure mode surfaces, and the ADR is what lets a future engineer understand *why* a given tier was configured the way it was rather than silently "fixing" it into a regression.
+
+**Cost optimization:** The dominant cost lever is Option B's batched-lease design (§15) — reducing Redis operations by roughly two orders of magnitude at scale is a larger, more durable saving than infrastructure right-sizing, and it should be evaluated *before* any proposal to downsize the Redis Cluster itself (§10 Expert Q9), since under-provisioning the shared dependency every request passes through risks a cost far exceeding the infrastructure saved.
+
+**Risk analysis:** The two risk classes this module keeps surfacing are structurally different: **capacity risk** (§4's aggregate-overload incident — a missing global tier) is caught by load testing the specific failure shape (§10 Advanced Q5); **precision risk** (§14's burst-tolerance incident) is caught only by traffic-shape-aware testing and fine-grained monitoring, since it is invisible at both the aggregate-metric level and in a uniform synthetic load test. A risk register for this system should track both independently rather than assuming "the rate limiter is tested" covers both.
+
+**Long-term maintainability:** The artifacts most likely to silently rot are per-tenant tier configurations (provisioned once at onboarding, rarely revisited as a tenant's actual traffic shape evolves — exactly what happened in §14) and the mapping of which limits are genuinely contractual/regulatory versus which are just historical defaults nobody has revisited. Both deserve a periodic review cadence, not a "configure once" mental model — a gateway's rate-limit configuration is a living contract with reality, not a one-time setup task.
 
 ## 18. Revision
 **Key takeaways**: The API Gateway centralizes cross-cutting concerns (auth, rate limiting, routing) once, rather than duplicating them per backend service — its own latency/availability directly multiplies across the entire system's traffic, making it a uniquely high-leverage (and high-blast-radius) component. Multi-tier rate limiting (global, per-tenant, per-user, per-endpoint) must include a global, aggregate tier specifically to protect against many individually-compliant sources overwhelming backend capacity in aggregate — per-tenant/per-user limits alone cannot prevent this failure mode. The gateway itself is not a single point of failure when correctly horizontally-scaled and stateless; its shared dependencies (Redis, service discovery) are the actual availability-critical components requiring the most rigorous HA design. Every optimization/correctness decision at the gateway tier (atomic Lua-script rate checks, signed internal trust assertions, early request rejection) is amplified in importance by being multiplied across 100% of the system's traffic.

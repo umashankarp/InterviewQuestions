@@ -108,21 +108,6 @@ Application Load Balancer
 
 ---
 
-## Core Design Patterns
-
-- API Gateway Pattern
-- Microservices Architecture
-- Database per Service
-- Cache-Aside Pattern
-- CQRS (optional for Orders)
-- Event-Driven Architecture
-- Saga Pattern (Order + Payment + Inventory)
-- Publish–Subscribe
-- Idempotent Payment Processing
-- Retry with Dead Letter Queue (DLQ)
-- Horizontal Auto Scaling
-- CDN for Product Images
-
 ## 1. Fundamentals
 
 ### What makes an e-commerce platform a distinct system-design problem from the content-distribution systems covered so far?
@@ -204,6 +189,60 @@ graph TB
 
 ---
 
+## 7. Performance Engineering
+
+**CPU:** The catalog/browse path is I/O- and serialization-bound, not CPU-bound — most latency is cache/database round trips and JSON serialization of denormalized product documents; profile at the request-handler level and expect serialization, not business logic, to dominate. The checkout path is comparatively CPU-light (a handful of conditional updates and an external PSP call) — its cost is *waiting*, not *computing*, which is why checkout throughput targets (§Step 1) are modest relative to browse.
+
+**Memory:** Product-catalog caching (Redis/CDN edge caches) is the dominant memory consumer at scale — a 10 TB catalog cannot be fully cached, so cache design must prioritize the actual access-frequency distribution (a small fraction of SKUs receive the overwhelming majority of views, a Zipfian distribution typical of retail catalogs), evicting the long tail rather than caching uniformly. Inventory's hot working set (a few hundred GB, per §Step 2's data model) is small enough to stay memory-resident in the transactional database's buffer pool, which is precisely why the atomic-decrement mechanism (§3.1) can sustain thousands of operations/second — the hot rows never leave memory.
+
+**GC/Allocations:** High-QPS catalog read handlers (100,000+ views/s) are exactly the scenario where per-request allocation (new DTOs, LINQ intermediate collections) produces measurable Gen-0 GC pressure — prefer pre-serialized, cached response payloads (serialize once on cache-write, serve the cached bytes directly on cache-hit) over re-serializing a deserialized object graph on every request.
+
+**Latency:** Product-page p99 (< 200 ms, §Step 1) is a CDN/cache-hit-rate problem far more than a compute problem — a cache miss cascading to the document store adds tens of milliseconds, and a miss cascading further to a cold catalog rebuild (post-deploy or post-cache-flush) can spike p99 by an order of magnitude, which is why cache warming ahead of any planned cache-layer deployment is a standing operational practice, not an optional nicety. Checkout's p99 (< 3 s, including the PSP round trip) is dominated by the PSP call itself (often 500 ms–2 s including 3-D Secure) — internal processing (inventory reservation, order creation) should be a small fraction of this budget, and if internal steps ever approach the PSP's own latency, that is itself a signal something (an unindexed query, a synchronous call that should be async) is wrong.
+
+**Throughput:** Checkout throughput (300/s peak, ordinary traffic) is bottlenecked by inventory-row contention (§3.1) long before it is bottlenecked by raw compute or database connection-pool size — this is why the flash-sale incident (§4) manifested as a locking bottleneck specifically, not a CPU or network saturation event, and why capacity planning for checkout must model contention explicitly rather than extrapolating linearly from single-item throughput benchmarks.
+
+**Benchmarking:** Load-test checkout specifically at flash-sale-representative contention levels (many concurrent requests against one SKU), not just aggregate platform-wide QPS — a benchmark measuring only total throughput across many different SKUs would never surface the single-row bottleneck the incident exposed, exactly the "test at representative scale and shape, not just representative volume" discipline.
+
+**Caching:** Three distinct cache tiers with different invalidation needs: CDN (product images, long TTL, rarely invalidated), catalog document cache (price/description, short TTL or event-driven invalidation on catalog update), and the explicitly-*not*-cached inventory-commit path (§Step 2's `availability_hint` naming exists precisely to keep this boundary honest to API consumers).
+
+---
+
+## 8. Security
+
+**Threats:** Card-testing/fraud (rapid, small, exploratory transactions validating stolen card numbers) against checkout; account takeover leading to fraudulent orders shipped to an attacker-controlled address; price/inventory manipulation via a compromised or malicious client bypassing server-side price re-resolution; scraping/denial-of-inventory (a bot holding reservations open on popular items without completing checkout, denying real customers stock); and PII/PCI exposure of shipping addresses and payment tokens.
+
+**Mitigations:** Server-side price and availability **re-resolution at checkout** (§Step 2's walkthrough step 3) is itself the primary mitigation against client-side price/inventory manipulation — the client's cached values are never trusted for a financial decision. Reservation TTLs (§3.2) bound denial-of-inventory abuse; a stricter, shorter TTL or a CAPTCHA/rate-limit challenge on repeated reservation-without-checkout from the same session mitigates deliberate hoarding. Checkout-specific velocity/anomaly checks (§Advanced Q7 in §10 below) run synchronously on cheap signals and asynchronously on expensive fraud-model scoring.
+
+**OWASP mapping:** Broken Object-Level Authorization is the dominant API risk — an order-detail or cart endpoint must verify the requesting user owns the `order_id`/`cart_id` in the path, not merely that the request carries a valid token (the IDOR class); Injection risk on any legacy code path still building SQL from catalog-search or filter parameters rather than using parameterized queries or the dedicated search index; Security Misconfiguration risk in the PSP integration (a webhook endpoint that fails to verify the PSP's signature is a direct path to forged "payment succeeded" events).
+
+**AuthN/AuthZ:** Cognito-issued tokens (per the architecture diagram) authenticate the customer; authorization is enforced per-resource at each service (Cart Service checks cart ownership, Order Service checks order ownership) rather than assuming a valid token implies access to any resource ID supplied in the request — defense-in-depth, not gateway-only enforcement.
+
+**Secrets:** PSP API credentials, and any signing keys used to verify PSP webhook signatures, are stored in a managed secrets store (not environment variables baked into a container image) with rotation support — a stolen PSP credential is a direct path to fraudulent charges or refunds.
+
+**Encryption:** Payment data is tokenized at the PSP boundary (§10 Basic Q8) — the platform's own databases never hold raw card data, which is both a security control and the mechanism that keeps most of the platform outside PCI-DSS's strictest scope. Shipping addresses and order history (PII) are encrypted at rest; TLS everywhere in transit, non-negotiably for a financial-transaction platform at this bar.
+
+---
+
+## 9. Scalability
+
+**Horizontal scaling:** The catalog/browse tier scales horizontally and near-linearly (stateless services behind the ALB, per the architecture diagram) — this is the easy 90% of the platform's scale story. Checkout scales horizontally for the *stateless orchestration logic*, but is ultimately bounded by inventory-row contention (§3.1) and the PSP's own capacity — adding more checkout-service instances does not increase throughput once the bottleneck is the shared inventory row or the external PSP's rate limit.
+
+**Vertical scaling:** Relevant for the inventory database's primary (more memory keeps the hot working set resident, more CPU absorbs higher conditional-update throughput) — but §Step 2's sharded-counter mechanism is what actually lets flash-sale throughput scale, not a bigger box, since a single row's maximum throughput is bounded regardless of the hardware underneath it.
+
+**Caching as scaling:** The catalog cache is a genuine scaling multiplier, not just a latency optimization — without it, 100,000+ views/s would land directly on the document store, which is sized for a fraction of that load; cache hit rate is effectively the platform's primary browse-scalability lever.
+
+**Replication/Partitioning:** The catalog read model is replicated broadly (CDN edge, regional caches) since it's read-mostly and eventually consistent. Inventory is partitioned by `(offer_id, location_id)` — the marketplace's per-seller-per-warehouse granularity is itself a natural sharding key that keeps ordinary (non-flash-sale) contention low without any special mechanism.
+
+**Load balancing:** Standard ALB round-robin/least-connections for the stateless service tiers; the flash-sale admission controller (§3.3) is a *load-shedding* mechanism more than a load-balancing one — it deliberately queues/rejects excess demand rather than attempting to serve it, the correct choice when the downstream resource (one inventory row, even sharded) has a hard throughput ceiling no amount of balancing across servers can raise.
+
+**High Availability:** Each service tier is deployed across multiple AZs; the inventory database's primary failover is the single most consequential HA event on the platform, since checkout cannot proceed without it — a brief primary-failover window during peak (a flash sale) is exactly when its cost is highest, motivating extra failover-testing rigor for this specific dependency ahead of any anticipated high-demand event.
+
+**Disaster Recovery:** Order and inventory data (the correctness-critical stores) require point-in-time-recoverable backups and a tested restore procedure; the catalog read model, being rebuildable from source-of-truth catalog events, does not need the same DR rigor — it can simply be regenerated, another instance of "protect the source of truth; the derived read model is disposable."
+
+**CAP theorem:** The catalog favors availability and partition tolerance (serve a possibly-stale product page rather than an error). Checkout/inventory favors consistency — the platform would rather reject a checkout attempt during a partition than risk overselling, directly the fail-closed policy already established for the payment-gateway-outage case (§10 Advanced Q5) generalized to the inventory store itself.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -251,6 +290,28 @@ graph TB
  **A:** Beyond the inventory-contention-specific sharded-counter technique, capacity planning for a broadly-anticipated high-traffic event requires pre-emptively scaling the **entire** read path (additional cache/CDN capacity, pre-warmed §Advanced Q4's CDN pre-warming discussion) and the checkout/payment-gateway-adjacent capacity (confirming the payment processor itself can handle the anticipated peak transaction rate, a third-party dependency's own capacity becoming this platform's bottleneck if not proactively coordinated) — directly the capacity-estimation discipline applied specifically to a known, scheduled event rather than organic, gradually-observed growth, requiring proactive coordination with every dependency in the critical path, not just the platform's own infrastructure.
 10. **Q: As a Principal Engineer, how would you structure a pre-launch readiness review specifically for a new, anticipated-high-contention product feature (a flash sale, a major promotional event), generalizing the lesson into a standing process?**
  **A:** Require any anticipated high-contention/high-traffic feature launch to include an explicit, documented section addressing: (a) what is the expected peak contention level on any shared, correctness-critical resource (inventory records specifically), and does the standard mechanism's throughput at that contention level meet the required latency/success-rate targets (validated via load testing at the *actual* anticipated contention level, not just organic historical traffic patterns, directly §Advanced Q7's "test at representative scale" discipline); (b) is a specialized technique (sharded counters, Advanced Q1's proactive trigger) warranted, and if so, is it correctly configured and tested before the event; (c) are all critical-path third-party dependencies (payment gateway, Advanced Q9) confirmed to have sufficient capacity for the anticipated peak — converting this module's reactive, incident-driven lesson into a mandatory, proactive pre-launch checklist item for any future high-contention event, directly this course's recurring pattern of institutionalizing hard-won lessons as standing governance rather than tribal knowledge.
+
+### Expert (10)
+1. **Q: Design the exact SQL/predicate structure that makes the "atomic decrement with constraint" mechanism (§Step 3 §3.1) structurally impossible to oversell, and explain precisely why a check-then-update pattern in application code fails even under `READ COMMITTED` isolation.**
+ **A:** The statement must be a single, predicated write: `UPDATE inventory SET reserved = reserved + n WHERE offer_id = @id AND on_hand - reserved >= n`, where the affected-row count (0 or 1) *is* the success/failure signal — there is no separate read step to race against. A check-then-update pattern (`SELECT available; if available >= n: UPDATE`) fails under `READ COMMITTED` because two concurrent transactions can both read `available = 1` before either commits its decrement — each sees a snapshot that was true at read time but is no longer true at write time, a classic lost-update anomaly; only `SERIALIZABLE` isolation (at a steep throughput cost) or pushing the predicate into the write statement itself (making the database's own row-level write-lock the enforcement mechanism, not application logic) closes this window. This is the same conclusion reached independently for hot ledger accounts elsewhere in this course — a recurring, domain-independent correctness pattern, not an e-commerce-specific trick.
+2. **Q: A marketplace seller reports that their listed stock count and the platform's authoritative inventory record have diverged by a small but persistent margin over several weeks, with no single identifiable incident. Design the investigation.**
+ **A:** This is a "small, chronic divergence" signature, not an acute failure — investigate the **reservation lifecycle** first (§3.2): a sweeper with degraded throughput (falling behind, not stopped) would leak a small number of expired-but-unreleased reservations continuously rather than catastrophically, producing exactly this slow-drift pattern that a binary "sweeper up/down" health check would miss. Instrument the specific metric §Step 4 names — aged `HELD` reservations past `expires_at` — as a *trend*, not just a threshold alert, since a slowly-worsening trend below any fixed alert threshold is precisely the failure mode a point-in-time health check is blind to. Secondary suspects: a compensating action (§Step 3's saga table) that fails silently on retry exhaustion without escalating to the human queue §3.4 requires, or a multi-warehouse allocation race not fully covered by the single-location inventory row's own locking.
+3. **Q: Design the specific mechanism preventing the `accepted_total` price-mismatch check (§Step 2 API design) from becoming a usability failure during a legitimate, fast-moving price change (e.g., a scheduled promotion activating mid-browse).**
+ **A:** A hard `409 PRICE_CHANGED` on every mismatch, with no further nuance, would reject a customer whose price changed by one cent during a promotion rollout as harshly as one facing deliberate manipulation — indistinguishable failure modes given identical treatment. Refine: tolerate a small, bounded price *decrease* silently (charge the lower, current price — never worse for the customer, and eliminates friction for the common "promotion just activated" case), but always hard-reject a price *increase* mismatch with the explicit `409` and the new total shown, since silently charging more than the customer saw is the scenario that produces chargebacks and trust damage. This asymmetric handling turns a blunt, one-size-fits-all check into one that matches the actual risk profile of the two directions of mismatch.
+4. **Q: The platform's Admission Controller (§Step 3 §3.3) issues tokens at a fixed rate (500/s) for a flash sale. Design what happens when the checkout success rate for token-holders is measurably lower than the token-issuance rate implies it should be — i.e., the admitted population isn't converting at the expected rate.**
+ **A:** First distinguish two structurally different causes with different fixes: (a) **genuine demand exceeding stock** — tokens were issued for the full stock count exactly (§3.3 point 4), so a lower-than-expected conversion rate here likely means abandoned/expired tokens (customers who queued, got a token, then didn't complete checkout within its validity window) — the fix is either extending the token validity window slightly or re-issuing expired-and-unused tokens to the next customers in the wait queue, keeping actual admitted-checkout-attempts closer to the true throughput budget; versus (b) **the checkout path itself degrading under the 500/s admitted load** (a downstream dependency — PSP, inventory shard — throttling), which is a capacity-planning miss in the admission rate itself, not a token-lifecycle issue, and requires re-validating that 500/s is genuinely within the checkout path's tested capacity (§Step 1's back-of-envelope estimation), not just an assumed-safe number.
+5. **Q: Design how you would extend this platform's saga (§Step 3 §3.4) to support partial fulfillment — an order with 3 line items where 2 ship immediately and 1 is backordered — without violating the "every step has a compensating action defined before the saga runs" discipline.**
+ **A:** Partial fulfillment means the saga's granularity must move from order-level to **line-item-level** steps: each line item gets its own allocate/ship/capture sub-saga, and the parent order's status becomes a rollup (`PARTIALLY_SHIPPED`) rather than a single state machine value. Payment capture (§Step 2's "capture on ship") must then also become per-line-item or per-shipment, not a single order-level capture — capturing the full order amount before the backordered item ships would either overcharge for goods not yet sent (a correctness and, depending on jurisdiction, legal violation) or require a subsequent partial refund, a strictly worse customer experience than capturing incrementally per shipment. The compensating action for a line item that's ultimately unfulfillable (permanently out of stock) is then scoped to that item alone — refund/void just its authorized amount, leave the other line items' already-captured payments and shipments untouched — which is only possible because the saga's unit of work was redefined to the line item up front, not retrofitted after the fact.
+6. **Q: A Principal Engineer is asked to evaluate a proposal to migrate the Inventory Service (§Step 2, currently PostgreSQL) to a globally-distributed database to support true multi-region active-active inventory. Evaluate the trade-off.**
+ **A:** The dialogue (§Step 1) explicitly scoped multi-region inventory as "genuinely hard because inventory is physical and cannot be replicated" — a globally-distributed database solves the *data-replication* problem but not the *physical-inventory* problem: a warehouse in region A physically holds the unit, and no amount of database consensus makes a unit sitting in a US warehouse simultaneously available for instant fulfillment from an EU region. The realistic design is **not** a single global inventory keyspace but region-scoped inventory (each warehouse's stock authoritative in its own region) with a higher-level allocation/routing layer deciding which region's warehouse fulfills a given order — the database-distribution question is secondary to, and should not be solved before, this fulfillment-topology question; migrating the database without first resolving warehouse-to-region assignment would add significant operational complexity (consensus latency, conflict resolution) while not actually solving the stated multi-region requirement, a classic case of solving the infrastructure problem instead of the actual business problem.
+7. **Q: Design the reconciliation process between the platform's authoritative inventory record and the actual physical stock count in a warehouse, given that damage, theft, and miscounts mean these two numbers will never be identical by construction.**
+ **A:** Physical inventory (a "cycle count" — periodic physical recount of a sample of SKUs, standard warehouse practice) is the ground truth the platform's inventory record must periodically reconcile against, exactly analogous to reconciling internal ledger state against an externally-supplied settlement file elsewhere in this course's payment-systems material — breaks are classified the same way: **automatable** (a small, expected discrepancy within a tolerance band, auto-corrected with an audit-trail entry), **manual** (a discrepancy requiring investigation — a specific SKU consistently overcounted, suggesting a process or system bug), and **investigate** (a large, unexplained discrepancy suggesting theft or a systemic miscount). Discovering an oversold item via cycle-count reconciliation (rather than at fulfillment time, §Step 3's warehouse-allocation-fails-after-payment case) is strictly better, since it surfaces the problem before a customer-facing promise was made — motivating reconciliation as a proactive, scheduled discipline, not merely a reactive one triggered by fulfillment failures.
+8. **Q: The flash-sale sharded-counter mechanism (§Step 3 §3.3) issues tokens for exactly the stock count. Design what happens when a customer's token expires unused and the corresponding "reserved via token" unit needs to re-enter the available pool — without ever allowing the total issued-plus-available count to exceed the original stock count at any point in time.**
+ **A:** The invariant to preserve is: `tokens_issued + units_still_in_shards = original_stock_count`, at every point in time, never momentarily violated even during the re-entry process. A naive "just increment a shard's count back up on expiry" risks a race where the expiry-driven re-increment and a concurrent purchase-driven decrement interleave incorrectly if not itself an atomic, predicated operation — the same §3.1 discipline (predicate in the write, not check-then-write) applies to token expiry re-entry exactly as it applies to the original purchase decrement. Practically: expiry re-entry is itself a single atomic conditional increment back into a specific shard (chosen deterministically, e.g., the same shard the expired token originally reserved from, to avoid needing a separate cross-shard rebalancing step just to handle expiries), guarded so the shard's stock never exceeds its original allocation — treating "give a unit back" with the same atomicity rigor as "take a unit," rather than assuming the reverse operation is inherently safer because it's "adding," not "subtracting."
+9. **Q: As a Principal Engineer, a VP of Engineering asks why the platform doesn't simply "add more database servers" to solve the flash-sale bottleneck, having heard that horizontal scaling solves throughput problems generally. Construct the explanation.**
+ **A:** Frame it around the specific bottleneck's shape: horizontal scaling (adding more database *read replicas* or more application-tier instances) solves problems where load is distributable across independent units of work — but a flash sale concentrates 50,000 attempts/s on **one logical resource** (one item's stock count), and adding more database servers does not create more copies of that one authoritative number that can be independently, correctly decremented without coordination (more replicas of a single writable value either require consensus overhead that reintroduces the bottleneck, or risk incorrect, uncoordinated decrements across replicas, i.e., overselling). The actual fix — sharding the *counter itself* into N independently-contended sub-counters (§3.3) — is a data-modeling change, not an infrastructure-scaling change; explaining this distinction (throughput-scalable-by-adding-boxes vs. contention-bound-on-one-logical-key) is exactly the kind of translation from an executive's reasonable-sounding-but-wrong mental model to the actual engineering constraint that a Principal Engineer is expected to deliver clearly and without condescension.
+10. **Q: Design the SLI/SLO framework for this platform's checkout path specifically, distinguishing metrics that indicate "the platform is broken" from metrics that indicate "customers are choosing not to buy" — a distinction a naive checkout-success-rate metric conflates.**
+ **A:** A single "checkout success rate" SLO conflates fundamentally different signals: `OUT_OF_STOCK` and `PRICE_CHANGED` rejections (§Step 4's funnel-by-failure-reason breakdown) reflect the platform working *correctly* (rejecting exactly what should be rejected) under normal business conditions, while `PAYMENT_DECLINED` may reflect the customer's own card issuer, not the platform, and **internal 5xx errors, timeouts, and PSP-integration failures** are the platform's own responsibility and the only category that should page an on-call engineer. The correctly-designed SLO is scoped specifically to platform-caused failures (5xx rate, timeout rate, PSP-call failure rate on the platform's side of the integration) with the business-driven rejection categories tracked as separate, non-paging business metrics owned by product/merchandising rather than engineering — collapsing these into one number either desensitizes on-call engineers to real platform degradation (buried in normal `OUT_OF_STOCK` noise during a legitimate sellout) or, worse, pages engineering for a healthy, correctly-functioning system during an expected, successful sellout event.
 
 ---
 
@@ -648,9 +709,119 @@ Three properties make it work: **every step is idempotent**, because retries are
 
 ---
 
-## 13–17. LLD / Debugging / Decision / Case Study / Principal
+## 13. Low-Level Design
 
-*(This module predates the full 16-section template; its incident, worked exercises, and Advanced-tier Q&A collectively carry this content. §12 above was authored to the four-step standard on 2026-08-09.)*
+**Requirements:** Inventory decrement must be atomic and predicate-guarded (§Step 3 §3.1); checkout must be idempotent end-to-end; order fulfillment must run as a compensatable saga with every compensation itself idempotent and retryable; the catalog read path must never share a code path (or a database connection pool) with the checkout write path.
+
+**Class diagram:**
+```mermaid
+classDiagram
+ class CheckoutOrchestrator {
+ +CheckoutAsync(idempotencyKey, cart) CheckoutResult
+ }
+ class IInventoryService {
+ <<interface>>
+ +TryReserveAsync(offerId, locationId, qty) ReservationResult
+ +ReleaseAsync(reservationId) Task
+ }
+ class IPaymentGateway {
+ <<interface>>
+ +AuthorizeAsync(amount, token) AuthResult
+ +CaptureAsync(authId) CaptureResult
+ +VoidAsync(authId) Task
+ }
+ class OrderFulfillmentSaga {
+ -Stack~CompensatingAction~ completedSteps
+ +ExecuteAsync(order) Task
+ }
+ class IIdempotencyStore {
+ <<interface>>
+ +TryGetAsync(key) IdempotencyRecord
+ +MarkCompletedAsync(key, result) Task
+ }
+ class ShardedInventoryCounter {
+ -int shardCount
+ +TryPurchaseAsync(userId) bool
+ }
+
+ CheckoutOrchestrator --> IInventoryService
+ CheckoutOrchestrator --> IPaymentGateway
+ CheckoutOrchestrator --> IIdempotencyStore
+ CheckoutOrchestrator --> OrderFulfillmentSaga
+ IInventoryService <|.. ShardedInventoryCounter
+```
+
+**Sequence diagram:** the checkout walkthrough (§Step 2, steps 1–8) is the canonical sequence — client → orchestrator (claim idempotency key) → pricing re-resolution → inventory reservation → PSP authorization → order creation → async fulfillment saga. The saga's own internal sequence is §Step 3 §3.4's forward-steps-then-reverse-compensation trace.
+
+**Design patterns used** (folded in from this module's original design-patterns list, now tied to the specific components above): **API Gateway** (the ALB/API Gateway tier fronting every service, §Visual Architecture); **Microservices** and **Database-per-Service** (catalog/Aurora, cart/Redis, inventory/DynamoDB or Postgres per §Step 2, each independently owned); **Cache-Aside** (catalog reads, §3.1's caching discipline); **CQRS** (the catalog read model is a denormalized projection, distinct from the write-side product/offer records — optional but natural given the 1,000:1 read:write ratio, §Step 1); **Event-Driven Architecture** and **Publish–Subscribe** (EventBridge/SNS/SQS fanning order events out to inventory and notification workers); **Saga** (`OrderFulfillmentSaga`, §Step 3 §3.4 — the compensating-action Memento-like tracking via `Stack<CompensatingAction>`); **Idempotent Request** (`IIdempotencyStore`, the checkout endpoint); **Retry-with-DLQ** (compensations and the SQS-backed workers); **Strategy** (`IInventoryService` swapped between the ordinary atomic-decrement implementation and `ShardedInventoryCounter` for flash-sale items, §Advanced Q1); **Adapter** (`IPaymentGateway` wrapping the PSP's actual SDK, §10 Advanced Q5).
+
+**SOLID mapping:** Single Responsibility (`CheckoutOrchestrator` orchestrates, it does not itself implement inventory locking or payment protocol details); Open/Closed (a new inventory-contention technique — the sharded counter — implements `IInventoryService` without changing `CheckoutOrchestrator`); Liskov (every `IInventoryService` implementation must honor the same "never oversell" contract regardless of internal mechanism — the ordinary and sharded implementations are behaviorally substitutable at the contract level, differing only in throughput under contention); Interface Segregation (`IPaymentGateway` separates `AuthorizeAsync`/`CaptureAsync`/`VoidAsync` rather than one monolithic `ProcessPayment`, since the saga needs to call these independently at different steps); Dependency Inversion (`CheckoutOrchestrator` depends on `IInventoryService`/`IPaymentGateway` abstractions, never a concrete PSP SDK type or a concrete DynamoDB/Postgres client — this is what makes the flash-sale swap in Advanced Q1 a configuration change, not a code change).
+
+**Extensibility:** A new PSP integration implements `IPaymentGateway` without touching the saga. A new fulfillment step (e.g., gift-wrap processing) adds a saga step with its own compensating action, without modifying prior steps — the `Stack<CompensatingAction>` structure (§11's Expert coding exercise) accommodates an arbitrary step count by construction.
+
+**Concurrency/thread safety:** The inventory predicate-guarded update (§3.1) is the system's sole point requiring database-level concurrency control, and it is pushed into a single atomic statement specifically to avoid needing application-level locking. `CheckoutOrchestrator` itself is stateless per request — safe under arbitrary concurrent invocation. The saga persists its state before each step (§Step 3 §3.4), so a crashed/restarted orchestrator instance resumes rather than requiring a distributed lock across orchestrator replicas.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** During a major, pre-announced promotional event (not a flash-sale-scale drop, but 5–10× normal checkout traffic), checkout latency p99 degraded from 3 s to over 20 s for roughly 40 minutes, and a subset of customers received `500` errors on checkout with no clear inventory or payment-decline cause.
+
+**Root cause:** The Idempotency Store (backing `IIdempotencyStore`) was a single, unpartitioned table with a unique index on `idempotency_key`, and — separately — an application-level retry policy on transient database errors was retrying with a fixed, non-jittered 500 ms delay. Under the promotional traffic spike, a brief database connection-pool exhaustion event caused a wave of transient failures; every retrying client backed off by exactly the same 500 ms, producing a synchronized "thundering herd" of retries landing on the database at the same instant, repeatedly, which kept the connection pool saturated far longer than the original, brief exhaustion event — a self-inflicted, retry-amplified outage on top of an initially minor blip.
+
+**Investigation:** Database connection-pool utilization metrics showed saturation correlating with the latency spike, but oddly in a sawtooth pattern (spike, brief recovery, spike again) rather than sustained flat saturation — the sawtooth period matched the fixed 500 ms retry delay almost exactly, the key clue. Application logs, correlated by request ID, showed clusters of retries firing in near-simultaneous bursts rather than smoothly distributed over time, confirming synchronized retries rather than organically staggered ones.
+
+**Tools:** Database connection-pool utilization dashboard (time-series, revealing the sawtooth); distributed tracing correlating retry attempts across concurrent requests by timestamp; application-level retry-attempt logging with request correlation IDs (this course's recurring correlation-ID discipline, applied here to retries specifically rather than just cross-service call chains).
+
+**Fix:** Replaced the fixed 500 ms retry delay with exponential backoff plus jitter (a random offset added to each client's delay, decorrelating retry timing across concurrent clients) on the idempotency-store and inventory-database calls specifically. Also increased the connection-pool size and added a circuit breaker around the idempotency-store dependency so a sustained saturation event fails checkout fast (a `503`, retryable by the client with backoff) rather than queuing requests indefinitely and prolonging the pool exhaustion.
+
+**Prevention:** (1) Mandate jittered exponential backoff, never fixed-delay retry, as a standing platform-wide library default rather than a per-team choice — a fixed retry delay is a latent thundering-herd generator that only manifests under exactly the traffic-spike conditions it's least safe to discover it in. (2) Load-test specifically at promotional-event-representative traffic multiples (5–10×), not just steady-state peak, mirroring §7's benchmarking discipline. (3) Add a connection-pool-saturation-specific alert (not just overall error rate), since the sawtooth pattern was diagnostic and would have been visible well before the 40-minute customer-facing degradation if monitored proactively.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Choosing the checkout-path inventory-concurrency-control mechanism for *ordinary* (non-flash-sale) traffic — the decision underlying §Step 3 §3.1's recommendation, laid out comparatively.
+
+**Option A — Pessimistic row-level locking (`SELECT … FOR UPDATE`):**
+*Advantages:* Simple to reason about — a lock is held, no other transaction can concurrently modify the row, overselling is trivially impossible by construction. Easy to explain and audit.
+*Disadvantages:* Serializes all concurrent checkout attempts against the same item, holding the lock for the duration of whatever application logic runs inside the transaction (including, if not carefully scoped, the PSP call itself) — exactly the mechanism that caused §4's flash-sale incident when applied without regard to contention level.
+*Cost:* Low engineering complexity; throughput cost scales badly with contention.
+*Complexity:* Low. *Maintainability:* High. *Scalability:* Poor under high contention — this option's entire weakness is contention-sensitivity.
+
+**Option B — Optimistic concurrency (version-checked conditional update, retry on conflict):**
+*Advantages:* No lock held across application logic — better throughput than pessimistic locking under low-to-moderate contention, since transactions don't block each other, only fail and retry on genuine conflict.
+*Disadvantages:* Under high contention, retry storms can consume as much or more resource as pessimistic locking would have, just distributed differently (many failed-and-retried attempts instead of many queued-and-waiting ones); requires careful, bounded retry-count/backoff design to avoid the exact thundering-herd failure mode of §14's incident.
+*Cost:* Moderate engineering complexity (retry logic, conflict handling). *Complexity:* Moderate. *Maintainability:* Moderate. *Scalability:* Good under moderate contention, degrading under extreme contention.
+
+**Option C — Single-statement atomic predicated update (`UPDATE … WHERE available >= n`, recommended for ordinary traffic):**
+*Advantages:* One round trip, no explicit application-held lock, no separate check-then-write race window (§10 Expert Q1) — the database's own row-level write lock is the entire enforcement mechanism, held only for the duration of the single statement, not the surrounding application logic. Overselling is structurally impossible, not merely checked-for.
+*Disadvantages:* Still contention-bound on a single row under extreme demand (the flash-sale scenario) — this option alone does not solve that; it's the correct default, not a universal answer to every contention level.
+*Cost:* Low engineering complexity, best throughput-per-unit-complexity of the three. *Complexity:* Low. *Maintainability:* High. *Scalability:* Good under ordinary contention; requires Option D (sharding) specifically for extreme, anticipated-in-advance contention.
+
+**Recommendation: Option C as the platform-wide default for ordinary checkout traffic, with the sharded-counter mechanism (§Step 3 §3.3, effectively a fourth, specialized option) layered on top specifically for products flagged as anticipated high-contention events.** Option A is never the right default at this platform's scale — it's included here because it's the design §4's incident actually shipped with, and the comparison is the clearest way to show *why* it failed: it optimizes for simplicity of reasoning at a cost (long-held locks under application-logic duration) that only becomes visible at exactly the contention level a growing platform will eventually hit. Option B is a reasonable middle ground for a smaller platform or a lower-contention product category, but Option C dominates it in practice at this scale because it removes the retry-storm risk (§14's actual incident, though triggered by a different retry path) entirely for the common case.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** Checkout latency and reliability translate directly to conversion rate and revenue — every additional second of checkout latency measurably reduces completion rate on real e-commerce platforms, and a checkout outage during a promotional event (§14) doesn't just fail the affected requests, it fails them at the moment of highest planned revenue concentration. A Principal Engineer frames checkout-path investment in these terms (conversion-rate protection, peak-event revenue-at-risk) rather than as an abstract reliability target, because that's the framing that wins budget against competing feature work.
+
+**Engineering trade-offs:** The recurring trade-off across this module is **correctness-mechanism simplicity versus throughput-under-contention** (§15's three options), and the second-order trade-off is **anticipating high-contention scenarios in advance (§Advanced Q1's proactive trigger) versus discovering them reactively (§4/§14's incidents)** — the latter is always more expensive, both in direct outage cost and in the credibility cost of a customer-facing failure during a promotional event the business specifically invested marketing spend into driving traffic toward.
+
+**Technical leadership:** The sharded-counter mechanism, the jittered-backoff retry policy, and the reservation-sweeper monitoring are all instances of controls that are invisible when working and only visible when they fail — the same organizationally-fragile-control pattern this course names repeatedly. A Principal Engineer's job is ensuring these are mechanically triggered (a product-catalog "flash-sale" flag automatically routing to the sharded mechanism, not a manual runbook step someone might forget under launch-week time pressure) rather than dependent on a specific engineer remembering.
+
+**Cross-team communication:** Merchandising/marketing plans promotional events and flash sales on a timeline largely independent of engineering's own release cadence — a Principal Engineer must establish a standing, mandatory intake process (§10 Advanced Q10's pre-launch readiness review) so engineering learns about an anticipated high-contention event with enough lead time to load-test and configure the sharded mechanism, rather than learning about it from the incident it causes. This is a cross-team-process problem as much as a technical one.
+
+**Architecture governance:** The decision to keep the catalog/browse path and the checkout/inventory path on structurally different consistency models (§Step 1's central finding) should be documented as a standing architectural principle, not just an implicit convention — a well-intentioned future engineer "simplifying" the two paths onto one consistency model (in either direction) is a realistic risk this module's own findings should pre-empt via an explicit ADR.
+
+**Cost optimization:** The sharded-counter mechanism and the admission-controller virtual waiting room (§Step 3 §3.3) are deliberately *not* applied platform-wide — reserving specialized, higher-operational-overhead techniques for the specific, identified high-contention scenarios that need them (rather than as a universal default) is itself a cost-optimization discipline, avoiding unnecessary infrastructure and engineering-maintenance cost for the 99% of catalog items that never approach flash-sale-level contention.
+
+**Risk analysis:** The platform's dominant risk is not steady-state failure but *failure concentrated at moments of peak business value* — flash sales and promotional events are simultaneously the highest-revenue-opportunity moments and the highest-technical-risk moments, an alignment that makes standard, uniformly-applied risk management (treating all traffic as equally important) insufficient; risk investment should be explicitly weighted toward these anticipated peak events.
+
+**Long-term maintainability:** The artifacts most likely to decay silently are the reservation-sweeper's health (§3.2, a slow-drift failure mode per §10 Expert Q2), the retry-backoff configuration across the growing number of services calling the idempotency store and inventory database (§14's incident could recur in a new code path if jittered backoff isn't enforced as a shared library default rather than reimplemented per-service), and the dependency-graph-like coupling between "a product is flagged high-contention" and "the sharded mechanism actually activates" — each needs an owner and periodic verification, not a one-time implementation treated as permanently correct.
+
+---
 
 ## 18. Revision
 **Key takeaways**: An e-commerce platform's browse/catalog path (eventually consistent, cache/CDN-heavy) and checkout/fulfillment path (strongly consistent, idempotent, correctness-critical) have genuinely different requirements — apply the "consistency per data type" discipline at its most consequential. Preventing overselling requires atomic, conditional inventory updates (optimistic concurrency or pessimistic locking); extreme-contention scenarios (flash sales) require specialized techniques (sharded counters) applied proactively, anticipated in advance, not retrofitted reactively. Checkout requires idempotency-key support to prevent duplicate orders/double-charges on retry. Multi-step order fulfillment spanning independent services requires the Saga pattern (compensating actions in reverse order, themselves idempotent/retryable) rather than an infeasible cross-service distributed transaction. A payment-gateway outage should fail closed (reject cleanly), a deliberate contrast to a rate limiter's typical fail-open default, justified by checkout's uniquely high correctness stakes.
