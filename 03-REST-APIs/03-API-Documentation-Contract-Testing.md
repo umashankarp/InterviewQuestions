@@ -68,6 +68,54 @@ graph LR
 
 ---
 
+## 7. Performance Engineering
+
+**CPU/Memory:** Code-first OpenAPI generation (`AddSwaggerGen`/`WithOpenApi`) reflects over every mapped endpoint at startup — for a service with thousands of endpoints (a large gateway aggregating many downstream APIs), this can add measurable seconds to cold-start time; cache the generated `OpenApiDocument` in memory after first generation rather than regenerating it per request to `/swagger/v1/swagger.json`.
+
+**Contract-test suite runtime at scale:** A provider's CI cost for consumer-driven contract testing grows with the **N×M matrix** — N currently-published consumer contracts × M provider-build verification runs — not with the provider's own endpoint count. A provider with 40 consumers, each publishing a new Pact on every deploy, can accumulate hundreds of contract-verification runs per provider CI build if every historical contract version is naively re-verified; the standard mitigation is verifying only each consumer's **currently-deployed** contract version (tracked via the Pact Broker's "deployed/released" tagging, not every historical version ever published), keeping the matrix bounded by active consumers, not cumulative contract history.
+
+**Spec-diff computation cost:** An OpenAPI breaking-change diff (oasdiff/openapi-diff) over a large (thousands-of-path) spec is O(paths × schema-depth) — for most real APIs this completes in low single-digit seconds, but a monolithic, un-versioned spec covering an entire platform can push this into the tens of seconds; splitting the spec per bounded context/service (rather than one platform-wide document) keeps each individual diff fast and keeps a change in one service from triggering a full-platform-wide diff recomputation.
+
+**Latency:** None of this is on the request-serving hot path — spec generation, diffing, and contract verification are all build-time/CI-time costs, not runtime costs; the only runtime cost is serving the (cached) generated spec document itself, which is negligible.
+
+**Throughput/Scalability:** Parallelize consumer-contract verification across the N consumers (they're independent) rather than running them sequentially in CI — this is the dominant lever for keeping contract-test suite wall-clock time acceptable as the consumer count grows; a sequential N-consumer verification step is the most common cause of contract testing "getting too slow" complaints that lead teams to (wrongly) abandon it rather than parallelize it.
+
+**Benchmarking:** Track contract-verification-step CI duration as its own dashboarded metric, trending it against consumer count — a linearly growing (not flat) trend confirms the matrix-growth cost is real and warrants the "verify only currently-deployed contract" and parallelization mitigations before the step becomes a CI bottleneck teams route around.
+
+---
+
+## 8. Security
+
+**Threats:** The dominant, topic-specific threat is **information disclosure via the generated spec itself** — code-first generation reflects *everything* the code exposes, including internal-only endpoints, debug/admin routes, and DTO fields never intended for external consumers, and a spec published publicly (or even just accessible to any authenticated internal user, in a large organization) becomes a reconnaissance map of the provider's internal structure, naming conventions, and potentially even implementation details (a field like `internalLedgerShardId` leaking sharding strategy) that a well-designed public API surface would never intentionally document.
+
+**Mitigations:** Maintain **two spec documents** — an internal, complete spec (used for internal tooling, SDK generation, and consumer-driven contract verification) and a curated, explicitly-filtered public spec (using `.ExcludeFromDescription` or a dedicated `DocumentFilter` to strip internal-only paths/fields before the document is ever served externally); never assume "not linked from the docs portal" is sufficient obscurity — an OpenAPI JSON document is trivially discoverable at its conventional URL path (`/swagger/v1/swagger.json`, `/openapi.json`) by anyone who tries it.
+
+**OWASP mapping:** This is a direct instance of **OWASP API Security Top 10 — API9:2023 Improper Inventory Management** (undocumented/shadow endpoints and unmanaged API versions expanding attack surface) combined with excessive data exposure risk when a schema's `example` values are populated with real (not synthetic) production data during development and never scrubbed before the spec is published.
+
+**AuthN/AuthZ:** Never assume documenting an endpoint's `securitySchemes` requirement in the spec is equivalent to *enforcing* it in code — a spec is descriptive, not enforcing; the classic gap is an endpoint whose OpenAPI annotation correctly declares a bearer-token requirement while the actual route registration is missing the corresponding `[Authorize]`/middleware, a documentation/implementation drift risk structurally identical to this module's central field-drift incident, now applied to security metadata specifically.
+
+**Secrets:** Pact Broker credentials and any CI-embedded API tokens used to publish/pull contracts must be scoped least-privilege (publish-only for consumer CI, verify-only-read for provider CI) and rotated on the organization's standard secrets-rotation cadence — a leaked Pact Broker write credential would let an attacker publish a forged consumer contract, potentially either unblocking a change that should have failed verification or, conversely, blocking a legitimate provider deploy via a spurious contract failure (a denial-of-service against the release pipeline itself).
+
+**Encryption:** Standard TLS-in-transit for spec/contract retrieval; specs and contracts at rest (in the Pact Broker or a spec registry) should be treated as sensitive-adjacent internal artifacts, not public-readable-by-default storage, given the reconnaissance value described above.
+
+---
+
+## 9. Scalability
+
+**Horizontal scaling:** Contract verification parallelizes cleanly across consumers (each an independent Pact-replay run) — the standard scaling lever as an organization's consumer count grows into the dozens or hundreds.
+
+**The N×M consumer-provider matrix:** In a large microservices estate (hundreds of services, each both a provider to some and a consumer of others), the number of distinct contract relationships grows combinatorially, not linearly, with service count — a Pact Broker's **"can I deploy?"** matrix query (checking whether a specific service version is compatible with every currently-deployed version of every service it has a contract relationship with) becomes the practical scaling bottleneck; the mitigation is scoping contract verification to only a service's *actual, currently-registered* consumer/provider relationships (which the broker already tracks), never attempting to naively verify against every service in the estate.
+
+**Spec versioning at scale:** Supporting N concurrently-live API versions multiplies both the spec-maintenance burden and the breaking-change-diff surface by N; the standard scaling discipline is capping the number of concurrently-supported live versions (e.g., N-1, deprecating the oldest once a new version ships) via an enforced `Sunset`-header deprecation policy, rather than allowing an unbounded number of historical versions to remain live indefinitely.
+
+**Caching:** Generated OpenAPI documents and Pact-verification results are both cacheable — a spec doesn't need regeneration on every request (cache until the next deploy invalidates it), and a contract-verification result for a given (consumer-version, provider-version) pair is immutable once computed and can be cached/skipped on repeat CI runs against the same pair.
+
+**Replication/Partitioning:** Split a platform-wide spec into per-bounded-context specs (Performance Engineering) — this is simultaneously a performance optimization and a scalability one, since it lets each service's spec/contract-verification pipeline scale independently rather than all services sharing one increasingly large, slow, monolithic document.
+
+**High Availability:** A Pact Broker (or spec registry) outage should **fail CI closed but not block production traffic** — the broker is a build-time dependency, not a runtime one, so its unavailability delays deploys (a build/release-velocity impact) rather than causing a production incident, an important distinction to design and communicate correctly to avoid over-provisioning the broker for runtime-grade availability it doesn't actually need.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -143,6 +191,48 @@ graph LR
  **Why correct:** Specifies blocking CI controls (breaking-change diff gate, additive-only lint, semantic snapshots, provider-side contract verification) + versioning/governance so breaks are only ever deliberate.
  **Common mistakes:** Relying on review/discipline to catch breaks; no automated diff gate; ignoring semantic (non-structural) changes; no enforced versioning path.
  **Follow-ups:** "What exactly does the diff gate block, and what's the override path?" / "How do you diff *semantic* changes, not just schema?" / "Who owns the public API contract and signs off on a version bump?"
+
+4. **Q: A Pact Broker's `pactflow.webhooks` integration — which is supposed to trigger provider verification automatically whenever a consumer publishes a new contract — silently stopped firing eight months ago after a broker upgrade changed its webhook payload schema. No provider verification has run against any new consumer contract since. How do you find this, and how do you prevent this exact class of failure generally?**
+ **A:** This is a **verification-infrastructure-silently-stopped-functioning** failure, structurally identical to a dead-letter consumer nobody is watching. Finding it: audit the *last-triggered timestamp* of every configured webhook against the *last-published-contract timestamp* for the same consumer — any webhook whose last-fire time predates a subsequent contract publish is proven broken, not merely suspected. Preventing it generally: (1) never trust "the integration is configured" as evidence it's *working* — add a synthetic canary that publishes a deliberately-trivial contract change on a schedule and asserts the corresponding provider verification run actually executed within an expected window, alerting on its absence; (2) treat webhook/integration-config changes (including third-party platform upgrades) as requiring an explicit smoke test of every dependent integration, not just the upgraded component itself; (3) dashboard "time since last successful provider verification per consumer" as a first-class metric, alerting on staleness, not just on verification failure — a silently-*not-running* check produces no failure signal at all, which is exactly the blind spot a "did it run" canary closes that a "did it pass" alert cannot.
+ **Why correct:** Diagnoses the failure as verification infrastructure going silently inert (not a contract failure) and proposes the specific "verify the verifier" canary/staleness-monitoring fix rather than just re-enabling the webhook.
+ **Common mistakes:** Treating "the webhook is configured" as proof it fires; monitoring only pass/fail of verification runs rather than whether they ran at all; not smoke-testing dependent integrations after an upstream platform upgrade.
+ **Follow-ups:** "What's the specific canary payload you'd publish?" / "How would you have caught the broker-upgrade schema change before it broke the webhook?" / "Where else in this course has 'the check exists but never fires' recurred?"
+
+5. **Q: Your organization has 200 microservices. A new Staff Engineer proposes that every service publish an OpenAPI spec and every consumer write Pact contracts, enforced org-wide starting next quarter. Evaluate this proposal as a Principal.**
+ **A:** The mechanism is right; the rollout strategy is not. A blanket, uniform mandate across 200 services ignores that contract-testing value is proportional to (a) number of independent consumers and (b) cost of a production break — a low-traffic internal reporting service with one consumer gets little marginal safety from Pact over careful code review, while a payments-adjacent API with 15 independently-deployed consumers gets enormous value. Recommend: (1) tier services by consumer-count × blast-radius, mandating consumer-driven contracts only for the top tier immediately, with schema-diff-gate-only (cheaper, still valuable) as the baseline for everything else; (2) budget the N×M CI-cost growth explicitly (Performance Engineering) before mandating org-wide, since a blanket rollout without addressing matrix growth guarantees CI slowdown complaints that erode adoption; (3) attach the classification/onboarding review to whatever shared tooling gets built, exactly as CRDT-infrastructure onboarding needed a review gate, so teams don't cargo-cult contract testing onto use cases that don't need it. The Principal framing: universal mandates that ignore differential risk and differential infrastructure cost predictably produce shallow, resented compliance rather than genuine safety improvement — tier the rollout by actual risk instead.
+ **Why correct:** Rejects uniform mandate in favor of risk-tiered rollout, explicitly budgets the CI-cost-growth concern, and ties governance to actual infrastructure onboarding.
+ **Common mistakes:** Treating "more contract testing everywhere" as an unqualified good; ignoring CI-cost and adoption-friction consequences of a blanket mandate; no risk-based tiering.
+ **Follow-ups:** "What tier criteria would you actually use?" / "How do you avoid the mandate becoming checkbox compliance?" / "What's the fallback for services that can't practically adopt Pact?"
+
+6. **Q: A payments provider must simultaneously expose the same underlying settlement-status data via a REST/OpenAPI endpoint (for legacy partners), a GraphQL schema (for a newer internal dashboard team), and a gRPC/protobuf contract (for a latency-sensitive internal service). How do you prevent these three contracts from silently diverging in their representation of the same underlying status field?**
+ **A:** The three surfaces must share a single **internal source-of-truth model** (the domain type, e.g., a `SettlementStatus` enum with a documented, versioned meaning per value) that each protocol's schema is *generated from or validated against* — never hand-maintain three independently-authored schemas for the same concept, since that's precisely the drift-by-construction risk this module opened with, now tripled. Concretely: define the canonical enum/type once in the domain layer; generate the OpenAPI schema, the GraphQL SDL, and the .proto definitions from (or validate all three against) that single source via codegen or a shared schema-registry approach; run a cross-protocol semantic-equivalence test in CI asserting all three surfaces report the identical status taxonomy (same value set, same meaning per value) for a fixed set of known settlement states. Treat any protocol-specific schema that has drifted from the canonical model as a build failure, exactly as a REST-only breaking-change diff gate would.
+ **Why correct:** Identifies the shared-source-of-truth requirement across protocols and specifies a concrete cross-protocol equivalence test, rather than treating each protocol's contract testing as independent.
+ **Common mistakes:** Running Pact/OpenAPI-diff for the REST surface only, leaving GraphQL/gRPC unguarded; assuming protocol-specific contract tools alone (without a shared canonical model) prevent semantic drift between protocols.
+ **Follow-ups:** "What would the cross-protocol equivalence test actually assert?" / "Who owns the canonical domain model when three different teams own the three protocol surfaces?"
+
+7. **Q: Calculate the ROI case for adopting consumer-driven contract testing at a firm with 40 services and a documented history of two production incidents per quarter attributable to undetected breaking API changes, each costing roughly 6 engineer-hours of incident response plus reputational cost with an external partner. Is Pact adoption justified, and what would change your answer?**
+ **A:** Rough numbers: 2 incidents/quarter × 6 hours ≈ 12 engineer-hours/quarter in direct incident cost alone, before counting partner-trust erosion (unquantified but real, per the field-removal incident's "partner's own downstream monitoring caught it" detail — a cost this course's accuracy rules require flagging as an assumption, not a guaranteed number). Pact adoption cost: initial integration per consumer (roughly 1-2 engineer-days each, a one-time cost) plus ongoing CI-time overhead (Performance Engineering's N×M growth, mitigated via parallelization and currently-deployed-only verification). For a firm already experiencing recurring, attributable incidents at this rate, the one-time integration cost pays back within roughly one to two quarters purely on direct incident-response hours, before counting the harder-to-quantify partner-trust cost — a reasonably strong case. What would change the answer: if the two incidents/quarter are concentrated on services with very few consumers (schema-diff-gate-only might address them more cheaply), or if the incidents trace to semantic (Advanced Q2-style) rather than structural drift (Pact alone doesn't catch semantic drift without explicit semantic assertions) — in either case, a narrower, cheaper intervention might be the better first step before a full org-wide Pact rollout.
+ **Why correct:** Does the actual arithmetic, explicitly labels the reputational-cost figure as unquantified per this repo's accuracy rules, and names the conditions that would change the recommendation rather than treating the ROI case as universally settled.
+ **Common mistakes:** Asserting contract testing is "obviously worth it" without doing the cost comparison; treating an ROI estimate as precise rather than an explicitly-labeled assumption; ignoring that the *type* of historical incident (structural vs. semantic) changes which intervention is actually cost-effective.
+ **Follow-ups:** "How would you actually measure the reputational-cost component?" / "What's the cheaper intervention if incidents are concentrated on low-consumer-count services?"
+
+8. **Q: Distinguish, precisely, between "the API is fully backward compatible per our automated diff gate" and "our external integrators will not experience a break," and explain a scenario where the first is true and the second is false.**
+ **A:** The diff gate only classifies changes against the *formal spec* (Advanced Q1-3's structural and semantic checks) — it cannot see behavior an integrator depends on that was never captured in the spec at all. Scenario: a provider changes its **rate-limiting threshold** (from 100 req/s to 20 req/s) for a given endpoint — this is not a schema change of any kind (no field, type, or status code changes), so it passes every structural and semantic diff check cleanly, yet an integrator whose traffic pattern assumed the old threshold starts receiving 429s in production. The gap: backward compatibility as measured by schema/semantic diffing is scoped to the *documented contract surface*; an integrator's actual dependency surface includes operational characteristics (rate limits, timeout budgets, typical latency) that are rarely captured in an OpenAPI spec at all. The fix is the same one this module has repeated throughout: recorded-traffic-derived synthetic contracts and/or an explicit "operational contract" (documented SLA fields — rate limits, latency percentiles — versioned and diffed) alongside the structural/semantic one, since "spec-compliant" and "won't break a real integrator" remain distinct claims even after closing the structural and semantic gaps.
+ **Why correct:** Gives a concrete, non-schema example (rate-limit change) proving the two claims are genuinely distinct, and generalizes to the need for an operational contract alongside the structural/semantic ones.
+ **Common mistakes:** Assuming closing the structural and semantic gaps (Advanced Q1-3) fully closes the "spec-compliant ≠ safe to ship" gap this module opened with, missing that operational characteristics are a third, still-uncaptured dependency surface.
+ **Follow-ups:** "What would an 'operational contract' document concretely?" / "How would you detect an integrator's actual dependency on a specific rate-limit or latency characteristic?"
+
+9. **Q: A junior engineer asks: "If our OpenAPI spec is code-first and therefore can never drift from the implementation, why do we still need contract testing at all?" Answer as a Principal Engineer would.**
+ **A:** Code-first generation guarantees the spec matches what the code *can* return — it says nothing about whether what the code *can* return matches what any given consumer *actually needs*, nor whether a technically-spec-compliant change (Advanced Q1's field-removal incident) breaks a consumer's real, possibly under-specified dependency. Code-first eliminates exactly one failure mode — documentation drift from implementation — while leaving two others entirely open: (1) a spec-compliant-but-consumer-breaking change (the field-removal incident, where removing a non-required field was fully code-first-accurate and still broke a consumer), and (2) operational/semantic drift the spec was never designed to capture (Expert Q8). Code-first and contract testing solve different problems: one guarantees the spec is an accurate mirror of the code; the other guarantees a change doesn't break what a real consumer actually depends on — a code-first, contract-testing-free API can still ship a technically-accurate, fully-documented breaking change with total confidence right up until it reaches a real consumer in production.
+ **Why correct:** Precisely separates the two guarantees (spec-accuracy vs. consumer-safety) and shows code-first solves only the first, using the module's own incident as the proof.
+ **Common mistakes:** Conflating "the spec can't drift from the code" with "changes to the code can't break consumers" — these are unrelated claims that happen to both involve the word "spec."
+ **Follow-ups:** "Give a second example of a spec-accurate but consumer-breaking change, beyond field removal." / "Does schema-first change this answer at all?"
+
+10. **Q: As a Principal Engineer setting API-governance strategy for the next three years, what specific, measurable signal would tell you the organization's contract-testing investment is paying off, versus becoming ceremony?**
+ **A:** Track four signals jointly, not any single one in isolation: (1) **incidents-per-quarter attributable to undetected breaking changes**, trending down after adoption (the direct outcome metric, mirroring Expert Q7's ROI framing); (2) **contract-verification-step CI duration**, trending flat or sublinearly as consumer count grows (proof the N×M-matrix mitigations, Performance Engineering, are actually working, not merely documented); (3) **canary-verified "is the verification infrastructure actually firing" staleness metric** (Expert Q4) at zero unexplained gaps, since a contract-testing program that looks healthy on paper but has silently-dead webhooks is worse than no program, because it provides false confidence; (4) **rate of contract-test failures caught pre-merge versus post-deploy incidents that a contract test *should* have caught but didn't** — a nonzero, investigated rate of the latter is the leading indicator that the contract suite's coverage has a real gap (missing semantic assertions, missing operational-contract coverage, Expert Q8) rather than an argument to abandon the program. Ceremony looks like: contracts exist, CI is green, but incident rate hasn't moved and nobody can say when verification last actually ran for a given consumer — exactly the failure this module's own incidents (Advanced Q9, Expert Q4) describe.
+ **Why correct:** Names four concrete, trackable signals spanning outcome (incident rate), infrastructure health (CI duration, canary staleness), and coverage-gap detection, distinguishing genuine effectiveness from checkbox ceremony.
+ **Common mistakes:** Measuring only "percentage of services with contract tests" (an adoption metric, not an effectiveness metric) or "contract tests passing in CI" (proves nothing if the infrastructure is silently not running, Expert Q4).
+ **Follow-ups:** "Which of these four would you prioritize first, and why?" / "How often would you review this dashboard, and with whom?"
 
 ---
 
@@ -221,9 +311,185 @@ public class PaginationConventionAnalyzer
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-A large multi-team API platform (/) publishes code-first OpenAPI specs (zero-drift by construction), runs every external and cross-team consumer's Pact contract in the provider's CI as a required merge gate, and enforces design-consistency conventions (pagination, error shape, naming) via an automated spec-linting check (Expert exercise) rather than manual review alone. The production-debugging signature incident — a schema-compliant-but-consumer-breaking field removal — is diagnosed and prevented identically: adopt consumer-driven contracts so the *actual* dependency, not just the formal spec, gates every provider change. Principal-level guidance: "spec-compliant" and "safe to ship" are different claims — never let schema validation alone stand in for verified consumer compatibility on any API with independently-deployed consumers, and invest in consumer-driven contract testing proportional to the number of independent consumers and the cost of a production break.
+**Scenario:** Design the API-governance and contract-testing platform for a payments provider exposing settlement-status and invoice APIs to ~40 internal consumer services and a handful of external bank/merchant integrators.
+
+**Functional requirements**
+- Every provider service publishes a code-first OpenAPI spec on every build.
+- Every internal consumer publishes a Pact contract describing its actual dependency; the provider's CI verifies all currently-deployed consumer contracts before deploy.
+- External integrators (who won't publish Pacts) are protected via an automated OpenAPI breaking-change diff gate plus recorded-traffic synthetic contracts.
+- A public-facing, curated spec is served separately from the complete internal spec, with internal-only endpoints/fields excluded.
+
+**Non-functional requirements**
+- Contract-verification CI step stays under a fixed wall-clock budget (e.g., 3 minutes) regardless of consumer-count growth, via parallelization and currently-deployed-only verification (§7).
+- No breaking change can merge to a supported API version without either passing every gate or receiving an explicit, logged senior sign-off plus a version bump.
+- Verification infrastructure health (webhook liveness, last-successful-run staleness) is itself monitored, not merely assumed working (Expert Q4).
+
+**Back-of-the-envelope estimation:** 40 consumers × ~1 deploy/day each ≈ 40 contract-verification triggers/day against the provider; at ~2 seconds per consumer-contract replay run in parallel, verifying all 40 concurrently costs ~2-4 seconds wall-clock, not 80 seconds — parallelization is the difference between an acceptable and unacceptable CI gate at this scale. What this arithmetic tells you: the N×M matrix (§9) is manageable at 40 consumers with parallelization, but the same sequential approach would already be a bottleneck; **design for parallel verification from day one**, not as a later optimization.
+
+**Components:**
+- **Spec Registry** — stores each service's generated OpenAPI document per build; source of truth for the breaking-change diff gate.
+- **Pact Broker** — stores consumer-published contracts, tracks deployed/released versions per environment, exposes the "can-i-deploy" compatibility matrix query.
+- **Breaking-Change Diff Gate** — CI step running oasdiff/openapi-diff against the last released spec of each supported version; blocks merge on a breaking classification without sign-off.
+- **Semantic Snapshot Checker** — asserts money-representation (scale, rounding), status/decline-code taxonomy, and date/time format haven't silently changed meaning (Expert Q2), since structural diffing alone misses these.
+- **Recorded-Traffic Synthesizer** — derives characterization tests from real integrator gateway-log traffic for external consumers who won't publish Pacts (Advanced Q8).
+- **Verification-Health Canary** — publishes a scheduled synthetic contract change and asserts the corresponding verification run actually executes within an expected window (Expert Q4).
+- **Public Spec Curator** — a `DocumentFilter`-based pipeline step stripping internal-only paths/fields before publishing the externally-served spec.
+
+**Database selection:** The Pact Broker's own backing store (Postgres, in the standard OSS/PactFlow deployment) — a relational store is the right choice here for the same reason the payment-system reference article prefers boring ACID relational storage generally: contract/version relationships are highly relational (many-to-many between consumers, providers, and versions), and the workload is low-volume, high-integrity metadata, not a high-throughput data path.
+
+**Caching:** Generated OpenAPI documents are cached post-generation until the next deploy invalidates them; contract-verification results for an already-verified (consumer-version, provider-version) pair are cached and skipped on repeat CI runs.
+
+**Messaging:** Pact Broker webhooks trigger provider verification asynchronously on consumer contract publish — exactly the mechanism whose silent failure is this module's Production Debugging incident (§14), reinforcing that an async trigger must be paired with liveness monitoring, not assumed durable by default.
+
+**Scaling:** Contract verification parallelizes across consumers; spec-diff computation is scoped per bounded-context spec rather than one platform-wide document (§7); concurrently-supported live API versions are capped (e.g., N-1) via enforced deprecation to bound both spec-maintenance and diff-surface growth (§9).
+
+**Failure handling:** A Pact Broker outage fails CI closed (blocks deploys) but never blocks already-running production traffic, since the broker is a build-time, not runtime, dependency (§9). A breaking-change diff-gate failure blocks merge with an explicit override path requiring senior sign-off and a mandatory version bump — never a silent bypass.
+
+**Monitoring:** Contract-verification CI duration trend; per-consumer verification staleness (time since last successful run); breaking-change diff-gate trigger rate and override rate (a rising override rate is itself a signal worth investigating — see the "verified/deployed drift" theme).
+
+**Trade-offs:** Consumer-driven contracts (Pact) give the strongest guarantee but require willing, cooperating consumers — the org therefore layers **both** a provider-side automated diff gate (works for every consumer, external or not) **and** consumer-driven contracts (stronger, where adoption is feasible) rather than choosing one exclusively — see §15 for the full comparison.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** A provider's CI must, on every build: generate an accurate spec; diff it against every supported version's last-released spec; verify every currently-deployed consumer's Pact contract; check money/code-taxonomy semantic snapshots; and block merge on any failure unless explicitly overridden with sign-off.
+
+**Class diagram:**
+```mermaid
+classDiagram
+ class IBreakingChangeDetector {
+ <<interface>>
+ +Diff(previousSpec, candidateSpec) DiffResult
+ }
+ class StructuralDiffDetector {
+ +Diff(previousSpec, candidateSpec) DiffResult
+ }
+ class SemanticSnapshotDetector {
+ +Diff(previousSpec, candidateSpec) DiffResult
+ }
+ class IContractVerifier {
+ <<interface>>
+ +Verify(consumerContract, candidateBuild) VerificationResult
+ }
+ class PactContractVerifier {
+ +Verify(consumerContract, candidateBuild) VerificationResult
+ }
+ class RecordedTrafficVerifier {
+ +Verify(syntheticContract, candidateBuild) VerificationResult
+ }
+ class VerificationHealthCanary {
+ +CheckLiveness(consumerId) CanaryResult
+ }
+ class ApiGovernanceGate {
+ +Evaluate(candidateBuild) GateDecision
+ }
+
+ StructuralDiffDetector ..|> IBreakingChangeDetector
+ SemanticSnapshotDetector ..|> IBreakingChangeDetector
+ PactContractVerifier ..|> IContractVerifier
+ RecordedTrafficVerifier ..|> IContractVerifier
+ ApiGovernanceGate --> IBreakingChangeDetector
+ ApiGovernanceGate --> IContractVerifier
+ ApiGovernanceGate --> VerificationHealthCanary
+```
+
+**Sequence diagram:**
+```mermaid
+sequenceDiagram
+ participant Dev as Developer PR
+ participant CI as Provider CI
+ participant Diff as Breaking-Change Diff Gate
+ participant Broker as Pact Broker
+ participant Canary as Verification Canary
+
+ Dev->>CI: open PR (candidate spec)
+ CI->>Diff: diff(lastReleasedSpec, candidateSpec)
+ Diff-->>CI: structural + semantic result
+ CI->>Broker: pull currently-deployed consumer contracts
+ Broker-->>CI: N contracts
+ par verify each consumer contract
+ CI->>CI: replay contract 1..N against candidate build
+ end
+ CI->>Canary: confirm verification infra fired within window
+ alt any check failed, no override
+ CI-->>Dev: BLOCK merge
+ else all pass, or explicit sign-off + version bump
+ CI-->>Dev: ALLOW merge
+ end
+```
+
+**Design patterns used:** Strategy (`IBreakingChangeDetector`/`IContractVerifier` implementations are interchangeable); Composite (`ApiGovernanceGate` aggregates multiple independent checks into one pass/fail decision); Chain of Responsibility (each check runs and can independently block, without the gate needing to know each check's internals); Observer (the verification-health canary reacting to each build to confirm liveness).
+
+**SOLID mapping:** Single Responsibility (diffing, contract verification, and canary-liveness checking are each an independent component); Open/Closed (a new check type — e.g., a rate-limit/operational-contract checker, Expert Q8 — implements the existing interfaces without modifying `ApiGovernanceGate`); Liskov (every `IContractVerifier` must genuinely verify compatibility — a lenient/no-op implementation would silently defeat every downstream consumer relying on the gate's guarantee); Interface Segregation (diffing and verification are distinct interfaces, not one bloated "checker" interface); Dependency Inversion (`ApiGovernanceGate` depends on the abstractions, not concrete Pact/oasdiff implementations, allowing tooling substitution).
+
+**Extensibility:** A new external-integrator protection mechanism (Expert Q6's recorded-traffic-per-protocol approach) implements `IContractVerifier` without touching the Pact-specific path; a new semantic invariant (a new money-representation rule) extends `SemanticSnapshotDetector` without modifying structural diffing.
+
+**Concurrency/thread safety:** Per-consumer contract verification runs are independent and safely parallelizable (§7/§12); the `ApiGovernanceGate`'s aggregate decision must wait on all parallel checks completing (a fan-out/fan-in barrier) before rendering a final pass/fail, with any single check's failure short-circuiting to a block decision.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** See Expert Q4 — the Pact Broker's webhook integration silently stopped firing provider verification for eight months after a broker upgrade changed its webhook payload schema, with no contract verification running against any new consumer contract in that window.
+
+**Root cause:** A third-party platform upgrade (the Pact Broker's own webhook payload schema change) broke an integration the provider team had configured once and never re-validated — the team's mental model was "the webhook is configured, therefore it works," never distinguishing "configured" from "currently firing successfully."
+
+**Investigation:** Comparing each webhook's last-triggered timestamp against the corresponding consumer's last-contract-publish timestamp immediately proved the gap — any webhook whose last-fire time predated a subsequent publish was definitively broken, not merely suspected; this comparison had never been run proactively because no dashboard tracked webhook-liveness as a distinct metric from verification pass/fail rate.
+
+**Tools:** Pact Broker webhook execution logs (available but never actively monitored); a manual timestamp cross-reference script written during the investigation, later promoted to the permanent canary (§12).
+
+**Fix:** Re-registered the webhook against the new payload schema; backfilled verification runs for every consumer contract published during the eight-month gap (surfacing, retroactively, two contracts that would have failed verification had it run at the time — both were investigated and resolved as genuine, since-fixed drift); added the Verification-Health Canary (§12/§13) as a permanent, scheduled check.
+
+**Prevention:** (1) The canary itself, run on a schedule independent of real consumer activity, so silence is detected within hours, not months. (2) A standing rule that any third-party platform upgrade affecting a configured integration requires an explicit smoke test of that integration as part of the upgrade's own rollout checklist, not an assumption that "unrelated" platform changes can't affect it. (3) Dashboarding "time since last successful verification per consumer" as a first-class, alerted metric — distinct from, and complementary to, "verification pass/fail rate," since a webhook that never fires produces zero failures and looks, on a pass/fail-only dashboard, identical to perfect health.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Choosing the contract-safety strategy for a provider API with both cooperating internal consumers and external integrators who won't adopt Pact.
+
+**Option A — Schema/OpenAPI-diff gate only (no consumer-driven contracts):**
+*Advantages:* Works uniformly for every consumer, internal or external, with zero consumer cooperation required; cheap to operate (one gate, no N×M matrix); simple to reason about.
+*Disadvantages:* Cannot catch a spec-compliant-but-consumer-breaking change (this module's founding incident) or any operational/semantic drift the spec doesn't capture (Expert Q8).
+*Cost:* Low — one CI step, no broker infrastructure.
+*Complexity/Maintainability:* Low.
+
+**Option B — Consumer-driven contract testing (Pact) only:**
+*Advantages:* Captures actual consumer dependency precisely, catching exactly the class of break schema diffing misses.
+*Disadvantages:* Requires consumer cooperation — structurally unavailable for external integrators who won't publish Pacts (Expert Q1); N×M CI-cost growth (§7/§9) requires active management as consumer count scales.
+*Cost:* Moderate-to-high — broker infrastructure, per-consumer onboarding effort, ongoing CI-time management.
+*Complexity/Maintainability:* Moderate; requires the verification-health canary discipline (§14) to avoid silent infrastructure decay.
+
+**Option C — Layered: diff gate (all consumers) + Pact (cooperating internal consumers) + recorded-traffic synthetic contracts (external integrators):**
+*Advantages:* Closes the gap Option A leaves (consumer-driven precision where adoption is feasible) while still protecting external integrators Option B structurally can't reach (Expert Q1's resolution); each layer catches a different failure class (structural, actual-dependency, and — for externals — observed-behavior drift).
+*Disadvantages:* Highest operational complexity of the three; requires disciplined ownership of three distinct mechanisms rather than one.
+*Cost:* Highest, but proportional to the highest-stakes APIs where it's applied (Expert Q5's risk-tiered rollout), not necessarily uniform across all 200 services.
+*Complexity/Maintainability:* Highest, mitigated by risk-tiering (apply full Option C only to high-consumer-count/high-blast-radius APIs; Option A alone for low-stakes internal services).
+
+**Recommendation: Option C, risk-tiered by consumer count and blast radius (Expert Q5), never applied uniformly across an entire service estate.** For a payments-adjacent provider with both internal and external consumers, Option A alone provably misses this module's own founding incident, and Option B alone structurally cannot protect external integrators — only the layered approach closes both gaps, and the risk-tiering keeps its added cost proportional to where a production break is actually most expensive.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** An undetected breaking change reaching an external bank/merchant integrator carries both direct incident-response cost and partner-trust cost that compounds over the relationship, not just the single incident — the ROI case (Expert Q7) is real but the reputational component must be explicitly labeled as an estimate, not treated as a precise, provable figure, per this repo's accuracy discipline.
+
+**Engineering trade-offs:** The central trade this module develops — the cost and consumer-cooperation dependency of consumer-driven contracts against the weaker but universally-applicable coverage of schema diffing alone — is resolved not by picking one, but by layering both proportional to actual risk (§15), a sharper, evidence-based instance of the general "match control cost to actual risk" principle rather than either extreme (no contract testing, or uniform maximal contract testing everywhere).
+
+**Technical leadership:** Teaching engineers that "spec-compliant" and "safe to ship" are different claims (this module's founding distinction) is a durable mental model that generalizes well beyond API contracts — into database migrations, event schema evolution, and any producer/consumer relationship with independent deploy cadences; a Principal Engineer's highest-leverage teaching moment here is naming this pattern explicitly the first time a team encounters it, rather than letting each team rediscover it via its own incident.
+
+**Cross-team communication:** The verification-health canary incident (§14) exists precisely because a third-party platform upgrade's blast radius wasn't communicated to, or actively verified by, the team owning the dependent integration — a recurring cross-team failure shape (an upstream change silently breaking a downstream assumption) best closed by requiring explicit dependent-integration smoke tests as part of any upgrade's own rollout checklist, not by hoping teams remember to check.
+
+**Architecture governance:** Every API's contract-safety tier (Option A/B/C, §15) and every consumer relationship's verification-health status should be recorded and auditable in one place — a governance dashboard answering "which of our 200 services have which level of protection, and is that protection actually currently functioning" — rather than each team independently, invisibly deciding its own API's safety posture.
+
+**Cost optimization:** Risk-tiering (Expert Q5) is itself a cost-optimization decision — full Option C for every service would be both operationally unsustainable and poor ROI for low-stakes internal APIs; the discipline of tiering by consumer-count × blast-radius keeps the organization's total contract-testing investment proportional to its total risk exposure, not to service count.
+
+**Risk analysis:** The dominant risk pattern across this module's incidents is not "the contract-testing mechanism is wrong" — every mechanism discussed (Pact, diff gates, semantic snapshots) is individually sound — but composition and silent-decay risk: a spec-compliant change still breaking a real consumer (composition of "correct" components producing a wrong outcome), and a correctly-designed webhook silently going inert for eight months (a safety mechanism's own unaudited operational assumption failing). Risk registers should record not just "this API has contract testing" but its currently-verified liveness status.
+
+**Long-term maintainability:** What decays over time is not the contract-testing mechanism's correctness but the *currency* of its coverage — new consumers onboarding without contract adoption, third-party platform upgrades silently breaking integrations (§14), and API surfaces evolving new operational characteristics (Expert Q8) the original contract scope never anticipated. The practice that prevents indefinite decay is the same one this course applies everywhere else: periodic, structural re-audit of what's actually covered and actually functioning, not a one-time setup assumed to remain correct forever.
 
 ## 18. Revision
 **Key takeaways**: Code-first (`TypedResults`) OpenAPI generation eliminates documentation drift by construction; schema-first supports design-led collaboration at the cost of sync discipline. Consumer-driven contract testing (Pact) verifies actual consumer dependencies, a strictly stronger guarantee than schema compliance alone. "Breaking" is partly a property of consumer behavior, not just provider changes — an additive, spec-optional field can still break a real consumer. Design review + automated spec-linting (pagination/error-shape conventions) catches design inconsistency while it's still cheap to fix.

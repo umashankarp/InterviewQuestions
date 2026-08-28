@@ -68,6 +68,40 @@ graph TB
 
 ---
 
+## 7. Performance Engineering
+
+**CPU/cache locality:** Same Big-O does not mean same wall-clock time. Quicksort's in-place partitioning walks a contiguous array with excellent spatial locality (sequential reads/writes stay within a handful of cache lines), while merge sort's combine step reads from two source runs and writes to a separate auxiliary buffer — three simultaneously "hot" memory regions instead of one, meaning more cache misses per comparison even though both are O(n log n). This is why, on real hardware, an in-place introsort routinely outperforms a naively-implemented merge sort by 2-3x on medium-sized arrays (tens of thousands of elements) despite identical asymptotic complexity — the constant factor is dominated by memory-hierarchy behavior, not comparison count.
+
+**Allocations/GC:** `List<T>.Sort`/`Array.Sort` sort in place — zero allocations beyond the recursion stack. LINQ's `OrderBy`/`ThenBy` allocates an `OrderedEnumerable<T>` wrapper, a buffering array, and a comparer-delegate closure per call — for a hot path executing thousands of times per second (e.g., re-ranking a live order book on every incoming tick in a market-data or matching-engine service), that allocation rate becomes measurable Gen0 GC pressure. A production matching-engine team profiling a 40,000-ticks/second re-sort path found `OrderBy` responsible for ~18% of total Gen0 collections; switching to `Array.Sort` with a manually-maintained tie-break comparer (accepting the loss of built-in stability, replaced with an explicit sequence-number tiebreaker embedded in the comparer itself) eliminated the allocation entirely while preserving deterministic ordering.
+
+**JIT/branch prediction:** Comparison-based sorts are branch-heavy — each partition/merge step is a data-dependent branch the CPU's branch predictor cannot learn well for random data (roughly 50/50, near the theoretical worst case for prediction accuracy), costing 10-20 cycles per misprediction on modern x86-64. This is precisely why radix/counting sort — which replace comparisons with arithmetic (bucket index computation) — can be 3-5x faster than a comparison sort for suitable data (bounded-range integer keys, e.g., trade IDs or timestamp buckets) even at identical or worse asymptotic complexity, because they trade branch-heavy control flow for branch-free arithmetic the CPU pipeline executes without stalling.
+
+**Benchmarking discipline:** Never trust a Big-O comparison alone for a performance-sensitive choice — measure with BenchmarkDotNet across realistic input sizes and distributions (random, nearly-sorted, reverse-sorted, many-duplicates), since constant factors and cache behavior can invert the "obvious" choice; a nearly-sorted 10,000-element array sorts dramatically faster under insertion sort or Timsort-style run detection than under a generic O(n log n) sort that doesn't exploit existing order.
+
+---
+
+## 8. Security
+
+**Algorithmic-complexity DoS:** A comparison-based sort's advertised average-case complexity assumes non-adversarial input. A public-facing endpoint that accepts user-controlled data and sorts it internally (e.g., a bulk trade-upload/reconciliation API sorting an uploaded CSV batch by a client-supplied key before processing) is exploitable if the sort implementation has *any* deterministic worst-case triggerable by crafted input — a naive quicksort with a fixed (first-element or middle-element) pivot strategy degrades to O(n²) on a deliberately-constructed input, turning a normally-fast bulk-upload endpoint into a resource-exhaustion vector with a modestly-sized (tens of thousands of rows) malicious payload. This is a real, historically-exploited bug class: several language runtimes (a well-publicized 2011 disclosure covered Java, PHP, and others' hash-table implementations; comparison-sort variants of the same class exist for naive quicksort implementations lacking a worst-case safeguard) shipped comparison routines vulnerable to crafted-input complexity attacks before switching to guarded hybrids. .NET's introsort is *specifically* hardened against this — its recursion-depth-triggered heapsort fallback means no crafted input can force `Array.Sort`/`List<T>.Sort` past O(n log n), which is a genuine security property, not merely a performance one, and a concrete reason to never replace it with a hand-rolled "optimized" quicksort lacking the same safeguard (directly connecting to Advanced Q8's evaluation).
+
+**Timing side-channels:** Comparison-based algorithms that short-circuit on the first differing element (a naive string/byte-array comparison, and by extension any sort using such a comparer) leak timing information proportional to how many leading elements matched — for any comparison touching secret material (comparing a submitted API key, HMAC signature, or PIN against a stored value), this is a genuine, exploitable timing side-channel (an attacker measuring response-time variance can incrementally guess the secret byte-by-byte). The mitigation is a **constant-time comparison** (e.g., .NET's `CryptographicOperations.FixedTimeEquals`) for any comparison over secret data — never a general-purpose sort comparer or `string.Equals`/`CompareTo`, both of which are optimized for early-exit speed, the opposite of what a secret-comparison context needs. Sorting a *collection* of secrets by a derived ranking key can leak the ranking itself (the order becomes observable even if individual values are encrypted) — a genuine concern in scenarios like sorting encrypted bid amounts for auction-ranking display, where the sort order alone reveals relative magnitude even without decrypting the values.
+
+**Input validation:** Never sort/binary-search user-supplied data without first bounding its size (a resource-exhaustion vector independent of algorithmic complexity — even a well-behaved O(n log n) sort over an unbounded, attacker-controlled n is a DoS surface) and validating the comparer itself doesn't throw or behave inconsistently (a non-transitive or side-effecting comparer supplied via a pluggable sort-key mechanism can corrupt sort state or, in some runtime implementations, cause undefined behavior).
+
+---
+
+## 9. Scalability
+
+**Horizontal scaling — distributed sort:** At scale beyond a single machine's memory, sorting becomes a **distributed sort** problem — the canonical example is MapReduce's shuffle-and-sort phase (and the record-setting TeraSort benchmark), which partitions the key space across nodes (via sampling to estimate balanced partition boundaries, avoiding a single node receiving a disproportionate share of keys), sorts each partition locally (a single-machine sort, typically merge-sort-based for its external-sort-friendly streaming properties, §2.5/Advanced Q2), then concatenates the already-globally-ordered partitions — no cross-partition merge needed, since the sampling step guaranteed each partition's key range is disjoint and ordered relative to its neighbors.
+
+**Parallel in-memory sort:** Quicksort parallelizes naturally via **parallel partition** — after the first partition step, the two resulting subarrays are independent and can be sorted concurrently on separate threads/cores (`Array.Sort` doesn't do this automatically; `Parallel.Invoke`-based custom quicksort or PLINQ's `AsParallel.OrderBy` does), typically yielding near-linear speedup up to the point where partition overhead and cache contention between cores dominate for small subarrays (mirroring the insertion-sort-for-small-n threshold, now applied per-core).
+
+**Replication/partitioning for search:** A single sorted array's O(log n) binary search doesn't horizontally scale past one machine's memory — the standard scale-out answer is a **partitioned, sorted index** (each shard independently sorted and binary-searchable, with a routing layer directing a lookup to the correct shard by key range) — the same conceptual structure underlying distributed B-tree indexes and LSM-tree-based key-value stores' sorted-string-table (SSTable) segments, each individually binary-searchable.
+
+**HA/DR — resumable external sort:** A multi-hour external merge sort (§2.5, Advanced Q2's exemplar) over a large batch (e.g., an end-of-day trade-reconciliation dataset) should checkpoint completed run-merges to durable storage, so a mid-process node failure resumes from the last completed merge stage rather than restarting the entire sort — the same "make expensive, long-running work resumable, not merely retryable-from-scratch" discipline recurring across this course's batch-processing guidance.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -115,6 +149,28 @@ graph TB
  **A:** Classic binary search is a specific instance of a more general pattern: given a monotonic boolean predicate over a sorted range (true for all elements from some boundary point onward, false before it), binary search finds that boundary in O(log n) — many seemingly-unrelated interview problems ("find the minimum value satisfying some condition," "find the first day a stock price exceeds a threshold") are actually this same generalized pattern in disguise, solvable via binary search over the *answer space* (not necessarily the original array) once the underlying predicate's monotonicity is recognized — this generalization, not the narrow "search for X in a sorted array" textbook framing, is what lets an engineer recognize and apply binary search to genuinely novel problems.
 10. **Q: As a Principal Engineer, how would you build organizational awareness of subtle, correctness-relevant (not just performance-relevant) API distinctions like sort stability, generalizing beyond this specific incident?**
  **A:** Maintain a shared, documented list of "commonly-confused, correctness-relevant API pairs" (directly this course's recurring shared-reference-documentation governance pattern) — `Array.Sort` vs. `OrderBy` (stability), `IEnumerable` vs. `IQueryable` semantics (the client-side-evaluation trap), Controllers vs. Minimal API binding inference — each entry documenting the specific, non-obvious behavioral difference and a concrete example of the bug it can cause if conflated; this converts a class of "looks similar, behaves subtly differently" API-misuse risk (which recurs across many different technology areas in this course, not just sorting) into a discoverable, referenceable resource rather than tribal knowledge each team must independently rediscover via their own incident.
+
+### Expert (10)
+1. **Q: Explain the algorithmic-complexity DoS vulnerability class as it applies to comparison-based sorting, and how you'd remediate a public endpoint sorting user-supplied data.**
+ **A:** Any sort routine with a deterministic, input-triggerable worst case (a naive fixed-pivot quicksort's O(n²) on adversarially-crafted input) turns a public endpoint accepting user-controlled data into a resource-exhaustion vector — a modest, crafted payload can consume disproportionate CPU. Remediation: use an implementation with a *guaranteed* worst-case bound regardless of input (.NET's introsort, via its heapsort fallback, already provides this — never replace it with a hand-rolled sort lacking the same safeguard), and independently bound input size before sorting (an unbounded n is a DoS surface even under a guaranteed-O(n log n) algorithm).
+2. **Q: Why is a naive, early-exit string/array comparison a timing side-channel when used to compare secret values, and what's the correct mitigation?**
+ **A:** Early-exit comparison (returning as soon as a differing element is found) leaks timing information proportional to the number of leading matching elements — an attacker measuring response-time variance can incrementally recover a secret byte-by-byte. Mitigation: a constant-time comparison (`CryptographicOperations.FixedTimeEquals` in.NET) that always examines the full length regardless of where a mismatch occurs, used specifically for any comparison over secret material (API keys, signatures, PINs) — never a general-purpose comparer optimized for speed.
+3. **Q: Explain sample-based partitioning in distributed sort (e.g., MapReduce's shuffle-and-sort/TeraSort), and why it avoids a final cross-partition merge.**
+ **A:** Each node samples a subset of its local keys; the samples are aggregated and used to compute partition boundaries dividing the full key space into roughly-equal, contiguous, non-overlapping ranges. Each node's data is then shuffled so every key lands on the node owning its range, each node sorts its own (now-bounded) partition locally, and since partitions are already globally ordered relative to each other (partition 1's keys are all less than partition 2's, by construction), concatenating the sorted partitions in order yields a fully-sorted global result with no final merge step needed.
+4. **Q: Compare radix sort's performance characteristics against introsort for a large array of bounded-range integer keys (e.g., trade IDs), explaining the branch-prediction angle specifically.**
+ **A:** Radix sort processes digits via arithmetic bucket-index computation, avoiding data-dependent comparison branches entirely; comparison-based introsort's partition/merge steps branch on every comparison, and for near-random data the branch predictor achieves close to 50% accuracy (near worst-case for prediction), costing 10-20 cycles per misprediction. For suitably-shaped data (bounded integer range), radix sort's O(n+k) complexity combined with its branch-free inner loop can outperform introsort's O(n log n) by a large constant factor — but only when k (the key range) is small relative to n; for a wide or sparse key range, radix sort's bucket overhead can erase this advantage.
+5. **Q: Design a parallel quicksort and explain where its speedup saturates.**
+ **A:** After the first partition step produces two independent subarrays, recursively sort each concurrently (`Parallel.Invoke` or a work-stealing thread pool); this yields near-linear speedup for large arrays where partition cost dominates, but saturates once subarray size drops below a threshold where thread-scheduling/synchronization overhead exceeds the work being parallelized — exactly the same size-dependent trade-off that motivates introsort's insertion-sort-for-small-n switch, now recurring at the parallelization-overhead layer instead of the recursion-overhead layer.
+6. **Q: A team wants to sort a dataset too large for one machine's memory but small enough to fit across a cluster's aggregate RAM. Compare a cluster-wide external (disk-based) merge sort against an in-memory distributed sort, and recommend one.**
+ **A:** An in-memory distributed sort (sample-partition, shuffle, local in-memory sort, concatenate — Expert Q3) avoids disk I/O entirely and is dramatically faster when the aggregate cluster RAM genuinely accommodates the dataset with headroom for shuffle buffers; a disk-based external merge sort is the necessary fallback when even the cluster's aggregate memory is insufficient, or when node failures mid-sort must be recoverable from checkpointed, durable intermediate state (§9) rather than restarting from scratch. Recommendation: default to the in-memory distributed approach for the stated scenario (fits in aggregate RAM), reserving external-sort's higher I/O cost and recovery complexity for genuinely memory-constrained or long-running/failure-prone jobs.
+7. **Q: Explain how Timsort (Python/Java's default sort) exploits nearly-sorted real-world data differently from introsort, and why this matters for choosing a sort algorithm for production data.**
+ **A:** Timsort detects existing ascending/descending "runs" in the input and merges these naturally-occurring runs (via an adaptive merge strategy with a proven-optimal merge-cost bound) rather than blindly partitioning as if the data were random — for real-world data that's frequently partially pre-sorted (e.g., a daily trade log mostly appended in timestamp order with a few late corrections), Timsort's run-detection can approach O(n) rather than O(n log n)..NET's introsort does not perform this run-detection (though its insertion-sort fallback for small subarrays incidentally helps somewhat with local near-sortedness) — for a workload known to be frequently nearly-sorted, this is a genuine, measurable reason to consider an alternative (or to pre-check "is this already sorted or nearly so" and skip sorting/use a cheaper adaptive path) rather than assuming introsort is always the fastest available option.
+8. **Q: Explain the historical algorithmic-complexity-attack disclosure (hash-table and sort-routine worst-case exploits) and its lasting influence on standard-library sort design.**
+ **A:** A well-publicized 2011 disclosure demonstrated that several language runtimes' default hash-table implementations (and, for related comparison-routine worst cases, some sort implementations) had deterministic, attacker-triggerable worst-case behavior that crafted, adversarial input could exploit for denial-of-service — the disclosure drove widespread adoption of randomized hashing (to prevent predictable hash-collision crafting) and hardened comparison-sort implementations with worst-case safeguards (introsort's heapsort fallback being exactly this class of hardening for sorting specifically) as a standard, expected property of any production-grade standard library, not an optional enhancement.
+9. **Q: Design a benchmarking methodology that would correctly reveal the cache-locality-driven performance gap between an in-place quicksort/introsort and a naive merge-sort implementation, given both share O(n log n) complexity.**
+ **A:** Benchmark (BenchmarkDotNet, with hardware counters if available) across a range of array sizes crossing typical cache-tier boundaries (small enough to fit in L1/L2 cache, versus large enough to spill to L3/main memory), measuring wall-clock time *and* cache-miss counts if the tooling exposes them — a naive Big-O-only comparison would miss the divergence entirely, since both algorithms are O(n log n); only a sizing sweep crossing cache boundaries, paired with allocation/GC metrics for the merge-sort variant's auxiliary buffer, reveals the real, hardware-driven constant-factor gap §7 describes.
+10. **Q: As a Principal Engineer, how would you decide whether a regulated financial system's batch sort/reconciliation pipeline needs a custom, hardened sort implementation versus trusting the platform default?**
+ **A:** Default to the platform's built-in sort (introsort, already hardened against algorithmic-complexity DoS and extensively tested) unless a specific, demonstrated requirement isn't met — e.g., the pipeline processes external, untrusted, adversarially-crafted input at a scale where even O(n log n)'s constant factor is a measured bottleneck (justifying a radix/counting-sort specialization for bounded-range keys, Expert Q4), or the dataset exceeds single-machine memory (justifying an external or distributed sort, §9); require any custom replacement to demonstrate, via BenchmarkDotNet and adversarial-input testing, both a measured performance win and an equivalent-or-better worst-case safety guarantee before approving it for a regulated pipeline where an unbounded-worst-case sort routine is itself an availability and audit risk, not merely a performance one.
 
 ---
 
@@ -217,9 +273,168 @@ public async Task ExternalSortAsync(string inputFile, string outputFile, int chu
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-A reporting platform migrates its multi-key sort logic from `List<T>.Sort` to LINQ's stable `OrderBy`/`ThenBy` (Medium exercise) organization-wide, backed by a shared "commonly-confused API pairs" reference document (Advanced Q10) preventing this and similar subtle-correctness-distinction bugs from recurring, and applies the binary-search-over-answer-space generalization (Hard exercise) to a shipping-capacity-optimization feature that initially used a brute-force linear scan. The signature production incident — a multi-key sort silently scrambling intended grouping due to `List<T>.Sort`'s unstable ordering — is this module's central lesson: subtle, correctness-relevant (not merely performance-relevant) API distinctions between superficially-similar methods are a recurring, dangerous bug class throughout this entire course (the `IEnumerable`/`IQueryable`, the binding-inference mismatch, now sort stability), and the fix is the same each time: a shared, documented reference of these specific gotchas, paired with targeted tests exercising exactly the scenario where the subtle difference manifests. Principal-level guidance: maintain this reference document as living, organization-wide infrastructure, not a one-time incident post-mortem artifact.
+**Scenario:** Design the **end-of-day trade reconciliation sort/merge pipeline** for a mid-size broker-dealer — nightly, it must ingest ~40 million executed-trade records from multiple venues (each venue's feed arriving as an unsorted, append-only file), produce a single stream sorted by `(SettlementDate, CounterpartyId, TradeId)` for the downstream reconciliation-matching engine, and complete within a 90-minute overnight batch window with full auditability of every merge decision.
+
+**Requirements:** *Functional* — merge N venue files into one globally-sorted stream; support incremental re-runs if a single venue's file arrives late without re-sorting the whole dataset; preserve original per-record venue provenance. *Non-functional* — deterministic, reproducible output (byte-identical for identical input, a regulatory-audit requirement); resumable after a mid-run failure without restarting from zero; bounded memory (the batch host has 16 GB RAM, well under the ~8 GB raw record size × comfortable multiplier needed to hold everything in memory alongside merge buffers).
+
+**Back-of-the-envelope:** 40M records × ~200 bytes/record ≈ 8 GB raw. A single in-memory `Array.Sort` is feasible memory-wise but risks holding the entire dataset in RAM alongside JIT/GC overhead and downstream buffers on a shared batch host — and doesn't naturally give per-venue incremental resumability. This pushes the design toward **external, run-based merge sort** (§2.5, Advanced Q2): sort each venue's file independently (in memory, since a single venue's file is a few hundred MB, comfortably fits), write each as an already-sorted "run," then k-way merge the runs.
+
+**Architecture:**
+```mermaid
+graph LR
+ V1["Venue 1 file<br/>(unsorted)"] --> S1["In-memory sort<br/>Array.Sort per venue"]
+ V2["Venue 2 file<br/>(unsorted)"] --> S2["In-memory sort"]
+ V3["Venue N file<br/>(unsorted)"] --> S3["In-memory sort"]
+ S1 --> R1["Sorted run 1<br/>(durable, checkpointed)"]
+ S2 --> R2["Sorted run 2"]
+ S3 --> R3["Sorted run N"]
+ R1 --> KM["K-way merge<br/>(min-heap over run heads)"]
+ R2 --> KM
+ R3 --> KM
+ KM --> OUT["Globally sorted output stream<br/>-> reconciliation-matching engine"]
+ KM -.->|"merge decision log<br/>(audit trail)"| AUDIT["Audit store"]
+```
+
+**Components:** a per-venue **in-memory sorter** (`Array.Sort`, stable ordering not required within a venue since `TradeId` is already unique — Basic/Intermediate distinction from §2.2 doesn't apply here); a **durable run writer** checkpointing each sorted run to disk before merge begins (the resumability requirement — a crash after runs are written doesn't require re-sorting); a **k-way merge coordinator** using a min-heap keyed on each run's current head record (an O(log N) "which run has the next-smallest record" operation per output record, standard multi-way external-merge structure, generalizing the two-way `MergeTwoSortedRunsAsync` from §11's Expert exercise to N runs); and an **audit log** recording each merge decision (which run "won" at each step) — required because the reconciliation-matching engine downstream must be able to prove, to an auditor, exactly how the sorted order was derived from raw venue input, not merely that it *is* sorted.
+
+**Database/storage selection:** Sorted runs and the audit log are written to the batch host's local disk (fast, ephemeral, sufficient for a 90-minute job) rather than a database — this is a batch-computation pipeline, not a query-serving system, so a relational store adds no value here and would only add I/O overhead; the *output* of the pipeline lands in the existing reconciliation-matching engine's own store.
+
+**Failure handling:** If a venue's file arrives late (after the nightly run has started), the design supports an **incremental re-merge**: only that venue's run needs to be (re)sorted, and the k-way merge re-runs against the updated set of runs — never re-sorting venues that already produced a valid, checkpointed run, directly exploiting the "each run independently sorted and durable" structure to bound the cost of a late-arrival correction to O(late venue's size + merge cost), not O(total dataset size).
+
+**Monitoring:** per-venue sort duration and record count (catching an unusually slow or unusually small venue file before it silently corrupts the reconciliation input); k-way merge throughput (records/sec, to catch the k-way merge itself becoming the bottleneck as venue count grows); end-to-end pipeline duration against the 90-minute SLA, alerting at 70% of budget consumed to leave remediation time.
+
+**Trade-offs:** External run-based merge sort over a single giant in-memory sort trades a small amount of additional complexity (managing runs, a k-way merge coordinator) for resumability, per-venue incremental correction, and headroom against the shared batch host's memory constraints — the same trade-off §2.5 and Advanced Q2 establish generally, now applied concretely to a regulated, audit-sensitive nightly batch.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** deterministic, reproducible k-way merge; per-run resumability; an auditable trail of merge decisions; thread-safe concurrent per-venue sorting (Step 1 of §12's pipeline parallelizes trivially across venues, since each venue's sort is fully independent).
+
+**Class diagram:**
+```mermaid
+classDiagram
+ class ISortedRun {
+ <<interface>>
+ +Peek() TradeRecord
+ +Advance() void
+ +bool IsExhausted
+ }
+ class FileBackedSortedRun {
+ -StreamReader _reader
+ +Peek() TradeRecord
+ +Advance() void
+ }
+ class KWayMergeCoordinator {
+ -PriorityQueue~ISortedRun, TradeRecord~ _heap
+ -IAuditSink _auditSink
+ +MergeAsync(runs: List~ISortedRun~) IAsyncEnumerable~TradeRecord~
+ }
+ class VenueSorter {
+ +SortVenueFileAsync(path) ISortedRun
+ }
+ class IAuditSink {
+ <<interface>>
+ +RecordMergeDecision(winningRun, record) void
+ }
+ ISortedRun <|.. FileBackedSortedRun
+ KWayMergeCoordinator --> ISortedRun
+ KWayMergeCoordinator --> IAuditSink
+ VenueSorter --> FileBackedSortedRun
+```
+
+**Sequence diagram:**
+```mermaid
+sequenceDiagram
+ participant Orchestrator
+ participant VenueSorter
+ participant Run as FileBackedSortedRun (xN)
+ participant Merge as KWayMergeCoordinator
+ participant Audit as IAuditSink
+
+ par per-venue, concurrent
+ Orchestrator->>VenueSorter: SortVenueFileAsync(venue1)
+ Orchestrator->>VenueSorter: SortVenueFileAsync(venueN)
+ end
+ VenueSorter-->>Orchestrator: ISortedRun (checkpointed to disk)
+ Orchestrator->>Merge: MergeAsync(all runs)
+ loop until all runs exhausted
+ Merge->>Run: Peek() on every run
+ Merge->>Merge: heap picks smallest head
+ Merge->>Audit: RecordMergeDecision(winningRun, record)
+ Merge->>Run: Advance() winning run
+ Merge-->>Orchestrator: yield record
+ end
+```
+
+**Design patterns used:** Strategy (`ISortedRun` abstracts file-backed vs. in-memory runs, letting the coordinator merge either uniformly); Iterator (`IAsyncEnumerable<TradeRecord>` streams merged output without materializing it); Template Method (the merge loop's peek/compare/advance/audit sequence is fixed, while what counts as "smallest" is injected via the comparer); Observer (`IAuditSink` reacts to every merge decision without the coordinator needing to know what auditing does with it).
+
+**SOLID mapping:** Single Responsibility (`VenueSorter` sorts, `KWayMergeCoordinator` merges, `IAuditSink` audits — each independently testable); Open/Closed (a new run source, e.g., a database-backed run, implements `ISortedRun` without modifying the coordinator); Liskov (any `ISortedRun` implementation must genuinely support `Peek`/`Advance` with the same "already internally sorted" contract — a run that isn't actually sorted silently breaks the merge's correctness with no exception, echoing §2.3's binary-search-precondition silent-failure theme); Interface Segregation (`ISortedRun` and `IAuditSink` are separate, narrow interfaces); Dependency Inversion (`KWayMergeCoordinator` depends on the `ISortedRun`/`IAuditSink` abstractions, not concrete file I/O).
+
+**Extensibility:** adding a new venue is adding one more `ISortedRun` instance to the merge; changing the sort key (e.g., adding a fourth tiebreaker field) is a single comparer change, not a structural rewrite, since the coordinator is comparer-driven rather than hardcoding the `(SettlementDate, CounterpartyId, TradeId)` ordering.
+
+**Concurrency/thread safety:** per-venue sorting (§12) runs fully concurrently — each `VenueSorter.SortVenueFileAsync` call is independent, with no shared mutable state, safely parallelizable via `Task.WhenAll`. The k-way merge itself is inherently sequential (each output record depends on the current heap state), so it does not parallelize the same way — attempting to parallelize the merge phase itself would require partitioning the *key space* first (the distributed-sort sample-partitioning approach, §9/Expert Q3), a materially different design, not a simple `Parallel.ForEach` over the merge loop.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** The reconciliation pipeline (§12) began intermittently missing its 90-minute SLA, with the overrun growing week over week rather than being a one-time spike — eventually breaching the SLA outright on a night with an unusually large options-expiry trade volume.
+
+**Investigation:** Per-venue sort timings (already monitored, §12) were flat and unremarkable — the growth was entirely in the k-way merge phase. Profiling the merge coordinator revealed the min-heap comparer was doing more work than expected: the comparer compared `(SettlementDate, CounterpartyId, TradeId)` as a composite key by first comparing `SettlementDate` (cheap, a struct comparison), but on any date tie, fell through to `CounterpartyId` — a `string` field — compared via default culture-aware `string.Compare`, which is dramatically more expensive than an ordinal comparison (locale-aware comparison involves Unicode normalization and culture-specific collation rules, not a simple byte-by-byte comparison). As venue count and trade volume grew, same-date ties became far more frequent, and the heap — performing O(log N) comparisons per output record, each now hitting the expensive culture-aware path far more often — became the dominant cost.
+
+**Root cause:** The `CounterpartyId` comparer was written as `string.Compare(a, b)` (implicitly culture-aware) rather than `string.CompareOrdinal(a, b)` or `string.Compare(a, b, StringComparison.Ordinal)` — a subtle, easy-to-miss default, since `CounterpartyId` values are internal, ASCII-only identifiers with no genuine linguistic-sorting requirement, making culture-aware comparison pure, unnecessary overhead paid on every tie-breaking comparison in the hottest loop of the entire pipeline.
+
+**Tools:** BenchmarkDotNet micro-benchmark isolating `string.Compare` vs. `string.CompareOrdinal` for representative `CounterpartyId` values (confirming a 5-8x per-comparison cost difference); a CPU sampling profiler (dotnet-trace) pinpointing the hot path directly to the comparer inside the heap's sift-down operation.
+
+**Fix:** Switched the comparer to `string.CompareOrdinal` (equivalently, `StringComparison.Ordinal`) for the `CounterpartyId` tiebreak — a one-line change that restored the merge phase to its expected throughput, since ordinal comparison is a direct byte/char comparison with none of culture-aware comparison's normalization overhead.
+
+**Prevention:** A coding-standard rule added specifically for any comparer used in a hot sorting/merging path: default to `StringComparison.Ordinal` unless linguistic/culture-aware ordering is a genuine, stated business requirement (rare for internal identifiers, common for user-facing display sorting) — paired with a benchmark-based regression gate on the reconciliation pipeline's merge-phase throughput, so a future accidental reintroduction of a culture-aware comparison in a hot path fails CI rather than silently degrading week over week until an SLA breach forces investigation.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Choosing the sorting strategy for the reconciliation pipeline's per-venue sort step (§12).
+
+**Option A — In-memory `Array.Sort` (introsort) per venue file:**
+*Advantages:* Simple, uses .NET's extensively-hardened, worst-case-safe default (§7/§8); each venue's file comfortably fits in memory, so no external-sort complexity is needed at this granularity.
+*Disadvantages:* None significant at this granularity — the "external sort" concern only applies at the *whole-dataset* level (§12's k-way merge across venues), not per-venue.
+*Cost/complexity:* Low — this is the recommended default and what §12 actually specifies.
+
+**Option B — LINQ `OrderBy` per venue file:**
+*Advantages:* Guaranteed stable, simpler-looking call site.
+*Disadvantages:* Stability is not a genuine requirement here (`TradeId` is already unique per Comment in §13), so the stability guarantee is paid for with no benefit; allocation overhead (§7) is unnecessary cost in a pipeline where per-venue sort duration is directly SLA-relevant.
+*Cost/complexity:* Low, but strictly worse than Option A for this specific, verified-non-stability-dependent use case.
+
+**Option C — Radix sort on a derived integer sort key:**
+*Advantages:* Could outperform comparison-based sort if `(SettlementDate, CounterpartyId, TradeId)` were collapsed into a single bounded-range integer key (Expert Q4's reasoning) — a genuine option if per-venue sort time became the bottleneck.
+*Disadvantages:* Requires engineering a composite-key encoding scheme (packing three fields into one sortable integer, itself error-prone and adding a new correctness-surface); the incident (§14) showed the bottleneck was actually in the *merge* comparer, not the per-venue sort, so this optimization targets a cost center that isn't the actual constraint.
+*Cost/complexity:* Higher — new encoding logic, more testing surface, for a benefit not currently justified by the measured bottleneck.
+
+**Recommendation: Option A (in-memory introsort per venue) for the sort step, combined with the ordinal-comparer fix (§14) for the merge step.** The Production Debugging incident is the deciding evidence: the actual measured bottleneck was an avoidable comparer-cost issue in the merge phase, not the sort algorithm's asymptotic complexity — reinforcing this module's recurring theme (§7, Advanced Q6) that a "faster algorithm" (Option C) is the wrong lever to pull before first measuring and fixing an actual, identified constant-factor cost in the current design.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** A late or SLA-breaching reconciliation run delays trade-break detection into the next business day — a direct regulatory and operational-risk exposure for a broker-dealer, not merely an engineering inconvenience; §14's incident (a slow week-over-week SLA drift culminating in an outright breach) is exactly the kind of "gradual degradation, no single alarming event, until it becomes a headline incident" pattern a Principal Engineer is expected to catch via trend monitoring, not wait for a threshold breach to surface it.
+
+**Engineering trade-offs:** The central trade this module's production scenario embodies — a small amount of added structural complexity (external, run-based, auditable k-way merge, §12/§13) in exchange for resumability, incremental-correction, and regulatory-auditability properties a simpler single in-memory sort doesn't provide — is the same "complexity earns its keep only when it buys a genuine, stated requirement" discipline recurring across this entire course, now applied at the algorithm-selection layer specifically.
+
+**Technical leadership:** The organization-wide, correctness-relevant API-pairs reference document this module's earlier incident (the unstable-multi-key-sort bug, §4) motivated should explicitly include the ordinal-vs-culture-aware `string.Compare` distinction §14 surfaced — both incidents share the same underlying shape: a superficially-reasonable default API choice silently carrying a cost (correctness in one case, performance in the other) invisible until a specific, non-obvious condition (ties needing stability; tie-frequency growth pushing the culture-aware comparator into the hot path) exposes it.
+
+**Cross-team communication:** The reconciliation-matching engine's downstream dependency on this pipeline's output being genuinely, verifiably sorted and auditable (§12's audit-log requirement) means any change to the sort/merge implementation must be communicated to and reviewed by the downstream team — an internal implementation detail (which sort algorithm, which comparer) is not "purely internal" when a downstream system's correctness assumptions (sortedness, auditability) depend on it.
+
+**Architecture governance:** Require any new hot-path comparer (sorting or merging) to explicitly declare and justify its `StringComparison` choice in code review — converting §14's specific, hard-won lesson into a standing, checked review criterion rather than tribal knowledge rediscovered independently by each future team that writes a comparer.
+
+**Cost optimization:** The culture-aware-comparer regression (§14) was pure wasted compute — no correctness or business benefit, just avoidable CPU cost compounding as tie-frequency grew; the fix's near-zero cost against its outsized throughput recovery is a textbook example of the highest-leverage kind of performance work: finding and removing accidental, unnecessary cost in an already-hot path, rather than pursuing a fundamentally different (and more complex, Option C) algorithm.
+
+**Risk analysis:** A batch pipeline with a hard SLA and regulatory stakes should have its performance-sensitive hot paths (the merge comparer specifically) covered by a benchmark-based regression gate (§14's prevention step), not only correctness tests — a purely-correctness-focused test suite would have passed throughout the entire multi-week SLA degradation, since the output remained correctly sorted the whole time; only a performance regression gate would have caught the actual, business-relevant risk.
+
+**Long-term maintainability:** What decayed here wasn't the code's correctness but the gap between an original, reasonable-at-the-time default (`string.Compare`, chosen before tie-frequency was significant) and the system's evolved reality (venue count and volume growth making that default's cost material) — the same "periodic re-audit against current, evolved reality, not one-time initial correctness" discipline this course applies repeatedly, now instantiated as a standing regression gate rather than a one-off fix.
 
 ## 18. Revision
 **Key takeaways**:.NET's `Array.Sort`/`List<T>.Sort` use introsort (quicksort + heapsort fallback + insertion sort for small subarrays) — O(n log n) worst-case, but **not stable**; LINQ's `OrderBy`/`ThenBy` **is** guaranteed stable, essential for any multi-key sort preserving prior grouping among ties. Binary search requires sorted input (a silent-failure precondition if violated) and should use `low + (high-low)/2` to avoid overflow. Merge sort (O(n) space, stable, guaranteed O(n log n)) suits external/streaming sorting naturally; quicksort (in-place, average-case O(n log n)) suits in-memory sorting, with introsort's hybrid design eliminating its classic worst-case vulnerability. Binary search generalizes far beyond array search to any monotonic-predicate search over an answer space.

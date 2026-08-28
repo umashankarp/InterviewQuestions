@@ -107,6 +107,51 @@ graph LR
 
 ---
 
+## 7. Performance Engineering
+
+### 7.1 Publisher Confirms — The Round-Trip Cost of Durability Guarantees
+Publisher confirms (`confirmSelect` / `ConfirmSelect`) are RabbitMQ's producer-side acknowledgment mechanism — the broker signals back to the producer once a published message has been safely handled (persisted to disk for a durable queue, or routed successfully for a transient one), letting the producer know it's safe to consider the publish complete rather than assuming success optimistically. This is not free: each confirm is a broker round-trip, and awaiting a confirm **per message** synchronously (publish, block until confirmed, publish next) caps throughput at roughly `1 / round_trip_latency` messages/sec — on a network with a 1ms round-trip, that's a hard ceiling of ~1,000 msg/sec no matter how fast the broker itself is, an entirely latency-bound (not broker-bound) limit. The standard fix is **asynchronous, pipelined confirms**: publish a batch of messages without waiting for each individual confirm, track outstanding delivery tags, and process confirms as they arrive (RabbitMQ can batch-confirm up to a given delivery tag with `multiple=true`) — this decouples throughput from round-trip latency, since many messages are in flight at once, and is the pattern that lets a well-tuned publisher sustain tens of thousands of msg/sec against a single connection. The trade-off is exactly the one Advanced Q4/§11's batched-acknowledgment discussion already established on the consumer side, mirrored on the producer side: a crash before a pipelined confirm arrives leaves the producer uncertain about which messages in the outstanding window actually landed, requiring the same idempotent-republish discipline (a client-generated message ID, checked or naturally deduplicated downstream) rather than blind resend.
+
+### 7.2 Queue Depth and Memory Pressure — Why RabbitMQ Queue Growth Is Urgent, Not Merely Suboptimal
+Unlike Kafka's log, which is designed around disk as the primary storage medium with memory as a bounded working set, a classic RabbitMQ queue by default keeps message bodies **in memory** (backed by disk for durability, but actively resident in RAM for delivery) until consumed — a sustained producer/consumer throughput mismatch doesn't just delay downstream processing, it directly consumes broker RAM, and a broker that exhausts available memory triggers RabbitMQ's **flow control**: the broker throttles (blocks) producer connections publishing to the affected vhost, converting a capacity problem into a producer-facing outage rather than a purely internal backlog. This is the concrete mechanism behind the Advanced Q8 queue-growth diagnostic (§10) — the reason RabbitMQ queue growth is more time-sensitive than the equivalent Kafka lag scenario is this direct RAM-to-flow-control pipeline, which Kafka's disk-first design doesn't share at anywhere near the same growth rate.
+
+### 7.3 Lazy Queues / Message Paging — Trading Memory for Disk Under Sustained Backlog
+For queues that are expected to occasionally carry a large backlog (a downstream consumer outage, a batch-processing pattern with bursty consumption), RabbitMQ's lazy-queue behavior (the default queue behavior in modern RabbitMQ versions, tunable via queue mode/policy in older ones) pages message bodies to disk more aggressively and keeps only a small in-memory index, trading higher per-message latency (a disk read on delivery instead of a pure memory read) for dramatically lower memory pressure under a large backlog — the correct choice for a queue whose normal operating mode includes large, bursty backlogs, while a queue that should always stay near-empty in normal operation is better served by keeping default in-memory-favoring behavior for lower steady-state latency. Getting this wrong in either direction is a recurring production tuning mistake: defaulting every queue to lazy behavior pays an unnecessary latency tax on queues that never actually accumulate backlog, while leaving a backlog-prone queue on eager, memory-favoring behavior risks the flow-control cascade in §7.2.
+
+### 7.4 Prefetch (QoS) — Balancing Consumer Throughput Against Redelivery Blast Radius
+A consumer's prefetch count (`basicQos(prefetchCount)`) controls how many unacknowledged messages the broker will deliver to that consumer channel before waiting for acks — set too low (e.g., 1), a consumer spends more time idle waiting for the broker to push the next message than processing, undershooting achievable throughput; set too high (unbounded), a consumer crash mid-batch redelivers a much larger in-flight window (echoing the batched-ack blast-radius trade-off in §2.4/Advanced Q4, now driven by delivery count rather than explicit ack-batch size). Tuning prefetch is therefore a direct throughput-vs-recovery-blast-radius trade-off, typically set empirically (start near expected per-consumer concurrent-processing capacity and measure) rather than left at RabbitMQ's historically low default, which under-utilizes most production consumers.
+
+---
+
+## 8. Security
+
+### 8.1 Virtual Host (vhost) Isolation — Logical Multi-Tenancy, Not a Security Boundary Against a Compromised Broker
+A vhost partitions exchanges, queues, bindings, and permissions within a single broker/cluster, letting unrelated teams or applications share infrastructure without seeing or accidentally binding into each other's topology (§10 Intermediate Q9) — but this is **logical** isolation enforced by the broker's authorization layer, not a hard security boundary in the sense a separate cluster or separate network segment provides. A vhost does not protect against a broker-level compromise (an attacker with broker admin credentials sees every vhost), nor does it provide resource isolation (one vhost's queue-growth-driven flow control, §7.2, can still degrade the whole broker's memory headroom, affecting other vhosts sharing that broker). For genuinely sensitive workloads — payment instructions, PII-bearing settlement messages — where regulatory or compliance requirements (PCI-DSS scope segmentation being the sharpest example) demand real isolation, a separate cluster, not merely a separate vhost, is the correct control.
+
+### 8.2 Transport Security — TLS for Both AMQP Traffic and the Management Plane
+RabbitMQ's default AMQP port (5672) and its HTTP management-API/UI port (15672) are both plaintext unless explicitly configured otherwise — production deployments must enable TLS on the AMQP listener (port 5671 conventionally) for producer/consumer traffic, and TLS on the management interface separately, since these are independent listener configurations and enabling one does not implicitly secure the other. Credentials (including the RabbitMQ default `guest` account, which is restricted to `localhost`-only connections out of the box specifically to prevent trivial remote exploitation) and message payloads travel in cleartext over an unencrypted AMQP connection — for a FinTech deployment carrying payment or trade data, unencrypted broker traffic is an immediate compliance failure (PCI-DSS's transmission-encryption requirements apply directly), not merely a best-practice gap.
+
+### 8.3 User Permission Scoping — Configure, Write, Read as Three Independent Grants
+RabbitMQ's permission model grants each user three independent, regex-scoped permissions per vhost: **configure** (declare/delete exchanges and queues), **write** (publish), and **read** (consume) — a common over-privileging mistake is granting a service account broad `.*` configure permission when it only ever needs to publish to a fixed, already-provisioned exchange, meaning a compromised or buggy service credential can redeclare or delete broker topology it should never be able to touch. The correct posture, directly mirroring least-privilege principles established elsewhere in this course for IAM/database roles, is to scope each service account's permissions to the minimum regex pattern actually needed for its specific queues/exchanges, with topology changes (configure permission) reserved for a deployment/ops identity rather than every runtime service credential.
+
+### 8.4 Unauthenticated or Default-Credential Broker Exposure — A Recurring, Real-World Incident Class
+RabbitMQ management consoles and AMQP listeners left exposed to the public internet with default or weak credentials are a well-documented, recurring real-world incident class (mass credential-stuffing scans specifically targeting RabbitMQ's default `guest`/`guest` combination and known management-API paths) — the concrete production posture is: never expose the AMQP or management ports directly to the internet (place the broker behind a VPN/private network/security-group restriction), always rotate/disable the default `guest` account in any non-localhost-restricted deployment, and enforce TLS client-certificate or strong-credential authentication for any broker reachable outside a fully trusted network boundary. This is the same "presence of an auth mechanism is not the same as it being correctly enforced" pattern this course has repeatedly flagged (Kubernetes RBAC objects existing without effective enforcement, Module 74–76) — a default install with `guest` reachable is technically "authenticated" but practically open.
+
+---
+
+## 9. Scalability
+
+### 9.1 Quorum Queues vs. Classic Mirrored Queues — Raft Consensus as the Modern Default
+Classic mirrored queues replicate a queue's contents to multiple nodes via a primary-mirror model with comparatively weak failover consistency guarantees (a mirror can, in some failure sequences, diverge or lose unsynced messages during a failover) — quorum queues, RabbitMQ's modern replacement, use the **Raft consensus algorithm**, requiring a write to be acknowledged by a quorum (majority) of replica nodes before it's considered committed, giving materially stronger consistency guarantees during leader failover at the cost of requiring a minimum of 3 cluster nodes (Raft's majority requirement needs an odd number ≥3) and a modestly different throughput/latency profile than classic queues (§10 Advanced Q6 covers the legitimate cases for still choosing classic queues). For any new FinTech-grade deployment carrying payment, trade, or settlement messages where a failover-induced message loss or divergence would be a real financial/compliance incident, quorum queues are the correct default, not classic mirrored queues.
+
+### 9.2 Federation and Shovel — Cross-Region and Cross-Cluster Distribution Without Full Clustering
+RabbitMQ clustering (including quorum-queue replication) is designed for **low-latency, same-datacenter** deployment — Raft consensus's per-write quorum round-trip makes a geographically stretched cluster (nodes split across regions) both slow (every write pays cross-region round-trip latency) and fragile (a region-partition risks losing quorum entirely). For cross-region or cross-cluster message distribution, RabbitMQ instead offers **federation** (a loosely-coupled link that forwards messages from an exchange/queue in one broker to another, tolerating WAN latency and even extended disconnection, at the cost of weaker delivery-ordering/consistency guarantees than true clustering) and **shovel** (a simpler, explicitly-configured point-to-point mover of messages between a source and destination queue/exchange, useful for one-off or unidirectional cross-cluster movement). The architectural principle: never stretch a single RabbitMQ cluster across regions to solve a cross-region distribution need — use federation/shovel, which are purpose-built for exactly that latency/reliability profile, the same "don't force a same-datacenter-optimized replication primitive across a WAN" principle this course has applied to stretched database clusters and stretched Kubernetes clusters elsewhere.
+
+### 9.3 Clustering Limits — Why RabbitMQ Clusters Don't Scale Like Kafka Partitions
+Kafka scales consumer-side parallelism by adding partitions (an explicit, pre-declared unit of parallelism); RabbitMQ has no equivalent partition concept — a single queue's throughput ceiling is ultimately bounded by that queue's own master/leader node's processing capacity (even with quorum replication spreading the replicated writes, message delivery for a given queue is still coordinated through that queue's current leader), and adding more broker nodes to a cluster does not automatically increase a single queue's throughput the way adding Kafka partitions increases a single topic's achievable parallelism. Horizontal scalability in RabbitMQ instead comes from **sharding work across multiple queues** (a producer-side hashing or routing-key strategy spreading messages across N independently-hosted queues, each independently consumed) — an explicit application-level design decision, not a broker-level lever, and a materially different scaling mental model from Kafka's partition-count knob (directly extending §10 Intermediate Q10's parallelism-model contrast).
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -154,6 +199,28 @@ graph LR
  **A:** This is exactly the incident's root-cause misconception, stated as an explicit claim — queue durability (the queue definition surviving a restart) and message persistence (the message contents surviving a restart) are separate, both-required settings; the claim conflates "the container survives" with "the contents survive," precisely the false-sense-of-security exposed at real cost — the correct response is to explicitly verify and configure both settings together, and ideally add the automated end-to-end restart-survival test (Advanced Q1) rather than relying on either setting's presence alone as sufficient evidence of the desired guarantee.
 10. **Q: As a Principal Engineer establishing RabbitMQ operational standards for an organization operating multiple RabbitMQ-based systems, design the specific set of standing configuration reviews and monitors (synthesizing this entire module) you would require, and justify each.**
  **A:** (1) Mandatory, automated end-to-end durability verification (both queue-durable and message-persistent settings, tested via an actual staging-environment restart) for every queue expected to preserve messages (Advanced Q1) — necessary because the two-setting requirement is easy to partially satisfy and only exposed by an actual restart. (2) Mandatory Dead Letter Exchange configuration with a bounded retry-count limit for every queue where processing failure is realistically possible (Advanced Q5) — necessary to prevent poison-message loops from consuming resources indefinitely. (3) Automated routing-configuration verification tests for every Topic/Headers exchange binding (Advanced Q7) — necessary because wildcard pattern mistakes are subtle and otherwise only discovered via missing or unwanted production delivery. (4) Standing queue-length/growth monitoring with alerting thresholds tuned tighter than the equivalent Kafka-lag monitoring (Advanced Q8), given RabbitMQ's more immediate memory/performance sensitivity to queue growth — necessary because unmitigated growth threatens broker stability more directly and more quickly than in Kafka's disk-based model. Each standard targets a distinct, concrete failure mode this module identified through specific incidents or reasoning, directly extending this course's recurring governance-gate pattern into RabbitMQ-specific operational practice.
+
+### Expert (10)
+1. **Q: A FinTech payment-notification service uses publisher confirms with async, pipelined publishing (§7.1) for throughput. Design the exact reconciliation logic needed to handle a broker connection drop with an unknown number of unconfirmed messages in flight, without either double-sending or silently losing a payment notification.**
+ **A:** On reconnection, the producer cannot trust its local "was this confirmed" state for the in-flight window at the moment of disconnect — some may have been persisted broker-side despite the confirm never arriving (network drop after the broker committed but before the ack reached the producer). Correct design: every published message carries a client-generated, stable idempotency key (e.g., a deterministic hash of payment ID + notification type, not a random GUID regenerated per attempt); on reconnect, before resending any message in the unconfirmed window, the producer (or, more robustly, the consumer side via an idempotency store keyed on that same key) treats a resend as safe-to-deduplicate rather than assuming resend implies duplicate-free. This is the publisher-side mirror of Advanced Q4/§7.4's consumer-side batch-redelivery idempotency requirement — extended here to the harder case where the *producer* itself, not just the consumer, cannot trust its own confirm-received bookkeeping across a connection drop.
+2. **Q: Explain precisely why `exactly-once = at-least-once AND at-most-once` applies to RabbitMQ's ack/requeue/confirm model, and identify which RabbitMQ mechanism supplies each half.**
+ **A:** At-least-once is supplied by requeue-on-crash (§2.3): an unacknowledged message is never silently dropped, guaranteeing every message is delivered at least once (possibly redelivered on failure). At-most-once is *not* natively supplied by RabbitMQ's protocol — RabbitMQ will happily redeliver the same message multiple times under retry/requeue, meaning "at most once" must come from the consumer's own idempotency layer (a dedupe store keyed on message ID/idempotency key), not from any broker setting. Combining broker-guaranteed at-least-once delivery with application-guaranteed at-most-once processing (via idempotency) together produces the practical effect of exactly-once *processing* — RabbitMQ itself never claims exactly-once delivery as a protocol-level guarantee, and any vendor or team claiming otherwise is describing the combined system property, not a broker primitive.
+3. **Q: A quorum queue's current leader node fails during a burst of in-flight payment-confirmation messages. Walk through, step by step, what happens to (a) messages already acknowledged by a quorum before the failure, (b) messages in flight but not yet quorum-acknowledged, and (c) consumers currently attached to that queue.**
+ **A:** (a) Messages already committed via Raft quorum-agreement survive intact — a new leader is elected from the surviving replicas that had the message, and it remains fully available, satisfying the consistency guarantee that motivated choosing quorum over classic mirrored queues (§9.1). (b) Messages published but not yet acknowledged by a quorum of replicas at the moment of failure are in an genuinely uncertain state from the producer's perspective — the producer's publisher-confirm (§7.1) simply never arrives for these, and the producer must treat them as unconfirmed (i.e., re-publish per its own confirm-timeout policy), which is exactly why relying on quorum-queue consistency alone, without also using publisher confirms, leaves a real gap. (c) Attached consumers experience a connection interruption to the old leader and must reconnect (RabbitMQ client libraries with automatic recovery handle this transparently) to the newly elected leader, resuming consumption from the now-consistent quorum state — any messages mid-delivery-but-unacknowledged at the moment of failure are requeued per the standard ack/requeue mechanism (§2.3), now redelivered from the new leader.
+4. **Q: Critique this architecture: a settlement-reconciliation team routes every reconciliation-break message through a single Direct exchange bound to one queue, consumed by one instance, to guarantee strict in-order processing of breaks per account. Identify the scalability ceiling this creates and propose a fix that preserves ordering where it's actually required.**
+ **A:** A single queue/single consumer guarantees total order but caps throughput at that one consumer's processing rate — directly the clustering-limits ceiling described in §9.3 (RabbitMQ has no partition concept; a queue's throughput is bounded by its own delivery path). The actual business requirement, however, is almost certainly ordering **per account**, not global ordering across all accounts — the fix is to shard by account (a routing-key or consistent-hash strategy mapping each account deterministically to one of N queues, each independently consumed, mirroring Kafka's partition-key-based ordering pattern but implemented via RabbitMQ's routing-key/binding mechanism instead of partition assignment) preserving per-account order while allowing N-way parallelism across accounts — the same "identify the true ordering scope before choosing a scaling strategy" principle this course applies to Kafka partition-key design, now translated into RabbitMQ's queue-sharding idiom since RabbitMQ has no native partition primitive to lean on.
+5. **Q: A broker operating multiple vhosts for different trading desks experiences a memory-pressure incident (§7.2/§7.3) caused by one desk's queue backlog, and it visibly degrades message delivery latency for an unrelated desk sharing the same physical broker. Diagnose the architectural gap and propose the fix, referencing §8.1.**
+ **A:** This is precisely the limit of vhost isolation named in §8.1 — vhosts provide logical (topology/permission) isolation, not resource isolation; one vhost's queue-driven memory/flow-control pressure affects the whole broker's available memory and can trigger flow control broker-wide, degrading unrelated vhosts sharing that node. The architectural gap is treating vhost separation as sufficient isolation for workloads with materially different criticality or backlog risk profiles. Fix: for workloads where one desk's backlog risk must not be allowed to degrade another's latency SLA, move to genuinely separate broker clusters (or at minimum, separate nodes within a cluster with resource limits/policies enforced per node) rather than relying on vhost separation alone — the same "logical partitioning is not a substitute for physical/resource isolation when blast-radius containment is the actual requirement" principle applied elsewhere in this course to Kubernetes namespaces and multi-tenant database schemas.
+6. **Q: Design the specific, end-to-end idempotency-key strategy for a payment-instruction publisher that must tolerate (a) producer-side retries after an unconfirmed publish, (b) consumer-side redelivery after a crash, and (c) a downstream at-least-once webhook call to an external payment processor — three independent at-least-once hops in sequence.**
+ **A:** A single, stable idempotency key must be generated once, deterministically, at the true origin of the business event (e.g., derived from the payment-instruction's own natural key — payer, payee, amount, and a client-supplied idempotent request ID — not regenerated at each hop), and propagated unchanged through every hop: attached as the RabbitMQ message's `MessageId`/application header for the publish-retry and consumer-redelivery hops (§7.1, §2.3), and forwarded as the same value in the `Idempotency-Key` header on the outbound webhook call to the external processor. Each hop's own deduplication layer (producer confirm-timeout resend logic, consumer idempotency-store check, and the payment processor's own idempotency-key handling — mirroring the Pragmatic-Engineer-style payment-system idempotency-key pattern) then independently collapses retries at that hop using the *same* key, rather than each hop minting its own key and losing the ability to correlate a retry back to the original attempt across hop boundaries — the critical design point being that idempotency-key propagation must be end-to-end by design, not re-derived independently at each stage, or duplicate suppression silently breaks at whichever hop generates a fresh key.
+7. **Q: A team proposes replacing RabbitMQ entirely with a database-backed outbox-and-polling queue table to "simplify the stack," for a moderate-throughput (500 msg/sec) internal task-distribution system with priority requirements. As a Principal Engineer, evaluate this proposal.**
+ **A:** A polling-based DB queue can work at 500 msg/sec but reintroduces, as custom application code, everything RabbitMQ provides natively: priority ordering (requires a custom `ORDER BY priority` query plus row-locking to prevent double-dequeue, both are RabbitMQ built-ins), visibility-timeout/redelivery semantics (requires custom lease-expiry logic, RabbitMQ's ack/requeue is this already), and dead-lettering (requires custom retry-count tracking and a manual "failed" table, RabbitMQ's DLX is this already) — each of these is a nontrivial correctness surface to reimplement and maintain, and polling itself adds either latency (a polling interval) or load (tight polling) that a push-based broker avoids entirely. The "simplification" argument only holds if the team is also removing a genuine current pain point RabbitMQ causes (e.g., broker operational burden disproportionate to the team's actual scale) — absent that, the proposal trades a well-understood, purpose-built, actively-maintained system for a larger, harder-to-get-right custom one, the same "resist reinventing a mature primitive without a genuine driving reason" critique this course applies to homegrown retry/backoff/circuit-breaker implementations elsewhere.
+8. **Q: Explain why federation (§9.2) provides weaker delivery guarantees than in-cluster quorum replication, and design a scenario-specific mitigation for a cross-region disaster-recovery use case where a primary region's queues must be federated to a standby region.**
+ **A:** Federation forwards messages from an upstream exchange/queue to a downstream one via a normal AMQP consumer-like link (the federated link itself behaves like a consumer of the upstream, republishing to the downstream) — it does not provide the same atomic, quorum-committed replication semantics as in-cluster quorum queues; a federation link can lag, and messages in transit during a primary-region outage may not yet have reached the standby region, meaning failover to the standby is not lossless by default. Mitigation for a DR use case: treat federation as a best-effort warm-standby mechanism, not a zero-RPO replication strategy — pair it with (a) publisher confirms on the *original* publish plus durable persistence in the primary region so the primary's own data isn't lost even if federation lags, (b) an explicit, measured RPO target based on observed federation lag under realistic load, communicated to stakeholders as the actual DR guarantee rather than an assumed zero-RPO figure, and (c) for genuinely zero-RPO requirements, reconsider whether synchronous replication to a same-region secondary (accepting the latency cost) rather than cross-region federation is the correct primary control, with cross-region federation reserved for the disaster scenario the same-region strategy doesn't cover.
+9. **Q: A Principal Engineer is asked to set the "correct" prefetch count (§7.4) for a new consumer service processing trade-settlement instructions, where processing time per message varies from 5ms (routine) to 4 seconds (instructions requiring manual-review-queue escalation). Design the approach, rather than proposing a single number.**
+ **A:** A single static prefetch value is the wrong frame here — the workload's highly variable per-message processing time means a prefetch tuned for the fast path (routine instructions) will hold an outsized in-flight window when a slow (manual-review-triggering) message is being processed, growing the crash blast-radius (§7.4) unpredictably; a prefetch tuned for the slow path underutilizes throughput on the common fast path. The better design separates the two workloads at the routing layer (a Topic or Headers exchange routing manual-review-bound instructions to a distinct queue/consumer pool from routine ones, §2.2) so each pool's prefetch can be tuned independently to its own actual processing-time distribution — directly an application of the "match routing granularity to actual behavioral differences in the workload" principle, avoiding a one-size-fits-all tuning parameter across a workload that isn't actually one size.
+10. **Q: Synthesizing §7 (Performance), §8 (Security), and §9 (Scalability), design the full production configuration checklist a Principal Engineer would require before a new RabbitMQ-backed payment-settlement queue goes live at an elite FinTech firm, and justify each item's inclusion.**
+ **A:** (1) Publisher confirms with async pipelining plus a defined confirm-timeout/resend policy keyed on a stable idempotency key (§7.1, Expert Q1/Q2) — without it, producer-side message loss on a connection drop is undetectable. (2) Quorum queues, not classic mirrored (§9.1) — classic queues' weaker failover consistency is an unacceptable risk for settlement data specifically. (3) Lazy-queue/paging behavior evaluated against the queue's expected backlog profile (§7.3) — sized deliberately, not left at an unexamined default. (4) TLS enabled on both the AMQP and management listeners, default `guest` account disabled, and broker not directly internet-exposed (§8.2, §8.4) — a compliance-mandatory baseline for payment data, not optional hardening. (5) Per-service-account permission scoping (configure/write/read) limited to the minimum needed queues/exchanges (§8.3) — least privilege, so a compromised service credential can't redeclare broker topology. (6) Dedicated cluster or resource-isolated nodes for this workload rather than a shared vhost on general-purpose infrastructure (§8.1, Expert Q5) — given the blast-radius risk a shared broker's memory pressure poses to an unrelated workload's latency SLA. (7) A prefetch value tuned to this queue's actual measured processing-time distribution, with slow/manual-review paths routed to a separate pool if the distribution is bimodal (§7.4, Expert Q9). (8) A Dead Letter Exchange with bounded retry-count tracking (§2.6, Advanced Q5) so a malformed settlement instruction can't loop indefinitely or be silently dropped. Each item traces to a specific, previously-established failure mode or guarantee gap in this module, rather than being a generic "harden the broker" checklist — the discipline a Principal Engineer applies is requiring every checklist item to answer "what specific incident or gap does this prevent," exactly the standard this module's own incident (§4) and Advanced-tier reasoning were built around.
 
 ---
 
@@ -238,9 +305,323 @@ public class BatchAckConsumer
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-*(the incident, the four exercises, and the Advanced-tier Q&A — especially Advanced Q1's end-to-end durability verification, Advanced Q2/Q3's broker-choice and hybrid-architecture decision frameworks, and Advanced Q10's synthesized governance checklist — collectively constitute this module's system-design, debugging, and Principal-Engineer-level content.)*
+### Step 1 — Understand the Problem and Establish Design Scope
+
+**Q (Interviewer): "Design a payment-instruction dispatch system for a bank's outbound wire-transfer desk — instructions come from an internal trade-settlement system and must reach three different downstream processors (SWIFT gateway, an internal ledger-posting service, and a customer-notification service), each with different processing speeds and different failure-handling needs. Where would you start?"**
+**A (Candidate): "First, what's the source of truth for 'this instruction was accepted' — is it acceptable for the dispatch system itself to be the durability boundary, or must every instruction already be durably recorded upstream before it reaches us?"**
+**Q: "Assume the trade-settlement system has already durably persisted the instruction and calls us via a synchronous API — our job starts once we return 200 OK to that call."**
+**A: "Then our own queue becomes the durability boundary from that point forward — I'd want message persistence and quorum replication non-negotiable. Second: do all three downstream consumers need the instruction in lockstep, or can each proceed independently at its own pace?"**
+**Q: "Independently — SWIFT gateway dispatch is time-critical (seconds), ledger posting can lag by up to a minute, notification can lag by minutes without issue."**
+**A: "That's a fan-out topology, not a pipeline — one exchange, three independently-consumed queues, each downstream free to process at its own rate without blocking the others. Is exactly-once processing required, or is at-least-once-plus-idempotency acceptable, given SWIFT dispatch is a real-money-movement action?"**
+**Q: "At-least-once with idempotency is fine, as long as SWIFT dispatch specifically never double-sends a wire."**
+**A: "Understood — that's the one consumer where idempotency enforcement is non-negotiable and needs its own dedicated dedupe store, not just best-effort. Scope-wise: am I designing the queue/routing layer only, or also the retry/reconciliation logic against SWIFT's own async confirmation?"**
+**Q: "Queue/routing layer plus the retry and reconciliation logic — SWIFT's confirmation arrives asynchronously, minutes later, via a separate webhook."**
+**A: "Good — that tells me this is fundamentally a durable fan-out-with-idempotent-dispatch problem, single-region for now, with SWIFT as the one leg requiring genuine exactly-once-effect guarantees."**
+
+**Functional requirements:**
+- Accept a durably-sourced payment instruction via synchronous API call from the trade-settlement system.
+- Fan the instruction out to three independent consumers (SWIFT dispatch, ledger posting, customer notification), each processing at its own pace.
+- Guarantee SWIFT dispatch never double-sends a wire for the same instruction, even under retry/redelivery.
+- Reconcile SWIFT's asynchronous confirmation webhook against the original instruction and update its status.
+- Route permanently-failing instructions (malformed, rejected by SWIFT) to a queue for manual investigation, never silently dropped.
+
+**Non-functional requirements:**
+- No message loss across a broker restart or single-node failure (durability + quorum replication).
+- SWIFT dispatch latency: instruction accepted-to-dispatched under 5 seconds at p99.
+- Throughput: the desk processes roughly 50,000 wire instructions/day, concentrated in business hours.
+- Auditability: every instruction's full lifecycle (received → dispatched → confirmed/failed) must be reconstructable for regulatory review.
+- Multi-vhost isolation from unrelated broker workloads sharing the same cluster (§8.1).
+
+**Back-of-the-envelope estimation:**
+```
+50,000 instructions/day ÷ (8 business hours × 3,600 sec/hour) = 50,000 / 28,800 ≈ 1.7 instructions/sec average
+Peak assumption: 5x average burst during market-open/close windows ≈ 8.5 instructions/sec peak
+```
+1.7–8.5 msg/sec is trivially low for RabbitMQ's throughput ceiling (a single well-tuned queue sustains thousands/sec, §7.1) — **this tells us throughput is not the hard problem.** The hard problem is exactly what the Pragmatic Engineer payment-system framing predicts: **correctness under failure** — guaranteeing SWIFT dispatch is neither lost nor duplicated, and that every instruction's status is auditable end-to-end, is what the design must actually be optimized for, not raw message-passing speed.
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+**Core flows** (three independent fan-out legs, sharing one entry point):
+1. **Dispatch leg** — instruction → SWIFT gateway (time-critical, exactly-once-effect required).
+2. **Ledger leg** — instruction → internal ledger-posting service (tolerant of minute-scale lag).
+3. **Notification leg** — instruction → customer-notification service (tolerant of minute-scale lag, least critical).
+
+**Component glossary:**
+- **Instruction Intake API** — the synchronous HTTP endpoint the trade-settlement system calls; its only job is to validate, assign an idempotency key, and publish to RabbitMQ with a publisher confirm before returning 200 OK.
+- **`instructions` Topic Exchange** — routes each instruction to all three downstream queues via a Fanout-like binding pattern (three permanent bindings, one per queue), using instruction type in the routing key to allow future selective routing.
+- **`swift-dispatch` Quorum Queue** — durable, quorum-replicated; consumed by the SWIFT Dispatch Service.
+- **`ledger-posting` Quorum Queue** and **`customer-notification` Quorum Queue** — same durability posture, independent consumers.
+- **SWIFT Dispatch Service** — consumes `swift-dispatch`, checks its idempotency store before calling SWIFT's API, records the dispatch attempt, and separately handles SWIFT's async confirmation webhook.
+- **Idempotency Store** — a keyed store (instruction ID → dispatch status) checked before every SWIFT call, the mechanism enforcing "never double-send."
+- **`swift-dlx` Dead Letter Exchange / `swift-investigate` queue** — receives instructions that permanently fail SWIFT validation after bounded retries, for manual ops review.
+- **Reconciliation Job** — nightly (plus intraday spot-check) job comparing SWIFT's settlement confirmation file against the Instruction Intake API's own record of dispatched instructions.
+
+**Architecture diagram:**
+```mermaid
+graph TB
+    TS[Trade-Settlement System] -->|"POST /instructions (sync)"| API[Instruction Intake API]
+    API -->|"publish + confirm"| EX{instructions Topic Exchange}
+    EX --> Q1[swift-dispatch queue]
+    EX --> Q2[ledger-posting queue]
+    EX --> Q3[customer-notification queue]
+    Q1 --> SDS[SWIFT Dispatch Service]
+    SDS -->|"check/set"| IDS[(Idempotency Store)]
+    SDS -->|"dispatch"| SWIFT[SWIFT Gateway]
+    SWIFT -.->|"async confirmation webhook, minutes later"| SDS
+    SDS -->|"requeue=false after bounded retries"| DLX{swift-dlx}
+    DLX --> INV[swift-investigate queue]
+    INV -.-> OPS[Ops: manual review]
+    Q2 --> LPS[Ledger-Posting Service]
+    Q3 --> NS[Notification Service]
+    RECON[Reconciliation Job] -->|"nightly settlement file"| SWIFT
+    RECON -->|"compare"| API
+```
+
+**End-to-end operational walkthrough (numbered):**
+1. Trade-settlement system durably persists the instruction, then calls `POST /instructions` on the Instruction Intake API.
+2. The API validates the payload, assigns/confirms an idempotency key (`instructionId`, supplied by the caller), and publishes one message to the `instructions` Topic Exchange with `properties.Persistent = true`.
+3. The API awaits the publisher confirm (§7.1) before returning 200 OK to the trade-settlement system — this is the durability handoff point.
+4. The exchange routes the message to all three bound queues (`swift-dispatch`, `ledger-posting`, `customer-notification`) per their bindings.
+5. SWIFT Dispatch Service consumes from `swift-dispatch`, checks the Idempotency Store for `instructionId` — if already dispatched, it ACKs immediately without re-calling SWIFT (dedupe on redelivery).
+6. If not yet dispatched, it calls SWIFT's API, records `status = EXECUTING` in the Idempotency Store, and ACKs the message only after SWIFT accepts the call (not before — an ack-then-crash-before-store-write is closed by writing the store record synchronously as part of the same transaction boundary as the SWIFT call where possible).
+7. Ledger-Posting Service and Notification Service consume independently from their own queues, at their own pace, unaffected by SWIFT's latency.
+8. Minutes later, SWIFT posts an async confirmation webhook; SWIFT Dispatch Service updates `status = SUCCESS` or `status = FAILED` against the same `instructionId`.
+9. If SWIFT rejects the instruction after bounded retries (§2.6/§10 Advanced Q5), it's NACKed with `requeue=false`, routing to `swift-investigate` for manual ops review — never silently dropped.
+10. The nightly Reconciliation Job compares SWIFT's settlement file against the Idempotency Store's recorded dispatches, flagging any break (Step 3 detail below).
+
+**REST API design:**
+
+`POST /instructions`
+
+| Field | Type | Description |
+|---|---|---|
+| `instructionId` | string (UUID) | Caller-supplied idempotency key; API rejects a duplicate `instructionId` with the original's recorded response rather than re-publishing. |
+| `payerAccount` | string | Source account identifier. |
+| `payeeSwiftCode` | string | Destination SWIFT/BIC code. |
+| `amount` | string | Transfer amount, stored/transmitted as a **string**, never a float — avoiding floating-point precision loss on monetary values (mirroring the Pragmatic Engineer payment-article convention this repo's §12 standard is built on). |
+| `currency` | string | ISO 4217 currency code. |
+| `valueDate` | string (ISO 8601 date) | Requested settlement date. |
+
+Response:
+
+| Field | Type | Description |
+|---|---|---|
+| `instructionId` | string | Echoed back. |
+| `status` | string | `ACCEPTED` (durably queued) — never a downstream-dispatch status, since dispatch is asynchronous from this call's perspective. |
+| `acceptedAt` | string (ISO 8601 timestamp) | When the API's publisher confirm was received. |
+
+`GET /instructions/{instructionId}/status` — polled by the trade-settlement system or ops tooling:
+
+| Field | Type | Description |
+|---|---|---|
+| `instructionId` | string | — |
+| `dispatchStatus` | string | `NOT_STARTED \| EXECUTING \| SUCCESS \| FAILED \| INVESTIGATING` |
+| `swiftConfirmationRef` | string, nullable | Populated once SWIFT's confirmation webhook arrives. |
+| `lastUpdatedAt` | string (ISO 8601 timestamp) | — |
+
+**Data model:**
+
+`instructions` table
+
+| Column | Type | Description |
+|---|---|---|
+| `instruction_id` | UUID, primary key | Idempotency key, also the RabbitMQ message ID. |
+| `payer_account` | varchar | — |
+| `payee_swift_code` | varchar | — |
+| `amount` | decimal(19,4) | Stored as a fixed-precision decimal in the database (the API's string transport avoids client-side float rounding; the DB itself uses `decimal`, not `float`, for the same reason). |
+| `currency` | char(3) | — |
+| `dispatch_status` | varchar (enum-constrained) | `NOT_STARTED → EXECUTING → SUCCESS \| FAILED` — the status lifecycle; `INVESTIGATING` is a terminal side-branch from `FAILED` after bounded retries route to the DLX. |
+| `swift_confirmation_ref` | varchar, nullable | — |
+| `created_at` / `updated_at` | timestamp | — |
+
+**Third-party integration boundary:** SWIFT's own API/webhook contract is treated as an external system boundary — the SWIFT Dispatch Service is the only component with direct SWIFT credentials/network access, keeping SWIFT-specific compliance scope (SWIFT CSP controls) contained to one service rather than spread across the fan-out.
+
+### Step 3 — Design Deep Dive
+
+**External-provider integration (SWIFT dispatch):** SWIFT's API is called directly (not via a hosted redirect page, unlike a card-payment flow) — the numbered flow is steps 5–6 above: idempotency-store check → SWIFT call → store the `EXECUTING` record → ACK. The async confirmation webhook (step 8) is the delayed-completion leg: SWIFT's own processing (correspondent-bank routing, compliance screening) can take minutes to hours, so the design never blocks the RabbitMQ consumer waiting for it — the consumer's job ends at successful *submission* to SWIFT, and the webhook independently closes the loop.
+
+**Reconciliation against externally-supplied truth:** the nightly Reconciliation Job pulls SWIFT's settlement confirmation file and classifies breaks into three tiers, mirroring the standard reconciliation pattern: **automatable** (an instruction shows `SUCCESS` in SWIFT's file and `SUCCESS` in our own store — no action), **manual** (SWIFT's file shows a confirmation for an `instructionId` our store still shows `EXECUTING` for — likely a missed/delayed webhook, auto-remediate by updating status from the file itself), and **investigate** (an `instructionId` in SWIFT's file with no matching record in our store at all, or a status mismatch beyond simple webhook-lag — routed to ops, never auto-resolved). This reconciliation step runs **even though SWIFT's webhook delivery is itself expected to be reliable** — per this repo's standing reconciliation principle, an upstream party's own delivery guarantee is never a substitute for independently verifying against their externally-supplied source of truth.
+
+**Handling processing delays:** the `EXECUTING` status is a genuine, expected pending state (not an error) — the `GET /instructions/{id}/status` endpoint is designed for polling by the trade-settlement system precisely because SWIFT confirmation is asynchronous and can legitimately take minutes; no consumer blocks or times out waiting for it.
+
+**Internal service communication:** the Instruction Intake API's only synchronous call is the publisher-confirm round-trip to RabbitMQ (§7.1) — every downstream leg (SWIFT dispatch, ledger posting, notification) is decoupled via the queue, a deliberate choice: a synchronous call chain (API → SWIFT dispatch → ledger → notification, in sequence) would tie the API's own latency and availability to the slowest and least reliable downstream (SWIFT), which is exactly the coupling the fan-out topology avoids.
+
+**Handling failed operations:** SWIFT rejections are classified retryable (a transient SWIFT-side timeout — NACK with `requeue=true`, bounded retry count) vs. non-retryable (a permanently malformed instruction — NACK with `requeue=false`, routed to `swift-investigate` via the DLX, §2.6/§10 Advanced Q5) — never an indefinite requeue loop.
+
+**Exactly-once delivery:** `exactly-once = at-least-once AND at-most-once` (§10 Expert Q2). At-least-once comes from RabbitMQ's ack/requeue mechanism (§2.3) plus publisher confirms (§7.1) on the intake side. At-most-once — specifically, "SWIFT is never called twice for the same instruction" — comes entirely from the Idempotency Store check in step 5, keyed on `instructionId`, checked before every SWIFT call regardless of how many times the message is redelivered. Two concrete scenarios: **(a) double submit** — the trade-settlement system retries its `POST /instructions` call after a network timeout, even though the first call actually succeeded; the API's own `instructionId`-uniqueness check (not RabbitMQ's) catches this at intake, returning the original `ACCEPTED` response rather than re-publishing. **(b) response lost after SWIFT succeeded** — the SWIFT Dispatch Service calls SWIFT, SWIFT accepts, but the service crashes before ACKing the RabbitMQ message; on redelivery, the Idempotency Store already shows `EXECUTING` (or later `SUCCESS`, once the webhook lands) for that `instructionId`, so the redelivered message is ACKed without a second SWIFT call — this is precisely why the store write must happen before the ACK, not after, and ideally atomically with the SWIFT call's own recorded outcome.
+
+**Consistency:** the Idempotency Store and the `instructions` table are the system's stateful components; both must be strongly consistent internally (a single primary-writer relational store, not an eventually-consistent replica, for the idempotency check specifically — a stale-read on the idempotency check is precisely the gap that would let a duplicate SWIFT call slip through) — RabbitMQ's own quorum queues (§9.1) provide the message-durability leg of consistency, but the idempotency check itself sits outside RabbitMQ, in the primary-writer store, deliberately.
+
+**Security:** the SWIFT Dispatch Service holds the only SWIFT credentials in the system (§12 Step 2's integration-boundary note); the RabbitMQ vhost hosting these three queues is dedicated to this workload, not shared with unrelated systems (§8.1/§9.1's shared-broker blast-radius lesson applied directly); TLS is mandatory end-to-end (§8.2) given the payment-instruction payload.
+
+### Step 4 — Wrap-Up
+
+**Not covered, and the next questions an interviewer would ask:** monitoring/alerting specifics (queue-depth alert thresholds tuned per §7.2's flow-control risk, SWIFT-dispatch-latency p99 dashboards, reconciliation-break-count alerting); multi-currency and multi-region expansion (a second region would need federation or a fully separate regional cluster per §9.2, not a stretched cluster); additional downstream integrations beyond the three named legs (e.g., a fraud-screening consumer added later — trivially added as a fourth queue binding on the same exchange, demonstrating the fan-out topology's extensibility); debugging tooling (RabbitMQ management UI queue/consumer dashboards, correlation-ID-based distributed tracing across the intake API, dispatch service, and reconciliation job).
+
+**Closing summary diagram:** see the architecture diagram in Step 2 — the durable fan-out from one exchange to three independently-paced, independently-scaled consumer queues, with the SWIFT leg singled out for idempotent-dispatch and reconciliation treatment, is the complete system.
+
+**References:**
+1. RabbitMQ official documentation — Exchanges, Queues, Bindings: https://www.rabbitmq.com/tutorials
+2. RabbitMQ documentation — Quorum Queues: https://www.rabbitmq.com/docs/quorum-queues
+3. RabbitMQ documentation — Publisher Confirms and Consumer Acknowledgements: https://www.rabbitmq.com/docs/confirms
+4. RabbitMQ documentation — Federation and Shovel: https://www.rabbitmq.com/docs/federation, https://www.rabbitmq.com/docs/shovel
+5. SWIFT — ISO 20022 payment messaging standards: https://www.swift.com/standards/iso-20022
+6. Colin McCabe / Pragmatic Engineer — "Designing a Payment System" (this repo's standing §12 structural reference): https://newsletter.pragmaticengineer.com/p/designing-a-payment-system
+
+---
+
+## 13. Low-Level Design
+
+**Requirements**: a publisher-side library used by the Instruction Intake API (§12) that (a) publishes with persistence and awaits a publisher confirm, (b) exposes a pluggable retry/idempotency strategy so the SWIFT-dispatch consumer's redelivery-dedupe logic (§12 Step 3) can be composed independently of the publish path, and (c) supports adding new downstream consumer bindings (the fraud-screening example from §12 Step 4) without modifying existing publisher or consumer code.
+
+### Class Diagram
+```mermaid
+classDiagram
+    class IMessagePublisher {
+        <<interface>>
+        +PublishAsync(Message msg) Task~PublishResult~
+    }
+    class ConfirmedRabbitMqPublisher {
+        -IModel channel
+        -TimeSpan confirmTimeout
+        +PublishAsync(Message msg) Task~PublishResult~
+    }
+    class IIdempotencyStore {
+        <<interface>>
+        +HasProcessedAsync(string key) Task~bool~
+        +MarkProcessedAsync(string key, string status) Task
+    }
+    class SqlIdempotencyStore {
+        +HasProcessedAsync(string key) Task~bool~
+        +MarkProcessedAsync(string key, string status) Task
+    }
+    class IMessageConsumer {
+        <<interface>>
+        +HandleAsync(DeliveredMessage msg) Task
+    }
+    class SwiftDispatchConsumer {
+        -IIdempotencyStore idempotencyStore
+        -ISwiftGatewayClient swiftClient
+        +HandleAsync(DeliveredMessage msg) Task
+    }
+    class LedgerPostingConsumer {
+        +HandleAsync(DeliveredMessage msg) Task
+    }
+    class ExchangeBindingRegistry {
+        +RegisterBinding(string queueName, string routingPattern)
+    }
+    IMessagePublisher <|.. ConfirmedRabbitMqPublisher
+    IIdempotencyStore <|.. SqlIdempotencyStore
+    IMessageConsumer <|.. SwiftDispatchConsumer
+    IMessageConsumer <|.. LedgerPostingConsumer
+    SwiftDispatchConsumer --> IIdempotencyStore
+    ConfirmedRabbitMqPublisher --> ExchangeBindingRegistry : declares bindings from
+```
+
+### Sequence Diagram — Idempotent SWIFT Dispatch on Redelivery
+```mermaid
+sequenceDiagram
+    participant Q as swift-dispatch queue
+    participant C as SwiftDispatchConsumer
+    participant S as IIdempotencyStore
+    participant SW as SWIFT Gateway
+
+    Q->>C: deliver(message, deliveryTag)
+    C->>S: HasProcessedAsync(instructionId)
+    alt already processed (redelivery after crash)
+        S-->>C: true
+        C->>Q: BasicAck(deliveryTag)
+    else not yet processed
+        S-->>C: false
+        C->>SW: Dispatch(instruction)
+        SW-->>C: accepted
+        C->>S: MarkProcessedAsync(instructionId, "EXECUTING")
+        C->>Q: BasicAck(deliveryTag)
+    end
+```
+
+**Design patterns used:**
+- **Strategy** — `IMessagePublisher` and `IIdempotencyStore` are swappable strategies (a test double replaces `SqlIdempotencyStore` with an in-memory store in integration tests without touching consumer logic).
+- **Template Method (implicit)** — every `IMessageConsumer` implementation follows the same idempotency-check → process → ack shape; a shared base class factors out the check/ack boilerplate, leaving only the business call as the variable step.
+- **Observer/Publish-Subscribe** — the exchange/binding topology itself is the Observer pattern realized at the infrastructure level: the publisher has no reference to any consumer, only to the exchange.
+- **Chain of Responsibility (for retry classification)** — the retryable-vs-non-retryable exception classification (§12 Step 3) is a small chain: transient-exception handlers attempt requeue, terminal-exception handlers route to the DLX, falling through in a fixed order.
+
+**SOLID mapping:**
+- **SRP** — `ConfirmedRabbitMqPublisher` only publishes and confirms; idempotency logic lives entirely in `IIdempotencyStore`/consumers, not smeared into the publisher.
+- **OCP** — adding the fraud-screening consumer (§12 Step 4) means adding a new `IMessageConsumer` implementation and a new binding registration — zero changes to `ConfirmedRabbitMqPublisher`, `SwiftDispatchConsumer`, or the exchange declaration.
+- **LSP** — any `IIdempotencyStore` implementation (SQL-backed, Redis-backed) is substitutable without changing consumer behavior, provided it honors the interface's consistency contract (§12 Step 3's "must be a strongly-consistent primary-writer store" requirement is a documented precondition, not enforced by the interface itself — a known LSP-adjacent limitation worth flagging in review).
+- **ISP** — `IMessagePublisher` and `IIdempotencyStore` are narrow, single-purpose interfaces rather than one bloated `IMessagingInfrastructure` interface a consumer would have to depend on in full.
+- **DIP** — `SwiftDispatchConsumer` depends on `IIdempotencyStore` and `ISwiftGatewayClient` abstractions, not concrete SQL/HTTP client types, enabling the confirm-timeout and retry-policy unit tests to run without a real broker or SWIFT sandbox.
+
+**Extensibility**: new downstream legs are added purely via new bindings + a new consumer implementing `IMessageConsumer` — the topic exchange and publisher path are untouched, directly realizing OCP at the messaging-topology level, not just the code level.
+
+**Concurrency / thread safety**: `ConfirmedRabbitMqPublisher` uses a single RabbitMQ channel per publishing thread (channels are not thread-safe for concurrent publish calls in most client libraries) — a connection pool with one channel per logical publisher worker avoids cross-thread channel contention; `SqlIdempotencyStore`'s `HasProcessedAsync`/`MarkProcessedAsync` pair is **not** atomic by default (a check-then-act race is possible if two redelivered copies of the same message are processed concurrently by different consumer instances) — the production mitigation is a unique constraint on `instruction_id` in the underlying table, converting a would-be race into a caught constraint violation that the consumer treats as "already processed" rather than relying on the check-then-act sequence alone to be race-free.
+
+---
+
+## 14. Production Debugging
+
+**Incident**: a bank's trade-settlement-notification pipeline (built on the fan-out topology from §12, though this incident predates the SWIFT-dispatch idempotency hardening described there) began exhibiting p99 message-delivery latency climbing from ~50ms to over 12 seconds during the London trading-day open, with the `ledger-posting` queue's depth climbing steadily into the tens of thousands and the broker's management UI showing memory usage approaching its configured high-watermark.
+
+**Root cause**: the Ledger-Posting Service had been redeployed the previous week with a new per-message database write that, under a specific combination of high message volume and a newly-introduced (unindexed) lookup query, ran roughly 40x slower than before — the consumer's effective processing rate dropped well below the sustained publish rate during the London-open volume spike, and RabbitMQ's default (non-lazy) queue behavior kept the growing backlog of unconsumed messages resident in broker memory (§7.2/§7.3), eventually approaching the broker's memory high-watermark and triggering flow control — which throttled **all** producers on that vhost, including the unrelated `swift-dispatch` and `customer-notification` legs sharing the same exchange, explaining why symptoms appeared broker-wide rather than confined to the one slow consumer.
+
+**Investigation**: the on-call engineer first ruled out a broker-level fault by checking RabbitMQ's management UI cluster-health dashboard (all nodes healthy, no network partition) — the queue-depth-by-queue breakdown immediately isolated `ledger-posting` as the sole queue with abnormal growth, while `swift-dispatch` and `customer-notification` queue depths stayed near zero, confirming the bottleneck was consumer-side on that one leg, not exchange/routing-level. Cross-referencing the Ledger-Posting Service's own APM traces against the queue-depth growth's start time pinpointed the exact deployment that introduced the slow query, and a database slow-query log confirmed the specific unindexed lookup as the per-message cost driver. The broker-wide flow-control throttling (visible as connection-level blocked notifications in the RabbitMQ management UI's connection view) was the mechanism connecting one queue's backlog to the unrelated legs' latency degradation — without checking per-queue depth breakdown first, this could easily have been misdiagnosed as a general broker capacity problem rather than a single consumer's regression.
+
+**Tools**: RabbitMQ management UI (per-queue depth, per-connection flow-control-blocked status, cluster memory/alarm view), the Ledger-Posting Service's APM/tracing tool (isolating the slow per-message database call), database slow-query log (confirming the missing index as root cause).
+
+**Fix**: added the missing index to eliminate the per-message query cost (restoring the Ledger-Posting Service's throughput to its prior baseline, draining the backlog); as an immediate mitigation while the index was being validated in staging, temporarily converted `ledger-posting` to a lazy queue (§7.3) to relieve broker memory pressure and stop the flow-control cascade from affecting the other two legs, accepting higher per-message delivery latency on that one queue as a deliberate, temporary trade-off.
+
+**Prevention**: added a per-queue depth-growth-rate alert (not just an absolute-depth threshold) so a consumer regression is caught within minutes of deployment rather than after it grows large enough to trigger broker-wide flow control; added a load-test gate to the Ledger-Posting Service's deployment pipeline specifically exercising realistic London-open message volume against any new per-message database call; and — as a structural fix beyond this one incident — moved the three fan-out legs onto separate vhosts with independent memory-alarm thresholds (§8.1's isolation limits directly informing this decision), so a future single-consumer regression on one leg can no longer trigger flow control against the other two.
+
+---
+
+## 15. Architecture Decision
+
+**Context**: choosing the message-durability/replication model for the `swift-dispatch`, `ledger-posting`, and `customer-notification` queues from §12.
+
+**Option A — Classic queues, non-mirrored.**
+- *Advantages*: lowest operational complexity, best raw throughput/latency for the small message volumes this system sees (§12's ~2–8.5 msg/sec).
+- *Disadvantages*: a single node failure loses the queue and its unconsumed messages entirely — unacceptable for payment-instruction durability.
+- *Cost/complexity*: lowest.
+- *Recommendation*: rejected outright for this workload — durability requirement is non-negotiable per §12's NFRs.
+
+**Option B — Classic mirrored queues.**
+- *Advantages*: better durability than Option A; mature, long-established RabbitMQ feature; lower node-count requirement than quorum queues.
+- *Disadvantages*: weaker failover-consistency guarantees than quorum queues (§9.1) — a failover can, in some sequences, lose or diverge unsynced messages, precisely the risk profile unacceptable for SWIFT wire-dispatch instructions specifically.
+- *Cost/complexity*: moderate — mirroring configuration and monitoring, but no minimum-3-node requirement.
+- *Maintainability*: RabbitMQ's classic mirrored-queue feature is in long-term maintenance mode relative to quorum queues, a forward-looking maintainability concern.
+
+**Option C — Quorum queues (recommended).**
+- *Advantages*: Raft-consensus-backed, quorum-committed writes give materially stronger failover consistency (§9.1) — directly matching the "SWIFT dispatch must never lose or duplicate" requirement; the actively-developed, currently-recommended RabbitMQ replication model.
+- *Disadvantages*: requires a minimum of 3 cluster nodes; somewhat different (not strictly better in every dimension) throughput/latency profile than classic queues.
+- *Cost/complexity*: moderate-to-higher (3-node minimum cluster cost), but the message volume here (§12's back-of-envelope) is so far below any quorum-queue throughput ceiling that the performance trade-off is immaterial in this specific case.
+- *Scalability*: sharding-by-account (§9.3) remains available if volume ever grows beyond a single queue's ceiling, independent of the mirroring-model choice.
+
+**Recommendation**: **Option C, quorum queues**, for all three legs, justified specifically by the payment-instruction durability requirement (§12 NFRs) outweighing the marginal 3-node operational cost — this is precisely the kind of decision where "the newer, generally-recommended option happens to also be correct here," distinguished from §10 Advanced Q6's counter-example (where classic queues remain legitimate for a genuinely lower-stakes workload) by this workload's specific correctness requirements around wire-transfer dispatch.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact**: a message-loss or duplicate-dispatch defect in the SWIFT-dispatch leg isn't a "bug" in the ordinary sense — a duplicate wire transfer is a real, often difficult-to-reverse movement of client funds, and a lost instruction is a missed settlement obligation with potential counterparty and regulatory consequences; this reframes every design decision in §12–15 (quorum queues, idempotency-key propagation, reconciliation) from "engineering best practice" to "the specific control that prevents a specific, quantifiable financial-loss and regulatory-reporting scenario" — the framing a Principal Engineer must carry into every design review and every trade-off conversation with non-engineering stakeholders.
+
+**Engineering trade-offs**: the quorum-queue-vs-classic decision (§15) and the lazy-queue/prefetch tuning (§7.3/§7.4) are genuinely competing concerns (consistency and durability vs. raw throughput/latency) — a Principal Engineer's job is not to pretend there's a free-lunch answer, but to make the trade-off explicit, tie it to the specific workload's actual risk profile (as §15 does, distinguishing this workload from §10 Advanced Q6's legitimate classic-queue counter-example), and ensure the decision is documented with its reasoning so a future engineer doesn't "simplify" it back to a lower-durability option without understanding why it was chosen.
+
+**Technical leadership**: the incident in §14 is a useful teaching moment — the actual defect was a slow database query, not a RabbitMQ misconfiguration, but its *blast radius* (throttling unrelated queues via broker-wide flow control) was a direct consequence of a shared-vhost topology decision; a Principal Engineer uses incidents like this to drive structural fixes (the post-incident vhost-separation change) rather than only fixing the proximate cause, and communicates the distinction between "what broke" and "what let it spread" clearly to the team.
+
+**Cross-team communication**: the SWIFT-dispatch idempotency guarantee (§12 Step 3, §10 Expert Q1/Q2) is a contract the trade-settlement team, the SWIFT Dispatch Service team, and compliance/audit all depend on being true — a Principal Engineer ensures this guarantee is documented as an explicit, testable contract (not tribal knowledge in one engineer's head), with the reconciliation job's break-classification output (§12 Step 3) surfaced to ops and compliance as a standing, reviewable audit trail rather than an internal engineering-only artifact.
+
+**Architecture governance**: the checklist in §10 Expert Q10 is exactly the kind of artifact a Principal Engineer institutionalizes as a mandatory pre-production gate for any new RabbitMQ-backed payment workload across the organization — not a one-off review for this system alone, converting a single design review's hard-won reasoning into a reusable governance control.
+
+**Cost optimization**: the 3-node quorum-queue minimum and dedicated-vhost/cluster isolation (§15, §14's structural fix) both carry real infrastructure cost — a Principal Engineer justifies that cost explicitly against the quantified downside (a duplicate-wire or lost-instruction incident's financial/regulatory cost) rather than either over-provisioning reflexively or under-provisioning to save infrastructure spend on a workload where the correctness stakes clearly justify the cost.
+
+**Risk analysis**: the single largest residual risk after this design is a defect in the Idempotency Store's own consistency guarantee (§12 Step 3's "must be strongly consistent, not eventually consistent" requirement) — a Principal Engineer explicitly names this as the system's actual correctness linchpin in any architecture review, rather than letting quorum-queue durability (a real but different guarantee) be mistaken for covering this risk too.
+
+**Long-term maintainability**: choosing the actively-developed quorum-queue model over the maintenance-mode classic-mirrored model (§15) is itself a long-term-maintainability decision, not just a durability one — a Principal Engineer weighs a technology's trajectory, not only its current feature set, when the choice will outlive the current team's tenure on the system.
+
+---
 
 ## 18. Revision
 **Key takeaways**: RabbitMQ's exchange-based routing (Direct/Topic/Fanout/Headers) provides sophisticated, producer-decoupled routing flexibility that Kafka's topic model doesn't natively offer, but its remove-on-acknowledgment storage model forfeits Kafka's durable retention/replay capability — the two brokers are optimized for genuinely different problems, and the choice (or justified hybrid use, Advanced Q3) should be deliberate. Durability requires two independent, both-required settings (durable queue + persistent message) — a common, costly misconfiguration is satisfying only one and assuming full durability, a gap invisible until an actual broker restart exposes it. Manual acknowledgment with NACK/reject and Dead Letter Exchange configuration provides native, protocol-level failure handling that mirrors the DLQ pattern but is broker-enforced rather than application-implemented. RabbitMQ's queue-growth performance sensitivity and non-partitioned parallelism model require a distinct mental model from Kafka's partition-bounded consumer groups when reasoning about scalability.

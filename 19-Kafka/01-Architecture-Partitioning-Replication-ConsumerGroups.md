@@ -4,165 +4,6 @@
 
 ---
 
-## Apache Kafka Architecture
-
-```mermaid
-flowchart LR
-
- Producer[Producer]
-
- Producer --> Broker1[Kafka Broker 1]
- Producer --> Broker2[Kafka Broker 2]
- Producer --> Broker3[Kafka Broker 3]
-
- Broker1 <-->|Replication| Broker2
- Broker2 <-->|Replication| Broker3
- Broker3 <-->|Replication| Broker1
-
- Broker1 --> ConsumerGroup[Consumer Group]
-
- ConsumerGroup --> Consumer1[Consumer 1]
- ConsumerGroup --> Consumer2[Consumer 2]
- ConsumerGroup --> Consumer3[Consumer 3]
-
- Broker1 --> Monitoring[Prometheus / Grafana]
-```
-
----
-
-## Topic Partitioning
-
-```text
-Topic: Orders
-
-   +--------------+     +--------------+     +--------------+
-   |  Partition 0 |     |  Partition 1 |     |  Partition 2 |
-   +--------------+     +--------------+     +--------------+
-   | Order-101    |     | Order-102    |     | Order-103    |   offset 0
-   | Order-104    |     | Order-105    |     | Order-106    |   offset 1
-   | Order-107    |     | Order-108    |     | Order-109    |   offset 2
-   +--------------+     +--------------+     +--------------+
-          |                    |                    |
-          v                    v                    v
-     append-only          append-only          append-only
-     ordered log          ordered log          ordered log
-```
-
-Drawing the partitions **side by side** rather than stacked is the point: they are parallel, independent logs, not one sequence split into chunks. Ordering is guaranteed *within* a partition and never *across* them — so `Order-101` is guaranteed to be read before `Order-104`, while nothing whatsoever is guaranteed about the relative order of `Order-101` and `Order-102`. Partition count is therefore the unit of both parallelism and of ordering scope, and those two pull in opposite directions.
-
----
-
-## Replication
-
-```text
-         ┌──────────────────────────┐
-         │ Broker-1                 │
-         │ Partition-0  (LEADER)    │   <- every produce and consume goes here
-         └─────────────┬────────────┘
-                       │  followers PULL from the leader
-            ┌──────────┴──────────┐
-            ▼                     ▼
-   ┌──────────────────┐  ┌──────────────────┐
-   │ Broker-2         │  │ Broker-3         │
-   │ Partition-0      │  │ Partition-0      │
-   │ (FOLLOWER, ISR)  │  │ (FOLLOWER, ISR)  │
-   └──────────────────┘  └──────────────────┘
-```
-
-Note what the arrows do **not** show: no client traffic reaches a follower. Followers exist for durability and failover, not for read scaling — which is the single most common wrong assumption about this diagram. A follower earns its place in the **ISR** (in-sync replica set) by staying caught up; only an ISR member can be promoted to leader without data loss, so `min.insync.replicas` is what actually determines your durability guarantee, not the replication factor alone.
-
----
-
-## Consumer Group
-
-```text
-                Topic: Orders
-                      │
-        ┌─────────────┴──────────────┐
-        │      Consumer Group A      │
-        └─────────────┬──────────────┘
-              ┌───────┴───────┐
-              ▼               ▼
-        ┌────────────┐  ┌────────────┐
-        │ Consumer-1 │  │ Consumer-2 │
-        └────────────┘  └────────────┘
-
-   Partition-0  ->  Consumer-1
-   Partition-1  ->  Consumer-2
-   Partition-2  ->  Consumer-1     <- 3 partitions, 2 consumers:
-                                      one consumer carries two
-```
-
-The assignment table is the important half of this diagram. Each partition is consumed by **exactly one** member of the group, which is what makes a consumer group Kafka's implementation of competing consumers. It also fixes the ceiling: **adding consumers beyond the partition count adds nothing** — a third consumer here would take over `Partition-2`, but a fourth would sit idle with no partition to own. Partition count, chosen at topic-creation time, is therefore the permanent upper bound on a group's parallelism.
-
----
-
-## Message Flow
-
-```text
-   Producer
-      │
-      │  publish
-      ▼
-   Kafka Topic
-      │
-      │  partition selected: hash(key), or round-robin when key is null
-      ▼
-   Leader Broker for that partition
-      │
-      │  replicate to followers; acks honoured per min.insync.replicas
-      ▼
-   Consumer Group
-      │
-      │  one partition -> exactly one member
-      ▼
-   Business Service
-```
-
-The labels on the arrows carry the content here, not the boxes. Two of them decide correctness rather than mechanics: **`hash(key)`** is where per-entity ordering is won or lost (a null or wrongly-chosen key scatters one entity's events across partitions and forfeits ordering silently), and **`acks` / `min.insync.replicas`** is where the durability guarantee is actually set — `acks=all` means nothing if `min.insync.replicas` is 1, because a single surviving replica then satisfies "all".
-
----
-
-## Kafka Components
-
-| Component | Responsibility |
-|-----------|----------------|
-| Producer | Publishes messages |
-| Topic | Logical stream of events |
-| Partition | Parallelism and ordering unit |
-| Broker | Stores and serves data |
-| Leader | Handles reads and writes |
-| Follower | Replicates data |
-| Consumer | Reads messages |
-| Consumer Group | Enables scalable processing |
-| Offset | Tracks message position |
-
-
-### End-to-End: Cluster, Topic, Partitions, Consumers
-
-```text
-                    Producer
-                        │
-                        ▼
-                  Kafka Cluster
-        ┌──────────┬──────────┬──────────┐
-        │ Broker1  │ Broker2  │ Broker3  │
-        └──────────┴──────────┴──────────┘
-                        │
-                 Topic (Orders)
-                        │
-          ┌─────────────┴─────────────┐
-          ▼             ▼             ▼
-     Partition0    Partition1    Partition2
-          │             │             │
-          ▼             ▼             ▼
-     Consumer1     Consumer2     Consumer3
-```
-
-This is the whole model on one page, and it is worth reading bottom-up: the three parallel consumer lanes exist **because** there are three partitions, and the three partitions are spread across brokers **because** that is what makes the topic both parallel and fault-tolerant. Brokers are the physical unit, partitions the logical unit of parallelism, and consumers the unit of work — collapse any two of those three and the model stops explaining anything.
-
----
-
 ## 1. Fundamentals
 
 ### What is Kafka, and why does it warrant a dedicated module beyond the broker-agnostic EDA concepts?
@@ -242,6 +83,154 @@ graph LR
  A0 -.->|"increasing durability"| A1 -.->|"increasing durability"| Aall
 ```
 
+### Apache Kafka Architecture — the Cluster-Level View
+
+```mermaid
+flowchart LR
+
+ Producer[Producer]
+
+ Producer --> Broker1[Kafka Broker 1]
+ Producer --> Broker2[Kafka Broker 2]
+ Producer --> Broker3[Kafka Broker 3]
+
+ Broker1 <-->|Replication| Broker2
+ Broker2 <-->|Replication| Broker3
+ Broker3 <-->|Replication| Broker1
+
+ Broker1 --> ConsumerGroup[Consumer Group]
+
+ ConsumerGroup --> Consumer1[Consumer 1]
+ ConsumerGroup --> Consumer2[Consumer 2]
+ ConsumerGroup --> Consumer3[Consumer 3]
+
+ Broker1 --> Monitoring[Prometheus / Grafana]
+```
+
+This is the full picture zoomed out one level from the leader/follower and consumer-group diagrams above: a producer fans out to whichever broker leads the relevant partition, brokers replicate among themselves, and a consumer group pulls from the leader while metrics flow out to observability tooling — every other diagram in this section is a zoomed-in view of one edge of this graph.
+
+### Topic Partitioning — Partitions as Parallel, Independent Logs
+
+```text
+Topic: Orders
+
+   +--------------+     +--------------+     +--------------+
+   |  Partition 0 |     |  Partition 1 |     |  Partition 2 |
+   +--------------+     +--------------+     +--------------+
+   | Order-101    |     | Order-102    |     | Order-103    |   offset 0
+   | Order-104    |     | Order-105    |     | Order-106    |   offset 1
+   | Order-107    |     | Order-108    |     | Order-109    |   offset 2
+   +--------------+     +--------------+     +--------------+
+          |                    |                    |
+          v                    v                    v
+     append-only          append-only          append-only
+     ordered log          ordered log          ordered log
+```
+
+Drawing the partitions **side by side** rather than stacked is the point: they are parallel, independent logs, not one sequence split into chunks. Ordering is guaranteed *within* a partition and never *across* them — so `Order-101` is guaranteed to be read before `Order-104`, while nothing whatsoever is guaranteed about the relative order of `Order-101` and `Order-102`. Partition count is therefore the unit of both parallelism and of ordering scope, and those two pull in opposite directions.
+
+### Replication — Leader Serves All Traffic, Followers Pull
+
+```text
+         ┌──────────────────────────┐
+         │ Broker-1                 │
+         │ Partition-0  (LEADER)    │   <- every produce and consume goes here
+         └─────────────┬────────────┘
+                       │  followers PULL from the leader
+            ┌──────────┴──────────┐
+            ▼                     ▼
+   ┌──────────────────┐  ┌──────────────────┐
+   │ Broker-2         │  │ Broker-3         │
+   │ Partition-0      │  │ Partition-0      │
+   │ (FOLLOWER, ISR)  │  │ (FOLLOWER, ISR)  │
+   └──────────────────┘  └──────────────────┘
+```
+
+Note what the arrows do **not** show: no client traffic reaches a follower. Followers exist for durability and failover, not for read scaling — which is the single most common wrong assumption about this diagram. A follower earns its place in the **ISR** (in-sync replica set) by staying caught up; only an ISR member can be promoted to leader without data loss, so `min.insync.replicas` is what actually determines your durability guarantee, not the replication factor alone.
+
+### Consumer Group — Partition Assignment Table
+
+```text
+                Topic: Orders
+                      │
+        ┌─────────────┴──────────────┐
+        │      Consumer Group A      │
+        └─────────────┬──────────────┘
+              ┌───────┴───────┐
+              ▼               ▼
+        ┌────────────┐  ┌────────────┐
+        │ Consumer-1 │  │ Consumer-2 │
+        └────────────┘  └────────────┘
+
+   Partition-0  ->  Consumer-1
+   Partition-1  ->  Consumer-2
+   Partition-2  ->  Consumer-1     <- 3 partitions, 2 consumers:
+                                      one consumer carries two
+```
+
+The assignment table is the important half of this diagram. Each partition is consumed by **exactly one** member of the group, which is what makes a consumer group Kafka's implementation of competing consumers. It also fixes the ceiling: **adding consumers beyond the partition count adds nothing** — a third consumer here would take over `Partition-2`, but a fourth would sit idle with no partition to own. Partition count, chosen at topic-creation time, is therefore the permanent upper bound on a group's parallelism.
+
+### Message Flow — Where Ordering and Durability Are Actually Decided
+
+```text
+   Producer
+      │
+      │  publish
+      ▼
+   Kafka Topic
+      │
+      │  partition selected: hash(key), or round-robin when key is null
+      ▼
+   Leader Broker for that partition
+      │
+      │  replicate to followers; acks honoured per min.insync.replicas
+      ▼
+   Consumer Group
+      │
+      │  one partition -> exactly one member
+      ▼
+   Business Service
+```
+
+The labels on the arrows carry the content here, not the boxes. Two of them decide correctness rather than mechanics: **`hash(key)`** is where per-entity ordering is won or lost (a null or wrongly-chosen key scatters one entity's events across partitions and forfeits ordering silently), and **`acks` / `min.insync.replicas`** is where the durability guarantee is actually set — `acks=all` means nothing if `min.insync.replicas` is 1, because a single surviving replica then satisfies "all".
+
+### Kafka Components — Responsibility Glossary
+
+| Component | Responsibility |
+|-----------|----------------|
+| Producer | Publishes messages |
+| Topic | Logical stream of events |
+| Partition | Parallelism and ordering unit |
+| Broker | Stores and serves data |
+| Leader | Handles reads and writes |
+| Follower | Replicates data |
+| Consumer | Reads messages |
+| Consumer Group | Enables scalable processing |
+| Offset | Tracks message position |
+
+### End-to-End: Cluster, Topic, Partitions, Consumers
+
+```text
+                    Producer
+                        │
+                        ▼
+                  Kafka Cluster
+        ┌──────────┬──────────┬──────────┐
+        │ Broker1  │ Broker2  │ Broker3  │
+        └──────────┴──────────┴──────────┘
+                        │
+                 Topic (Orders)
+                        │
+          ┌─────────────┴─────────────┐
+          ▼             ▼             ▼
+     Partition0    Partition1    Partition2
+          │             │             │
+          ▼             ▼             ▼
+     Consumer1     Consumer2     Consumer3
+```
+
+This is the whole model on one page, and it is worth reading bottom-up: the three parallel consumer lanes exist **because** there are three partitions, and the three partitions are spread across brokers **because** that is what makes the topic both parallel and fault-tolerant. Brokers are the physical unit, partitions the logical unit of parallelism, and consumers the unit of work — collapse any two of those three and the model stops explaining anything.
+
 ## 4. Production Example
 **Scenario**: An analytics pipeline's Kafka consumer group processed high-volume clickstream events, with each batch triggering a moderately expensive enrichment call to an external geolocation API before committing offsets. During a period of elevated latency on that external geolocation API (unrelated to Kafka itself), individual batch-processing times occasionally exceeded the consumer's configured `max.poll.interval.ms` — Kafka, receiving no poll from that consumer instance within the expected window, presumed it dead and triggered a rebalance, reassigning its partitions to other group members; the "dead" instance, still alive and simply slow, eventually finished its poll cycle and rejoined the group moments later, triggering **another** rebalance. This repeated in a cascading loop for nearly 20 minutes, during which the "stop-the-world" rebalancing protocol in use (the older, non-cooperative version) paused consumption across **the entire consumer group**, not just the affected partitions, causing consumer lag to spike dramatically across the whole pipeline, well beyond what the original, isolated external-API slowness alone would have caused. **Investigation**: monitoring showed the classic rebalancing-storm signature — a rapid sequence of "member joined/member left" group-coordinator log events correlating precisely with the lag spike, rather than a single, sustained processing slowdown; correlating against the external geolocation API's own latency metrics (the distributed-tracing/correlation discipline, now applied to root-causing a Kafka-specific incident) revealed the true root cause several layers removed from Kafka itself. **Fix**: (1) increased `max.poll.interval.ms` to a value comfortably exceeding the geolocation API's worst-case observed latency plus enrichment processing time, preventing premature dead-consumer presumption during transient external slowness; (2) migrated to the incremental cooperative rebalancing protocol, so that even if a rebalance did trigger, only the specific reassigned partitions would pause, not the entire group; (3) separately, added a circuit breaker around the geolocation API call itself, so a genuinely degraded external dependency would fail fast with a fallback rather than risk exceeding the poll interval at all. **Lesson**: this incident illustrates the compounding nature of insufficiently-tuned Kafka configuration interacting with an external dependency's transient degradation (the resilience-pattern territory) — the geolocation API's slowness was the trigger, but Kafka's overly-aggressive `max.poll.interval.ms` and the older, non-cooperative rebalancing protocol were what turned a contained, external-dependency slowdown into a full consumer-group-wide outage; a Principal Engineer must reason about Kafka configuration and application-level resilience patterns together, not as independent concerns.
 
@@ -258,6 +247,50 @@ graph LR
 - Leaving `max.poll.interval.ms` at an aggressive default while consumer processing logic includes slow, unbounded external calls, inviting rebalancing storms.
 - Committing offsets before processing completes, risking silent under-processing (records skipped) rather than the generally-preferred at-least-once over-processing risk.
 - Ignoring under-replicated-partition alerts (partitions whose ISR has shrunk below the desired replication factor), which silently erodes the durability guarantee `acks=all` is meant to provide until an actual leader failure exposes the gap.
+
+---
+
+## 7. Performance Engineering
+
+**CPU/Memory**: each partition costs a broker real, non-zero overhead regardless of throughput — an open file handle per log segment, in-memory index structures, and replication-fetcher thread state — so a cluster with tens of thousands of partitions spread across only a handful of brokers pays a fixed per-partition tax before a single extra message is produced; Confluent's own operational guidance treats a few thousand partitions per broker as a practical ceiling for this reason, not an arbitrary round number.
+
+**Latency**: `acks=all` (2.3) adds the round-trip to the slowest ISR member as a hard floor on producer-perceived latency — typically single-digit milliseconds within one availability zone, but materially higher across zones or regions, which is why `min.insync.replicas` and replica placement (§9) are latency decisions as much as durability ones. Enabling the idempotent/transactional producer (Module 55 §2.1–2.2) adds further, smaller overhead — sequence-number bookkeeping and, for transactions, coordinator round-trips to begin/commit — that must be weighed against the correctness it buys.
+
+**Throughput**: producer-side batching (`linger.ms`, `batch.size`) is the primary throughput lever, trading a small, bounded added latency for materially fewer, larger network round-trips and more efficient broker-side I/O (§Advanced Q7 of Module 55 develops this for transactional producers specifically); consumer-side, `fetch.min.bytes`/`fetch.max.wait.ms` provide the mirror-image lever on the read path.
+
+**Scalability**: partition count is the throughput ceiling for both producers (parallel writes across leaders spread over brokers) and consumer groups (§2.4), but scaling partition count is a one-way, largely irreversible decision in practice — Kafka doesn't support reducing partition count on an existing topic without recreating it, so under-provisioning is easier to fix (add partitions) than over-provisioning (the broker-overhead cost of §7's opening point is now permanent for that topic).
+
+**Benchmarking**: benchmark with `kafka-producer-perf-test`/`kafka-consumer-perf-test` under the target `acks` and replication-factor configuration, not the default — a benchmark run with `acks=1` materially overstates the throughput a production topic running `acks=all` will actually sustain, exactly the kind of configuration-mismatched benchmark that produces a false sense of headroom.
+
+**Caching**: Kafka relies on the OS page cache, not an application-level cache, for its read performance — sequential, append-only writes and reads mean a broker serving mostly-recent data benefits enormously from page cache hits, which is why running brokers with insufficient free memory for page caching (over-provisioning the JVM heap instead) is a common, avoidable performance regression.
+
+## 8. Security
+
+**Threats**: an unauthenticated, unencrypted broker listener is a direct data-exfiltration and data-injection risk — any host with network access can produce forged trade events or consume every message on every topic, including regulated financial data, with zero audit trail of who did so.
+
+**Mitigations**: SASL (SASL/SCRAM or SASL/GSSAPI-Kerberos) or mutual TLS (mTLS) for broker authentication, terminated at the broker listener itself, not delegated to a perimeter firewall alone — directly the "never assume internal network traffic is trusted" principle (§Intermediate Q10) applied to Kafka specifically. TLS in transit for all producer/broker/consumer/inter-broker traffic, and encryption at rest for the underlying log segments where the topic carries regulated financial data.
+
+**AuthN/AuthZ**: per-topic, per-operation ACLs (`kafka-acls.sh`) scoping exactly which authenticated principal may `Write`/`Read`/`Describe` a given topic or consumer group — a payments-processing service's producer credential should be authorized to write to `payment-events` and nothing else, following least-privilege rather than a single, cluster-wide credential shared across every service, which turns any one compromised service into a compromise of the entire event backbone.
+
+**OWASP mapping**: broken access control (missing or overly broad ACLs); security misconfiguration (an unauthenticated `PLAINTEXT` listener left enabled alongside a properly secured one, still reachable); insufficient logging (no audit trail of which principal produced/consumed which topic, hampering incident investigation).
+
+**Secrets/Key management**: SASL credentials and TLS private keys belong in a managed secrets store (AWS Secrets Manager, Azure Key Vault, HashiCorp Vault), rotated on a schedule, never embedded in application configuration files checked into source control — the same discipline this course applies to every other credential class.
+
+**PCI/PII considerations**: a topic carrying cardholder data or PII should additionally apply field-level tokenization/encryption before the record ever reaches Kafka, since broker-level encryption at rest protects against physical disk compromise but not against an over-broadly-authorized consumer simply reading the plaintext payload it was never meant to see in full.
+
+## 9. Scalability
+
+**Horizontal scaling**: adding brokers to a cluster does not automatically rebalance existing topics' partitions onto them (§Intermediate Q9) — horizontal scaling requires an explicit partition-reassignment operation (`kafka-reassign-partitions.sh` or a tool like Cruise Control for automated, load-aware reassignment) to actually realize the added capacity for already-existing topics.
+
+**Partitioning/rebalancing at scale**: a cluster running thousands of partitions across dozens of brokers makes manual partition-reassignment impractical — production-scale operations typically adopt an automated rebalancer (Cruise Control) that continuously moves partitions to correct broker-level CPU/disk/network skew, since even a well-chosen initial partition assignment drifts out of balance as topics grow at different rates.
+
+**Cross-cluster replication**: MirrorMaker 2 (or a managed equivalent) replicates topics across clusters for multi-region disaster recovery or geo-local read/write patterns — critically, MirrorMaker 2 replication is **asynchronous and eventually consistent across clusters**, so a DR cluster's data lags the primary by a measurable replication delay; a failover runbook must account for this lag explicitly (how many seconds/minutes of trade events might not yet be replicated at failover time) rather than assuming the DR cluster is a perfect, real-time mirror.
+
+**Load balancing**: producer traffic is inherently load-balanced across partition leaders (spread across brokers) by the partitioning scheme itself; consumer load balancing is the consumer-group rebalance mechanism (2.4/2.5) — both mechanisms depend on the partition count and key distribution actually being well-chosen (§14's hot-partition incident is exactly a load-balancing failure at the partition-key layer, not a broker-capacity failure).
+
+**High availability**: `min.insync.replicas=2` with replication factor 3 tolerates one broker failure with zero data loss and continued availability (a second failure would either block writes, if `min.insync.replicas` can no longer be satisfied, or risk data loss if writes are allowed to proceed anyway — an explicit availability-vs-durability choice that must be made deliberately, not left as an emergent property of default settings).
+
+**Disaster recovery**: RPO for a Kafka-based system is bounded below by MirrorMaker 2's replication lag (never zero for an async cross-cluster setup); RTO depends on the failover runbook's automation maturity — a manual DNS/config cutover to the DR cluster measured in tens of minutes versus an automated, tested failover measured in single-digit minutes are very different operational postures for the same underlying topology, and the difference is entirely in operational investment, not Kafka capability.
 
 ---
 
@@ -308,6 +341,67 @@ graph LR
  **A:** Directly extend the testing-pyramid philosophy to Kafka topic design: write a targeted test that publishes a representative sample of events for several distinct entities (using the proposed partition key) and asserts (a) all events for the same entity land in the same partition (verifying the ordering property directly, rather than assuming the key design is correct by inspection alone) and (b) events for different entities are reasonably distributed across the full partition count (verifying the parallelism property) — converting an easy-to-get-subtly-wrong design assumption (as in the incident) into an explicit, automatically-verified pre-production check, rather than only discovering a partition-key mistake once production load exposes an ordering violation.
 10. **Q: As a Principal Engineer establishing Kafka operational standards across a large organization with many teams independently operating consumer groups, design the specific set of standing configuration reviews and monitors (synthesizing this entire module) you would require, and justify each.**
  **A:** (1) Mandatory, documented `max.poll.interval.ms` justification tied to each consumer's actual worst-case processing time (Advanced Q1) — necessary because default values are easy to leave unvalidated until a rebalancing storm exposes the gap. (2) A per-topic, explicitly-justified `acks` and replication-factor decision (Advanced Q2, Q3) rather than a uniform default — necessary because durability requirements genuinely differ by topic, and blind uniformity either overpays in latency or underpays in durability somewhere. (3) Standing alerting on under-replicated-partition counts, treated with the same urgency as any other degraded-redundancy signal (Advanced Q8) — necessary because the risk is latent until an actual failure exposes it, by which point it's too late to remediate. (4) Pre-production partition-key/ordering verification tests for any topic with ordering-sensitive consumers (Advanced Q9) — necessary because ordering mistakes are otherwise invisible until production load and specific entity access patterns expose them, often much later and much more expensively than a pre-production test would. Each standard targets a distinct, concrete failure mode this module identified through specific incidents or reasoning, directly extending this course's recurring "convert hard-won lessons into specific, enforced, fleet-wide gates" governance pattern into Kafka-specific operational practice.
+
+### Expert (10)
+1. **Q: A partition key that is high-cardinality and uniformly distributed in general can still produce hot partitions in production (§14). Design a partitioning strategy resilient to this class of skew without abandoning per-entity ordering.**
+ **A:** Pure `hash(TradeId)` partitioning is correct for ordering but blind to real-world activity skew — the fix isn't a different key (which would break ordering) but **more partitions than the average-load math alone suggests**, sized against the measured or realistically-modeled skew distribution (§14's fix: doubling partition count to reduce the probability any two hot accounts collide on the same partition), combined with a per-partition (not just aggregate) lag alert so a future skew is caught as a localized signal, not averaged into an aggregate metric that still looks healthy. A more sophisticated option for extreme, known-in-advance skew is a composite key (`TradeId` salted or bucketed) for the specific hot accounts only — but this is a targeted, higher-complexity exception, not a default strategy, since it complicates any consumer logic that assumes a single partition holds one entity's full history.
+ **Why correct:** Preserves the ordering guarantee (the non-negotiable constraint) while directly addressing the skew risk through capacity headroom and monitoring granularity, reserving key-salting for genuinely extreme, well-understood cases.
+ **Common mistakes:** Changing the partition key to something more "evenly distributed" without checking whether the new key still guarantees the required per-entity ordering.
+ **Follow-ups:** "How would you detect this skew before it reaches production?" (A load test replaying a realistic, non-uniform account-activity distribution against a staging topic, per §14's prevention step — not a uniform-random synthetic load.)
+
+2. **Q: Kafka's controller (KRaft mode, post-ZooKeeper removal) is itself a Raft-based quorum. How does controller failure differ operationally from a partition-leader failure, and why does this distinction matter for an SRE on-call runbook?**
+ **A:** A partition-leader failure triggers ISR-scoped leader election (2.2) for that one partition only, affecting only clients of that specific partition, and resolves in milliseconds to low seconds. A controller failure affects **cluster-wide metadata operations** — new topic creation, partition reassignment, broker registration — while in-flight partition leadership for already-stable partitions is typically unaffected during the brief controller re-election window, since KRaft's controller quorum re-elects a new active controller via the same Raft mechanism, directly reusing the consensus/quorum concepts. The operational distinction matters because a controller-election event alone, with no correlated partition-leader-election spike, should not be treated with the same urgency as a broker outage causing multiple simultaneous partition-leader elections — conflating the two produces either alert fatigue (over-escalating routine controller elections) or under-escalation (missing that a genuine broker outage is occurring).
+ **Why correct:** Precisely distinguishes the blast radius and operational signature of the two failure classes, and ties the distinction to a concrete on-call decision.
+ **Common mistakes:** Treating any leader-election log line as equally urgent, without checking whether it's a routine single-partition event or a cluster-wide controller failover correlated with a broader outage.
+ **Follow-ups:** "What migration risk does KRaft's removal of ZooKeeper introduce for a long-running cluster?" (Version-compatibility and metadata-migration risk during the ZooKeeper-to-KRaft migration itself, which is a one-time, carefully-staged operational event requiring its own tested runbook, distinct from steady-state controller-failover behavior.)
+
+3. **Q: Design the exactly-once producer-idempotency guarantee's interaction with the hot-partition fix in §14 — does doubling partition count from 24 to 48 risk breaking any producer-side guarantee already in place?**
+ **A:** No, and precisely why is worth stating explicitly: the idempotent producer's deduplication (Module 55 §2.1) tracks a sequence number per (Producer ID, partition) pair — increasing partition count changes which partition a given key's messages land on (via the hash function), but does not affect the correctness of the per-(PID, partition) sequence tracking itself, since that tracking is established fresh for whichever partition a given key now maps to. The one real operational risk is that repartitioning **changes key-to-partition mapping for every key**, meaning any consumer relying on "this specific partition number always holds this specific entity" (an anti-pattern in itself, since consumers should never hardcode partition-number assumptions) would break — the correct design was already partition-count-agnostic at the consumer level, so this repartitioning is safe specifically because that assumption was never made.
+ **Why correct:** Correctly separates what repartitioning does and does not affect, and surfaces the specific consumer-side anti-pattern that would have made it unsafe.
+ **Common mistakes:** Assuming repartitioning is risk-free in general, without checking whether any consumer has silently taken a dependency on specific partition numbers.
+ **Follow-ups:** "Would in-flight, uncommitted transactions be affected by a partition-count change?" (Transactions should be drained/completed before a partition-count change in a transactional topic — repartitioning a topic with in-flight transactions is an unsupported, high-risk operation that should be scheduled as an explicit maintenance window, not performed live.)
+
+4. **Q: A regulator asks how the firm guarantees no trade-lifecycle event (§12) is ever silently lost. Answer precisely, distinguishing what Kafka's own guarantees cover from what requires an independent control.**
+ **A:** Kafka's own guarantee: `acks=all` with `min.insync.replicas=2` and replication factor 3 ensures an acknowledged write survives any single broker failure without loss, and the ISR-gated leader-election mechanism (2.2) ensures a promoted leader is never missing acknowledged data. This is a real, structural guarantee — but it is scoped to "data already accepted and acknowledged by Kafka," not to "every trade event a producer intended to send actually reached Kafka" (a producer-side bug, network partition before the send, or an unhandled produce-callback failure could still mean an event never arrived at all). The complete answer names both layers: Kafka's durability guarantee for acknowledged writes, **and** an independent, permanent reconciliation control (§12's ledger-vs-`TradeSettled`-count check) that would catch an event that never made it into Kafka in the first place — exactly this course's standing principle that structural guarantees are supplemented, never replaced, by independent verification.
+ **Why correct:** Precisely scopes Kafka's own guarantee and names the specific gap (pre-produce failure) it doesn't cover, plus the independent control that closes that gap.
+ **Common mistakes:** Answering only with Kafka's `acks=all`/ISR mechanics, presenting it as a complete, unqualified "no data loss" guarantee without acknowledging its actual boundary.
+ **Follow-ups:** "What producer-side failure specifically falls outside `acks=all`'s coverage?" (A producer that crashes, or whose outbound network call fails, before the produce request is even sent — the message never existed from Kafka's perspective at all; this is why many financial-event producers pair Kafka publication with the transactional/outbox pattern at the source database, ensuring the intent to publish is itself durably recorded before the publish attempt.)
+
+5. **Q: Compare `CooperativeSticky` assignment (used in §4's fix) against `RangeAssignor` and `RoundRobinAssignor`, and explain precisely why only cooperative rebalancing reduces blast radius, not merely partition-assignment quality.**
+ **A:** `RangeAssignor` and `RoundRobinAssignor` differ from each other only in **which** partitions end up with which consumer (range-per-topic vs. round-robin across all subscribed topics) — both are still **eager** protocols, meaning every rebalance revokes all partitions from all members before reassigning, causing a stop-the-world pause regardless of assignment quality. `CooperativeSticky` changes the **protocol**, not just the assignment algorithm: it computes a new assignment that preserves as many existing partition-to-consumer mappings as possible and only revokes the specific partitions that must actually move, allowing unaffected partitions to continue processing throughout the rebalance — the blast-radius reduction (2.5, §4) comes from the protocol-level incremental-revocation behavior, not from being a "smarter" assignment algorithm.
+ **Why correct:** Correctly distinguishes assignment-algorithm quality (which partition goes to which consumer) from rebalance-protocol behavior (eager vs. incremental revocation), identifying the latter as what actually reduces disruption.
+ **Common mistakes:** Assuming any assignor change alone would have fixed the §4 incident, without recognizing that `RangeAssignor`/`RoundRobinAssignor` are both still eager-protocol, stop-the-world assignors.
+ **Follow-ups:** "Is `CooperativeSticky` compatible with a group mid-migration from an eager assignor?" (Kafka supports a documented, multi-step rolling upgrade path for this exact migration; deploying `CooperativeSticky` directly to a subset of a group already running an eager assignor without following that path can itself trigger repeated rebalances — the migration path itself must be followed carefully, not treated as a simple config swap.)
+
+6. **Q: Design a chaos-engineering test that would validate the settlement platform's (§12) actual RTO/RPO under a genuine, unannounced broker-loss event, rather than relying on the theoretical `min.insync.replicas=2`/replication-factor-3 guarantee alone.**
+ **A:** Inject a real broker termination (not a simulated/mocked failure) against a staging cluster carrying production-representative topic configuration and load, then measure: (1) time from termination to a new leader being elected for every affected partition (the actual RTO for write availability), (2) whether any producer using `acks=all` observed a failed or timed-out send during the election window (validating the durability guarantee held under real, not theoretical, conditions), and (3) whether the reconciliation control (§12) would have caught it if it hadn't. This directly extends the pre-production ordering-verification-test philosophy (Advanced Q9 of the Basic/Intermediate/Advanced tiers) from correctness properties to failure-recovery properties specifically — validating the theoretical guarantee empirically rather than trusting the configuration alone.
+ **Why correct:** Proposes measuring the guarantee's actual, observed behavior under a real failure injection rather than relying solely on configuration review, and explicitly ties it to validating each of the three layered controls.
+ **Common mistakes:** Treating `acks=all`/`min.insync.replicas=2` as sufficient proof of the guarantee on paper, without ever having observed the cluster's actual recovery behavior under a genuine broker loss.
+ **Follow-ups:** "How often should this test run?" (Periodically, as a scheduled game-day exercise, and mandatorily after any change to replication factor, `min.insync.replicas`, or broker/rack placement — configuration drift is exactly the kind of change that can silently invalidate a previously-validated guarantee.)
+
+7. **Q: A team proposes reducing replication factor from 3 to 2 on a high-volume, lower-criticality clickstream topic to cut storage cost, citing this module's per-topic durability principle (Advanced Q2/Q3). Evaluate the proposal and identify what it correctly does and doesn't address.**
+ **A:** The proposal correctly applies the per-topic-not-uniform durability principle — a lower-criticality, recomputable topic is exactly the case where a lower replication factor is defensible. What it must additionally address, and often doesn't in a first pass: replication factor 2 means **any single broker failure removes redundancy entirely** (down to 1 replica) until recovery, not merely "slightly less durable" — during that window, a second failure causes actual data loss, a materially different risk profile than factor 3's "survive one full failure with redundancy to spare." The complete evaluation requires explicitly stating this narrowed failure-tolerance window as a named, accepted risk (with an estimate of how long a broker typically takes to recover and rejoin the ISR) rather than presenting the storage saving alone as the full picture.
+ **Why correct:** Credits the correct general principle while surfacing the specific, quantifiable risk (zero-redundancy window) the proposal must explicitly own, not silently accept.
+ **Common mistakes:** Evaluating replication-factor changes purely on "is this topic important" without quantifying the specific window-of-vulnerability the change introduces.
+ **Follow-ups:** "Would `min.insync.replicas=1` be an acceptable pairing with replication factor 2 for this topic?" (Only if message loss during a broker failure is genuinely, fully acceptable for this topic — `min.insync.replicas=1` with factor 2 means a single remaining replica satisfies every future acknowledged write, which is a materially weaker guarantee still, and should be an explicit, documented choice, not a default.)
+
+8. **Q: How would you extend this module's ordering guarantee (2.1) to a scenario where a single logical business transaction spans multiple topics — e.g., a trade event on `trade-lifecycle-events` and a corresponding risk-limit-check event on a separate `risk-checks` topic — that must be processed by a downstream consumer in a specific relative order?**
+ **A:** Kafka provides no native cross-topic ordering guarantee — partition-level ordering (2.1) is scoped to a single partition of a single topic, and nothing in the protocol relates the relative arrival order of records on two different topics, even if produced by the same producer in program order. A consumer requiring strict cross-topic ordering must implement it at the application level: either (a) a windowed buffering/joining strategy (the Kafka Streams stream-time join model) that explicitly reasons about event-time ordering across the two streams rather than assuming arrival order, or (b) restructuring the design so the dependent events are actually published to the *same* topic/partition as a single, ordered stream if the relative-ordering requirement is strict and business-critical enough to justify the coupling — the correct choice depends on whether the two event types are genuinely independent streams that occasionally need correlating (favoring (a)) or are really one logical lifecycle artificially split across two topics (favoring (b)).
+ **Why correct:** Correctly states the absence of a native cross-topic guarantee and provides two concrete, differently-scoped remediation strategies with the deciding criterion between them.
+ **Common mistakes:** Assuming that because both events come from the same producer and were sent in program order, Kafka preserves that relative order across topics — it does not, since each topic's partitions are entirely independent logs.
+ **Follow-ups:** "Does producing both events within the same Kafka transaction (Module 55 §2.2) solve the ordering problem?** (No — a transaction guarantees atomic, all-or-nothing visibility of the two produces together, not their relative *order* as observed by a downstream consumer reading both topics; atomicity and ordering are distinct guarantees that are easy to conflate.)
+
+9. **Q: Critique this claim from a junior engineer: "Our consumer group has 48 instances for a 24-partition topic, so we have 2x redundancy in case any instance fails."**
+ **A:** This inverts the actual mechanics (2.4/§Basic Q9): only 24 of the 48 instances are actively assigned a partition at any time; the other 24 sit fully idle, consuming nothing, because partition count is the hard ceiling on active parallelism. If an active instance fails, its partition is reassigned to one of the *idle* instances via a rebalance (2.5) — so there genuinely is failover capacity, but it is not "2x redundancy" in the sense of 2x processing capacity or 2x throughput; it is exactly 1x processing capacity (bounded by partition count) plus idle standby capacity that only activates during a rebalance, and that rebalance itself incurs the pause-and-reassign cost (2.5) the module has extensively covered — a materially different, more nuanced claim than "2x redundancy" suggests.
+ **Why correct:** Corrects the specific, common misconception about what "extra instances beyond partition count" actually provides — standby failover capacity, not additional throughput or a doubled-capacity redundancy claim.
+ **Common mistakes:** Believing that adding consumer instances beyond partition count provides any processing benefit at all under normal, healthy operation.
+ **Follow-ups:** "Is provisioning idle standby instances a reasonable practice at all, given they provide no throughput benefit?" (Yes, in specific cases — e.g., absorbing sudden instance failures with zero cold-start delay for the replacement, or supporting a planned future partition-count increase without a code deploy — but the decision should be made explicitly for that reason, not under the mistaken belief it doubles throughput capacity.)
+
+10. **Q: Synthesize this module's recurring theme — connect the hot-partition incident (§14), the exactly-once scope limits (Module 55), and the CRDT composition-risk theme from the Distributed Systems domain into a single Principal-level observation about "component correctness versus system correctness."**
+ **A:** All three cases share an identical shape: a mechanism that is individually, provably correct for the specific property it guarantees — Kafka's hash-based partitioning genuinely distributes uniformly-random keys evenly; `acks=all`/ISR genuinely guarantees no acknowledged-write loss on a single-partition basis; a CRDT's merge genuinely, mathematically converges for its own data type — produces a system-level failure not because the mechanism was wrong, but because a **broader, unstated assumption composed on top of it** didn't hold: uniform key distribution assumed no real-world activity skew (§14); "no data loss" was implicitly over-extended to "no event ever fails to reach Kafka at all" (Expert Q4); individually-correct CRDT convergence was assumed to imply aggregate, cross-field correctness (the CRDT module). The Principal-level discipline this pattern demands is the same in every case: state the mechanism's actual, narrow guarantee precisely, then separately and explicitly verify whether the broader property the business actually needs is a logical consequence of that narrow guarantee or merely resembles one — the recurring, expensive mistake across all three domains is treating resemblance as logical entailment.
+ **Why correct:** Identifies the shared structural pattern across three genuinely different technical domains and states the general discipline that prevents it, rather than treating each incident as an isolated, domain-specific lesson.
+ **Common mistakes:** Treating the hot-partition incident, exactly-once scoping, and CRDT composition risk as three unrelated topics rather than recognizing the identical "narrow guarantee, broader assumed guarantee" failure shape recurring across all three.
+ **Follow-ups:** "What single review practice would catch this failure shape across any new mechanism a team proposes adopting?" (A mandatory, explicit statement of the mechanism's precise guarantee boundary at design-review time — "this guarantees X specifically; here is what it does NOT guarantee" — reviewed against every property the business actually needs, rather than allowing "we use Kafka's durability guarantee" or "we use CRDTs" to stand as an unscoped, implicitly-broader safety claim.)
 
 ---
 
@@ -393,9 +487,122 @@ public class EnrichmentHandler
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-*(the incident, the four exercises, and the Advanced-tier Q&A — especially Advanced Q1's capacity-review safeguard, Advanced Q5/Q6's lag-pattern and cross-signal diagnostic frameworks, and Advanced Q10's synthesized governance standards — collectively constitute this module's system-design, debugging, and Principal-Engineer-level content.)*
+**Scenario**: Design the Kafka topic and partitioning strategy backing a real-time trade-settlement notification platform for a multi-asset investment bank. Every executed trade produces a lifecycle of events — `TradeExecuted` → `TradeAffirmed` → `TradeSettled`/`TradeFailed` — and these must reach: (1) a settlement-ops dashboard needing near-real-time state, (2) a regulatory trade-reporting service with a hard T+1 deadline, (3) a client-notification service, and (4) an internal ledger-posting service that must never post a settlement twice.
+
+**Requirements**:
+- Functional: preserve strict per-trade event ordering; support 4 independent downstream consumers with different latency tolerances; support replay for a newly onboarded consumer without re-touching upstream systems; guarantee the ledger-posting service never double-posts.
+- Non-functional: 50,000 trades/day peak-day volume (≈ 2 TPS sustained, bursting to ~50 TPS at market open/close — the estimation immediately tells you this is a **correctness-and-ordering problem, not a throughput problem**, exactly the module's recurring theme applied at design-scope level); durability such that no acknowledged trade event is ever lost even under a single-broker failure; auditability for 7 years (regulatory retention, handled outside Kafka's own retention window — see Wrap-Up).
+
+**Topic and partition design**:
+- Topic `trade-lifecycle-events`, partition key = `TradeId` (never `AccountId` or a random UUID) — this is the single decision that preserves the mandatory `Executed → Affirmed → Settled` ordering per trade, directly reusing 2.1's ordering-vs-parallelism trade-off: 24 partitions, sized for the 50 TPS burst against a target of ≤2 TPS/partition, not for the 2 TPS average, since burst capacity — not average load — is what determines partition count in a bursty, market-hours-concentrated workload.
+- Replication factor 3, `min.insync.replicas=2`, `acks=all` on every producer — non-negotiable for this topic class per Advanced Q2's per-topic durability decision: a lost `TradeSettled` event is a regulatory and financial-integrity incident, not a tolerable data-quality blemish.
+- Four independent consumer groups (`settlement-dashboard`, `reg-reporting`, `client-notify`, `ledger-posting`) off the **same** topic — the fan-out property (2.4) means the regulatory-reporting consumer's own pace (batched, T+1) never throttles the dashboard's near-real-time pace, and a fifth consumer can be onboarded later with zero change to producers, replaying from `earliest` for full historical reconstruction.
+- `ledger-posting` consumer is built with idempotent processing keyed on `TradeId + EventType` (a unique constraint in the ledger's own database), since Kafka's at-least-once delivery (offset committed after processing, 2.6) means this consumer **will** see redelivery after a crash — the double-post risk is closed at the ledger's own write path, not assumed away by Kafka.
+
+**Failure handling**: a `reg-reporting` consumer outage triggers steadily increasing lag (distinguishable from a rebalancing-storm spike per Advanced Q5) with plenty of runway before the T+1 deadline, alerted on a lag-vs-time-to-deadline burn-rate metric rather than a raw lag threshold, since raw lag alone doesn't communicate deadline risk.
+
+**Monitoring**: per-consumer-group lag, under-replicated-partition count (Advanced Q8), rebalance-event rate, and — specific to this domain — a reconciliation job comparing ledger-posted settlement count against `TradeSettled` events produced, independent of Kafka's own guarantees, per this course's standing principle that structural guarantees are supplemented, never replaced, by an independent backstop.
+
+## 13. Low-Level Design
+
+**Scope**: the `ledger-posting` consumer's internal design — the component with the hardest correctness requirement (no double-post) in the system design above.
+
+```mermaid
+classDiagram
+ class TradeLifecycleConsumer {
+ -IConsumer~string, TradeEvent~ _consumer
+ -IIdempotentLedgerWriter _ledgerWriter
+ -IRetryPolicy _retryPolicy
+ +ConsumeLoopAsync(CancellationToken) Task
+ }
+ class IIdempotentLedgerWriter {
+ <<interface>>
+ +PostAsync(LedgerEntry) Task~PostResult~
+ }
+ class SqlLedgerWriter {
+ +PostAsync(LedgerEntry) Task~PostResult~
+ }
+ class LedgerEntry {
+ +string TradeId
+ +string EventType
+ +decimal Amount
+ }
+ class IRetryPolicy {
+ <<interface>>
+ +ExecuteAsync(Func~Task~) Task
+ }
+ TradeLifecycleConsumer --> IIdempotentLedgerWriter
+ TradeLifecycleConsumer --> IRetryPolicy
+ IIdempotentLedgerWriter <|.. SqlLedgerWriter
+ SqlLedgerWriter --> LedgerEntry
+```
+
+```mermaid
+sequenceDiagram
+ participant K as Kafka (trade-lifecycle-events)
+ participant C as TradeLifecycleConsumer
+ participant W as SqlLedgerWriter
+ participant DB as Ledger DB (unique index: TradeId+EventType)
+
+ K->>C: poll -> TradeSettled(TradeId=T1)
+ C->>W: PostAsync(LedgerEntry)
+ W->>DB: INSERT ... ON CONFLICT (TradeId, EventType) DO NOTHING
+ DB-->>W: 0 rows affected (already posted)
+ W-->>C: PostResult.AlreadyPosted
+ C->>K: Commit(offset) -- safe to commit; duplicate was a no-op, not an error
+```
+
+**Design patterns used**: Strategy (`IRetryPolicy` pluggable backoff), Repository/Gateway (`IIdempotentLedgerWriter` isolates Kafka-consumer logic from persistence mechanics), Template Method (`ConsumeLoopAsync` fixes the poll→process→commit skeleton while delegating the processing step).
+
+**SOLID mapping**: SRP — the consumer only orchestrates poll/commit, the writer only owns idempotent persistence; OCP — a new ledger backend (e.g., swapping SQL Server for an event-sourced ledger) implements `IIdempotentLedgerWriter` without touching the consumer; DIP — `TradeLifecycleConsumer` depends on the `IIdempotentLedgerWriter` abstraction, not `SqlLedgerWriter` directly, enabling the exact substitution just described and trivial unit testing with a fake writer.
+
+**Extensibility**: adding a fifth downstream consumer (Section 12) requires zero changes to this class hierarchy — it is a wholly independent consumer-group instance of the same pattern, reusing `IIdempotentLedgerWriter`'s idempotency discipline template for its own store if it, too, has a double-processing risk.
+
+**Concurrency/thread safety**: a single `TradeLifecycleConsumer` instance processes one partition's records strictly sequentially (Kafka's own per-partition ordering guarantee makes this safe by construction, 2.1) — parallelism is achieved by running multiple consumer instances within the group (2.4), each bound to a disjoint partition set, never by multi-threading within one partition's processing, which would silently violate the per-trade ordering this entire design exists to preserve.
+
+## 14. Production Debugging
+
+**Incident**: `ledger-posting`'s consumer lag climbed from near-zero to 40 minutes over a single trading session, with no rebalance events in the group-coordinator logs (ruling out the rebalancing-storm pattern from §4) and no under-replicated-partition alerts (ruling out a broker-side issue).
+
+**Investigation**: `kafka-consumer-groups.sh --describe --group ledger-posting` showed lag concentrated on 3 of 24 partitions, not spread evenly — immediately narrowing the search from "the consumer is slow" to "specific partitions are slow," which pointed at data skew rather than a global capacity problem. Correlating the 3 hot partitions against `TradeId` hashing revealed a small number of high-frequency algorithmic-trading accounts whose `TradeId` values happened to hash into the same 3 partitions, each producing an order of magnitude more trade-lifecycle events than a typical account — a hot-partition problem structurally identical to a skewed shard key in any partitioned datastore.
+
+**Tools**: `kafka-consumer-groups.sh` for per-partition lag, JMX metrics (`kafka.consumer:type=consumer-fetch-manager-metrics`) for per-partition fetch latency confirming the 3 partitions were being polled at the same rate as the others (ruling out a broker-side leader-placement issue) but simply carried more work per poll cycle, and application-level structured logs correlating processing duration against `TradeId` to confirm the skewed accounts as root cause.
+
+**Root cause**: partition key choice (`TradeId`) was correct for ordering (§12) but its hash distribution wasn't uniform under this specific account-activity profile — a small number of accounts' trade volume was disproportionate enough to create de facto hot partitions, even though `TradeId` itself is high-cardinality and uniformly distributed in the general case.
+
+**Fix**: increased partition count from 24 to 48 (halving the probability any single hot account's trades cluster with another hot account's trades on the same partition) and added a per-partition lag alert (not just aggregate group lag) so a future skew shows up as a targeted signal rather than being averaged away in an aggregate metric that looked healthy overall.
+
+**Prevention**: added a synthetic load test replaying a realistic, skewed account-activity distribution (not a uniform-random `TradeId` distribution) against a staging topic before any future partition-count change, directly Intermediate §Advanced Q9's pre-production ordering/parallelism verification test, extended here to also verify distribution under realistic, non-uniform load rather than only verifying correctness under idealized uniform load.
+
+## 15. Architecture Decision
+
+**Decision**: how should the settlement platform (§12) deliver trade-lifecycle events to the 4 downstream consumers?
+
+| Option | Advantages | Disadvantages | Cost | Complexity | Scalability |
+|---|---|---|---|---|---|
+| **A. Single Kafka topic, 4 consumer groups (recommended)** | One source of truth; new consumers onboard for free via replay; independent per-group pacing (fan-out, 2.4) | All consumers see the same event shape — a consumer needing a very different view still must transform it itself | Lowest — one topic, standard Kafka ops | Low | Scales consumers independently up to partition-count ceiling per group |
+| **B. Point-to-point queues per downstream (e.g., RabbitMQ per consumer)** | Per-consumer message shape/routing flexibility | 4x infrastructure to operate; no replay; a new consumer requires a new publish path from producers | Highest — 4 separate broker resources | High | Each queue scales independently but with 4x operational surface |
+| **C. Kafka topic + downstream materialized views via Kafka Streams per consumer need** | Each consumer gets a purpose-built, pre-joined view | Added Kafka Streams operational surface (state stores, 2.5/§9 of Module 55); over-engineered for consumers that just need the raw event | Medium-high | Medium-high | Scales well but only justified if per-consumer transformation logic is genuinely complex |
+
+**Recommendation**: Option A. The 4 consumers in §12 all need the *same* underlying event stream at different paces, not fundamentally different data shapes — exactly the case Kafka's topic/consumer-group model is built for, and Option B's operational multiplication and lost replay capability are costs with no corresponding benefit here. Option C is the right answer only if a future consumer genuinely needs pre-aggregated or joined data (e.g., a real-time settlement-risk score requiring a windowed join against a positions topic) — reserved as the natural next step, not the starting design, per this module's recurring "match tool to actual requirement, not to what's fashionable" discipline.
+
+## 17. Principal Engineer Perspective
+
+**Business impact**: an ordering or durability mistake in this topic doesn't surface as a UI bug — it surfaces as a missed regulatory filing deadline, a double-posted ledger entry requiring manual reconciliation and client-facing correction, or a delayed settlement notification breaching an SLA with a counterparty. The `acks=all`/`min.insync.replicas=2` and `TradeId`-keyed partitioning decisions in §12 are therefore not tuning choices made for their own sake — they are the mechanism by which a specific business risk (financial-record loss or duplication) is closed at the infrastructure layer, and a Principal Engineer must be able to trace that line explicitly when justifying the resulting latency/cost trade-off to a non-technical stakeholder.
+
+**Engineering trade-offs**: every decision in this module trades something concrete for something concrete — `acks=all` trades producer latency for durability; more partitions trade broker-side overhead for parallelism headroom and hot-partition resilience (§14); cooperative rebalancing trades a small implementation/upgrade cost for a materially smaller blast radius during membership changes (§4). None of these are free, and articulating the specific cost being paid, not just the benefit being gained, is what distinguishes a Principal-level design review from a junior one that only argues from benefits.
+
+**Technical leadership & cross-team communication**: the partition-key decision (§12) is easy for a downstream team to get wrong in a way that's invisible until production — a new consumer team adding a feature that (incorrectly) assumes cross-partition ordering is exactly the kind of mistake a platform/Kafka-owning team must actively guard against via topic-level documentation of the ordering contract and, ideally, an automated pre-production check (Advanced Q9) rather than trusting every downstream team to independently rediscover this module's lessons.
+
+**Architecture governance**: a standing review gate requiring explicit `acks`/replication-factor/partition-key justification for every new topic (Advanced Q10) converts tribal knowledge about "how we do Kafka here" into an enforced, auditable standard — essential in a regulated environment where "why was this topic configured this way" must have a defensible answer during an audit, not just a shrug.
+
+**Cost optimization**: partition count and replication factor both carry real infrastructure cost (broker CPU/memory/network, storage multiplication) — the Principal-level judgment call is sizing for genuine burst/skew headroom (§12, §14) without over-provisioning "just in case," which is why the design explicitly grounds partition count in measured burst TPS and observed account-activity skew rather than a round, arbitrary number.
+
+**Risk analysis & long-term maintainability**: the single largest long-term risk in this design is silent partition-key misuse by a future producer team unaware of the ordering contract — mitigated by documentation, the pre-production ordering test (Advanced Q9), and treating any observed cross-partition-ordering violation as a P1 data-integrity incident, not a low-priority bug, reflecting the actual blast radius of getting this specific decision wrong in a financial system.
+
+---
 
 ## 18. Revision
 **Key takeaways**: Kafka is a distributed, replicated commit log, not a traditional queue — partitions are simultaneously the unit of ordering and parallelism, and the chosen partition key (not partition count alone) determines whether per-entity ordering is preserved. The ISR-based replication model, combined with the `acks` setting, gives explicit, tunable control over the durability-vs-latency trade-off per topic — a decision that should be made deliberately per topic's actual business criticality, not defaulted uniformly. Consumer groups provide both fan-out (across groups) and load-balanced competing consumption (within a group) from one underlying partition-assignment mechanism, but rebalancing (triggered by group-membership changes) pauses affected consumption and can cascade into a disruptive storm if `max.poll.interval.ms` is misconfigured relative to real processing time — application-level resilience patterns (the circuit breakers) and Kafka-level configuration must be reasoned about together, not independently.

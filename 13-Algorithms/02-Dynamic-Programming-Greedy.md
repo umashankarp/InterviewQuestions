@@ -83,6 +83,40 @@ graph TB
 
 ---
 
+## 7. Performance Engineering
+
+**CPU/allocation cost:** A `Dictionary<int, T>`-backed memoization cache (the natural top-down implementation, §2.1) carries real per-lookup overhead (hashing, bucket traversal, boxing if `T` is a value type stored via a non-generic collection) compared to an array-backed bottom-up table indexed directly by subproblem parameters — for a DP problem whose state space is small, bounded, contiguous integers (the common case: knapsack capacity, string-prefix lengths), an `int[]`/`int[,]` table is both faster (direct array indexing, no hashing) and more cache-friendly (contiguous memory, sequential access pattern in the bottom-up fill order) than a dictionary-based memo — a 2-4x measured difference is typical for tight numeric DP loops, entirely a constant-factor effect invisible to Big-O analysis.
+
+**Memory/space optimization:** §Advanced Q5's row-reduction technique (collapsing an O(n×W) table to O(W) when the recurrence only depends on the previous row) is not merely a memory optimization — it's frequently also a *performance* win, since a smaller table fits within L2/L3 cache for longer during the fill, reducing memory-bandwidth-bound stalls that dominate large 2D DP tables' actual wall-clock time far more than the raw comparison/arithmetic count the Big-O figure captures.
+
+**Recursion depth/stack:** Top-down memoization's stack-overflow risk (§Intermediate Q2) is a real, measured production concern for DP over large linear sequences (e.g., a 100,000-character edit-distance computation) — .NET's default 1 MB thread stack accommodates roughly a few thousand to tens of thousands of typical recursive frames depending on frame size, meaning a naive recursive memoized solution over a long sequence can overflow well before the DP table itself would exceed memory limits, making bottom-up tabulation not merely a style preference but a hard correctness requirement past a data-size threshold.
+
+**Branch prediction:** DP recurrences with a `Math.Max`/`Math.Min`/conditional branch per cell (0/1 Knapsack's include-vs-exclude choice) are branch-heavy in the same way comparison sorts are (companion module, §7) — for performance-critical DP over large tables, branchless formulations (e.g., using arithmetic min/max via bit tricks, or vectorized SIMD comparison where the recurrence permits) can meaningfully reduce misprediction stalls, though this level of micro-optimization is justified only after profiling confirms the DP fill loop, not I/O or memoization overhead, is the actual bottleneck.
+
+---
+
+## 8. Security
+
+**Algorithmic-complexity DoS via unmemoized recursion:** The single most exploitable security-relevant mistake in this module's scope is deploying a naive, unmemoized recursive solution (accidentally, e.g., a developer "simplifying" a memoized solution during a refactor and dropping the cache) to a problem with exponential naive complexity, then exposing it — directly or indirectly — to user-controlled input size. A public API accepting a user-specified `n` for a Fibonacci-shaped or knapsack-shaped computation, if it silently loses its memoization, turns an O(n) or O(n·W) service into an O(2^n)-or-worse resource-exhaustion vector from a single, small, entirely-unremarkable-looking request (e.g., `n=50` is enough to make naive recursive Fibonacci computationally infeasible) — a devastating amplification factor for a trivially small attacker input, making this a higher-severity DoS class than most algorithmic-complexity attacks discussed elsewhere in this course, precisely because the "before/after" cost ratio (memoized vs. not) is so extreme.
+
+**Greedy-algorithm gaming:** For any greedy algorithm exposed to adversarial input (e.g., a greedy resource/bandwidth-allocation algorithm where a malicious client can shape its own request pattern), an attacker who understands the greedy-choice property's limits (§2.3) can potentially craft input sequences that exploit known greedy suboptimality to unfairly monopolize a shared resource — a distinct, subtler risk from pure DoS: not crashing the system, but gaming its resource-allocation fairness by exploiting the same structural property (lack of look-ahead/reconsideration) that this module's coin-change/route-optimization discussion treats as a correctness concern, now reframed as an adversarial-robustness concern.
+
+**Input validation:** Bound any user-influenceable DP state-space dimension (array length, target sum, capacity) *before* invoking a DP routine — even a correctly-memoized DP is not immune to resource exhaustion if its table size itself is unbounded and attacker-controlled (an O(n·W) knapsack table with attacker-controlled `W` set arbitrarily large is a memory-exhaustion vector regardless of the algorithm's polynomial complexity).
+
+---
+
+## 9. Scalability
+
+**Horizontal scaling — decomposable DP:** Some DP problems decompose across independent subproblems that can be distributed (e.g., computing edit distance for many independent document pairs in a bulk diff/plagiarism-detection service parallelizes trivially, one worker per pair, since the pairs share no DP state) — but a *single* large DP table (one long sequence's edit distance) generally does not horizontally scale the same way, since the recurrence's dependency structure (each cell depends on specific neighbors) creates a data-dependency graph that resists naive partitioning; **wavefront/anti-diagonal parallelization** (processing cells along a table's anti-diagonal concurrently, since all cells on a given anti-diagonal are mutually independent given the previous diagonal is complete) is the standard technique for parallelizing a single large 2D DP table across cores, exploited in practice for large-scale sequence-alignment (bioinformatics) and, by direct analogy, large-scale text-diff computations.
+
+**Caching/memoization at scale:** For a DP computation reused across many requests with overlapping sub-inputs (e.g., a pricing-optimization DP recomputed for overlapping parameter ranges across many customer requests), an external, shared cache (Redis) keyed on the DP state can extend memoization beyond a single process's lifetime/memory — the same core idea as in-process memoization (§2.1), now applied at the distributed-caching layer, with the added complexity of cache invalidation when the underlying cost/value inputs change.
+
+**Replication/partitioning:** For DP-on-graphs at scale (Bellman-Ford, §2.5), a graph too large for one machine's memory requires a distributed shortest-path formulation (partitioning the graph across nodes, exchanging boundary-node updates iteratively) — the same iterative-relaxation DP structure, now with network-communication cost per relaxation round replacing in-memory array access, a materially different performance profile requiring careful round-count and message-volume budgeting.
+
+**High availability/DR:** A long-running DP computation (e.g., an overnight portfolio-optimization batch job using DP over many assets/constraints) should checkpoint intermediate table state periodically, mirroring the companion module's external-merge-sort resumability discipline (§9 there) — recomputing a multi-hour DP fill from scratch after a transient node failure is an avoidable, purely-operational cost with the same "make expensive work resumable" fix applying identically here.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -130,6 +164,28 @@ graph TB
  **A:** Push back firmly — "simpler and faster" is only a valid justification if the algorithm is also **correct**, and greedy's correctness is not a given, it's a property requiring specific proof (Advanced Q3's empirical-verification technique, or a formal exchange-argument proof) for this exact problem's structure; recommend either (a) a rigorous correctness argument specific to this problem before shipping greedy, or (b) empirical brute-force comparison testing across a representative range of inputs (Advanced Q3) as a minimum bar, treating "greedy is simpler" as a reason to *hope* it's correct, never a substitute for actually verifying it is — directly the same "don't ship based on hope, verify the actual requirement" discipline recurring throughout this entire course.
 10. **Q: As a Principal Engineer, how would you build organizational capability specifically preventing the greedy-choice-property assumption error from recurring across future optimization-feature development?**
  **A:** Require any proposed greedy algorithm for a genuinely new (not previously-proven) optimization problem to include, as part of its design-review documentation, either a stated exchange-argument proof or empirical brute-force-comparison test results (Advanced Q3) across a representative range of inputs specifically probing for the kind of interdependency that breaks greedy correctness — directly mirroring this course's recurring pattern of converting a hard-won, incident-driven lesson into a standing, mandatory design-review requirement (the LSP-contract documentation requirement, the OCP-risk branch-count signal) — making "prove the greedy-choice property, don't assume it by analogy" an explicit, checked step in the development process rather than relying on every engineer independently remembering the coin-change cautionary tale.
+
+### Expert (10)
+1. **Q: Explain the algorithmic-complexity DoS risk of an accidentally-de-memoized recursive DP endpoint, and how you'd defend against it at multiple layers.**
+ **A:** If memoization is silently dropped (a refactor bug, or a per-request cache that isn't actually shared/persisted), an O(n) DP problem reverts to its naive exponential complexity, and a small, innocuous-looking input (`n=50` for Fibonacci-shaped recursion) becomes computationally infeasible — a uniquely severe DoS amplification factor since the cost ratio between memoized and non-memoized is so extreme. Defense-in-depth: (a) a unit/integration test asserting bounded execution time for a moderately-sized input, failing fast if memoization regresses; (b) a request-level timeout independent of the algorithm's own correctness, bounding worst-case damage regardless of cause; (c) explicit input-size validation/rate-limiting on any user-influenceable DP dimension, never trusting the algorithm's expected-case complexity alone as the sole defense.
+2. **Q: Design a wavefront (anti-diagonal) parallelization scheme for a large 2D edit-distance DP table, and explain precisely why cells on the same anti-diagonal are safe to compute concurrently.**
+ **A:** In the standard edit-distance recurrence, `dp[i][j]` depends only on `dp[i-1][j]`, `dp[i][j-1]`, and `dp[i-1][j-1]` — all three predecessors lie on the *previous* anti-diagonal (`i+j-1`), never the same one. This means every cell with the same `i+j` value has no dependency on any other cell sharing that value, making all cells on one anti-diagonal mutually independent and safely computable in parallel (e.g., via `Parallel.For` over the diagonal's cell range) once the prior diagonal is fully complete — a genuine, exploitable parallelism opportunity invisible if you only look at the table's row-by-row or column-by-column fill order.
+3. **Q: Compare an in-process `Dictionary`-based memoization cache against an external, shared (Redis-backed) memoization cache for a DP computation reused across many service instances, including the invalidation problem the external variant introduces that the in-process one doesn't have.**
+ **A:** In-process memoization is fast (direct memory access, no network hop) but scoped to a single process's lifetime and memory — no sharing across horizontally-scaled instances, meaning identical subproblems get redundantly recomputed on every instance. An external cache shares results across instances (higher hit rate at scale) at the cost of network round-trip latency per lookup and, critically, an **invalidation problem** the in-process variant never has: if the DP's underlying cost/value inputs can change (e.g., a pricing DP's input prices update), a stale cached subproblem result silently returns an outdated answer unless the cache key incorporates a version/timestamp of the underlying inputs or has an explicit invalidation trigger — an in-process cache typically avoids this because its process (and thus its cache) is naturally recycled/restarted alongside deployments that would change the inputs, a coincidental safety net an external, long-lived cache doesn't have.
+4. **Q: Derive the time complexity of the standard 0/1 Knapsack DP precisely, and explain why it's described as "pseudo-polynomial," including the practical consequence of that distinction.**
+ **A:** The DP table is `O(n × W)` where `n` is item count and `W` is capacity — polynomial in the *numeric value* of `W`, but `W`'s numeric value can require only `O(log W)` bits to represent, meaning the algorithm's complexity is exponential in the *input size* (bit-length) of `W`, not merely in `n` — this is precisely what "pseudo-polynomial" means. Practical consequence: 0/1 Knapsack's DP is efficient for a capacity that's a "reasonably-sized number" (e.g., thousands to low millions) but becomes infeasible if capacity is specified with very large numeric magnitude (e.g., a capacity near `long.MaxValue`), even though the same DP approach is "polynomial" by the loose, common (but technically imprecise) description — a distinction worth stating precisely rather than glossing over, since it directly determines whether the DP approach remains viable for a given problem's actual numeric ranges.
+5. **Q: A junior engineer proposes solving the Traveling Salesman Problem exactly via DP for a route with 500 stops, citing the Held-Karp DP algorithm's O(n² × 2^n) as "provably better than brute force's O(n!)." Evaluate this claim as a Principal Engineer.**
+ **A:** The claim is true but practically meaningless at this scale — Held-Karp's `2^n` factor for n=500 is astronomically infeasible (vastly beyond any conceivable computational resource) despite being asymptotically superior to `n!`; "asymptotically better" does not mean "practically usable" when both bounds are already far outside feasible computation for the actual input size in question. Correct guidance: for `n` this large, an exact DP solution (Held-Karp or otherwise) is off the table regardless of its asymptotic elegance — the actual engineering choice is a heuristic/approximation algorithm (nearest-neighbor with local-search refinement, or a bounded-window local-DP-refinement hybrid per this module's own Advanced Q7) accepting a near-optimal, not provably-optimal, result as the only computationally realistic option.
+6. **Q: Explain why memoization alone does not fix an incorrectly-defined DP state (a wrong choice of what parameters index a subproblem), using a concrete example of a plausible-but-wrong state definition.**
+ **A:** Memoization only guarantees each *distinct, correctly-identified* subproblem is computed once — if the state definition itself fails to capture information the recurrence actually needs (e.g., defining a "maximum path sum with at most k stops" DP state as just `(node)` instead of `(node, stops_remaining)`, silently conflating genuinely-different subproblems that happen to share a node but differ in remaining budget), the memoized cache will return an incorrect cached result for a subproblem that was never actually the same problem, producing wrong answers *faster*, not correct answers — memoization is purely a performance mechanism layered on top of an already-correct recurrence and state definition; it cannot compensate for or mask a state-definition error, and can actively make such a bug harder to detect (since it "runs fast," masking the more obvious signal a slow/hanging naive recursive version might have provided during debugging).
+7. **Q: Design and justify a monitoring/alerting strategy specifically for detecting DP-memoization regressions in production before they cause an incident, generalizing Expert Q1's defense into standing infrastructure.**
+ **A:** Track P99 execution-time-per-input-size as a first-class metric for any production DP endpoint (not merely average latency, which a rare-but-catastrophic exponential-blowup case can hide within an otherwise-healthy average) — since a memoization regression manifests specifically as latency growing super-linearly (in the worst case, exponentially) with input size rather than uniformly, a metric bucketed or normalized by input size (not raw latency alone) is what actually surfaces the regression signal; alert on the *shape* of the latency-vs-size curve deviating from its expected polynomial profile, not merely on an absolute latency threshold, since a fixed threshold alone would only catch the regression after it's already large enough to breach it on production-typical input sizes, potentially well after smaller-but-still-anomalous inputs already show the warning shape.
+8. **Q: Compare bottom-up tabulation's space-optimization ceiling (row-reduction, Advanced Q5) against a further "rolling variable" optimization for 1D DP (e.g., simple Fibonacci-shaped recurrences), and identify the point past which further space optimization stops being worthwhile.**
+ **A:** For a recurrence depending only on a small, fixed number of previous states (Fibonacci's `dp[i-2]`/`dp[i-1]`), the table can be collapsed further than a full array — to just two or three scalar variables updated in a rolling fashion each iteration, reaching O(1) space instead of O(n). This optimization stops being worthwhile once the DP genuinely needs to *reconstruct* the actual optimal solution (not merely its value) — reconstructing the chosen items/path (e.g., which items were included in the optimal knapsack solution) requires retaining enough table history to trace back the decisions, meaning an aggressively space-optimized rolling-variable version that only keeps the final value cannot support solution reconstruction at all, a genuine, easy-to-overlook trade-off between minimal memory footprint and the ability to explain/justify the DP's answer, not merely report it.
+9. **Q: Explain how you would design an automated static-analysis or code-review heuristic to flag a likely-missing greedy-choice-property proof before a PR merges, generalizing this module's incident-driven review requirement into tooling.**
+ **A:** A fully automated proof-checker isn't feasible (correctness proofs aren't mechanically derivable from arbitrary code), but a practical heuristic-based lint/review-checklist trigger is: flag any new function whose implementation pattern matches "iterate once, make a locally-best choice per iteration, never revisit an earlier choice" (a detectable structural/AST shape — a single forward pass with no backtracking, no revisiting of prior decisions, no full-state DP table) when it's tagged or documented as solving an "optimal"/"best"/"minimum cost" business problem — routing this specific pattern to a mandatory reviewer checklist item ("has the greedy-choice property been proven or empirically verified for this specific problem, Advanced Q3's harness or an exchange-argument proof?") rather than expecting every reviewer to independently recognize the risk pattern unprompted.
+10. **Q: As a Principal Engineer evaluating a proposed migration of a mission-critical greedy scheduling algorithm to a machine-learning-based (learned) heuristic, what DP/greedy-specific risks would you insist the proposal address before approval?**
+ **A:** First, whether the current greedy algorithm's correctness (or known suboptimality bound) is actually documented and proven — a proposal to "replace greedy with ML" often implicitly assumes the current baseline's behavior is well-understood, when Advanced Q9's lesson is that many production greedy algorithms were never actually proven correct in the first place, making "improve on the baseline" an ill-defined target. Second, whether the ML approach can provide any worst-case guarantee at all — a learned heuristic typically offers no exchange-argument-style provable bound and can fail unpredictably on out-of-distribution inputs, a materially different risk profile from a greedy algorithm whose failure modes (when the greedy-choice property doesn't hold) are at least structurally characterizable, even if not always caught in advance. Recommend requiring a documented performance/correctness baseline (via the empirical brute-force-comparison harness, Expert exercise) *before* evaluating whether an ML replacement is genuinely an improvement, and instrumenting the ML replacement with runtime bounds-checking/fallback-to-greedy logic for detected out-of-distribution inputs, rather than trusting the learned model's behavior unconditionally in a mission-critical scheduling path.
 
 ---
 
@@ -224,9 +280,167 @@ public class GreedyCorrectnessVerifier<TInput, TResult> where TResult: IComparab
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-A logistics platform replaces its greedy per-leg route-optimization algorithm with a bounded-state-space DP formulation (Advanced Q2) correctly accounting for volume-discount interdependencies, backed by the generic greedy-correctness-verification harness (Expert exercise) now required for any future optimization-algorithm design review before committing to a greedy approach. The signature production incident — a greedy algorithm assumed correct by analogy to Dijkstra's shortest-path correctness, silently producing 15-20% suboptimal routes once volume-discount interdependencies were introduced — is this module's central lesson, a real-world, financially-significant instance of the classic coin-change greedy-failure trap: the greedy-choice property must be proven for the *specific* problem's structure, never assumed by analogy to a superficially similar problem where it happens to hold. Principal-level guidance: require either a formal exchange-argument proof or empirical brute-force-comparison verification (the Expert exercise's harness) as a mandatory design-review step for any new greedy algorithm, converting this hard-won lesson into a standing, checked development-process requirement.
+**Scenario:** Design a **trade-allocation optimization service** for a broker executing large block orders across multiple client accounts — given a block order's total executed shares and each participating client account's requested allocation, compute the cost-minimizing (transaction-fee- and tax-lot-aware) allocation of shares to accounts subject to hard constraints (each account's allocation must be within its requested min/max bounds; total allocated must exactly equal total executed), serving allocation decisions within a strict sub-second latency budget during active trading hours.
+
+**Requirements:** *Functional* — given N accounts (typically tens to low hundreds per block order) each with a requested range and a per-share cost/benefit weight, compute the exact allocation minimizing total weighted cost while satisfying every account's bounds and the total-shares constraint exactly (no rounding slack — the regulatory requirement is that allocated shares sum to *exactly* the executed total). *Non-functional* — sub-second p99 latency (allocation decisions gate downstream settlement processing); deterministic, reproducible output for audit; must degrade gracefully (a bounded-time approximate answer) rather than time out entirely if N grows unexpectedly large.
+
+**Back-of-the-envelope:** This is a bounded-knapsack-shaped optimization: N accounts (say, up to 200), each account's allocation is itself a small integer range (not binary include/exclude, unlike classic 0/1 Knapsack) — a direct DP formulation has state space `O(N × TotalShares)`, and for a typical block order (TotalShares in the tens of thousands), this is on the order of `200 × 50,000 = 10,000,000` states — computationally comfortable within the sub-second budget, but the moment `TotalShares` grows into the millions (a very large block order), the DP table's *pseudo-polynomial* nature (Expert Q4) makes the naive formulation infeasible within budget. This numeric reality — not the account count — is what actually drives the design: **the DP is only safe as the default path within a bounded `TotalShares` regime**, and the system needs an explicit fallback for the regime where it isn't.
+
+**Architecture:**
+```mermaid
+graph TB
+ REQ["Allocation request<br/>(accounts, bounds, weights, total shares)"] --> Gate{TotalShares within<br/>DP-feasible bound?}
+ Gate -->|Yes, common case| DP["Exact DP allocation<br/>(bounded knapsack-shaped)"]
+ Gate -->|No, large block order| Heur["Greedy + local-DP-refinement<br/>hybrid (bounded windows)"]
+ DP --> Verify["Constraint verifier<br/>(bounds + exact-total check)"]
+ Heur --> Verify
+ Verify --> Audit["Audit log:<br/>which path, inputs, decision trace"]
+ Verify --> OUT["Allocation result"]
+```
+
+**Components:** a **feasibility gate** deciding, from the request's numeric parameters alone (before running anything), whether the exact DP path is within its computationally-safe regime (directly operationalizing Expert Q4's pseudo-polynomial distinction as a runtime routing decision, not just an academic caveat); the **exact DP allocator** for the common case; a **greedy-with-local-DP-refinement hybrid** (directly reusing the sibling module's Advanced Q7 pattern) as the fallback for the rare, very-large-block-order case, trading provable optimality for bounded computation time; a **constraint verifier** run unconditionally after either path, independently re-checking every account's bounds and the exact-total constraint before the result is trusted (never trusting either optimizer's own internal logic as sufficient proof of constraint satisfaction — the same "verify the verifier" independent-check discipline recurring throughout this course); and an **audit log** recording which path was taken and why, required since a regulator reviewing an allocation decision must be able to see whether it was the exact-optimal or the bounded-approximate path, not merely the final numbers.
+
+**API design:** `POST /allocations/compute` — request: `{ blockOrderId, totalShares, accounts: [{accountId, minShares, maxShares, costWeight}] }`; response: `{ allocations: [{accountId, allocatedShares}], method: "exact-dp" | "greedy-refined", computeTimeMs }` — the `method` field is a deliberate, explicit part of the contract, not an internal implementation detail, since downstream audit/compliance consumers need to know which guarantee (provably optimal vs. bounded-approximate) applies to a given decision.
+
+**Failure handling:** if the DP path's actual measured runtime unexpectedly approaches the latency budget (a monitoring signal, not merely the upfront static feasibility-gate check), it aborts and falls back to the greedy-refined path rather than risking an SLA-breaching timeout — a dynamic, runtime safety net layered on top of the static gate, since the static gate's threshold is itself an estimate that real-world variance (e.g., an unusually dense weight-tie structure slowing the DP's branch-heavy inner loop, §7) could occasionally violate.
+
+**Monitoring:** DP-path vs. greedy-fallback-path selection rate (a sustained, unexpected shift toward the fallback path signals block-order sizes are trending beyond the original feasibility assumption, requiring the gate's threshold to be revisited); constraint-verifier failure rate (should be exactly zero — any non-zero rate is a critical-severity signal that either optimizer produced a constraint-violating result, requiring an immediate halt, not a soft warning); compute time distribution per path.
+
+**Trade-offs:** The exact-DP-default-with-bounded-approximate-fallback design accepts additional system complexity (two allocation paths, a feasibility gate, a runtime safety net) in exchange for never silently either (a) violating the sub-second SLA on a large block order or (b) violating a hard account-bound/exact-total constraint — directly the same "complexity earns its keep only for a genuinely load-bearing requirement" discipline this module applies elsewhere, now at the system-design layer.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** exact, constraint-satisfying allocation for the common case; a bounded-time approximate fallback for the rare large-order case; independently-verified constraint satisfaction regardless of which path computed the result; auditable path selection.
+
+**Class diagram:**
+```mermaid
+classDiagram
+ class IAllocationStrategy {
+ <<interface>>
+ +Allocate(request) AllocationResult
+ }
+ class ExactDpAllocator {
+ +Allocate(request) AllocationResult
+ }
+ class GreedyRefinedAllocator {
+ +Allocate(request) AllocationResult
+ }
+ class FeasibilityGate {
+ +ChooseStrategy(request) IAllocationStrategy
+ }
+ class ConstraintVerifier {
+ +Verify(request, result) VerificationResult
+ }
+ class AllocationOrchestrator {
+ -FeasibilityGate _gate
+ -ConstraintVerifier _verifier
+ -IAuditSink _audit
+ +ComputeAsync(request) AllocationResult
+ }
+ IAllocationStrategy <|.. ExactDpAllocator
+ IAllocationStrategy <|.. GreedyRefinedAllocator
+ AllocationOrchestrator --> FeasibilityGate
+ AllocationOrchestrator --> ConstraintVerifier
+ AllocationOrchestrator --> IAllocationStrategy
+```
+
+**Sequence diagram:**
+```mermaid
+sequenceDiagram
+ participant Client
+ participant Orchestrator as AllocationOrchestrator
+ participant Gate as FeasibilityGate
+ participant Strategy as IAllocationStrategy
+ participant Verifier as ConstraintVerifier
+ participant Audit
+
+ Client->>Orchestrator: ComputeAsync(request)
+ Orchestrator->>Gate: ChooseStrategy(request)
+ Gate-->>Orchestrator: ExactDpAllocator or GreedyRefinedAllocator
+ Orchestrator->>Strategy: Allocate(request)
+ alt DP path exceeds runtime safety threshold
+ Orchestrator->>Strategy: abort, retry with GreedyRefinedAllocator
+ end
+ Strategy-->>Orchestrator: AllocationResult
+ Orchestrator->>Verifier: Verify(request, result)
+ alt verification fails
+ Orchestrator-->>Client: error (never return an unverified result)
+ else verification passes
+ Orchestrator->>Audit: record path, inputs, result
+ Orchestrator-->>Client: AllocationResult
+ end
+```
+
+**Design patterns used:** Strategy (`IAllocationStrategy` — DP vs. greedy-refined, selected at runtime); Chain of Responsibility (the runtime safety-net retry from DP to greedy-refined on threshold breach); Decorator (`ConstraintVerifier` wraps any strategy's output uniformly, independent of which strategy produced it); Observer (`IAuditSink` reacting to every completed allocation without the orchestrator needing to know audit-storage details).
+
+**SOLID mapping:** Single Responsibility (each allocator, the gate, and the verifier are independently testable units); Open/Closed (a third allocation strategy — e.g., a future ML-assisted heuristic per Expert Q10 — implements `IAllocationStrategy` without touching the orchestrator or verifier); Liskov (every `IAllocationStrategy` implementation must return a result the verifier can meaningfully check against the same constraint contract — a strategy returning a differently-shaped or partially-populated result silently breaks this substitutability); Interface Segregation (allocation, verification, and auditing are separate, narrow interfaces); Dependency Inversion (`AllocationOrchestrator` depends on `IAllocationStrategy`/`ConstraintVerifier` abstractions, never on `ExactDpAllocator` or `GreedyRefinedAllocator` concretely).
+
+**Extensibility:** adding a new allocation strategy (e.g., Expert Q10's ML-assisted heuristic, with mandatory bounds-checking/fallback) requires only a new `IAllocationStrategy` implementation and a `FeasibilityGate` routing rule — the verifier and audit machinery apply unchanged, since they're deliberately strategy-agnostic.
+
+**Concurrency/thread safety:** each `ComputeAsync` call is independent and stateless across requests (no shared mutable DP table between concurrent allocation requests — each gets its own table instance), making the service trivially horizontally scalable per-request; the only shared, contended resource is the audit sink, which should be append-only and safe for concurrent writers (mirroring the outbox-pattern append-only-write discipline recurring elsewhere in this course).
+
+---
+
+## 14. Production Debugging
+
+**Incident:** The allocation service (§12) began intermittently returning allocations that failed the constraint verifier — an event tagged critical-severity per §12's monitoring design, correctly halting and alerting rather than silently returning a bad result, but occurring often enough (a few times a week) to require root-causing rather than dismissing as a rare fluke.
+
+**Investigation:** Every failing case involved an account with `minShares == maxShares` (a client requesting a fixed, non-negotiable exact allocation, not a range) combined with several other accounts whose ranges were wide. Tracing the exact-DP allocator's recurrence revealed the bug: the DP state transition allowed skipping an account's contribution entirely in certain branches (treating an account's minimum as if it were always `0`, an implicit assumption valid for accounts with `minShares == 0` but silently wrong for an account whose `minShares` was a strictly-positive fixed value) — a state-definition bug (Expert Q6's exact failure category: memoization ran flawlessly, computing the *wrong* recurrence's answer very efficiently, with no error, no exception, no obviously anomalous output shape).
+
+**Root cause:** the DP was originally designed and tested against the simpler classic-knapsack-shaped case (accounts with `minShares == 0`, i.e., a pure "how much, if any" allocation problem) — the fixed-minimum case (`minShares == maxShares > 0`) was a later, additively-introduced business requirement that the original recurrence's state transitions were never re-derived to correctly account for; the existing test suite's coverage, built against the original requirement set, had no case exercising a strictly-positive fixed minimum, so the gap shipped undetected until real client requests with this shape hit it in production.
+
+**Tools:** the constraint verifier's own failure log (pinpointing exactly which account's allocation violated its bound, directly narrowing the search); a targeted unit test reproducing the exact failing input shape (an account with `minShares == maxShares > 0`) against the DP recurrence in isolation, confirming the state-transition bug directly rather than needing to reason about the full production request.
+
+**Fix:** corrected the DP recurrence's state transition to require, not merely permit, at least `minShares` be allocated to any account with a strictly-positive minimum before considering it "satisfied" — verified against Expert Q6's exact concern by adding a dedicated fixed-minimum test case family (varying account counts, positions, and combinations of fixed-vs-ranged accounts) to the regression suite, specifically targeting the class of state-definition gap this incident represents, not merely the single failing input that triggered the investigation.
+
+**Prevention:** (1) the expanded test-case family, closing the specific gap. (2) A standing review practice, directly generalizing Expert Q6's lesson: **any change to a DP problem's business constraints (not merely its numeric parameters) requires re-deriving and re-justifying the recurrence and state definition from first principles, not merely re-running the existing test suite** — since the existing suite, built against the *original* requirement set, structurally cannot catch a state-definition gap introduced by a requirement it predates. (3) The constraint verifier itself — an independent, strategy-agnostic correctness check (§13) — is explicitly credited in the incident's own postmortem as the reason this shipped as a caught, halted allocation rather than a silently-wrong one reaching settlement, reinforcing why the verifier is architected as non-optional, unconditional infrastructure rather than a debug-only assertion.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Choosing the allocation-computation approach for the trade-allocation service (§12) for a large block order whose `TotalShares` exceeds the exact-DP path's feasibility-gate threshold.
+
+**Option A — Greedy allocation (proportional-to-request, no DP):**
+*Advantages:* Extremely fast, O(N log N) at worst (a sort plus a linear pass); trivial to reason about and implement.
+*Disadvantages:* No optimality guarantee for the weighted-cost-minimization objective; per this module's central lesson (§4, Advanced Q1), a greedy approach's correctness for this specific objective would need to be independently proven, and a proportional-allocation greedy generally does *not* minimize weighted cost when accounts' weights differ meaningfully — expected to produce measurably suboptimal (higher-cost) allocations for the large-order case specifically.
+*Cost/complexity:* Lowest.
+
+**Option B — Exact DP, unconditionally, regardless of `TotalShares`:**
+*Advantages:* Always provably optimal.
+*Disadvantages:* Violates the sub-second SLA for large `TotalShares`, per the pseudo-polynomial complexity reality (Expert Q4, §12's back-of-the-envelope) — not merely slower, but potentially infeasible within any practical time budget for a sufficiently large block order.
+*Cost/complexity:* Low implementation complexity, but operationally unacceptable risk (an unbounded-latency allocation on the exact size of order — a large block trade — where fast, reliable execution matters most).
+
+**Option C — Greedy-with-bounded-local-DP-refinement hybrid (the §12 fallback):**
+*Advantages:* Bounded, predictable computation time regardless of `TotalShares`; captures materially more of the weighted-cost-minimization benefit than pure greedy by applying exact, small-scale DP refinement within bounded local windows (directly the sibling module's Advanced Q7 pattern, reused here); still requires the independent constraint verifier (§13) as a safety net, same as the exact-DP path.
+*Disadvantages:* Does not guarantee the true global optimum, only a bounded-quality approximation; more implementation complexity than pure greedy.
+*Cost/complexity:* Moderate.
+
+**Recommendation: Option A (exact DP) as the default for the common case (within the feasibility gate's threshold), Option C as the explicit, monitored fallback for the rare large-order case — never Option B (unconditional exact DP) given its unbounded-latency risk for the exact scenario (large orders) where reliable execution is most operationally critical.** This mirrors the sibling module's Advanced Q7 recommendation directly, now grounded in this module's own concrete numeric feasibility analysis (§12) rather than argued in the abstract — and reinforces the closing principle both modules share: **an algorithm's asymptotic elegance is subordinate to its measured, bounded behavior at the actual scale and latency budget the production system must operate within.**
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** A constraint-violating allocation reaching settlement (had the verifier not caught it, §14) would have meant client accounts receiving shares outside their explicitly agreed bounds — a direct contractual and regulatory exposure for a broker, not merely a computational nicety; the incident's actual, realized cost was contained specifically because the independent verifier was architected as unconditional, non-bypassable infrastructure rather than an optional check a time-pressured team might have been tempted to skip for "obviously correct" allocator code.
+
+**Engineering trade-offs:** This module's recurring central trade-off — a simpler, faster technique (greedy) against a more expensive but more rigorously correct one (DP), with the choice depending on a provable, problem-specific property (the greedy-choice property) rather than superficial resemblance — now appears a second time at the system-design layer as the exact-DP-vs-bounded-approximate-fallback choice (§15), demonstrating this isn't a one-off lesson scoped to a single incident but a structural pattern recurring at every layer this module's content touches, from a single recurrence relation up through a full production system's request-routing design.
+
+**Technical leadership:** §14's incident and the companion module's stability incident share an identical underlying shape worth naming explicitly to any team working on optimization or sorting infrastructure: a component that is *individually, verifiably correct* against its original test suite can still be *wrong* against a later, additively-introduced requirement the original design and test coverage never anticipated — the fix in both cases is the same discipline, re-deriving/re-justifying the core logic from first principles whenever the underlying requirements meaningfully change, not merely re-running existing tests and treating a pass as sufficient evidence of continued correctness.
+
+**Cross-team communication:** The `method` field in the allocation API's response (§12) — exposing whether a given decision came from the exact-optimal or bounded-approximate path — is a deliberate design choice enabling downstream compliance/audit teams to reason correctly about which decisions carry which guarantee, without needing to reverse-engineer internal routing logic; a Principal Engineer should treat this kind of "expose the guarantee, not just the answer" API design as a standing default for any system offering more than one correctness/optimality tier internally.
+
+**Architecture governance:** Any DP-based production service should have its feasibility-gate threshold (§12) explicitly documented and periodically re-validated against real, current traffic patterns — the threshold was originally set against an assumed `TotalShares` distribution, and (mirroring the companion module's culture-comparer incident) a distribution that quietly drifts over time toward larger orders would silently erode the assumption the threshold was based on, exactly the kind of "correct when set, unaudited as reality evolves" risk pattern this course flags repeatedly.
+
+**Cost optimization:** The independent constraint verifier (§13) is a small, fixed, unconditional cost paid on every single allocation request — the correct cost/risk trade here is unambiguous: its cost is negligible relative to the financial and regulatory exposure of even one constraint-violating allocation reaching settlement, making "always verify independently of the optimizer's own claimed correctness" a case where the ROI calculation isn't close, not a borderline efficiency trade-off.
+
+**Risk analysis:** The dominant risk pattern across both this module's production narratives (the route-optimization greedy-correctness incident, §4, and the allocation-service state-definition bug, §14) is the same: an algorithm that is locally, mechanically correct in its execution (the greedy steps were each individually reasonable; the memoization correctly cached whatever the recurrence computed) failing at the *modeling* layer — the recurrence, the greedy-choice property, or the state definition not actually matching the true business problem. Risk reviews for any new optimization feature should explicitly probe the modeling layer (is this the right recurrence/greedy-choice for *this exact, current* set of business constraints), not only the implementation layer (does the code correctly implement whatever recurrence/greedy-choice was specified).
+
+**Long-term maintainability:** Both incidents in this module ultimately trace to the same maintainability failure mode: a correctness argument (a greedy-choice proof, a DP recurrence's derivation) that was valid at the time it was made, silently becoming invalid as the underlying business requirements evolved, with no standing process forcing its re-validation — the durable fix, recurring at every layer this module has examined, is making "re-derive and re-justify whenever the requirements change" an explicit, checked step (Advanced Q10's design-review requirement, §14's prevention practice), not a hoped-for engineering instinct.
 
 ## 18. Revision
 **Key takeaways**: DP requires both optimal substructure *and* overlapping subproblems — optimal substructure alone (as in merge sort) doesn't benefit from memoization without genuine subproblem repetition. Top-down memoization computes only actually-needed subproblems (readable, risks stack depth); bottom-up tabulation avoids recursion entirely (stack-safe, enables space optimization via reduced-dimension tables, with a critical iteration-order subtlety for in-place 0/1 Knapsack). Greedy's correctness requires the greedy-choice property, which must be proven for the *specific* problem instance — the coin-change {1,3,4} counterexample demonstrates the same problem shape can require DP or admit greedy depending entirely on structural specifics, never assumable by analogy. Recognize common DP archetypes (knapsack, LCS, edit distance) and DP-as-applied-to-graphs (Bellman-Ford) as connected, transferable patterns rather than isolated, separately-memorized algorithms.

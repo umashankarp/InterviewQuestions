@@ -101,6 +101,44 @@ graph TB
 
 ---
 
+## 7. Performance Engineering
+
+**Consensus round-trip cost:** Every Raft/Paxos-committed write requires at least one network round trip to a majority of nodes before the leader can consider the entry committed — for a 5-node cluster with nodes spread across two availability zones in the same region, this floor is typically 1-3ms (intra-region round trip); for a cluster deliberately spread across continents (the Advanced Q8 anti-pattern), the floor becomes the speed-of-light-bound cross-continental round trip, commonly 60-150ms — a fixed cost paid on **every** write, not amortizable by batching alone, since the majority-acknowledgment requirement is per-committed-entry, though batching multiple client operations into a single log entry (group commit, directly reusing SQL Server's log-flush batching concept) does amortize the round-trip cost across many logical operations.
+
+**2PC blocking cost:** Two-Phase Commit's cost is dominated not by its two round trips (prepare, then commit/abort) under normal operation, but by its **tail latency under partial failure** — a single slow or unresponsive participant during the prepare phase blocks the entire transaction's completion, and a coordinator crash during the window between "all participants prepared" and "final decision communicated" (§4's incident) can block a participant's held locks for an unbounded duration, not merely a fixed millisecond cost — this unbounded-tail-latency risk, not the typical-case latency, is 2PC's real performance liability in production.
+
+**Idempotency-key lookup cost at scale:** An idempotency-key store (§Advanced Q2, §Intermediate discussion in Module 48) must answer "has this key been seen before?" on the hot path of every retryable write — at high write volume this is effectively a point-lookup on a high-cardinality index, cheap individually (sub-millisecond on an indexed key column or a Redis `SETNX`) but a genuine bottleneck if implemented as a full-table scan or an unindexed lookup; production systems typically use a dedicated, TTL-bounded key-value store (Redis, or a narrow SQL table with a clustered index on the key and a background purge job) rather than layering the check onto the primary business table, keeping the lookup O(1) and independent of overall table growth.
+
+**Throughput ceiling:** Consensus clusters do not scale write throughput by adding nodes — every additional node increases the majority-acknowledgment fan-out cost without adding parallel write capacity, since all writes still funnel through one elected leader — this is why large systems use consensus only for a small coordination/metadata layer and shard the actual data volume across many independent groups (§Advanced Q9), each potentially backed by its own small consensus group.
+
+**Benchmarking:** Benchmark commit latency under realistic node-to-node network latency (not localhost, where round-trip cost is masked to near-zero) and under a majority-but-not-all nodes healthy scenario (the realistic degraded case, not just the all-nodes-healthy happy path) — a consensus cluster benchmarked only on localhost with all nodes healthy will show misleadingly optimistic numbers relative to a real, geographically-distributed deployment.
+
+## 8. Security
+
+**Byzantine-fault vs. crash-fault assumptions:** Raft and Paxos, as used in this module and in nearly all production coordination services (etcd, Consul, ZooKeeper), assume **crash-fault** tolerance only — a node can stop responding or restart, but is assumed never to send a deliberately incorrect, malicious message while still participating. This is a materially weaker assumption than **Byzantine fault tolerance** (BFT — tolerating nodes that actively lie, e.g., voting twice or reporting a false log entry), which is the assumption blockchain-style consensus (PBFT, Tendermint) is built for. Using a crash-fault-only consensus service (etcd/Raft) inside a trust boundary that includes a potentially-compromised or malicious node (a third-party-operated node, or a node an attacker has gained code-execution on) is a real, exploitable gap — a single Byzantine node inside a Raft cluster can, in the worst case, corrupt the agreed-upon state, since Raft's correctness proofs explicitly assume honest-but-possibly-crashed participants, not adversarial ones.
+
+**Mitigations:** Restrict consensus-cluster membership to nodes within a single, tightly-controlled trust boundary (the same VPC/security group, provisioned via the same trusted infrastructure pipeline) rather than spanning organizational or trust boundaries; if genuine Byzantine tolerance is required (multi-party financial consortiums, cross-institution settlement networks — a realistic FinTech scenario), use a purpose-built BFT protocol instead of a crash-fault-only one, explicitly naming this as a distinct trust model in the design document, not an incidental implementation detail.
+
+**Authentication between nodes:** Every consensus-cluster node should mutually authenticate every other node via mTLS before participating in leader election or log replication (§Intermediate Q8) — an unauthenticated node able to join the cluster's `RequestVote`/`AppendEntries` exchange could disrupt the cluster's ability to reach consensus at all (a denial-of-service on the coordination layer itself) or, in the crash-fault model's blind spot, inject state the cluster's own correctness proofs never accounted for defending against.
+
+**Idempotency-key spoofing/replay risk:** An idempotency key that is not scoped per-caller/per-tenant (client-supplied, globally shared keyspace) allows one caller to guess or replay another caller's key, either reading back the cached result of an operation they didn't perform (an information-disclosure risk if the cached result contains sensitive data) or — more seriously in a payments context — deliberately colliding with a legitimate key to suppress or interfere with another party's in-flight transaction. Idempotency keys must be scoped to the authenticated caller's identity (hashed/prefixed with a tenant or account identifier server-side, never trusted as globally unique from client input alone) and should be treated as security-sensitive, not merely a correctness convenience.
+
+**2PC coordinator compromise:** A compromised 2PC coordinator can instruct participants to commit or abort inconsistently (telling one participant "commit" and another "abort" for what should be the same atomic decision) — since participants generally trust the coordinator's phase-two instruction without independent verification, coordinator compromise is a single point of both availability and integrity failure; mitigating this requires coordinator authentication plus, for genuinely high-stakes settings, a coordinator whose decision is itself derived from a consensus-agreed log (directly motivating consensus-backed transaction coordinators over a single, unaudited coordinator process).
+
+## 9. Scalability
+
+**Quorum sizing trade-offs:** A larger cluster (5 nodes vs. 3) tolerates more simultaneous node failures (5 nodes tolerate 2 failures while maintaining a majority; 3 nodes tolerate only 1) at the cost of a larger majority-acknowledgment fan-out on every write (more nodes must respond before commit) — the standard production sizing is an odd number (3, 5, or occasionally 7) specifically because an even-numbered cluster gains no additional fault tolerance over the next-lower odd number (a 4-node cluster still only tolerates 1 failure, the same as 3, while paying the cost of an extra node) — this odd-sizing discipline is a direct, practical consequence of the majority-quorum formula (§2.3), not an arbitrary convention.
+
+**Sharding a consensus group:** Since a single consensus group's write throughput doesn't scale with node count (§7), horizontal write-scaling requires **sharding across multiple, independent consensus groups**, each responsible for a disjoint partition of the keyspace (directly the same partition-key-based sharding discipline this course applies to databases, generalized to consensus groups) — a system like CockroachDB or TiDB runs many small Raft groups in parallel (often one per data range/shard), each independently electing its own leader and reaching its own majority, so that aggregate cluster throughput scales with shard count even though any single shard's throughput remains bounded by its own group's majority-commit cost.
+
+**Load balancing reads:** Read throughput can scale beyond a single leader's capacity by serving reads from followers with a bounded-staleness or lease-based freshness guarantee (accepting slightly stale reads in exchange for horizontal read scaling) — but any read requiring strict linearizability must still go through the current leader (or use a read-index/lease mechanism confirming leadership is still current), since only the leader is guaranteed to reflect the latest committed entry.
+
+**High availability / disaster recovery:** A consensus cluster's HA posture is bounded by its majority requirement — losing a majority of nodes (not merely "some" nodes) makes the cluster unable to elect a leader or commit new entries, correctly favoring consistency over availability during a genuine, sustained partition (§6). DR planning for a consensus-backed system must explicitly account for this: a cross-region DR strategy that assumes the surviving region alone can continue operating needs that region to independently hold a majority, which usually means either accepting a manual, human-triggered quorum reconfiguration during a genuine regional loss, or deliberately over-provisioning node count/placement so the intended DR region can reach majority alone.
+
+**CAP theorem:** Consensus-based systems are unambiguously CP — they sacrifice availability during a partition lacking a majority in favor of never returning an inconsistent, non-agreed-upon answer; this is a deliberate, correct design choice for coordination/metadata (leader election, distributed locks, transaction logs) but a poor fit for high-volume, must-always-accept-writes data paths, which is precisely why production architectures pair a small CP consensus layer for coordination with AP-leaning, quorum-tunable or Saga-based mechanisms for the bulk, high-volume data path.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -148,6 +186,67 @@ graph TB
  **A:** Prefer an existing, purpose-built, extensively-battle-tested consensus service (directly this course's recurring "don't hand-roll what a mature solution already provides" discipline, §Advanced Q9, §Advanced Q6, now applied to distributed coordination specifically) if the team already operates one or the requirement is substantial/critical enough to justify introducing one; building custom coordination logic on top of an existing database's consistency primitives (Advanced Q2's Redlock-vs-etcd comparison) is a reasonable, simpler choice specifically when the coordination need is narrow, the team doesn't already operate a dedicated consensus service, and the correctness stakes tolerate the somewhat-weaker guarantees a database-primitive-based approach (versus a genuine, formally-verified consensus algorithm) provides.
 10. **Q: As a Principal Engineer, how would you build organizational understanding that "we use eventual consistency here" and "we use strong consistency there" are not arbitrary per-team style preferences, but specific, theoretically-grounded trade-offs each deserving explicit justification, generalizing this module's unifying theme?**
  **A:** Require any new system's design document to explicitly state which consistency model (and, if applicable, which specific quorum/consensus parameters) it uses for each major data type, with the justification framed in terms of this module's actual, formal trade-off vocabulary (the W+R>N quorum formula, the CAP-theorem-informed AP-vs-CP choice, the 2PC-vs-Saga blocking-vs-compensating trade-off) rather than informal, ad-hoc reasoning — directly connecting every engine-specific consistency decision covered across Modules 19-28 back to this module's unifying theoretical foundation, converting what could otherwise remain a collection of disconnected, engine-specific "best practices" into a single, coherent, transferable body of understanding a Staff/Principal engineer can apply to any future system, including ones using technologies this course hasn't directly covered.
+
+### Expert (10)
+1. **Q: A settlement-instruction service must decide, for its cross-border leg, between a Raft-backed distributed lock and a database-row-level advisory lock scoped to a single regional primary. Walk through the full decision, including what changes if the service later needs to expand to active-active across regions.**
+ **A:** For a single-region-primary deployment, a database-row-level advisory lock is the simpler, lower-overhead choice — it inherits the primary database's own durability and requires no additional infrastructure, and the correctness stakes are fully covered since only one writer (the primary) ever exists. If the service later expands to active-active across regions, the advisory lock stops being sufficient, since two regional primaries could each independently believe they hold "the" lock — at that point a Raft-backed distributed lock (§Advanced Q2) becomes necessary specifically because its correctness is anchored in a single, cluster-wide agreed state rather than any one region's local view. The decision isn't "always use the stronger mechanism" — it's choosing the mechanism whose guarantee matches the actual deployment topology, upgrading only when the topology itself changes to require it, directly reusing this module's recurring "match the mechanism to the actual coordination requirement, not the strongest available one" discipline.
+ **Why this answer is correct:** Ties the lock choice to deployment topology rather than treating "strongest guarantee" as an unconditional default, and correctly identifies the specific trigger (active-active expansion) that changes the requirement.
+ **Common mistakes:** Defaulting to the Raft-backed lock everywhere "to be safe," incurring unnecessary consensus-cluster operational overhead for a single-primary deployment that never needed it.
+ **Follow-up questions:** "What happens during the migration window when the service is neither purely single-primary nor fully active-active?" "How would you validate the advisory lock is genuinely sufficient before committing to it?"
+
+2. **Q: A trade-settlement platform runs a 2PC-like coordinator across a payment ledger and a securities ledger for delivery-versus-payment (DvP) settlement. Regulators require proof that a specific settlement either fully completed or fully did not happen — never partially. Design the audit mechanism.**
+ **A:** The coordinator's own decision log (durably written before phase two is ever communicated to either participant) is the authoritative record — every settlement's final state must be derivable from a single, durably-persisted "COMMIT" or "ABORT" entry in this log, written and fsynced *before* the coordinator sends the corresponding instruction to either ledger, so that even a coordinator crash immediately after writing this entry leaves a recoverable, unambiguous record of the intended final state (the coordinator can replay this log on restart and re-drive any not-yet-acknowledged participants toward the already-decided outcome, rather than making a fresh, potentially-inconsistent decision). For regulatory proof, reconcile this decision log against both ledgers' actual committed state as a standing, automated job — any settlement whose ledger state doesn't match its decision-log entry is flagged for immediate investigation, directly reusing this course's "measure the actual invariant, don't just trust the mechanism" discipline, now applied to prove DvP atomicity to an external regulator rather than merely to internal confidence.
+ **Why this answer is correct:** Identifies the durable decision log as the actual atomicity guarantee (not the two network round trips themselves) and adds the independent reconciliation check regulators would actually require as evidence.
+ **Common mistakes:** Treating "we implemented 2PC" as sufficient proof of atomicity on its own, without a durable, independently-auditable decision record and a standing reconciliation check against it.
+ **Follow-up questions:** "What happens if the coordinator crashes after writing COMMIT but before either participant acknowledges?" "How would you extend this to a three-way DvP involving a custodian as a third participant?"
+
+3. **Q: Compare Raft and Multi-Paxos for a new coordination service from a Principal Engineer's build-vs-adopt perspective, given both provide equivalent theoretical guarantees.**
+ **A:** Since both solve the same problem with equivalent formal guarantees, the decision is almost entirely about operational and organizational factors, not algorithmic superiority: Raft's explicit design goal of understandability translates directly into a wider pool of engineers who can correctly reason about, debug, and safely modify a Raft-based implementation, and a larger ecosystem of mature, battle-tested open-source implementations (etcd, HashiCorp's raft library) to adopt rather than build; Multi-Paxos variants, while used in some large-scale production systems (Google's Chubby, Spanner's underlying layer), are generally harder to correctly implement and reason about, and mostly appear as an internal component of an already-adopted, larger system rather than something a team builds fresh today. Recommend Raft (via an existing, mature library) as the default for a new coordination service, reserving a from-scratch Paxos-family implementation for the rare case where an already-adopted larger platform's internals require it.
+ **Why this answer is correct:** Correctly identifies that the decision is operational/organizational, not a matter of one algorithm being theoretically stronger, and gives a clear, justified default.
+ **Common mistakes:** Debating Raft vs. Paxos as if one provides materially stronger consistency guarantees, when both are provably equivalent in what they guarantee.
+ **Follow-up questions:** "Under what circumstance would you still choose to build a custom Paxos-family implementation today?" "How would you validate a chosen library's correctness before trusting it with production coordination?"
+
+4. **Q: Design a chaos-engineering test plan specifically validating that your production Raft-based coordination service correctly refuses to make progress during a genuine, majority-losing network partition, rather than silently continuing with stale or inconsistent state.**
+ **A:** Deliberately partition the cluster in a controlled test/staging environment such that no resulting partition contains a majority of nodes, then assert two things: (a) no partition elects a new leader and no new log entries are committed anywhere during the partition (confirming the CP, not silently-available, behavior §6 describes as correct, not a bug), and (b) client-facing requests during this window fail fast with an explicit "no leader / unavailable" error rather than hanging indefinitely or silently returning stale data — then heal the partition and assert the cluster correctly re-elects a single leader and resumes normal operation without manual intervention. This test should run as a recurring, scheduled chaos exercise (not a one-time validation), since a library upgrade or configuration change could silently regress this behavior without a standing test catching it.
+ **Why this answer is correct:** Tests the actually load-bearing correctness property (refusing progress without a majority) rather than only the happy path, and insists on recurring, not one-time, validation.
+ **Common mistakes:** Testing only that the cluster recovers after a partition heals, without also verifying it correctly refuses to make progress during the partition itself — the more consequential, easier-to-silently-regress property.
+ **Follow-up questions:** "How would you distinguish 'correctly refusing to make progress' from 'the cluster is simply broken' in an alert?" "What client-side behavior should accompany this — retry, fail fast, or degrade to a read-only mode?"
+
+5. **Q: A junior engineer argues that since Saga already handles the order-fulfillment workflow correctly, the team should also migrate the payment-authorization step itself (currently a single, local ACID transaction against the payment ledger) to a Saga step "for consistency of approach across the codebase." Evaluate this as a Principal Engineer.**
+ **A:** Push back — Saga's compensating-action model exists specifically to coordinate across genuinely separate, independently-committing systems; a single local ACID transaction against one database already provides a strictly stronger, simpler guarantee (true atomicity, not eventual-consistency-with-compensation) for anything that fits within one database's transactional boundary. Migrating an already-atomic, single-database operation to Saga would trade a stronger guarantee for a weaker one purely for stylistic uniformity — directly the "use the strongest, simplest mechanism the actual system boundaries allow" principle (§Advanced Q3) being violated in the wrong direction. "Consistency of approach" is a reasonable secondary concern but should never override matching the mechanism to what the actual system boundary requires.
+ **Why this answer is correct:** Recognizes that architectural uniformity is a weaker goal than correctness-per-boundary, and correctly identifies the proposal as downgrading a stronger guarantee unnecessarily.
+ **Common mistakes:** Accepting "consistency of approach" as sufficient justification for choosing a weaker coordination mechanism than the actual system boundary requires.
+ **Follow-up questions:** "Is there a legitimate reason to eventually split the payment-authorization step into its own service?" "If so, what would need to be true first before this migration becomes genuinely justified?"
+
+6. **Q: Explain precisely why a client-generated idempotency key combined with Saga's per-step commits is not, by itself, sufficient to guarantee "exactly-once" business effect for the overall Saga, even though every individual step is idempotent.**
+ **A:** Per-step idempotency guarantees that *retrying a single step* doesn't produce a duplicate effect for that step — but it says nothing about whether the *Saga orchestrator itself* correctly tracks which steps have already run when recovering from its own crash mid-workflow. If the orchestrator's own "which step am I on" state isn't itself durably persisted and correctly restored on restart, a crash mid-Saga could cause the orchestrator to re-run an already-completed step's *forward* logic under a new, different idempotency key (a bug in key generation, not step execution) — producing a genuine duplicate business effect despite every individual step technically being "idempotent" in isolation. The orchestrator's own state machine must itself be durably persisted (typically in the same database as the steps it coordinates) and must reuse the same idempotency key across a resumed execution, not regenerate one — a distinct requirement from step-level idempotency alone.
+ **Why this answer is correct:** Correctly separates step-level idempotency from orchestrator-level state durability, identifying a genuine, easy-to-miss gap between "each step is idempotent" and "the overall Saga produces exactly-once effect."
+ **Common mistakes:** Assuming step-level idempotency alone is sufficient, without considering whether the orchestrator's own coordination state survives a crash correctly.
+ **Follow-up questions:** "How would you test this specific gap?" "Where should the orchestrator's state live relative to the steps it coordinates?"
+
+7. **Q: How would you extend this module's quorum-based reasoning to design a cross-region disaster-recovery strategy for a Raft-backed coordination service, given that a naive 3-region, 1-node-per-region deployment cannot survive a full regional outage while maintaining a majority?**
+ **A:** A 3-node, 1-per-region deployment loses majority (drops to 2 of 3, still a majority — actually survives one region loss) but a 5-node, non-uniform deployment (e.g., 2-2-1 across three regions) can lose its 1-node region and retain a 4-of-5 majority, or lose a 2-node region and retain a 3-of-5 majority — the specific node-count-per-region layout must be deliberately designed against the exact failure scenario being defended against (single-region loss), not assumed safe by node count alone. For genuine protection against losing an entire region *including* its ability to contribute to any future majority, a 5-node cluster spread 2-2-1 (or larger, 3-2-2 for tolerating a 2-node region loss) is the standard pattern — explicitly modeling "which regions can be lost together and still retain a majority" as a first-class design input, not an afterthought discovered during an actual regional outage.
+ **Why this answer is correct:** Moves beyond "add more nodes" to the actually load-bearing question — the specific per-region distribution relative to the specific failure scenario being defended against.
+ **Common mistakes:** Assuming any odd-numbered, multi-region cluster automatically survives a single-region outage, without checking the specific per-region node distribution against the specific failure being planned for.
+ **Follow-up questions:** "What operational procedure handles the case where the surviving regions genuinely cannot reach majority?" "How would you test this DR posture without causing a real regional outage?"
+
+8. **Q: A Principal Engineer is asked to justify, to a non-technical audit committee, why the firm's core ledger uses 2PC-avoidant Saga-based coordination rather than "the strongest possible consistency guarantee available." Draft the explanation.**
+ **A:** Frame it around risk, not technical mechanism: "the strongest possible guarantee" (2PC-style blocking atomicity) creates a different, and for our actual failure patterns a worse, risk — a coordinator failure during a blocking transaction can freeze a customer-facing resource indefinitely until manual intervention, an availability failure with direct customer and reputational impact, demonstrated by real production, incidents at other institutions using similar patterns. Our chosen approach (Saga, eventual-consistency-with-compensation) trades a theoretically stronger point-in-time guarantee for materially better availability and self-healing behavior under the failure modes we actually observe in production, with the brief, precisely-bounded inconsistency window explicitly monitored, reconciled, and — where regulatory-sensitive — separately disclosed as a deliberate, understood trade-off (§Advanced Q6) rather than an overlooked gap. This is the honest, defensible answer: not "we chose a weaker guarantee," but "we chose the guarantee whose failure mode matches our actual operational risk tolerance."
+ **Why this answer is correct:** Translates a technical trade-off into risk language an audit committee can evaluate, and is honest about the trade-off rather than overselling either option.
+ **Common mistakes:** Either overselling Saga as having "no downside," or being unable to explain the choice in terms the audience can actually evaluate and hold the team accountable to.
+ **Follow-up questions:** "What evidence would you present that the reconciliation process actually catches every inconsistency window?" "How would this answer change for a genuinely real-time, sub-second settlement requirement?"
+
+9. **Q: Design a monitoring dashboard a Principal Engineer would actually use to assess the health of a production consensus-backed coordination layer at a glance, distinct from the individual node-level metrics an SRE would watch.**
+ **A:** A Principal-level view should surface: (1) leader stability (time since last election, and election frequency over the past 24h — a proxy for underlying network/node health without requiring per-node drill-down), (2) commit latency distribution (p50/p99/p99.9, since the majority-acknowledgment cost is sensitive to the single slowest node in the required majority, making tail latency the more informative signal than average), (3) quorum headroom (how many additional node failures the cluster could currently absorb before losing majority — a forward-looking risk metric, not merely current health), and (4) cross-cluster consistency of decisions where multiple sharded consensus groups exist (§9), flagging any group whose behavior diverges materially from its peers. This is deliberately a smaller, risk-and-trend-oriented view than the full node-level metrics dashboard, designed to answer "is this coordination layer currently healthy and how much margin do we have" in one glance, not to replace detailed operational telemetry.
+ **Why this answer is correct:** Distinguishes a leadership-level risk/trend view from operational node-level metrics, and includes the forward-looking "headroom" metric a purely reactive dashboard would miss.
+ **Common mistakes:** Building a Principal-level dashboard that's simply a smaller version of the SRE dashboard, without the forward-looking risk framing (quorum headroom) that's actually distinctive to this altitude of review.
+ **Follow-up questions:** "What would trigger an escalation from this dashboard versus a routine SRE alert?" "How would you present quorum headroom to someone without distributed-systems background?"
+
+10. **Q: Synthesize this entire module's governance implications: what standing organizational practice would most reduce the recurrence of the specific 2PC-blocking-incident class across a growing microservices estate, beyond "know the theory"?**
+ **A:** A mandatory architecture-review gate for any new cross-service coordination requirement, requiring the design document to explicitly name which of this module's mechanisms (single-database transaction, Saga, consensus-backed lock, or — flagged for extra scrutiny — a custom-built 2PC-like protocol) is being used and why, with any custom-built distributed-transaction protocol requiring explicit sign-off from an engineer who can demonstrate first-principles understanding of its blocking-failure-mode risk before it's approved for production — directly converting this module's theoretical vocabulary (§10 Intermediate Q10's "formal trade-off vocabulary" requirement) from a personal understanding into an enforced organizational gate, so that a team unfamiliar with 2PC's well-documented failure mode cannot silently reintroduce the same incident class the way the original team did before this course's lessons were formalized.
+ **Why this answer is correct:** Converts individual understanding into an enforced, structural organizational practice — the standard "make the correct default the path of least resistance" governance pattern applied specifically to this module's central risk.
+ **Common mistakes:** Relying on documentation or training alone ("everyone should know this") without an enforced review gate that catches the case where a team doesn't.
+ **Follow-up questions:** "How would you handle a team that already has a production 2PC-like protocol deployed before this gate existed?" "What's the minimum bar for 'first-principles understanding' the sign-off should actually verify?"
 
 ---
 
@@ -253,9 +352,175 @@ public class QuorumStore
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-*(This entire module IS the deep-dive case study — the incident, the four worked exercises, and the extensive Advanced-tier Q&A collectively constitute this section's typical content, explicitly unifying Modules 19-28's engine-specific consistency discussions under one formal theoretical foundation.)*
+**Scenario:** Design the coordination layer for a multi-currency, cross-border trade-settlement platform that must guarantee a trade's payment leg and securities leg either both settle or neither does (delivery-versus-payment, DvP), while remaining available for new trade submissions even during a transient regional network issue.
+
+**Functional requirements:**
+- Every settlement instruction's payment and securities legs settle atomically (both or neither) — genuine, auditable DvP.
+- New trade submission (order intake, not settlement) must remain available even during a partial regional network partition.
+- A durable, replayable record of every coordination decision (settle / abort) for regulatory audit.
+
+**Non-functional requirements:**
+- No indefinite blocking of held resources under any single coordinator/participant failure.
+- Cross-region write latency for trade intake must stay under ~50ms p99 within a region; settlement coordination latency (lower volume, higher-stakes) may tolerate 200-500ms.
+- Every coordination decision must be independently reconstructible from a durable log, not only from in-memory coordinator state.
+
+**Back-of-the-envelope estimation:** A mid-size settlement platform processes roughly 200,000 trades/day → ~2.3 TPS average, with peak bursts around market close reaching perhaps 50-100 TPS. At these volumes, the actual engineering challenge is **not raw throughput** (any of the mechanisms this module covers handle 100 TPS trivially) — it is **correctness under partial failure**, exactly the same conclusion this course's system-design work reaches whenever transaction volume is moderate but the cost of a single incorrect settlement is high (a wrong DvP outcome is a regulatory incident, not a performance metric).
+
+**Architecture:** Two distinct coordination mechanisms for two distinct problems, deliberately not one mechanism forced to cover both:
+- **Trade intake** (high-availability requirement, no cross-system atomicity needed at this stage): a single, regionally-local database transaction records the trade request; no distributed coordination at all — availability is achieved simply by not introducing a distributed dependency where none is needed yet.
+- **Settlement (DvP)** (the genuine cross-system atomicity requirement): a durable, consensus-backed transaction coordinator — modeled after §4's fix and §Expert Q2's audit design — orchestrating the payment ledger and securities ledger via a **durable decision log written before either participant is instructed**, not a naive, undurable, in-memory 2PC coordinator.
+
+```mermaid
+graph TB
+    Client[Trade Intake API] -->|local tx, no distributed coordination| IntakeDB[(Regional Intake DB)]
+    IntakeDB -->|CDC / outbox, feeding Module 48's pattern| SettlementQueue[Settlement Queue]
+    SettlementQueue --> Coordinator[Settlement Coordinator]
+    Coordinator -->|1. write PREPARE decision, durable| DecisionLog[(Durable Decision Log — Raft-backed)]
+    Coordinator -->|2. prepare| PaymentLedger[(Payment Ledger)]
+    Coordinator -->|2. prepare| SecuritiesLedger[(Securities Ledger)]
+    Coordinator -->|3. write COMMIT/ABORT decision, durable, BEFORE phase 2| DecisionLog
+    Coordinator -->|4. commit/abort| PaymentLedger
+    Coordinator -->|4. commit/abort| SecuritiesLedger
+    ReconJob[Reconciliation Job] -.->|standing, automated| DecisionLog
+    ReconJob -.-> PaymentLedger
+    ReconJob -.-> SecuritiesLedger
+```
+
+**Components:** Trade Intake API (regionally-local, no cross-region coordination); Settlement Queue (buffers settlement requests, decoupling intake availability from settlement coordination latency); Settlement Coordinator (durable-decision-log-backed, per §Expert Q2); Raft-backed Decision Log (the durable audit trail, independently replayable); Reconciliation Job (standing, automated, per §Expert Q2's regulatory-proof mechanism).
+
+**Database selection:** Regionally-local relational database for intake (ordinary ACID, no distributed transaction needed); the Decision Log itself backed by a small, dedicated Raft group (etcd or equivalent) rather than a general-purpose database, since its correctness properties (durable, ordered, majority-committed) are exactly what a consensus service is purpose-built for, not an incidental fit.
+
+**Caching:** Not applicable to the coordination path itself — correctness-critical state must never be served from a cache; the trade-intake read path (order status queries) may use a bounded-staleness cache.
+
+**Messaging:** Settlement Queue as an at-least-once, durable message channel (directly Module 48's territory) between intake and the coordinator — decoupling intake's write rate from settlement's coordination latency, so a settlement-side slowdown never backpressures trade intake.
+
+**Scaling:** Trade intake scales horizontally and trivially (no coordination dependency); settlement coordination scales via §9's sharding pattern — multiple coordinator instances, each owning a disjoint partition of in-flight settlements (sharded by settlement ID), each backed by its own small decision-log partition rather than one global consensus group serializing all settlements.
+
+**Failure handling:** A coordinator crash between phases is recoverable by design — on restart, the coordinator replays its durable decision log and re-drives any settlement whose decision was written but not yet fully communicated to both participants, eliminating §4's indefinite-block failure mode structurally rather than relying on manual intervention.
+
+**Monitoring:** Settlement-coordination p99 latency; decision-log commit latency (the majority-acknowledgment cost, §7); count of settlements in a "decided but not yet fully communicated" state and their age (a growing, aging count is the leading indicator of a coordinator or participant problem); reconciliation-job discrepancy rate (should be zero; any non-zero rate pages immediately).
+
+**Trade-offs:** Deliberately two different coordination mechanisms for two different problems (availability-first for intake, correctness-first for settlement) rather than one uniform mechanism — accepting the added complexity of maintaining two distinct code paths in exchange for never forcing settlement's strict-correctness requirement onto intake's high-availability requirement, or vice versa.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** A settlement coordinator whose decision (commit/abort) is durably recorded before being communicated to any participant; recoverable from a crash at any point without requiring manual intervention; independently auditable against actual ledger state.
+
+**Class diagram:**
+```mermaid
+classDiagram
+    class ISettlementCoordinator {
+        <<interface>>
+        +ExecuteAsync(SettlementRequest) SettlementResult
+    }
+    class DurableDecisionLog {
+        +AppendAsync(SettlementId, Decision) void
+        +GetDecisionAsync(SettlementId) Decision
+        +GetUnresolvedAsync() List~SettlementId~
+    }
+    class TwoPhaseSettlementCoordinator {
+        -DurableDecisionLog _log
+        -IParticipant _paymentLedger
+        -IParticipant _securitiesLedger
+        +ExecuteAsync(SettlementRequest) SettlementResult
+        +RecoverAsync() void
+    }
+    class IParticipant {
+        <<interface>>
+        +PrepareAsync(SettlementId) bool
+        +CommitAsync(SettlementId) void
+        +AbortAsync(SettlementId) void
+    }
+    class ReconciliationJob {
+        +RunAsync() List~Discrepancy~
+    }
+
+    TwoPhaseSettlementCoordinator ..|> ISettlementCoordinator
+    TwoPhaseSettlementCoordinator --> DurableDecisionLog
+    TwoPhaseSettlementCoordinator --> IParticipant
+    ReconciliationJob --> DurableDecisionLog
+    ReconciliationJob --> IParticipant
+```
+
+**Sequence diagram:** the §12 architecture diagram's numbered flow (PREPARE decision write → prepare both participants → COMMIT/ABORT decision write, durable, before phase two → commit/abort both participants) is the coordinator's core sequence; on restart, `RecoverAsync` replays `GetUnresolvedAsync` and re-drives each entry to completion using the same, already-durable decision, never re-deciding.
+
+**Design patterns used:** Template Method (the fixed prepare → decide → commit/abort skeleton, with participant-specific prepare/commit/abort logic supplied by each `IParticipant` implementation); Strategy (payment vs. securities ledger participants are interchangeable `IParticipant` implementations); Memento-like recovery (the durable decision log lets the coordinator reconstruct its exact in-flight state after a crash, rather than losing it).
+
+**SOLID mapping:** Single Responsibility (the decision log's only job is durable decision recording; the coordinator's only job is orchestration; each participant's only job is its own prepare/commit/abort); Open/Closed (a third participant, e.g., a custodian for a three-way DvP, per §Expert Q2's follow-up, implements `IParticipant` without modifying the coordinator); Liskov (every `IParticipant` implementation must genuinely honor "once PrepareAsync returns true, CommitAsync must succeed" — a violating implementation silently reintroduces §4's blocking risk); Dependency Inversion (the coordinator depends on `IParticipant` and `DurableDecisionLog` abstractions, not concrete ledger clients).
+
+**Extensibility:** A new settlement type (e.g., a three-way DvP with a custodian) adds a third `IParticipant` without touching the coordinator's core prepare/decide/commit skeleton.
+
+**Concurrency/thread safety:** Each settlement's coordination is single-threaded per settlement ID (no concurrent coordinators may act on the same settlement — enforced via the sharding scheme in §12, where each coordinator instance owns a disjoint partition of settlement IDs) but many settlements are coordinated concurrently across the sharded coordinator fleet; the decision log's own writes are serialized per settlement ID and rely on the underlying Raft group's own concurrency control for cross-settlement parallelism.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** A settlement coordinator, running the design above, began showing a slowly-growing count of settlements stuck in "decided but not yet fully communicated" state during a maintenance window — the count was noticed only because the monitoring metric from §12 had been added following an earlier, unrelated incident, not because of any user-facing symptom yet.
+
+**Root cause:** A recent deployment had introduced a change to the securities-ledger participant's `CommitAsync` implementation, adding a new validation check that, for a specific, rare settlement-instrument-type combination, threw an unhandled exception instead of committing — this meant every settlement matching that combination reached the "COMMIT decision durably written" step successfully, then failed on the actual commit call to the securities ledger, leaving the coordinator retrying `CommitAsync` indefinitely (correct behavior, since the decision was already durably made and must eventually be honored) without ever succeeding, since the underlying bug made every retry fail identically.
+
+**Investigation:** The stuck-settlement age metric (§12) correctly flagged the growing count; correlating stuck settlements against their instrument-type metadata revealed all of them shared the specific rare instrument-type combination, narrowing the search immediately to the recent securities-ledger participant deployment rather than a broad, undirected investigation; reviewing that deployment's diff surfaced the new, incompletely-tested validation check.
+
+**Tools:** The stuck-settlement-age monitoring metric (the actual detection mechanism); structured logs correlating settlement ID to instrument-type metadata, enabling the pattern-matching step; the deployment history/changelog, narrowing the root-cause search to a specific, recent change rather than requiring a from-scratch investigation.
+
+**Fix:** Rolled back the securities-ledger participant's validation change; manually re-drove the stuck settlements (whose decisions were already durably COMMIT, so re-driving simply retried the now-fixed `CommitAsync` call, requiring no re-decision); added the specific rare instrument-type combination to the deployment's regression test suite.
+
+**Prevention:** The core prevention lesson is structural, not just "add a test for this specific case": any change to a participant's `CommitAsync`/`AbortAsync` implementation is uniquely dangerous because a bug there manifests *after* the coordinator has already durably committed to an outcome — unlike a `PrepareAsync` bug (which merely causes a safe, clean abort), a post-decision bug leaves the coordinator correctly, indefinitely retrying an operation that will never succeed until a human fixes the underlying code. Any deployment touching commit/abort logic for a settlement participant should therefore require an explicit, elevated review tier (more scrutiny than an ordinary code change) precisely because of this asymmetry — a lesson worth generalizing to any coordinator-pattern implementation, not just this specific settlement platform.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Choosing the coordination mechanism for the DvP settlement leg described in §12.
+
+**Option A — Ad-hoc, in-memory 2PC coordinator (the original, incident-prone pattern from §4):**
+*Advantages:* Simplest to initially build; no additional infrastructure beyond the participants themselves.
+*Disadvantages:* No recovery path from a coordinator crash between phases — §4's indefinite-blocking failure mode is structural, not a rare edge case.
+*Cost:* Lowest upfront engineering cost.
+*Complexity:* Low upfront, but high hidden operational risk.
+*Maintainability:* Poor — every operator must understand and manually resolve stuck settlements.
+*Scalability:* Fine for throughput; fails on correctness under failure.
+
+**Option B — Durable-decision-log-backed coordinator (the §12/§13 design):**
+*Advantages:* Structurally eliminates the indefinite-blocking failure mode (recoverable via decision-log replay); independently auditable for regulatory proof (§Expert Q2).
+*Disadvantages:* Requires operating a small, dedicated consensus-backed log; more upfront design and testing effort.
+*Cost:* Moderate — a small Raft group (etcd or equivalent) plus the coordinator logic.
+*Complexity:* Moderate, concentrated in the coordinator and decision-log integration, not spread across every participant.
+*Maintainability:* Good — recovery is automatic and auditable, not a manual, tribal-knowledge-dependent procedure.
+*Scalability:* Shardable per §9, scales with settlement volume.
+
+**Option C — Saga-based settlement (compensating actions instead of blocking prepare/commit):**
+*Advantages:* No blocking window at all; each leg commits independently and immediately.
+*Disadvantages:* For DvP specifically, a "compensating" reversal of an already-settled securities transfer or payment is often not a clean, symmetric undo in regulated financial settlement — reversing a completed securities transfer may itself require a new, separately-reportable transaction, not a simple rollback, making Saga a structurally awkward fit for genuine DvP compared to workflows (like §4's order fulfillment) where compensation is a natural, symmetric business operation.
+*Cost:* Comparable to Option B for the coordination logic itself, but with added complexity in designing genuinely correct, regulator-acceptable compensating actions for settlement reversal.
+*Risk:* The brief, Saga-inherent inconsistency window is a materially harder sell for a regulated DvP settlement than for an e-commerce order — directly §Advanced Q6's concern, sharply relevant here.
+
+**Recommendation: Option B**, specifically because DvP's "both or neither, with no partial or compensatable intermediate state" requirement is precisely the strong-atomicity case this module's mechanisms exist for — Option A is rejected because its failure mode is exactly the demonstrated incident; Option C is rejected because settlement reversal is not genuinely a clean, symmetric compensating action in this domain, unlike the order-fulfillment case where Saga was correctly recommended. This is the same discipline as §Advanced Q3's hybrid approach, applied at the level of choosing the mechanism per actual system boundary and business-reversibility characteristics, not a uniform, one-size-fits-all default.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** A DvP settlement mechanism failure is not merely a technical incident — an incorrect or indefinitely-stuck settlement is a regulatory-reportable event with direct client and counterparty impact, and (per §Expert Q2) the audit trail proving correct atomicity is itself a deliverable regulators may require on demand, not an optional internal nicety.
+
+**Engineering trade-offs:** The central trade-off this module teaches — strong, blocking atomicity (2PC-family) versus available, compensating atomicity (Saga) versus formally-agreed, majority-based coordination (consensus) — recurs at every altitude from a single microservice's order-fulfillment workflow to a firm's core settlement platform; the mechanism changes with the domain's actual reversibility and availability requirements, but the underlying theoretical vocabulary (§10 Intermediate Q10) doesn't.
+
+**Technical leadership:** A Principal Engineer's distinctive contribution here isn't implementing any single mechanism correctly (each is well-documented, solved engineering) — it's correctly diagnosing which mechanism's failure mode is acceptable for a given business boundary, and building the organizational discipline (§Expert Q10's review gate) ensuring that diagnosis happens deliberately, every time, rather than defaulting to whichever mechanism a given team happens to be most familiar with.
+
+**Cross-team communication:** The settlement coordinator sits at a genuine organizational seam — owned by neither the payment-ledger team nor the securities-ledger team alone — making its decision-log schema and recovery semantics a shared contract that must be documented and reviewed jointly, not unilaterally changed by either participant team (directly the root cause of §14's incident: a participant-side change made without full visibility into how a post-decision failure would be handled by the coordinator).
+
+**Architecture governance:** Every new cross-service coordination requirement in the settlement domain should be required to explicitly answer "which of this module's mechanisms, and why" before implementation begins (§Expert Q10) — with any custom-built distributed-transaction logic requiring elevated review specifically because of §14's demonstrated asymmetric risk (commit-phase bugs are categorically more dangerous than prepare-phase bugs).
+
+**Cost optimization:** The dedicated Raft-backed decision log (Option B) is a genuine, ongoing infrastructure cost beyond Option A's zero-additional-infrastructure baseline — justified here specifically because the cost of an incorrect or indefinitely-stuck settlement (regulatory exposure, manual remediation effort, client trust) is disproportionately larger than the infrastructure cost, a calculation that would come out differently for a lower-stakes, internal-only coordination requirement.
+
+**Risk analysis:** The dominant risk pattern is the same one recurring throughout this module: individually correct-looking components (a coordinator that correctly writes durable decisions, a participant that correctly implements prepare) failing specifically at an under-scrutinized transition point (§14's post-decision commit-phase bug) — risk reviews should specifically probe this transition, not only each component's own isolated correctness.
+
+**Long-term maintainability:** What decays over time is institutional memory of *why* the durable-decision-log design was chosen over the simpler Option A — new engineers joining the team, absent this module's explicit reasoning, may reasonably ask "why not just call both ledgers directly," and the ADR (§15) exists specifically to answer that question durably, preventing a well-intentioned future simplification from silently reintroducing §4's original incident.
 
 ## 18. Revision
 **Key takeaways**: Consensus (agreement + validity + termination, Raft's leader-election/log-replication mechanism) and the majority-quorum principle (W+R>N) are the formal, unifying theory underlying every engine-specific consistency knob covered across Modules 19-28 (SQL Server replication, MongoDB write concern, Redis Sentinel quorum, DynamoDB tunable consistency). 2PC provides strong, blocking atomicity across distributed participants but has a well-documented, structural coordinator-crash blocking failure mode; Saga trades this for availability via independent, immediately-committing steps plus compensating actions — a direct, CAP-theorem-informed AP-vs-CP choice, not an arbitrary stylistic preference. Vector/logical clocks solve distributed event-ordering without relying on synchronized physical clocks, generalizing the specific timestamp-ordering lesson. Consensus systems have an inherent node-count scaling ceiling, motivating "consensus for coordination metadata, sharding for data volume" as the standard large-scale-system architecture pattern.

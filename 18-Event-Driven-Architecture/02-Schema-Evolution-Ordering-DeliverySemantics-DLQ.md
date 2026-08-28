@@ -110,6 +110,54 @@ graph LR
 
 ---
 
+## 7. Performance Engineering
+
+**CPU/Memory:** Every message deserialization that requires a schema lookup against the Schema Registry adds a network round trip on the hot path unless the resolved schema is cached — a consumer resolving schema ID → schema definition on every single message, rather than caching by schema ID (schema IDs are immutable once registered, making them perfectly cache-safe), pays an avoidable registry round trip per message that becomes the dominant per-message latency cost at high throughput.
+
+**Latency:** The schema-registry lookup, when uncached, sits directly in front of every message's business processing — at 50,000 messages/second, even a well-performing 2ms registry call, uncached, adds a 100-second/second aggregate latency tax the consumer group must absorb somewhere (either as backpressure or as growing consumer lag); caching schema definitions locally by ID (a simple in-memory dictionary, since schema IDs never change their associated definition) reduces this to a one-time cost per distinct schema version seen, not per message.
+
+**Throughput — DLQ replay:** Reprocessing a large DLQ backlog (the aftermath of a downstream outage that caused a burst of failures) competes for the same consumer capacity as the live stream unless replayed through a dedicated consumer group or throttled explicitly — replaying 500,000 backlogged DLQ messages through the same consumer instances handling live traffic risks starving live-stream processing of capacity exactly when the system is already recovering from an incident; a separate, rate-limited DLQ-replay consumer group avoids this contention.
+
+**Throughput — partition count ceiling:** As Intermediate Q8 established, partition count is a hard throughput ceiling independent of consumer instance count — before scaling consumer instances to address a throughput problem, always first confirm partition count isn't already the binding constraint, since adding instances beyond partition count provides zero additional parallelism and only wastes provisioned capacity.
+
+**Scalability:** Schema-registry lookup caching scales trivially (a local cache per consumer instance, no coordination needed, since schema definitions are immutable once published); DLQ-replay throughput scales by provisioning a dedicated, separately-scaled replay consumer group sized to the specific backlog being cleared, not sized to steady-state live-traffic volume.
+
+**Benchmarking:** Benchmark DLQ-replay throughput specifically at realistic backlog sizes (tens of thousands to millions of messages, depending on realistic outage-duration scenarios) rather than assuming replay behaves like normal steady-state consumption — a replay workload is a very different access pattern (a burst read of a large, possibly cold-storage-tier backlog) than the warm, steady, per-message flow the main consumer path is normally tuned for.
+
+**Caching:** Cache schema definitions client-side by schema ID with no TTL/expiry needed (immutability guarantees this is always safe) — this is one of the rare caches in this course's material that requires no invalidation strategy at all, since the cached value can never become stale by construction.
+
+## 8. Security
+
+**Threats:** The Schema Registry is a high-value target precisely because it sits upstream of every event-producing service in the organization — write access to the registry means the ability to approve (or, if compatibility enforcement itself is bypassed, silently permit) a schema change that every downstream consumer will trust; a compromised or over-permissioned registry credential is a supply-chain-shaped risk for the entire event-driven estate, not a narrow, single-service risk.
+
+**Mitigations:** Enforce registry write access (schema registration) as a distinctly more privileged, more tightly scoped operation than registry *read* access (schema lookup for deserialization) — most services need only read access; schema registration should be gated behind CI/CD pipeline identity and code review, not available to an arbitrary running service's runtime credentials, closing the gap between "any service that can reach the registry" and "any service that should be able to change a schema every consumer trusts."
+
+**OWASP mapping:** Broken Access Control (A01) if registry write access isn't scoped distinctly from read access; Security Misconfiguration (A05) if compatibility enforcement can be disabled or bypassed per-topic without a reviewed, audited change — the registry's compatibility-enforcement configuration is itself a security-relevant control, not merely a data-quality one, since a bypassed compatibility check is functionally equivalent to an unreviewed breaking change reaching every consumer.
+
+**DLQ data-at-rest sensitivity:** A Dead Letter Queue, by construction, retains the **complete original payload** of every failed message — for a fat, Event-Carried State Transfer event (the sibling module's §2.2) carrying embedded customer PII, the DLQ is now a durable, at-rest store of that same sensitive data, often with weaker access controls and retention discipline than the primary data stores it was extracted from, since DLQs are typically treated as an operational/debugging tool rather than a first-class data store subject to the same governance review. Apply the same data-classification and encryption-at-rest requirements to DLQ contents as to the primary data they originated from — Intermediate Q10 already establishes this in principle; the concrete control is ensuring the DLQ inherits its source topic's data-classification tag rather than defaulting to an unclassified "just ops tooling" assumption.
+
+**AuthN/AuthZ:** DLQ read/replay access should be scoped as tightly as production data access generally is — an engineer with broad "operational troubleshooting" access to inspect DLQ contents is, functionally, being granted read access to the sensitive payloads of every failed message across every topic they can reach, which is a materially broader grant than most engineers' normal data-access scope and should be reviewed as such, not assumed benign because it's "just the DLQ."
+
+**Encryption:** DLQ storage must be encrypted at rest to the same standard as the source topic's classification; DLQ messages in transit during replay must use the same TLS requirements as normal message flow — no exception should exist for "it's just a retry mechanism."
+
+## 9. Scalability
+
+**Horizontal scaling:** Partition count sets the hard ceiling on consumer-side parallelism within a consumer group (§Intermediate Q8) — scaling a consumer group beyond its topic's partition count is a wasted, ineffective scaling action, so partition count must be provisioned ahead of anticipated peak consumer parallelism, not reactively increased only once a throughput ceiling is hit (increasing partition count on an existing topic is possible on most brokers but changes the hash-to-partition mapping going forward, risking a transient ordering disruption for in-flight entities during the transition).
+
+**Partitioning/ordering trade-offs at scale:** The tension named is scale-dependent — a partition key chosen for ordering correctness (entity ID) caps that specific entity's own event throughput at whatever a single partition/consumer can sustain; this is invisible at low-to-moderate scale and becomes a genuine bottleneck only if a single entity's own event rate approaches partition-level throughput limits (a very high-frequency single trading account, an extremely active single shipment). At that specific scale threshold, the resolution requires either accepting a narrower ordering guarantee (sub-partitioning by entity plus a coarse time window) or redesigning the entity granularity itself (splitting an overly-broad "entity" into more granular sub-entities that don't all need to share one partition) — a genuine architectural trade-off that should not be resolved prematurely for entities nowhere near this threshold.
+
+**DLQ backlog scaling:** A DLQ is normally low-volume by design (only genuinely, repeatedly failing messages land there) — but a systemic failure (a downstream dependency outage, a bad deployment breaking a wide class of messages) can produce a DLQ backlog orders of magnitude larger than the DLQ's normal operating volume in a short window. The DLQ infrastructure itself (storage, and any replay tooling) must be provisioned for this burst scenario, not just steady-state trickle volume — sizing DLQ storage and replay throughput only for the common case is a scalability gap that surfaces precisely during the highest-stakes moment (recovering from a systemic incident), when replay speed directly determines how quickly the business returns to a consistent state.
+
+**Replication/HA:** Both the Schema Registry and the DLQ need their own HA/replication story independent of the main event pipeline's — a Schema Registry outage blocks **every** producer attempting to publish under compatibility enforcement (a single point of failure for the entire event-driven estate, per §8's supply-chain framing), and a DLQ storage outage during an active systemic-failure event means the very mechanism meant to preserve failed messages during a crisis is itself unavailable during that crisis — both warrant multi-node/multi-AZ deployment as a baseline, not an afterthought.
+
+**Load balancing:** Consumer-group rebalancing (partitions reassigned across consumer instances as instances join/leave) is itself a scaling mechanism, but a rebalance in progress briefly pauses consumption for the partitions being reassigned — frequent, unplanned rebalances (from flapping instances, aggressive auto-scaling thresholds) can measurably reduce effective throughput even though the *intent* was to increase it, a subtlety easy to miss when only steady-state throughput is monitored rather than rebalance-frequency and rebalance-pause-duration as their own metrics.
+
+**High Availability / Disaster Recovery:** Cross-region DR for an event-driven pipeline must explicitly decide whether the Schema Registry and DLQ contents are replicated to the DR region — a failover that restores the main event pipeline but not the registry leaves the DR region's consumers unable to deserialize any event requiring a registry lookup for a schema version not yet locally cached, and a failover that loses DLQ contents loses the record of every failure the primary region hadn't yet resolved at failover time.
+
+**CAP theorem:** Schema Registry compatibility enforcement is inherently a consistency-favoring control — under a partition between a producer and the registry, favoring availability (allowing publication without a registry check) reopens exactly the unknown-consumer-breakage risk the registry exists to close, while favoring consistency (blocking publication until the registry is reachable) trades producer availability for that protection; for schema compatibility specifically, the consistency-favoring default is almost always correct, since the cost of a blocked publish is transient and recoverable while the cost of an unchecked incompatible schema reaching consumers is not.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -157,6 +205,28 @@ graph LR
  **A:** This conflates two genuinely separate concerns (Advanced Q4) — idempotency addresses duplicate delivery of the same event, while ordering addresses the relative sequence of distinct events; a fully idempotent consumer processing events in the wrong order (as) will still produce an incorrect final result, since idempotency guarantees "processing this exact event twice is harmless," not "the events I'm receiving are in the correct relative sequence" — the claim's implicit assumption that idempotency is a superset of reliability concerns is precisely the kind of subtle, false equivalence that let the actual root cause (a pure ordering bug) go undetected while the team's attention was on other reliability properties.
 10. **Q: As a Principal Engineer establishing EDA operational standards across a large organization, design the specific set of automated gates and standing monitors (synthesizing this entire module) you would require for every event-producing/consuming service, and justify each one's necessity.**
  **A:** (1) Mandatory schema-registry compatibility enforcement (full mode by default) on every publish — necessary because manual review alone misses unknown-consumer breakage (directly §Advanced Q5's automated-gate philosophy applied to events). (2) A declared, checkable partition-key-to-ordering-requirement contract for every stateful consumer (Advanced Q1) — necessary because ordering assumptions are otherwise implicit and easy to silently violate. (3) A shared, standard idempotency library as the sanctioned default for every consumer (Advanced Q8) — necessary because ad hoc, team-by-team idempotency implementations vary unpredictably in correctness. (4) Mandatory Dead Letter Queue routing with attached, staffed alerting/triage process for every consumer (Advanced Q5) — necessary because a DLQ without an operational process is a silent graveyard, not an actionable safety mechanism. Each gate targets a distinct, specific failure mode this module identified through concrete incidents or reasoning, directly the same "convert each hard-won lesson into a specific, non-optional, automated or process-backed gate" governance pattern this course applies recurrently, now completing the pattern's application across the full Microservices-and-EDA arc.
+
+### Expert (10)
+1. **Q: Design a Schema Registry deployment that remains available to producers even during a full registry outage, without silently disabling compatibility enforcement.**
+ **A:** The correct design is not "fail open" (allowing unchecked publication, reopening the exact risk the registry exists to close) nor naive "fail closed" (blocking every producer estate-wide on any registry blip, an outsized blast radius for a transient issue) — it is **client-side schema caching with a bounded staleness tolerance**: producers cache the last-known-good compatibility verdict and their own previously-registered schema ID locally, so a producer publishing under an *already-registered, previously-validated* schema can continue doing so during a registry outage (no new compatibility decision is needed, since none is being made), while a producer attempting to register a genuinely **new** schema version during the outage is correctly blocked, since that specific action requires a compatibility decision the registry alone can make. This narrows the blast radius of a registry outage to exactly "no new schema versions can be introduced right now," not "no events can be published right now" — a materially smaller, more defensible degradation.
+2. **Q: A high-frequency trading platform has a single instrument whose event rate approaches the partition-level throughput ceiling, making strict per-instrument ordering (partition key = instrument ID) a genuine bottleneck for that one instrument specifically. Design a resolution that doesn't sacrifice ordering correctness for the instrument's price-affecting events.**
+ **A:** Split the instrument's event stream by **event category**, not by further partitioning the instrument itself — separate the events that genuinely require strict relative ordering against each other (price updates, which must be applied in sequence to avoid stale-overwriting a newer price with an older one) from events that don't have an ordering dependency on each other (independent analytics/logging events about the same instrument) — routing only the ordering-critical subset through the single, correctly-ordered partition while allowing the non-ordering-critical subset to spread across multiple partitions for parallelism. This is the same gating-vs-non-gating discriminating question the sibling module applies to coordination style, now applied to *which events for one entity actually need to share a partition* — not every event about an entity has the same ordering requirement as every other event about that entity.
+3. **Q: Critique the following DLQ design: messages are routed to the DLQ after N failed retries, and a nightly batch job automatically replays every DLQ message back into the main stream once per day.**
+ **A:** This design silently reintroduces exactly the failure mode a DLQ exists to prevent — if the original failure cause is still present (a persistent bug, not a transient blip), the nightly replay will fail again identically, but now the message has cycled through the DLQ→main-stream→DLQ loop indefinitely, consuming processing capacity every night without ever resolving, and — critically — without any human ever being alerted, since the automatic replay silently "handles" what should have triggered Advanced Q5's staffed-triage process. Automatic replay is appropriate only for failure classes confirmed to be transient (a downstream dependency's known brief outage window, confirmed resolved) — for anything else, replay must be a deliberate, triggered action following investigation, not a blind, scheduled default.
+4. **Q: Explain the specific mechanics of a Kafka consumer-group rebalance and why it can cause brief, ordering-relevant processing pauses even for correctly-partitioned data.**
+ **A:** A rebalance reassigns partition ownership across the consumer group's live instances (triggered by an instance joining, leaving, or being deemed dead via a missed heartbeat) — during the reassignment window, every affected partition briefly has **no actively-consuming owner** until the new assignment is confirmed and the new owning instance resumes from the last committed offset; this is not an ordering-correctness violation (the partition's own internal event order is untouched), but it is a **latency and continuity** disruption — a workflow-completion monitor (the sibling module's) with an aggressive threshold could false-positive-alert on a stall that's actually just a rebalance pause, so alerting thresholds must be calibrated with rebalance-pause duration as an accepted, expected floor, not treated as indistinguishable from a genuine processing stall.
+5. **Q: A team stores DLQ messages with full plaintext payloads for "ease of debugging," arguing that encrypting DLQ contents would slow down incident response during exactly the high-pressure moments DLQ inspection matters most. Evaluate.**
+ **A:** This is a false trade-off — encryption at rest doesn't meaningfully slow down authorized incident-response access (decryption on read, transparent to an authorized engineer with the right access, is a standard, low-latency pattern), it only prevents *unauthorized* access to the same sensitive payloads §8 identifies the DLQ as retaining. The actual, unstated trade being made is convenience for whoever provisioned the DLQ against data-governance discipline for whoever's PII ends up in a failed message — the "ease of debugging" framing conflates "encrypted" with "harder for an authorized engineer to read," which isn't what encryption-at-rest does; it's specifically what it doesn't do for legitimate access while doing exactly that for illegitimate access.
+6. **Q: Design a contract-testing strategy specifically for schema evolution, distinct from event-flow contract testing, that would have caught a "structurally compatible but semantically wrong" schema change before production.**
+ **A:** Beyond the registry's structural compatibility check (field types, presence/absence rules), maintain a small suite of **golden-event fixtures** — real, representative sample events captured from production — replayed through actual, deployed consumer deserialization and business-logic code whenever a new schema version is proposed, asserting the consumer's resulting business behavior (not just successful deserialization) matches an expected, previously-approved outcome. This catches the class of change that's structurally valid (e.g., changing a currency-amount field's numeric type in a way the registry's rules permit) but semantically wrong for a specific consumer's calculation logic — a gap the registry's schema-shape-only compatibility check is not designed to catch, since it reasons about the schema's structure, not about what any specific consumer *does* with the data.
+7. **Q: How should idempotency-key retention interact with cross-region schema-registry replication during a failover, if a consumer resumes in a DR region using a locally-cached, possibly-stale schema-registry mirror?**
+ **A:** A DR region's schema-registry mirror lagging behind the primary region means the DR consumer may be unable to resolve the schema ID of a very recently-published event (published in the primary region just before failover, not yet replicated to the DR mirror) — this manifests as a deserialization failure indistinguishable, without specific diagnosis, from a genuinely malformed event, risking an incorrect DLQ routing for a perfectly valid event whose only problem is a lagging registry mirror. The mitigation: DR failover runbooks must explicitly check schema-registry mirror lag as a pre-condition before resuming consumption, and a consumer's DLQ-routing logic should distinguish "schema ID not found, possibly due to registry replication lag" from "payload genuinely malformed" as separate failure categories with separate handling, rather than collapsing both into an identical DLQ outcome.
+8. **Q: A Principal Engineer is asked whether "exactly-once" should be pursued at the broker/transactional level (e.g., Kafka's transactional producer/consumer APIs) for a new, latency-sensitive trading-events pipeline, or whether idempotent-consumer design on top of at-least-once delivery is sufficient. What's the deciding factor?**
+ **A:** The deciding factor is **where the pipeline's side effects terminate**, not throughput or latency preference in isolation: if every step of the pipeline stays fully within the broker's own transactional boundary (Kafka-to-Kafka, no external side effect), broker-level transactional guarantees provide genuine, strong protection with less bespoke idempotency-key engineering required. If any step's side effect crosses outside that boundary (a call to an external execution venue, a write to a non-transactional external system), broker-level guarantees provide **no** protection for that step regardless of how strong they are internally, making idempotent-consumer design mandatory anyway — at which point paying the latency/throughput cost of broker-level transactions *in addition to* idempotent-consumer design is often not worth the marginal protection it adds only to the fully-internal portion of the pipeline. For a trading pipeline whose entire point is triggering external effects (order execution), idempotent-consumer design is the load-bearing guarantee regardless of whether broker-level transactions are also enabled.
+9. **Q: Design chaos-engineering experiments specifically targeting this module's three disciplines (schema evolution, ordering, DLQ) rather than generic infrastructure chaos (killing random pods).**
+ **A:** (1) **Schema chaos:** deliberately deploy a consumer pinned to an *older* schema version against a topic actively receiving *newer*-schema events in production-like volume, verifying forward compatibility holds under real load, not just in an isolated compatibility-check test. (2) **Ordering chaos:** inject artificial partition-reassignment/rebalance events during active processing of a known ordering-sensitive entity's event sequence, verifying the consumer's state machine handles the resulting brief pause correctly rather than mis-timing out or false-alerting. (3) **DLQ chaos:** simulate a sustained downstream-dependency failure at production-representative volume, verifying DLQ storage and alerting handle the resulting backlog burst without the DLQ mechanism itself becoming the bottleneck or losing messages under the induced load. Each experiment targets a specific mechanism this module names, rather than generic resilience testing that wouldn't isolate which of these three disciplines actually failed.
+10. **Q: Deliver the closing synthesis: what single discipline, if adopted as a non-negotiable default across every event-producing and event-consuming service in an organization, would prevent the largest share of this module's failure modes at once?**
+ **A:** **Content-derived, transactionally co-located idempotency keys with a database-level structural uniqueness backstop, applied uniformly, regardless of coordination style, ordering guarantee, or delivery-semantics configuration.** Reasoning: ordering bugs (the incident) still cause incorrect *processing outcomes* even with perfect idempotency, but a structural uniqueness backstop specifically prevents the most costly *consequence* of both ordering failures and duplicate-delivery failures alike — a duplicated or conflicting write reaching a system of record. Schema-evolution failures are a separate category this specific discipline doesn't address, but ordering and delivery-semantics failures — the two disciplines most likely to produce a silent, financially consequential duplicate or corrupted write — are both substantially mitigated by the same one mechanism. This is why idempotency, of everything covered across both modules, earns its own dedicated deeper treatment: it is the single highest-leverage, broadest-coverage discipline in the entire domain, not merely one item on a checklist alongside the others.
 
 ---
 
@@ -247,9 +317,183 @@ public class ResilientEventConsumer
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-*(the incident, the four exercises, and the Advanced-tier Q&A — especially Advanced Q1's ordering-contract safeguard, Advanced Q5's DLQ-process fix, and Advanced Q10's synthesized governance-gate framework — collectively constitute this module's system-design, debugging, and Principal-Engineer-level content.)*
+**Scenario:** Design the market-data and trade-confirmation event pipeline for a multi-asset trading platform — a high-volume `PriceUpdate` stream per instrument, and a lower-volume, correctness-critical `TradeConfirmed` stream, both flowing through a shared broker infrastructure to dozens of independent downstream consumers (risk engines, client-facing feeds, regulatory reporting, analytics).
+
+**Functional requirements:**
+- Every consumer must be able to deserialize events under whatever schema version it was built against, regardless of which schema version the producer is currently publishing (forward compatibility, §2.2, is the dominant concern here since consumers upgrade independently and on their own schedule).
+- `PriceUpdate` events for a single instrument must be strictly ordered relative to each other; `TradeConfirmed` events have no cross-instrument ordering requirement but must never be lost or silently dropped.
+- Repeatedly-failing messages must not block the stream, and must be recoverable without reprocessing already-successful messages.
+
+**Non-functional requirements:**
+- Schema-registry lookup must not become a per-message latency tax at `PriceUpdate` volume (§7).
+- DLQ storage and replay must handle a burst backlog from a systemic downstream outage without becoming the bottleneck during recovery (§9).
+- No consumer's dedup/ordering assumptions should be violated by partition-key or partition-count changes made without cross-team visibility.
+
+**Back-of-the-envelope estimation:** `PriceUpdate`: ~200,000 events/second across all instruments at peak (a genuinely high-throughput stream). `TradeConfirmed`: ~50 events/second (low volume, individually high-stakes). This order-of-magnitude difference — 4,000x — is the deciding input for treating these as two structurally different topics with different partition counts, retention, and DLQ handling, not a single uniform topic design applied to both.
+
+**Architecture:** Two separate topics. `price-updates`, partitioned by instrument ID (ordering-critical per instrument, high partition count for aggregate throughput across many instruments, per §Expert Q2's category-splitting principle if any single instrument approaches partition-level throughput). `trade-confirmed`, partitioned by trade ID (no cross-trade ordering need, but each individual trade's own lifecycle events, if any, must stay ordered), low partition count reflecting its low volume, with materially longer retention (trade confirmations are audit-relevant and replay-worthy far longer than transient price ticks).
+
+**Components:** Schema Registry (shared across both topics, full-compatibility mode enforced); `SchemaCache` client library (§7, mandatory for every consumer, caching resolved schema definitions by immutable schema ID); per-topic Dead Letter Queues, `price-updates-dlq` sized for burst tolerance given the topic's high steady-state volume, `trade-confirmed-dlq` with tighter alerting thresholds given the topic's low volume and high per-message stakes; `DlqReplayService` (a dedicated, separately-scaled consumer group per §7, never sharing capacity with live-stream consumers).
+
+**Database selection:** Not directly applicable to the pipeline itself; each downstream consumer's own persistence is out of scope for this shared-infrastructure design, per the same boundary-setting discipline the sibling module's §12 applies.
+
+**Caching:** Schema-definition cache (§7, per-consumer, keyed by immutable schema ID, no expiry needed); no caching on the ordering-critical `price-updates` partition-assignment path itself, since correctness there depends on current, not cached, partition ownership.
+
+**Messaging:** Both topics use at-least-once delivery (the practical default, §2.4); every consumer is required to be idempotent (the shared, sanctioned idempotency library, §Advanced Q8) regardless of which topic it consumes, since duplicate delivery is a property of the delivery mechanism, not of any specific topic's business content.
+
+**Scaling:** `price-updates` partition count provisioned ahead of peak instrument-count growth, not reactively (§9); `trade-confirmed`'s low volume means partition count is driven by ordering-scope needs, not throughput. DLQ replay capacity provisioned for a stated worst-case backlog scenario (a full trading day's `price-updates` volume during a prolonged downstream outage), benchmarked explicitly per §7, not assumed adequate by extrapolating from steady-state DLQ volume.
+
+**Failure handling:** A downstream consumer's repeated processing failure routes to its topic-specific DLQ after a bounded retry count, unblocking the live stream (§2.5); DLQ arrivals for `trade-confirmed` page an on-call engineer immediately given the low volume and high per-message stakes, while `price-updates` DLQ arrivals alert on backlog *rate* (a sudden spike) rather than on every individual arrival, given the topic's normal, higher background DLQ trickle.
+
+**Monitoring:** Schema-cache hit rate (near-100% expected in steady state; a drop signals either a schema-version churn spike or a cache-implementation regression); DLQ volume and backlog age per topic; consumer-group rebalance frequency and pause duration (§Expert Q4), tracked distinctly from genuine processing stalls.
+
+**Trade-offs:** Splitting into two topics with different partition/retention/DLQ profiles costs additional operational surface area (two DLQ alerting policies, two retention configurations to maintain) versus a single uniform topic design — accepted because the 4,000x volume and stakes asymmetry between the two streams makes a uniform design either over-provisioned for `trade-confirmed` or under-provisioned for `price-updates` regardless of which single configuration is chosen.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** A schema-registry lookup is cached and never repeated per message for an already-seen schema ID; a partition key is deliberately, explicitly chosen per topic rather than defaulted; failed messages route to a DLQ with retry-count tracking without blocking subsequent messages; a replay operation validates dedup/schema coverage before running.
+
+**Class diagram:**
+```mermaid
+classDiagram
+    class ISchemaCache {
+        <<interface>>
+        +GetOrResolveAsync(schemaId) SchemaDefinition
+    }
+    class SchemaRegistryClient {
+        +RegisterAsync(schema) SchemaId
+        +ResolveAsync(schemaId) SchemaDefinition
+    }
+    class CachingSchemaResolver {
+        -ISchemaCache _cache
+        -SchemaRegistryClient _registry
+        +DeserializeAsync(message) TEvent
+    }
+    class IPartitionKeySelector~TEvent~ {
+        <<interface>>
+        +SelectKey(evt) string
+    }
+    class InstrumentIdKeySelector
+    class TradeIdKeySelector
+    class ResilientEventConsumer {
+        -IPartitionKeySelector~TEvent~ _keySelector
+        -IDeadLetterQueue _dlq
+        +HandleAsync(message) Task
+    }
+    class DlqCoverageValidator {
+        +ValidateReplayWindow(replayFrom, retention) CoverageResult
+    }
+
+    CachingSchemaResolver --> ISchemaCache
+    CachingSchemaResolver --> SchemaRegistryClient
+    IPartitionKeySelector~TEvent~ <|.. InstrumentIdKeySelector
+    IPartitionKeySelector~TEvent~ <|.. TradeIdKeySelector
+    ResilientEventConsumer --> IPartitionKeySelector~TEvent~
+    ResilientEventConsumer --> DlqCoverageValidator
+```
+
+**Sequence diagram:**
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant Reg as Schema Registry
+    participant B as Broker
+    participant C as ResilientEventConsumer
+    participant Cache as SchemaCache
+    participant DLQ as Dead Letter Queue
+
+    P->>Reg: register/validate schema (compatibility check)
+    Reg-->>P: APPROVED, schemaId
+    P->>B: publish(key=InstrumentId, schemaId, payload)
+    B->>C: deliver message
+    C->>Cache: GetOrResolveAsync(schemaId)
+    alt cache hit
+        Cache-->>C: SchemaDefinition (no registry call)
+    else cache miss
+        Cache->>Reg: ResolveAsync(schemaId)
+        Reg-->>Cache: SchemaDefinition
+        Cache-->>C: SchemaDefinition (now cached)
+    end
+    C->>C: deserialize + process
+    alt processing fails after N retries
+        C->>DLQ: publish(message, failureReason)
+        C->>B: acknowledge (unblock stream)
+    else success
+        C->>B: acknowledge
+    end
+```
+
+**Design patterns used:** **Strategy** (`IPartitionKeySelector<TEvent>` — the partition-key choice is an explicit, swappable strategy per event type rather than an implicit default, directly preventing §4's incident's root cause); **Chain of Responsibility** (retry-then-DLQ escalation, each retry attempt a link in the chain before falling through to DLQ routing); **Registry/Cache-Aside** (`CachingSchemaResolver`, resolving through the cache first and falling back to the registry only on miss); **Circuit Breaker** (implicit in DLQ routing — isolating a repeatedly-failing message rather than letting it degrade the whole stream, per §2.5's explicit analogy).
+
+**SOLID mapping:** **Single Responsibility** — schema resolution, partition-key selection, and DLQ routing are each an independent, separately-testable component. **Open/Closed** — a new event type adds a new `IPartitionKeySelector<TEvent>` implementation without modifying `ResilientEventConsumer`. **Liskov** — every `IPartitionKeySelector<TEvent>` implementation must return a key stable across retries of the same logical event and must genuinely reflect the entity requiring ordering, or downstream ordering guarantees silently break regardless of the interface being correctly implemented in a structural sense. **Interface Segregation** — `ISchemaCache`, `IPartitionKeySelector<TEvent>`, and DLQ routing are independent, narrow interfaces usable in isolation. **Dependency Inversion** — `ResilientEventConsumer` depends on the `IPartitionKeySelector<TEvent>` and `ISchemaCache` abstractions, allowing partition strategy and caching implementation to change independently of consumer logic.
+
+**Extensibility:** A new event type's partition-key strategy is added without touching the consumer's retry/DLQ logic; a new schema version is added without touching consumer code at all, provided compatibility mode is respected.
+
+**Concurrency/thread safety:** `ISchemaCache` must be safe for concurrent reads across all consumer threads (a simple `ConcurrentDictionary`-backed cache is sufficient given schema definitions are immutable once cached — no write contention beyond the rare first-resolution-per-schema-ID write); DLQ routing must ensure the main-stream acknowledgment and the DLQ publish are effectively atomic from the consumer's perspective (acknowledge only after the DLQ publish is confirmed durable, never before, or a crash between the two could lose the failed message from both the main stream and the DLQ).
+
+---
+
+## 14. Production Debugging
+
+**Incident:** Following the partition-key fix (§4), the platform's Schema Registry experienced an unplanned two-hour outage during a routine infrastructure maintenance window that was believed, incorrectly, to be isolated from the registry. During the outage, every producer across the estate — not just the ones actively registering new schema versions — began failing to publish entirely, halting the `PriceUpdate` and `TradeConfirmed` streams estate-wide, since every producer's publish call synchronously checked registry compatibility, including producers publishing under an already-registered, previously-approved schema they'd used unchanged for months.
+
+**Root cause:** The producer client library performed a registry compatibility check on **every publish call**, not only on first use of a new schema version — a design that made sense when first built (simplicity: one code path, always check) but meant the registry's availability became a hard dependency for *all* publishing, not merely for the genuinely infrequent event of a schema change. §Expert Q1's distinction — between "publishing under an already-validated schema" and "registering a new one" — had never been implemented; the client treated both as requiring a live registry round trip.
+
+**Investigation:** Estate-wide publish failures correlating precisely with the registry-maintenance window made the registry the immediate suspect; reviewing producer client library code confirmed every publish call, regardless of schema novelty, synchronously called the registry's compatibility-check endpoint with no local caching of prior approval decisions.
+
+**Tools:** Producer error logs (uniform `SchemaRegistryUnavailable` exceptions across every producing service simultaneously); registry maintenance-window change log cross-referenced against the outage's exact start time; client library source review confirming the missing cache.
+
+**Fix:** Implemented exactly §Expert Q1's design: producers cache their own previously-approved `(schema content hash → schema ID, approved)` mapping locally, so publishing under an unchanged, already-approved schema requires no registry call at all; only a genuinely new schema version (a cache miss) requires a live registry round trip, correctly narrowing the registry's blast radius to "blocks new schema introductions" rather than "blocks all publishing."
+
+**Prevention:** Added a standing architecture-review requirement that any shared, upstream dependency sitting in a service's synchronous critical path (the Schema Registry being the clearest instance, but generalizing to any shared control-plane service) must have an explicit, reviewed answer to "what does this dependency's unavailability actually block, and is that blast radius the minimum necessary, or merely whatever the simplest implementation happened to produce?" — the original "always check" design wasn't wrong when built, it was never revisited as the registry's blast radius grew from "irrelevant, rarely hit" to "every single publish, estate-wide," the same shape of un-revisited-assumption failure recurring from the sibling module's own incidents.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** How should Schema Registry compatibility checking be performed on the publish path — synchronously, on every publish call, against a live registry; or cached client-side with only new-schema registrations requiring a live check?
+
+**Option A — Synchronous check on every publish (as originally built, §14):**
+*Advantages:* Simplest possible implementation; no cache-invalidation reasoning required at all; always reflects the registry's absolute latest state.
+*Disadvantages:* Registry unavailability blocks all publishing estate-wide, regardless of whether any actual new schema decision is being made (§14's incident); adds a network round trip to every single publish call regardless of volume (§7's latency tax).
+*Cost:* Lowest engineering cost to build; highest operational/incident cost when the registry is unavailable.
+*Complexity:* Lowest.
+*Maintainability:* High in isolation, but hides a blast-radius risk that isn't visible until an incident exposes it.
+*Scalability:* Poor at high publish volume — registry call cost scales linearly with message volume, not with the (much rarer) rate of actual schema changes.
+
+**Option B — Client-side caching of approved schemas, live check only on cache miss (the fix, recommended):**
+*Advantages:* Registry unavailability blocks only genuinely new schema registrations, not steady-state publishing under already-approved schemas (§14's fix); removes the per-message registry round trip for the overwhelming majority of publishes.
+*Disadvantages:* Requires correct cache-key design (content-hash-based, per §Advanced Q9's schema-registration parallel to idempotency-key design) and a clear answer for what happens on a genuine cache miss during a registry outage (must still block, correctly, since that's a real new-schema decision requiring the registry).
+*Cost:* Moderate — a cache layer to build and reason about, offset by materially reduced registry load and blast radius.
+*Complexity:* Moderate — one additional cache-consistency question to answer, though schema immutability makes this simpler than typical cache-invalidation problems.
+*Maintainability:* Better long-term — the blast-radius question is answered explicitly by design rather than discovered during an incident.
+*Scalability:* Strong — registry load scales with schema *change* rate, not message volume, matching the resource cost to the actual, infrequent event that requires it.
+
+**Recommendation: Option B.** The same "declared ≠ actual" pattern recurs here as elsewhere in this course: Option A's design implicitly declared "the registry protects against unknown-consumer breakage" without the corollary blast-radius statement "...and therefore the registry's own availability becomes a dependency of every single publish, forever" — a consequence not wrong to accept, but never explicitly decided, only inherited from the simplest implementation. Option B makes the actual dependency explicit and minimal: the registry is only in the critical path for the event that genuinely needs it — a new schema decision — not for the vastly more common case of publishing under an already-settled one.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** Both this module's incidents (§4's ordering bug, §14's registry-outage blast radius) share a business-impact shape: a correctness or availability control, correctly motivated and correctly built for the condition it was designed under, produced an outsized business cost once a condition it was never explicitly evaluated against (a high-frequency entity; an infrastructure maintenance window) actually occurred. A Principal Engineer's framing to leadership is that these controls are not "done" once built — they carry an ongoing obligation to re-validate their assumptions as the system's scale and operating conditions change.
+
+**Engineering trade-offs:** The recurring trade in this module is **correctness-by-design versus blast-radius-of-the-mechanism-enforcing-it** — a schema registry, a partition key, a DLQ, are each a control that, done naively, protects the specific thing it targets while quietly creating a new, broader dependency or bottleneck of its own; the mature version of each control (cached registry checks, deliberately-chosen partition keys, burst-provisioned DLQs) is the version that has had this second-order cost made explicit and engineered against, not merely the first-order benefit.
+
+**Technical leadership:** The most valuable review question across this entire module is not "does this satisfy at-least-once delivery / ordering / schema compatibility?" — most implementations will answer yes — but "what does this control's own unavailability or misconfiguration cost us, and is that cost the minimum necessary, or an accident of the simplest way to build it?" Both incidents in this module would have been caught by that second question during design review.
+
+**Cross-team communication:** A Schema Registry, DLQ, and partition-key convention are shared, cross-team infrastructure by nature — a change to any one of them (tightening compatibility mode, changing DLQ retention, altering a partition-key convention) has consequences for every team producing or consuming events through them, and must be communicated and reviewed as a cross-cutting change, not owned and changed unilaterally by whichever team happens to operate the shared infrastructure.
+
+**Architecture governance:** Require an explicit, reviewed blast-radius statement for any shared control-plane dependency (the registry) as a standing architecture-review item — §14's prevention measure — generalizing beyond this module's specific incident to any future shared dependency added to the estate's critical path.
+
+**Cost optimization:** §Expert Q8's exactly-once-vs-idempotent-consumer trade-off is the clearest cost-optimization lens in this module: paying for stronger broker-level transactional guarantees only where the guarantee's actual coverage (internal-to-broker state) matches the pipeline's actual risk surface, rather than paying for it uniformly and still needing idempotent-consumer design anyway wherever any external side effect exists.
+
+**Risk analysis:** The dominant risk pattern across this module's two incidents is a **hidden coupling** — ordering correctness quietly coupled to partition-key choice; publish availability quietly coupled to registry availability for every message, not just new-schema ones — surfaced only once a specific, previously-untested condition (high-frequency entity; maintenance-window outage) exercised it. Risk registers for event-driven infrastructure should explicitly enumerate each shared control's hidden coupling and its blast radius under failure, not just its intended benefit under success.
+
+**Long-term maintainability:** As an event-driven estate grows — more topics, more schema versions, more consumers, more entities with varying event-rate profiles — the assumptions baked into early, simple implementations of shared controls (a synchronous registry check; a convenient-but-wrong partition key) age at different rates for different parts of the system, and neither incident in this module was caused by the original implementation being wrong when built — both were caused by the system's growth outrunning an assumption nobody was assigned to keep re-checking.
 
 ## 18. Revision
 **Key takeaways**: A schema registry enforces compatibility (backward/forward/full) at publish time, closing the unknown-consumer breakage risk identified, now automated at the event layer. Ordering is guaranteed only within a partition, and the partition key — not partition count alone — determines whether same-entity events stay correctly ordered (the incident: a randomized key broke ordering for high-frequency-update entities specifically). At-least-once delivery is the practical default, making idempotent consumer design mandatory — but idempotency and ordering are genuinely separate concerns (Advanced Q4, Q9); solving one does not solve the other. Dead Letter Queues isolate repeatedly-failing messages without blocking the stream, but only deliver operational value when paired with an actual alerting/triage process (Advanced Q5) — a DLQ with no attached process is a silent graveyard, not a safety mechanism. Event replay is a powerful recovery/backfill capability that depends entirely on the idempotent-consumer discipline already being correctly in place.

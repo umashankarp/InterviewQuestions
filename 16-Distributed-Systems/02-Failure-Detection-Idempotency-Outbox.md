@@ -78,6 +78,44 @@ graph TB
 
 ---
 
+## 7. Performance Engineering
+
+**Idempotency-key lookup cost at scale:** An idempotency-key check sits on the hot path of every retryable write, so its cost structure matters directly: implemented as an indexed lookup against a dedicated, TTL-bounded key-value store (Redis `SET key value NX EX ttl`, or a narrow SQL table with a clustered index on the key), the check is O(1) and sub-millisecond, independent of overall system volume; implemented as an unindexed query against a large, general-purpose business table (a common early-stage shortcut), it degrades toward O(n) as the table grows, becoming a genuine bottleneck at scale. Production systems should treat the idempotency store as its own bounded, purpose-built component from day one, not a bolt-on query against existing tables.
+
+**Outbox-relay throughput cost:** A polling-based relay's throughput is bounded by `(rows fetched per poll) / (poll interval)` — a 100-row batch every 1 second caps throughput at 100 events/sec regardless of downstream broker capacity, meaning polling interval and batch size, not the broker, are frequently the actual bottleneck for a single-instance relay. A CDC-based relay removes the polling-interval ceiling entirely (near-real-time, bounded only by replication-log propagation) but adds the operational cost of running and monitoring a CDC connector (Debezium or equivalent) as a genuinely new, in-fleet infrastructure component.
+
+**Outbox table growth and index cost:** The outbox table's `WHERE PublishedAt IS NULL` query (the polling relay's core query) degrades as the table accumulates published-but-not-yet-archived rows, unless a partial index on `PublishedAt IS NULL` (supported natively in PostgreSQL/SQL Server) keeps the scan bounded to genuinely unpublished rows rather than scanning the full historical table — directly reusing the "index the actual query shape, not the whole table" discipline from earlier SQL modules, now applied to this specific hot-path query.
+
+**Failure-detector timeout cost:** An aggressively short, fixed failure-detection timeout (§2.2) trades detection latency for false-positive-triggered retry storms — a false positive against a merely-slow (not failed) dependency causes a retry that adds load to an already-slow dependency, a self-reinforcing degradation pattern; an adaptive, percentile-based timeout (§Advanced Q3) avoids this by widening its threshold precisely when the dependency is genuinely, if unusually, slow rather than actually unresponsive.
+
+**Benchmarking:** Benchmark the idempotency-key store's lookup latency under its expected production key cardinality and TTL-driven churn rate, not an empty store; benchmark the outbox relay's throughput under a realistic backlog (post-broker-outage recovery, §Advanced Q5), not only steady-state, since backlog-draining behavior is where relay throughput actually gets tested in production.
+
+## 8. Security
+
+**Idempotency-key spoofing/replay risk:** A client-supplied idempotency key that isn't scoped to the authenticated caller allows one caller to guess, reuse, or intentionally collide with another caller's key — reading back another party's cached operation result (information disclosure) or interfering with another party's in-flight operation. Idempotency keys must always be scoped server-side to the authenticated caller's identity (e.g., hashed together with an account/tenant identifier) before being used as the store's lookup key — never trusted as globally unique purely from client input, and never accepted from an unauthenticated caller for any operation with a meaningful side effect.
+
+**Outbox-table access control:** The outbox table sits directly in the path between a business transaction and every downstream system that consumes its events — write access to it must be restricted to the owning service's own transactional code path (never a shared, broadly-writable table other services or ad-hoc scripts can insert into directly), since an unauthorized or accidental insert into the outbox table would cause the relay to publish a fabricated, illegitimate event to every downstream consumer as if it were a genuine business event. Read access for the relay process should be similarly scoped — a relay credential with only the specific permissions needed (`SELECT`/`UPDATE` on the outbox table) rather than broad database access, limiting blast radius if the relay's credentials are ever compromised.
+
+**Payload sensitivity in outbox events:** Outbox event payloads (§Advanced Q2's schema) often carry the same sensitive business data as the originating transaction (customer PII, payment references) — these payloads should be encrypted at rest exactly as the source table is, and access to historical, already-published outbox rows (retained for audit per §Intermediate Q8's archival discussion) should follow the same data-retention and access-control policy as the source business data, not a laxer one simply because it's "just an event log."
+
+**Failure-detector spoofing:** In a system where failure detection drives automated failover/reconfiguration (§Advanced Q3's adaptive timeout, §Advanced Q9's Sentinel discussion referenced from Module 01), an attacker able to inject fabricated heartbeat/liveness signals could trigger unwarranted failover — heartbeat channels used for failure detection should be authenticated (mTLS or equivalent) with the same rigor as any other inter-service control-plane traffic, not treated as low-stakes because they carry no business data.
+
+**Consumer-side idempotency-store poisoning:** An idempotency store recording "this event ID has been processed" is itself a security-relevant piece of state — if an attacker can forge a processed-event-ID entry (write access to the idempotency store isn't properly restricted to the legitimate consumer process), they could cause the legitimate consumer to silently skip processing a genuine event, a data-integrity attack distinct from, but structurally similar to, the outbox-table access-control concern above.
+
+## 9. Scalability
+
+**Outbox-relay throughput scaling:** A single relay instance has a fixed maximum throughput ceiling (§7); horizontal scaling requires sharding the outbox table by a partition key (typically `AggregateId` hash, per §Advanced Q4/the Expert coding exercise) so that N relay instances, each responsible for a disjoint shard, scale aggregate throughput roughly linearly with N — critically, this requires downstream consumers to not depend on strict global ordering across all events (only per-aggregate ordering, which a consistent hash-based shard assignment preserves, since all events for a given `AggregateId` always route to the same shard/instance).
+
+**Idempotency-store scaling:** A dedicated key-value store (Redis, or a sharded SQL table) scales idempotency-key lookups horizontally the same way any high-cardinality key-value workload scales — partitioning by key hash; the TTL-based expiry (§Intermediate discussion) is itself a scalability mechanism, bounding the store's steady-state size regardless of cumulative request volume, rather than requiring unbounded storage growth.
+
+**Failure-detector scaling:** Heartbeat-based failure detection between every pair of nodes in a large cluster scales quadratically (O(n²) heartbeat pairs) if implemented naively — production systems at scale typically use a gossip-based or hierarchical failure-detection protocol (each node monitors a small, rotating subset of peers, with failure suspicion propagated via gossip) to keep the monitoring overhead sub-quadratic as cluster size grows.
+
+**High availability / disaster recovery:** The outbox pattern's DR posture is inherently strong for the business-write/event-durability guarantee (both are captured in the same, already-replicated database transaction) — but the relay process itself needs its own HA design (multiple relay instances behind the sharding scheme above, or an active-passive relay with fast failover) so a relay-process outage doesn't itself become the single point of failure for event delivery, even though no event is ever lost (only delayed) during a relay outage.
+
+**CAP theorem:** The outbox pattern is fundamentally CP for the write itself (the business write and the outbox write share one ACID transaction, all-or-nothing) but AP for the *delivery* of the resulting event (at-least-once, eventually, with consumers required to be idempotent) — correctly locating the pattern's strong guarantee (the write) separately from its explicitly weaker one (delivery timing), rather than treating "we use the Outbox pattern" as an unqualified strong-consistency claim across the entire pipeline.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -136,6 +174,67 @@ graph TB
  **A:** Since both writes are part of one ordinary database transaction, the correctness guarantee rests entirely on the database engine's own, already-extensively-tested ACID transaction implementation (/24) — the actual testing focus should instead verify (a) that the application code genuinely writes both rows within one transaction scope (a code-review/static-analysis check, or an integration test deliberately forcing a mid-transaction exception and asserting **neither** row persists, confirming true atomicity rather than an accidental two-separate-transactions implementation bug) and (b) the relay process's own correctness (Advanced Q2's schema, correctly identifying and publishing unpublished rows exactly once under normal operation, and at-least-once under the relay's own crash scenarios) — the atomicity guarantee itself is "free," inherited from the database; the engineering risk is in correctly implementing the surrounding application and relay logic, not in re-verifying the database's own transactional correctness.
 10. **Q: As a Principal Engineer, how would you build organizational capability ensuring every new microservice correctly implements the Outbox pattern (and idempotent consumption) by default, rather than each team rediscovering the dual-write problem reactively via their own incident, as?**
  **A:** Provide a shared, reusable Outbox-pattern library/framework component (directly this course's recurring shared-infrastructure governance pattern,/, §Advanced Q10) that new services adopt by convention — abstracting the outbox-table schema, the transactional-write helper (ensuring business writes and outbox writes are correctly co-transacted), and the relay-process implementation (CDC-based by default, per Advanced Q2's preferred approach) into a well-tested, centrally-maintained component, rather than requiring every team to correctly re-derive and re-implement this genuinely subtle pattern from first principles independently — directly preventing the specific, demonstrated incident class (and §Advanced Q6's original conceptual introduction of this exact risk) from recurring across a growing service estate, converting a hard-won distributed-systems lesson into reusable, low-friction infrastructure.
+
+### Expert (10)
+1. **Q: A payment-processing service uses the Outbox pattern to publish "PaymentAuthorized" events, and a downstream fraud-scoring consumer processes them idempotently by event ID. A retry storm from a transient broker issue causes the same event to be redelivered 40 times over 10 minutes. Walk through exactly what should and shouldn't happen, end to end.**
+ **A:** Each of the 40 deliveries should reach the consumer's idempotency check (`HasBeenProcessedAsync(eventId)`); the first delivery processes normally and marks the event ID processed; the remaining 39 deliveries should each be recognized as already-processed and skipped, with **zero** additional fraud-scoring side effects and zero duplicate downstream actions — the redelivery storm should be visible in logs/metrics (a spike in "already processed, skipping" log lines) but should produce **no observable business-level effect** beyond that logging. If any of the 40 deliveries instead produced a duplicate fraud score or duplicate downstream action, this indicates either the idempotency check has a race condition (§Expert Q3) or the "mark processed" write isn't itself durable/atomic with the processing effect — either way, a genuine bug requiring investigation, not "an acceptable rare edge case."
+ **Why this answer is correct:** Traces the exact expected behavior at each of the 40 deliveries and correctly identifies what an actual bug (versus expected, harmless redelivery noise) would look like.
+ **Common mistakes:** Assuming any redelivery is inherently a problem requiring broker-side deduplication, rather than recognizing consumer-side idempotency as the correct, expected mechanism for absorbing this exact scenario harmlessly.
+ **Follow-up questions:** "How would you distinguish this scenario's log signature from a genuine, first-time processing bug in monitoring?" "What if the fraud-scoring consumer's processing itself is non-deterministic (e.g., calls a third-party API whose answer could differ between calls)?"
+
+2. **Q: Design the idempotency check so that two concurrent deliveries of the *same* event (a genuine race, not sequential redelivery) cannot both pass the "not yet processed" check and both execute the business effect.**
+ **A:** The check-and-record must be a single atomic operation, not a separate read-then-write (`HasBeenProcessedAsync` followed later by `MarkProcessedAsync`) — the naive two-step version has a genuine race window where two concurrent deliveries can both read "not processed" before either writes "processed," both proceeding to execute the business effect. The fix is an atomic conditional insert (`INSERT... WHERE NOT EXISTS`, a SQL unique-constraint violation used as the race-detection signal, or Redis's atomic `SET key value NX`) performed *before* the business effect runs — only the delivery that wins the atomic insert proceeds; the loser treats the resulting constraint-violation/NX-failure as "already being processed by someone else" and skips (or, for a stronger guarantee, waits and re-checks for the effect's completion).
+ **Why this answer is correct:** Identifies the specific race window in the naive check-then-write pattern and proposes the correct fix — an atomic conditional write, not a logically-separate check followed by a write.
+ **Common mistakes:** Implementing the idempotency check as a plain read followed by a separate write, which is idempotent against *sequential* redelivery but not against *genuinely concurrent* delivery — a subtler, easy-to-miss gap.
+ **Follow-up questions:** "What should the 'losing' concurrent delivery do if it needs to know the business effect's result, not just that it lost the race?" "How does this change if the idempotency store and the business-effect execution aren't in the same transactional scope?"
+
+3. **Q: A team's phi-accrual-style adaptive failure detector (§Advanced Q3) begins producing false positives specifically during a legitimate, once-daily batch-reporting job that temporarily increases load on a monitored dependency. Diagnose and fix.**
+ **A:** The adaptive detector's rolling window of "recent" observations likely doesn't span long enough to include the prior day's batch-job-induced latency pattern, meaning each day's batch job looks like a novel, sudden latency spike relative to the detector's short-term baseline rather than a recognized, cyclical pattern. The fix is either widening the rolling window to span multiple days (capturing the batch job as part of the learned baseline) or, more robustly, making the detector aware of known scheduled-load windows (a simple allowlist of "batch job runs 02:00-02:30 UTC daily, widen the threshold during this window specifically") — trading a purely statistical, context-free adaptive model for one that incorporates known, deterministic load patterns the statistics alone can't distinguish from a genuine anomaly.
+ **Why this answer is correct:** Correctly diagnoses the specific interaction between rolling-window length and cyclical-but-infrequent load patterns, and proposes both a purely statistical and a context-aware fix.
+ **Common mistakes:** Widening the detector's threshold globally (reducing false positives during the batch job) at the cost of also slowing genuine-failure detection the rest of the day — failing to account for why a context-aware, time-window-specific fix is preferable to a blanket threshold change.
+ **Follow-up questions:** "What happens when the batch job's schedule changes without the failure-detector configuration being updated?" "How would you validate the fix without waiting a full day-cycle to observe the next batch-job run?"
+
+4. **Q: A regulatory audit requires proof that every payment authorization that debited a customer's account also produced exactly one corresponding ledger-credit event, with no lost or duplicated events, across a full calendar year. Design the audit mechanism using this module's Outbox infrastructure.**
+ **A:** The audit's ground truth is the Outbox table itself (or its durable archive, per §Intermediate Q8) — not the message broker's delivery logs, which only prove *attempted* delivery, not correct, singular business effect. Build a standing reconciliation job (directly §Advanced Q1's pattern) comparing three counts over the audit period: (a) payment-authorization business rows, (b) corresponding outbox rows generated in the same transaction (should be 1:1 by construction, §2.4), and (c) downstream ledger-credit records the consuming service produced (should also be 1:1, given consumer idempotency, §Expert Q1). Any year-over-year archival/deletion policy on the outbox table (§Intermediate Q8) must retain enough historical detail to support this specific audit window — an outbox archival policy designed only for operational table-size management, without an explicit regulatory-retention requirement folded in, risks deleting exactly the evidence an audit like this needs.
+ **Why this answer is correct:** Identifies the outbox table (not broker delivery logs) as the correct ground truth, specifies the three-way reconciliation, and flags the retention-policy interaction an audit-focused design must account for.
+ **Common mistakes:** Treating message-broker delivery confirmation as sufficient audit evidence, missing that delivery confirmation proves attempted transmission, not correct, singular, idempotent business-side processing.
+ **Follow-up questions:** "How would you handle a discrepancy discovered during the audit for an event now outside the archival retention window?" "What would you add to the outbox schema itself to make this audit easier to run?"
+
+5. **Q: Compare "the Outbox pattern with a CDC relay" against "a transactional message broker that participates directly in the database transaction" (some brokers offer XA/2PC-style integration). Is the latter ever the better choice?**
+ **A:** A transactional-broker integration, where it genuinely exists and is mature, removes the separate relay process entirely — the business write and the message publish share one distributed transaction directly. This is occasionally the better choice specifically when the team already operates infrastructure with mature, well-tested XA support and the added 2PC-style coordination overhead (§Module 47's blocking-risk analysis, now directly relevant since XA is itself a 2PC variant) is acceptable for the specific throughput/latency profile — but for most teams, this reintroduces exactly the blocking-failure-mode risk §Module 47 documents, now at the message-broker boundary instead of the original database-coordinator boundary, while the Outbox-plus-CDC-relay approach avoids any 2PC-style coordination entirely by relying only on the local database's already-solved ACID guarantee. The Outbox pattern's real advantage isn't merely "avoiding one architecture," it's specifically avoiding *any* distributed-transaction protocol for this use case, which XA-based broker integration reintroduces by a different name.
+ **Why this answer is correct:** Correctly identifies XA-based broker transactions as reintroducing 2PC-style blocking risk under a different name, connecting this module's central lesson back to Module 01's, and gives a calibrated (not absolute) answer about when the trade-off might still be acceptable.
+ **Common mistakes:** Treating "the broker supports transactions" as an unqualified improvement over the Outbox pattern, without recognizing it reintroduces the specific blocking-coordinator risk the Outbox pattern was designed to avoid.
+ **Follow-up questions:** "What operational maturity would you want to see before accepting XA-based broker integration for a new service?" "How would you migrate an existing XA-based integration to the Outbox pattern with minimal risk?"
+
+6. **Q: Design a chaos-engineering test specifically validating that a production Outbox relay correctly resumes, without event loss or unbounded duplication, after being killed at every possible point in its publish-then-mark-published cycle.**
+ **A:** Deliberately kill the relay process at three distinct injection points across repeated test runs: (a) before calling `PublishAsync` (the event remains unpublished — correct recovery: republish on restart, zero data loss), (b) after `PublishAsync` succeeds but before `SaveChangesAsync` marks it published (the event was actually delivered to the broker, but the relay doesn't know it — correct, expected behavior: a redundant republish occurs on restart, which is why consumer idempotency, not relay-side perfection, is what actually prevents a duplicate business effect), and (c) after `SaveChangesAsync` commits (fully resolved, no redelivery). Assert that scenario (a) never loses an event, and that scenario (b)'s redundant republish is correctly absorbed harmlessly by the downstream consumer's idempotency check (§Expert Q1) — explicitly testing that the *combination* of relay-side at-least-once delivery and consumer-side idempotency together produce zero net duplicate business effect, not testing either mechanism in isolation.
+ **Why this answer is correct:** Identifies the three genuinely distinct crash-injection points and specifies that the correct assertion targets the combined relay-plus-consumer behavior, not either component tested in isolation.
+ **Common mistakes:** Testing only that the relay eventually publishes every event (ignoring scenario (b)'s expected, harmless redelivery), without also testing that the downstream consumer correctly absorbs that redelivery without a duplicate effect.
+ **Follow-up questions:** "How would this test change for a CDC-based relay instead of a polling-based one?" "What's the minimum set of injection points needed to have genuine confidence, versus an exhaustive but impractically large test matrix?"
+
+7. **Q: A Principal Engineer reviewing a new service's design finds the team has correctly implemented the Outbox pattern for the business-write/event-durability guarantee, but has made the relay process itself a single, unreplicated instance with no monitoring on relay-process liveness (only on outbox-table backlog age). Evaluate the gap.**
+ **A:** The backlog-age monitoring (§Advanced Q1's discipline) will eventually alert if the relay stops functioning — but only *after* a backlog has accumulated and aged past the alert threshold, meaning detection is delayed by however long that threshold is tuned to, and during that entire window every downstream consumer of this service's events is silently starved of updates with no direct signal pointing at "the relay process itself died" as the specific, immediately-actionable root cause. The gap: liveness monitoring on the relay process itself (a heartbeat, or a process-supervision mechanism restarting it automatically) is a distinct, faster, more specific safeguard than backlog-age monitoring alone — the two are complementary, not substitutes; backlog-age monitoring catches "the relay is running but not keeping up or is stuck," while liveness monitoring catches "the relay process itself is not running at all," a different failure mode requiring a different, faster response.
+ **Why this answer is correct:** Distinguishes two genuinely different failure modes (relay slow/stuck vs. relay process dead) that require two different, complementary monitoring mechanisms, rather than treating backlog-age monitoring as sufficient coverage for both.
+ **Common mistakes:** Treating backlog-age monitoring as comprehensive coverage for "the relay isn't working," missing that it detects the symptom with a built-in delay rather than the root cause immediately.
+ **Follow-up questions:** "What's the right alerting threshold trade-off between backlog-age sensitivity and false-positive noise during expected traffic spikes?" "How would you design relay-process auto-restart without risking a restart loop masking a genuine, persistent bug?"
+
+8. **Q: Design an idempotency-key strategy for a multi-step, client-retried checkout flow (create order → authorize payment → confirm order) where the client may retry any individual step independently after a timeout, and steps must not be allowed to execute out of order or be duplicated across retries.**
+ **A:** Each step needs its own, distinctly-scoped idempotency key — not one key shared across the whole flow, since a shared key can't distinguish "retry step 2" from "erroneously re-attempt step 1 after step 2 already succeeded." The client generates a single flow-level correlation ID at flow start, and each step's idempotency key is derived deterministically from `(correlationId, stepName)` — allowing the server to safely allow retries of a given step (recognized via its specific key) while independently detecting and rejecting an out-of-order attempt (e.g., a "confirm order" call arriving with a correlation ID whose "authorize payment" step hasn't yet recorded success, which the server should treat as a client-side ordering bug, not silently proceed with). This makes each step's idempotency independently verifiable while the flow-level correlation ID ties them together for ordering validation.
+ **Why this answer is correct:** Correctly identifies that per-step (not per-flow) idempotency keys are needed, while a shared correlation ID provides the ordering context individual step-level keys alone wouldn't.
+ **Common mistakes:** Using a single idempotency key for the entire multi-step flow, which conflates "retry the same step" with "the flow overall has been attempted before," losing the ability to distinguish legitimate step-retries from illegitimate step-skipping or reordering.
+ **Follow-up questions:** "How would you handle a client that loses its correlation ID and needs to resume an in-progress flow from a new session?" "What HTTP status/response should the server return for a detected out-of-order step attempt?"
+
+9. **Q: Evaluate the claim: "Since the Outbox pattern guarantees the event is never lost, and our consumer is idempotent, our end-to-end pipeline is exactly-once." Is this claim accurate?**
+ **A:** Not quite, and the imprecision matters: the pipeline achieves **at-least-once delivery plus idempotent processing**, which produces an **effectively-once observable business outcome** — not a genuine "exactly-once delivery" guarantee at the transport/delivery level (redelivery still happens, as §Expert Q1/Q6 demonstrate; it's merely rendered harmless). The distinction matters operationally: monitoring and capacity planning must still account for the real redelivery rate (which "exactly-once" language would incorrectly suggest is zero), and any component in the pipeline that isn't itself idempotent (a poorly-designed downstream side effect, a non-idempotent third-party API call made from within the "idempotent" consumer) breaks the effectively-once property despite every other component being correctly implemented — the claim "exactly-once" invites exactly the kind of scope over-extension this course has repeatedly flagged elsewhere (a narrow, true guarantee silently generalized into a broader, false one).
+ **Why this answer is correct:** Precisely distinguishes the true, narrower claim (effectively-once business outcome via at-least-once-plus-idempotency) from the imprecise, broader claim ("exactly-once"), and identifies a concrete way the broader claim can silently fail even when every named component is correctly implemented.
+ **Common mistakes:** Accepting "exactly-once" as an accurate summary once idempotency is in place, without distinguishing delivery-level guarantees from the effectively-once business outcome idempotency actually produces.
+ **Follow-up questions:** "Give a concrete example where every component is idempotent, yet the end-to-end outcome still isn't effectively-once." (A consumer that's idempotent for its own database writes but calls a non-idempotent third-party payment API without its own separate idempotency-key forwarding — the third-party side effect duplicates even though the consumer's own state doesn't.) "How would you word this precisely in a design document?"
+
+10. **Q: As a Principal Engineer, design the minimum standing organizational review that would catch both this module's failure classes (the dual-write incident and a hypothetical future idempotency-race incident) before either reaches production, without slowing every team down with a heavyweight process.**
+ **A:** A short, mandatory design-review checklist (not a full architecture review) triggered specifically whenever a service's design includes (a) a database write that must be communicated to another system, or (b) any operation exposed to client- or consumer-side retries — requiring the design to explicitly name which pattern from this module governs each case (Outbox for (a); atomic conditional-write idempotency, §Expert Q2, for (b)) and explicitly state the specific test (§Expert Q6's chaos-injection points, or §Expert Q2's concurrency test) that will validate it before launch. This is deliberately narrow and fast (a checklist, not a multi-week review), triggered only by the two specific structural conditions this module's incidents both trace back to, keeping the process proportional to genuinely elevated risk rather than applying heavyweight review to every design uniformly.
+ **Why this answer is correct:** Proposes a narrowly-scoped, structurally-triggered review (not a blanket heavyweight process) that specifically targets the two conditions this module's incidents share, keeping organizational cost proportional to actual risk.
+ **Common mistakes:** Proposing either no standing process (relying on individual engineer awareness, which the original incidents demonstrate is insufficient) or an overly broad, slow review process applied to every design regardless of whether it actually involves either risk condition.
+ **Follow-up questions:** "How would you retrofit this checklist against already-deployed services without re-reviewing everything at once?" "What's the escalation path when a team's design doesn't cleanly map to either named pattern?"
 
 ---
 
@@ -251,9 +350,195 @@ public class ShardedOutboxRelay
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-*(This entire module IS the deep-dive case study — the incident, the four worked exercises, and the extensive Advanced-tier Q&A collectively constitute this section's typical content.)*
+**Scenario:** Design the reliable-notification backbone for a payments platform: every completed payment authorization must reliably trigger (a) a customer-facing confirmation notification, (b) a downstream ledger-credit event, and (c) a fraud-scoring evaluation — with no lost events, bounded duplicate-processing risk, and full recoverability from any single component's crash, directly generalizing §4's missing-confirmation-email incident to a multi-consumer, higher-stakes payments context.
+
+**Functional requirements:**
+- Every committed payment authorization produces exactly one outbox event per downstream concern (notification, ledger, fraud), atomically with the authorization itself.
+- Every consumer processes each event's business effect at most once, despite at-least-once delivery.
+- A poison event (malformed payload, or a downstream service rejecting it repeatedly) must not block delivery of subsequent, healthy events.
+
+**Non-functional requirements:**
+- Relay-to-broker latency under 2 seconds p99 during normal operation (customer confirmation is a UX-sensitive path).
+- Zero event loss under any single-component crash (relay, broker, or consumer).
+- Full recoverability from a broker outage of up to several hours without manual intervention.
+
+**Back-of-the-envelope estimation:** 500,000 payment authorizations/day → ~5.8 TPS average, peaking at perhaps 150 TPS during high-volume windows. At three downstream events per authorization, peak outbox-write and relay-publish volume is ~450 events/sec — well within a single, well-indexed outbox table and a modestly-sharded relay's capacity (§9). As in Module 47's estimation, **the actual hard problem here isn't throughput** — it's guaranteeing zero silent event loss and bounding duplicate-processing risk, exactly the correctness-over-throughput conclusion this course reaches whenever transaction volume is moderate and per-event correctness stakes are high.
+
+**Architecture:**
+```mermaid
+graph TB
+    PaymentSvc[Payment Service] -->|1 tx: authorization row + 3 outbox rows| DB[(Payment DB)]
+    DB -->|CDC| Relay[Sharded Outbox Relay]
+    Relay -->|publish| Broker[Message Broker]
+    Broker --> NotifyConsumer["Notification Consumer (idempotent)"]
+    Broker --> LedgerConsumer["Ledger Consumer (idempotent)"]
+    Broker --> FraudConsumer["Fraud-Scoring Consumer (idempotent)"]
+    NotifyConsumer -.->|poison after N retries| DLQ1[Notification DLQ]
+    LedgerConsumer -.->|poison after N retries| DLQ2[Ledger DLQ]
+    Recon[Reconciliation Job] -.-> DB
+    Recon -.-> NotifyConsumer
+    Recon -.-> LedgerConsumer
+    Recon -.-> FraudConsumer
+```
+
+**REST API design:** Internal event contract (broker payload), not a public REST API — the payment authorization itself is created via `POST /v1/payments/authorizations`; the events this design covers are the *side effects* of that write, not separate API calls.
+
+| Field | Type | Description |
+|---|---|---|
+| `EventId` | GUID | Unique per outbox row — the idempotency key downstream consumers check against. |
+| `AggregateId` | string | The payment authorization ID — the sharding/partition key for both the relay (§9) and any per-payment ordering requirement. |
+| `EventType` | string | `PaymentConfirmationRequested` \| `LedgerCreditRequested` \| `FraudScoringRequested`. |
+| `Payload` | JSON | Event-specific data (customer email, ledger amount, transaction metadata). |
+| `CreatedAt` | timestamp | Set at outbox-row insert time, part of the same transaction as the authorization. |
+
+**Data model — Outbox table (the schema, extended):**
+| Column | Type | Description |
+|---|---|---|
+| `Id` | BIGINT IDENTITY | Internal ordering key for the polling/CDC cursor. |
+| `EventId` | GUID | The externally-visible idempotency key (distinct from `Id` so internal row identity and external idempotency identity can evolve independently). |
+| `AggregateId` | VARCHAR(50) | Sharding key (§9), also used for per-aggregate ordering guarantees. |
+| `EventType` | VARCHAR(100) | Discriminator for consumer routing. |
+| `Payload` | NVARCHAR(MAX) | Serialized event body. |
+| `CreatedAt` | DATETIME2 | Set within the originating transaction. |
+| `PublishedAt` | DATETIME2 NULL | NULL = unpublished; the relay's core filter predicate. |
+| `RetryCount` | INT | Drives the dead-letter threshold (Advanced Q6). |
+
+**Status lifecycle:** `UNPUBLISHED (PublishedAt IS NULL) → PUBLISHED (PublishedAt set)`, with a parallel, per-consumer lifecycle tracked in each consumer's own idempotency store: `NOT_PROCESSED → PROCESSED`, and, on repeated consumer-side failure, `NOT_PROCESSED → DEAD_LETTERED` (moved to a DLQ per Advanced Q6, out of the primary processing path).
+
+**Caching:** Not applicable to the outbox/relay path (correctness-critical); notification-consumer templates may be cached, but the idempotency check itself must never be served from a cache that could return stale "not yet processed" state.
+
+**Messaging:** Broker topic-per-event-type (three logical topics: confirmation, ledger, fraud), each with its own consumer group and independent DLQ, so a poison event or an outage affecting one downstream concern doesn't block the other two.
+
+**Scaling:** §9's sharded-relay pattern, partitioned by `AggregateId` hash; each consumer group scales independently based on its own processing cost (fraud-scoring, calling an external model, is likely the slowest and most heavily-scaled consumer).
+
+**Failure handling:** Relay crash mid-cycle — §Expert Q6's three injection points, all recoverable via at-least-once redelivery plus consumer idempotency. Broker outage — outbox table serves as the durable buffer (Advanced Q5); backlog age and size both monitored distinctly. Poison event — DLQ after a bounded retry count (Advanced Q6), never blocking the relay's forward progress.
+
+**Monitoring:** Per-consumer-group processing lag and DLQ depth; outbox-relay backlog age/size (Advanced Q5); idempotency-store hit rate (a high, sustained rate of "already processed, skipping" outside a known redelivery-storm window would indicate a broker or relay misbehaving); reconciliation-job discrepancy count (Advanced Q1), the standing proof this pipeline is actually working, not merely believed to be.
+
+**Trade-offs:** Three separate topics/consumer-groups (rather than one shared topic with consumer-side filtering) chosen specifically so that a fraud-scoring-consumer outage cannot delay customer-facing notification delivery — accepting the added operational surface of three independent consumer groups in exchange for this fault isolation.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** Atomically co-transacted business write and multi-event outbox insert; a relay that never loses an event and tolerates redelivery; consumers that are idempotent by construction, not by convention.
+
+**Class diagram:**
+```mermaid
+classDiagram
+    class IOutboxWriter {
+        <<interface>>
+        +AddEventAsync(AggregateId, EventType, Payload) void
+    }
+    class OutboxWriter {
+        +AddEventAsync(AggregateId, EventType, Payload) void
+    }
+    class IOutboxRelay {
+        <<interface>>
+        +RunAsync(CancellationToken) Task
+    }
+    class ShardedOutboxRelay {
+        -int ShardId
+        -int TotalShards
+        +RunAsync(CancellationToken) Task
+    }
+    class IIdempotencyStore {
+        <<interface>>
+        +TryMarkProcessedAsync(EventId) bool
+    }
+    class IEventConsumer {
+        <<interface>>
+        +HandleAsync(EventMessage) Task
+    }
+    class NotificationConsumer {
+        -IIdempotencyStore _store
+        +HandleAsync(EventMessage) Task
+    }
+
+    OutboxWriter ..|> IOutboxWriter
+    ShardedOutboxRelay ..|> IOutboxRelay
+    NotificationConsumer ..|> IEventConsumer
+    NotificationConsumer --> IIdempotencyStore
+```
+
+**Sequence diagram:** the §3 dual-write-vs-outbox diagram for the write path; §Expert Q6's three-injection-point crash-recovery sequence for the relay; §Expert Q2's atomic-conditional-insert sequence for consumer-side idempotency under concurrent redelivery.
+
+**Design patterns used:** Template Method (`IEventConsumer.HandleAsync`'s fixed idempotency-check-then-process skeleton, shared across all three consumer types); Strategy (each consumer type is an interchangeable `IEventConsumer` implementation); Repository (`IOutboxWriter`/`IIdempotencyStore` abstracting persistence); Circuit Breaker (implicit in the DLQ threshold — after `RetryCount` exceeds a bound, the consumer stops attempting a poison event, structurally identical to breaker-open behavior).
+
+**SOLID mapping:** Single Responsibility (writer, relay, and each consumer each own exactly one concern); Open/Closed (a new event type/consumer implements `IEventConsumer` without modifying the relay or other consumers); Liskov (every `IEventConsumer` implementation must genuinely check idempotency *before* any side effect — a violating implementation silently reintroduces duplicate-processing risk for every caller relying on the interface's implied at-most-once-effect contract); Interface Segregation (`IOutboxWriter`, `IOutboxRelay`, `IIdempotencyStore` are independent, narrowly-scoped interfaces); Dependency Inversion (consumers depend on `IIdempotencyStore` abstraction, not a concrete Redis/SQL implementation).
+
+**Extensibility:** A new downstream concern (e.g., a regulatory-reporting consumer) adds a new `EventType`, a new topic, and a new `IEventConsumer` implementation without touching the outbox writer, relay, or any existing consumer.
+
+**Concurrency/thread safety:** The idempotency check-and-mark must be atomic (§Expert Q2) to remain correct under genuinely concurrent redelivery, not merely sequential retries; the sharded relay's per-shard `AggregateId`-hash partitioning (§9) ensures no two relay instances ever contend over the same outbox rows, avoiding both duplicate publishing and lock contention across instances.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** The fraud-scoring consumer group's processing lag grew from its normal ~2 seconds to over 45 minutes over a single trading day, with no corresponding growth in the notification or ledger consumer groups' lag, and no alert fired because the only configured lag alert was a single, shared threshold applied uniformly across all three consumer groups, tuned against the (much higher-volume) ledger consumer's normal operating range.
+
+**Root cause:** A third-party fraud-scoring API the consumer called synchronously had begun silently rate-limiting the service's requests during a promotional traffic spike unrelated to payments (a shared API-gateway tier with another internal consumer of the same third party), causing a growing fraction of fraud-scoring calls to block on retry-with-backoff — each blocked call held a consumer-group worker thread, so throughput degraded specifically for this consumer group while the other two, calling entirely different downstream systems, were unaffected.
+
+**Investigation:** Once discovered (via a customer complaint about a delayed fraud-hold notification, not proactive monitoring — the detection gap itself), correlating the fraud consumer's processing-time distribution against the third-party API's own reported latency/error metrics showed a clear, simultaneous onset; the shared-tenancy API gateway's own request logs confirmed the rate-limiting was triggered by the unrelated internal consumer's traffic, not the payments platform's own request volume.
+
+**Tools:** Per-consumer-group lag metrics (existed, but without a per-group-appropriate alert threshold — the actual gap); the third-party API's own status/metrics dashboard; API-gateway request logs, correlating the rate-limiting trigger to the unrelated internal consumer.
+
+**Fix:** Configured per-consumer-group lag alert thresholds (each group's own normal operating range, not one shared threshold tuned to the highest-volume group) — directly closing the detection gap. Negotiated a dedicated, isolated rate-limit tier for the fraud-scoring consumer's third-party API access, decoupling it from the unrelated internal consumer's traffic. Added a circuit breaker around the third-party fraud API call specifically, so a sustained downstream slowdown degrades gracefully (failing fast to a manual-review queue) rather than silently accumulating consumer-group lag.
+
+**Prevention:** The core, generalizable lesson: a single, shared alert threshold across multiple structurally-different consumer groups (different downstream dependencies, different normal latency profiles, different business criticality) will always be miscalibrated for at least one of them — either too sensitive for the naturally-slower group (alert fatigue) or, as here, too insensitive for a group whose normal range is much smaller than the group the threshold was actually tuned against. Every consumer group in a multi-consumer outbox architecture (§12) needs its own, independently-calibrated lag/health thresholds, not a single shared one inherited from whichever group happened to be configured first.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Choosing the outbox-relay implementation strategy for the payments platform in §12.
+
+**Option A — Polling-based relay, single instance:**
+*Advantages:* Simplest to build and reason about; no CDC infrastructure to operate.
+*Disadvantages:* Polling-interval-bounded latency (§7); single-instance throughput ceiling; single point of failure for the relay process itself (§Expert Q7).
+*Cost:* Lowest.
+*Complexity:* Lowest.
+*Maintainability:* High initially, but requires a later migration once volume or latency requirements outgrow it.
+*Scalability:* Poor beyond moderate volume without adding sharding (Option B).
+
+**Option B — Sharded polling-based relay, multiple instances:**
+*Advantages:* Removes the single-instance throughput ceiling and single-point-of-failure risk; still avoids CDC infrastructure.
+*Disadvantages:* Still polling-interval-bounded latency per shard; added operational complexity of coordinating shard assignment across instances.
+*Cost:* Moderate.
+*Complexity:* Moderate.
+*Maintainability:* Good — a well-understood, incrementally-scalable evolution of Option A.
+*Scalability:* Good, scales roughly linearly with shard/instance count (§9).
+
+**Option C — CDC-based relay (Debezium or equivalent), sharded:**
+*Advantages:* Near-real-time latency (no polling-interval floor); no additional query load on the primary database; combines cleanly with sharding for both latency and throughput.
+*Disadvantages:* Requires operating and monitoring genuinely new infrastructure (a CDC connector reading the database's replication log) — a real, ongoing operational cost and a new failure mode to understand (connector lag, replication-slot management).
+*Cost:* Highest upfront (new infrastructure), but lowest marginal cost per additional event at scale.
+*Complexity:* Highest, concentrated in CDC connector operation rather than application code.
+*Maintainability:* Good once the team has genuine CDC operational maturity; a liability without it.
+
+**Recommendation: Option B initially, with an explicit, pre-planned migration path to Option C once either (a) polling-interval latency genuinely becomes customer-visible (the confirmation-notification path's 2-second p99 requirement, §12, is the concrete trigger) or (b) database query load from polling becomes measurable.** This mirrors §Intermediate Q9's general guidance (polling as a reasonable starting choice, migrating to CDC as a demonstrated-need-driven optimization, not a day-one requirement) — recommending against jumping straight to Option C's added operational complexity before the specific, measurable trigger that justifies it actually materializes, while explicitly pre-committing to the migration path so it isn't perpetually deferred once the trigger does arrive.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** The §14 fraud-consumer-lag incident delayed a fraud-hold notification by 45 minutes — in a payments context, this is a direct customer-trust and potential-loss-exposure issue (a fraudulent transaction that should have been held/reviewed within seconds instead had a much longer window), making per-consumer-group monitoring calibration a genuine business-risk control, not merely an operational nicety.
+
+**Engineering trade-offs:** The central trade this module teaches — at-least-once delivery plus idempotent processing as the honest, achievable target, rather than pursuing a genuinely unachievable "true exactly-once" — recurs as the correct framing at every layer from a single HTTP API's idempotency key to this module's full multi-consumer payments pipeline; a Principal Engineer's job is ensuring every new component in the pipeline is built against this same, explicit target rather than each team independently, and sometimes incorrectly, assuming a stronger guarantee exists.
+
+**Technical leadership:** The dual-write incident (§4) and the fraud-consumer-lag incident (§14) share a root shape worth teaching explicitly: both are cases where a *structurally sound* overall design (the Outbox pattern, correctly implemented) still failed at an under-scrutinized seam — the crash-window between two operations in the first case, a shared, miscalibrated monitoring threshold in the second — reinforcing that correct component design and correct operational calibration are both necessary, and a gap in either produces a real incident regardless of how sound the other is.
+
+**Cross-team communication:** A shared Outbox/relay infrastructure component, used by many teams' services (§Advanced Q10's recommended governance), concentrates both benefit and risk — a single well-tested implementation benefits every adopting team, but a single miscalibrated default (§14's shared-threshold problem, generalized) can silently propagate across every team using it, making the shared component's own defaults and documentation a genuine cross-team responsibility, not merely an implementation detail of whichever team built it first.
+
+**Architecture governance:** §Expert Q10's narrowly-scoped, structurally-triggered design-review checklist (triggered specifically by "a write must be reliably communicated" or "an operation is exposed to retries") is the concrete governance mechanism this module recommends — proportional to risk, not a blanket heavyweight process, and specifically designed to catch both this module's demonstrated incident classes before they reach production rather than relying on individual engineer memory of these lessons.
+
+**Cost optimization:** Option B → Option C's staged migration path (§15) is itself a cost-optimization discipline — deferring CDC infrastructure's genuine but real operational cost until a specific, measurable trigger justifies it, rather than either prematurely over-engineering (Option C from day one) or indefinitely under-investing (staying on Option A past the point its limitations become customer-visible).
+
+**Risk analysis:** The recurring risk pattern across both this module's incidents is a *correctly-designed mechanism failing at an unmonitored or under-differentiated boundary* — not a flaw in the Outbox pattern or in idempotency itself, both of which performed exactly as designed in both incidents, but a gap in the surrounding operational discipline (crash-window awareness in §4, per-group monitoring calibration in §14) that no amount of correct core-pattern implementation alone would have caught.
+
+**Long-term maintainability:** As the payments platform in §12 grows to add new consumer groups over time, each new consumer inherits the shared Outbox/relay infrastructure's correctness by construction — but each new consumer's *own* operational calibration (its lag thresholds, its retry/DLQ tuning, its specific downstream-dependency failure modes) must be independently established, never inherited by default from an earlier, structurally-different consumer group, precisely the gap §14 demonstrates and the standing lesson this module leaves for every future consumer added to the pipeline.
 
 ## 18. Revision
 **Key takeaways**: Distributed failure detection is fundamentally ambiguous (can't distinguish "crashed" from "slow" over an asynchronous network) — this is precisely why idempotency is a universal, non-optional requirement for any system with retry logic, not an HTTP-API-specific nicety. The dual-write problem (database write + separate message publish, non-atomic) causes silent, hard-to-diagnose failures under the entirely realistic "crash between the two steps" scenario — the Outbox pattern solves it by co-transacting the business write and the event-to-publish row, inheriting the database's own ACID guarantee for free. The Outbox pattern guarantees at-least-once (never-lost) delivery, not exactly-once — downstream consumers must be idempotent to handle possible redelivery, the same conclusion this course has reached repeatedly (Modules 26, 39, 43) now understood as a direct, unavoidable consequence of the pattern's own mechanics. CDC-based relays (reusing/27's change-data-capture pattern) are the modern, preferred Outbox-relay mechanism over polling, for both latency and database-load reasons.
