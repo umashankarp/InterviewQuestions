@@ -2,11 +2,200 @@
 
 > Domain: Architecture Patterns | Level: Beginner → Expert | Prerequisite: [[../17-Microservices/01-Decomposition-Communication-Strangler-Fig]] (Strangler Fig — this module treats it as already-established and does not re-derive it), [[02-EvolutionaryArchitecture-FitnessFunctions-ADRs-Governance]] (the fitness-function-guarded incremental discipline this module's migrations depend on to execute safely), [[../26-CICD/04-CDPipelineOrchestration-EnvironmentPromotion-ProgressiveDelivery-ReleaseGovernance]] §Expand/Contract (schema-change mechanics this module extends to full data-migration scope)
 >
-> **Note on format:** Per the standing user preference (see `CLAUDE.md`), this module covers only the 40 most-frequently-asked interview questions (10 per level), without the full 15-section deep-dive template.
+> **Note on format:** Upgraded from the leaner 40-Q&A-only format to the current standing full template (§1–§15/§17, §16/§18 handling per the 2026-07-18 template-reversion decision in `CLAUDE.md`). The original 40 Q&A (§10) are preserved verbatim below; §1–9, §11–15, §17, §18 are new.
 
 ---
 
-## Interview Questions
+## 1. Fundamentals
+
+**What:** This module covers four related but distinct techniques used to safely change a live system's structure, implementation, or underlying data store while it keeps serving correct production traffic: **Branch by Abstraction** (swap an implementation behind a stable interface), **Parallel Run** (run a new implementation in shadow against real traffic to build confidence before it's trusted), **Anti-Corruption Layer** (translate at a boundary so a legacy or third-party model doesn't distort a new one), and **Data Migration** mechanics (dual write, Change Data Capture, expand-contract) for moving the persisted state itself.
+
+**Why:** A migration is unlike ordinary feature development in one specific way: there is no "off" switch. The system must remain a fully correct, live production system at every intermediate step, not just at the final state — a half-migrated system serving live traffic is still a production system that must be correct. These four patterns exist because "just rewrite it and cut over" (a big-bang migration) concentrates every risk into one large, hard-to-partially-roll-back event, and every technique in this module trades some additional short-term complexity (running two implementations, or two data stores, side by side) for the ability to verify correctness incrementally and roll back cheaply at any point.
+
+**When:** Branch by Abstraction fits *internal component* replacement (a payment-routing algorithm, a pricing engine) where the calling code stays the same. Parallel Run fits any situation where a new implementation's correctness against real traffic patterns is genuinely uncertain and the cost of validating it in shadow is acceptable. An Anti-Corruption Layer fits any long-lived or ongoing boundary between two different conceptual models — most commonly a legacy system a new one is being extracted from, or a third-party vendor/processor integration. Data-migration mechanics (dual write, CDC, expand-contract) apply whenever the underlying persisted state itself, not just the code operating on it, needs to move.
+
+**How (30,000-ft view):**
+```
+Old implementation (sole authority)
+        │  1. introduce abstraction / ACL
+        ▼
+Old implementation behind interface, new implementation built alongside
+        │  2. Parallel Run — new implementation observes real traffic, output NOT yet trusted
+        ▼
+Divergence low enough → gradual, flag-controlled cutover (1% → 10% → 50% → 100%)
+        │  3. data migrated via dual-write or CDC, continuously reconciled
+        ▼
+New implementation is sole authority; old implementation decommissioned (not just idled)
+```
+
+---
+
+## 2. Deep Dive
+
+### 2.1 Branch by Abstraction — the mechanics of "branching without a branch"
+The technique exists to avoid a long-lived version-control branch, whose defining problem is *merge divergence* — the longer a branch lives disconnected from trunk, the more expensive and risky its eventual merge becomes. Branch by Abstraction keeps the in-progress work in trunk, continuously integrated, but *behaviorally* inert until switched on. Concretely: (1) define an interface capturing the existing implementation's contract; (2) refactor every caller to depend on the interface, with the legacy implementation as its sole current implementer — a pure, test-verifiable refactor with zero behavior change; (3) build the new implementation behind the same interface, initially never invoked; (4) introduce a routing decision (typically a feature flag) selecting which implementation handles a given call, starting at 0%; (5) increase the new implementation's share gradually, observing production behavior at each step; (6) once fully cut over and soaked, delete the old implementation and, if no longer needed, the abstraction itself. The interface is the "branch point" — it lets two implementations coexist in trunk without either being a divergent, hard-to-merge fork.
+
+### 2.2 Parallel Run — shadow traffic, and the side-effect suppression problem
+A Parallel Run's defining property is that the new implementation's *output is computed but never trusted or acted on* — it's run purely for comparison. The subtle engineering problem this creates: the new implementation must be executed with **all side effects suppressed or redirected**. If the old implementation charges a customer's card and posts a ledger entry, running the new implementation "for real" in shadow would double-charge the customer and double-post the ledger — so the new implementation's write paths must be stubbed, sandboxed against a shadow account, or executed against a dry-run mode that computes the *decision* without committing the *effect*. This is the single most common Parallel Run implementation bug: engineers build the shadow path correctly for computation but forget to suppress a side effect three calls deep in the new implementation's dependency graph, producing a class of bug (duplicate real-world effects from a system that's explicitly not supposed to be live yet) that's invisible in code review and only surfaces as a production incident.
+
+### 2.3 Anti-Corruption Layer — translation depth, not just field renaming
+An ACL is frequently under-built as a thin DTO-mapping layer. Its actual job is deeper: it must reconcile genuinely different *domain semantics*, not just different field names or types. A legacy system's "order status = 3" might conflate two states a new domain model treats as meaningfully distinct (e.g., "payment authorized" and "payment captured"); a naive field-mapping ACL would map both to a single new-model status and silently lose information the new domain needs. A properly-built ACL contains real translation logic — sometimes stateful, sometimes requiring additional lookups against the legacy system — specifically to preserve semantic fidelity across the boundary, and it is usually where a migration's genuine domain-modeling effort concentrates, not an afterthought bolted on at the wire-format level.
+
+### 2.4 Dual write vs. CDC — internal mechanics and the failure modes each introduces
+**Dual write**: the application code, synchronously or near-synchronously, issues two writes — one to the old store, one to the new store — inside (ideally) the same logical request. Its failure mode is *partial write failure*: the first write succeeds, the second fails (network blip, timeout, schema mismatch), and the caller's request still reports success because the primary write succeeded, leaving the two stores silently, invisibly inconsistent. There is no free lunch here — a true atomic dual write across two independent stores requires distributed-transaction coordination (two-phase commit), which is rarely practical against a legacy store and a new one built on different technology.
+
+**CDC (Change Data Capture)**: reads the source store's transaction/replication log (SQL Server's native CDC, or a log-tailing tool such as Debezium) as a continuous stream of committed changes, and replays them into the target. Its failure mode is *replication lag*, not partial failure — since it reads only what was actually, durably committed to the source, there's no "half applied" state at the source, but the target is always some bounded time behind. CDC also requires careful handling of the *initial snapshot* (bootstrapping the target with existing data before the log stream catches it up) — get the snapshot/stream stitching wrong and you either duplicate or silently drop rows that changed during the snapshot window.
+
+### 2.5 Expand-Contract, generalized to whole-store migration
+Expand-contract's three phases — expand (add the new form alongside the old, both live), migrate (move consumers to the new form, old form still present as a fallback), contract (remove the old form) — apply identically whether "form" means a single new nullable column or an entire new data store. The subtlety at whole-store scale: the "expand" phase's write path is exactly the dual-write/CDC mechanism above, and the "contract" phase requires the same completion-criteria rigor a schema-level column drop does — an un-contracted expand-phase state (two live stores, ongoing replication) has a real, ongoing infrastructure and cognitive cost that a lingering unused nullable column does not carry to nearly the same degree.
+
+### 2.6 Cutover mechanics — why gradual, percentage-based cutover is cheaper to roll back than any other step
+A flag-controlled percentage cutover is uniquely valuable because its rollback cost is symmetric with its progress cost: moving from 10% to 50% costs the same kind of action as moving back from 50% to 10% — a config change, not a code deployment or a data restoration. This is the phase of a migration where rollback is cheapest across the entire migration lifecycle; every other phase (deleting the old implementation, contracting a schema) has an asymmetric, more expensive rollback. This is why migrations should linger deliberately in the gradual-cutover phase — soaking at each percentage long enough to observe infrequent code paths, periodic batch jobs, and low-traffic time windows — rather than rushing through it to reach the (harder to reverse) contract phase.
+
+---
+
+## 3. Visual Architecture
+
+```mermaid
+stateDiagram-v2
+    [*] --> CallersOnLegacy: Old implementation, no abstraction
+    CallersOnLegacy --> CallersOnAbstraction: Introduce interface,\nrefactor callers (pure refactor)
+    CallersOnAbstraction --> NewImplBuilt: Build new implementation\nbehind interface, 0% traffic
+    NewImplBuilt --> ParallelRun: Shadow real traffic,\nside effects suppressed
+    ParallelRun --> GradualCutover: Divergence acceptable\n(1% -> 10% -> 50% -> 100%)
+    GradualCutover --> GradualCutover: Fitness-function gate\nat each increment
+    GradualCutover --> Soaking: 100% traffic, old impl\nkept warm as rollback path
+    Soaking --> Decommissioned: Old impl deleted,\nabstraction removed if unneeded
+    Decommissioned --> [*]
+```
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Router as Flag-Controlled Router
+    participant Old as Legacy Implementation
+    participant New as New Implementation (shadow)
+    participant Cmp as Comparator/Divergence Log
+
+    Client->>Router: request
+    Router->>Old: forward (authoritative)
+    Old-->>Router: real response
+    Router-->>Client: real response
+    par shadow, side effects suppressed
+        Router->>New: forward (shadow, dry-run mode)
+        New-->>Cmp: computed result (not returned to client)
+    end
+    Old-->>Cmp: authoritative result
+    Cmp->>Cmp: diff and log divergence
+```
+
+```mermaid
+graph LR
+    subgraph Legacy Domain
+        L[Legacy Core Banking System<br/>status codes, flat schema]
+    end
+    subgraph Boundary
+        ACL[Anti-Corruption Layer<br/>translates status/semantics,<br/>normalizes scale & currency]
+    end
+    subgraph New Domain
+        N[New Ledger Service<br/>clean domain model]
+    end
+    L <--> ACL
+    ACL <--> N
+```
+
+```mermaid
+graph TB
+    Source[(Legacy Store<br/>transaction log)] -->|CDC stream| Pipeline[CDC Pipeline<br/>e.g. Debezium / native CDC]
+    Pipeline --> Target[(New Store)]
+    Source -->|initial bulk backfill| Target
+    Target --> Recon[Reconciliation Job<br/>full-dataset + aggregate checks]
+    Source --> Recon
+    Recon -->|divergence found| Alert[Block cutover / Alert]
+    Recon -->|clean| Gate[Fitness-function gate:<br/>allow next cutover increment]
+```
+
+---
+
+## 4. Production Example
+
+**Problem:** A tier-1 bank's trade-settlement ledger ran on a 20-year-old mainframe/Oracle system. Settlement volume had grown to the point where nightly batch settlement runs routinely overran their window, and the mainframe's COBOL logic was understood by only a handful of remaining engineers. The bank needed to move to a modern, horizontally-scalable SQL Server-based settlement platform without a single settlement being lost, duplicated, or miscalculated during the transition — the ledger had to be correct at every intermediate moment, not just at the end.
+
+**Architecture:** The migration combined all four patterns from this module. An **Anti-Corruption Layer** sat at the boundary, translating the mainframe's flat, code-based trade records (a single "status" field conflating "matched," "affirmed," and "settled" states the new domain model needed to track separately) into the new ledger's clean domain model. **Branch by Abstraction** wrapped the settlement-calculation logic itself behind an `ISettlementEngine` interface, letting the new engine be built and tested behind the same contract the legacy engine satisfied. A **Parallel Run** shadowed every real settlement instruction through the new engine, with all downstream effects (posting to the new ledger, notifying counterparties) suppressed in shadow mode — only the *computed* settlement amount and status were captured for comparison. **CDC**, layered on the mainframe's replication feed, streamed committed trade and position changes into the new store continuously, with a full historical backfill run once before the CDC stream was trusted.
+
+**Implementation:** The Parallel Run ran for six full settlement cycles (each cycle spanning a full T+2 window) before any real settlement instruction was allowed to route through the new engine, specifically because early cycles surfaced two genuine divergences: a rounding-mode difference on odd-lot trades (the mainframe truncated, the new engine banker's-rounded) and a missed corporate-action adjustment the new engine's ACL hadn't yet been taught to translate. Both were found and fixed *before* any real money moved through the new path, because the Parallel Run's output was never trusted until it matched. Cutover then proceeded by settlement-desk (not by percentage of overall volume), starting with the lowest-volume, lowest-complexity desk, each desk requiring two full clean settlement cycles under the new engine before the next desk was added.
+
+**Trade-offs:** The migration took fourteen months end to end — dramatically longer than a big-bang cutover would have taken on paper — and required running (and reconciling) two full ledger systems simultaneously for the entire period, a real, sustained infrastructure and operational cost. The bank accepted this explicitly: the cost of a single incorrect settlement in a regulated, audited ledger context (potential regulatory reporting breach, counterparty dispute, forced unwind) was judged to vastly exceed fourteen months of dual-running cost.
+
+**Lessons learned:** The two divergences the Parallel Run caught before go-live (the rounding-mode difference and the missed corporate-action adjustment) would very likely not have been caught by unit tests written against the *new* engine's own specification, since both were behaviors of the *old* system's actual, sometimes-undocumented real-world behavior that the new engine's spec simply hadn't captured — this is the concrete, decisive argument for a Parallel Run over unit/integration testing alone whenever the "correct" behavior is defined by an existing system's real, historical output rather than a clean specification. The second lesson: the ACL's translation logic, not the settlement-calculation logic itself, was where the majority of genuine domain-modeling effort and defect risk concentrated — the "boring" translation layer at the boundary carried more real risk than the more visibly complex new settlement engine it fed.
+
+---
+
+## 5. Best Practices
+- Sequence behavior migration (Branch by Abstraction) and data migration (dual-write/CDC) as two separately-verified tracks that run concurrently, rather than one combined, harder-to-diagnose change.
+- Run a Parallel Run against a full, representative cycle of real traffic — not just a few hours — specifically to surface periodic/batch code paths a short window would miss.
+- Build the ACL as real domain-translation logic reconciling actual semantic differences, not a thin DTO mapper — budget real design time for it.
+- Make every cutover-percentage increment gated by an explicit, automated fitness function (reconciliation-divergence rate, error rate, business-metric health), not a fixed calendar schedule.
+- Treat "decommission the old system" as a tracked, scheduled deliverable with its own explicit completion criteria from the start of migration planning — not an informal, "we'll get to it" intention.
+- Reconcile continuously throughout the entire coexistence period (full-dataset checksums and aggregate invariants, e.g. ledger totals), not just once before cutover.
+
+## 6. Anti-patterns
+- Cutting reads over to the new store before independently validating its state matches the source, trusting "the CDC pipeline is running" as proof of correctness.
+- Dual-writing without an explicit, scheduled reconciliation job — treating "the code looks correct" as sufficient assurance against silent partial-write failure.
+- Building an ACL as a bare field-mapping layer, silently losing or conflating semantic distinctions the new domain model actually needs.
+- Letting the "expand" phase's coexistence period become permanent by never scheduling the "contract"/decommission step.
+- Running a Parallel Run with side effects not fully suppressed, causing real-world duplicate effects from a path that's explicitly not supposed to be live.
+- Proceeding through cutover-percentage increments on a fixed calendar schedule regardless of what the reconciliation/fitness-function metrics currently show.
+
+---
+
+## 7. Performance Engineering
+
+**CPU/Memory:** A Parallel Run roughly doubles compute cost for the shadowed code path for its entire duration, since every real request also executes the new implementation; this is a deliberate, budgeted cost, not incidental waste, and should be sized into capacity planning for the migration window specifically.
+
+**Latency:** If the Parallel Run's shadow call is synchronous and blocking on the critical path, it directly adds the new implementation's latency to the real request's latency — the shadow call must be fire-and-forget (or the comparison performed asynchronously off a captured snapshot) to avoid degrading real user-facing latency during the entire validation period.
+
+**Throughput:** Dual writes add a second write's latency (and its own retry/backoff behavior on failure) to every write path for the whole coexistence period; CDC avoids this at the application layer but shifts the cost to a separate replication pipeline whose throughput must itself be provisioned to keep pace with source write volume, or lag grows unbounded.
+
+**Scalability:** Reconciliation jobs comparing full datasets scale with total record count, not just recent-change volume — a full-dataset reconciliation against a multi-terabyte legacy ledger can itself become a multi-hour job requiring its own resource planning, incremental/checkpointed design, and off-peak scheduling.
+
+**Benchmarking:** Benchmark the Parallel Run's shadow-path overhead under realistic peak load before enabling it broadly, since a naive fire-and-forget implementation can still exhaust connection pools or thread-pool capacity if the new implementation's dependencies aren't independently rate-limited from the real path's dependencies.
+
+**Caching:** A cache warmed against the old store's data shape can silently serve stale or wrongly-shaped data once cutover begins routing to the new store — cache invalidation/warm-up must be an explicit part of the cutover plan, not assumed to "just work."
+
+---
+
+## 8. Security
+
+**Threats:** An Anti-Corruption Layer is a genuine trust boundary as well as a semantic one — it's where data from a legacy or third-party system, potentially with weaker input validation or a different trust model, first meets the new domain's assumptions; treating it only as a translation concern and not also an input-validation/authorization boundary is a common gap. A CDC pipeline reading a legacy store's transaction log has broad, often highly-privileged read access to *everything* that store contains, including fields never intended for the new system's use — this is a data-minimization and least-privilege concern, not just a plumbing detail.
+
+**Mitigations:** Apply the same input-validation and authorization discipline at the ACL that any external-facing boundary would require — never assume the legacy system's data is "already trusted" simply because it's internal. Scope the CDC pipeline's read access and downstream propagation explicitly to only the fields the new system actually needs, rather than replicating an entire legacy schema by default. Authenticate and authorize every replica/participant contributing to a dual-write or CDC stream — an unauthenticated write path into either store undermines every downstream reconciliation guarantee.
+
+**OWASP mapping:** Broken access control if the ACL trusts legacy-origin data without re-validating; sensitive data exposure if CDC propagates PII/financial fields beyond their minimum necessary scope into the new store or into logs/reconciliation reports.
+
+**AuthN/AuthZ:** The flag-controlled router deciding old-vs-new-implementation routing should itself be access-controlled and audited — an unauthorized or accidental change to cutover percentage is effectively an unauthorized production deployment.
+
+**Secrets:** Dual-write and CDC pipelines typically need credentials to both the legacy and new stores simultaneously for the migration's duration — a broader credential footprint than either store needs alone, requiring explicit, time-bounded scoping and rotation, not indefinite standing access left over after migration completes.
+
+**Encryption:** Data in transit through the CDC pipeline and at rest in both stores during coexistence must meet the same encryption standard as either store alone — a common gap is an intermediate CDC broker/staging area that wasn't in either system's original threat model and ends up under-protected.
+
+---
+
+## 9. Scalability
+
+**Horizontal scaling:** CDC pipelines typically scale by partitioning the change stream (e.g., by table or by a sharding key), letting replication throughput scale independently of either store's own read/write capacity, provided ordering is preserved within each partition.
+
+**Vertical scaling:** A full-dataset reconciliation job's memory/compute footprint can be reduced by chunked, checkpointed comparison (compare in key ranges, track progress) rather than loading entire datasets into memory at once.
+
+**High Availability:** During coexistence, both the old and new stores must independently maintain their own HA posture — the migration doesn't get to "borrow" availability from whichever system is currently less critical, since either could be the one serving traffic depending on cutover percentage.
+
+**Disaster Recovery:** A DR event during the coexistence period should have an explicit, tested runbook for *which* store is authoritative post-recovery and how the other is re-synchronized — an untested assumption here (e.g., "the new store's replica will just catch up") is exactly the kind of unverified claim this course has repeatedly found fails silently under real conditions.
+
+**CAP theorem:** A dual-write pattern is, in CAP terms, choosing to accept a bounded, application-managed inconsistency window between two independently-available stores rather than paying for a coordinated, consistent (but partition-vulnerable) cross-store transaction — this is a conscious, temporary trade accepted specifically because the alternative (true cross-store atomicity) is rarely practical, not because eventual consistency was the actual goal.
+
+---
+
+## 10. Interview Questions
 
 ### Basic (10)
 
@@ -269,5 +458,313 @@
 **Why correct:** Positions the ACL as a money-boundary correctness/resilience control — normalizing vendor quirks (scale/rounding/status), localizing vendor-change blast radius, enabling substitution, and enforcing money invariants at the boundary.
 **Common mistakes:** Letting a vendor/legacy model leak into the domain; trusting foreign amounts without normalizing scale/currency; no seam to swap/fail-over processors; coupling ledger correctness to a third party's quirks.
 **Follow-ups:** "What money-specific normalization belongs in the ACL for a payment processor?" (scale, currency, rounding, status taxonomy) / "How does the ACL help when the vendor ships a breaking change?"
+
+---
+
+## 11. Coding Exercises
+
+### Easy — Branch by Abstraction: flag-controlled router
+**Problem:** Route a call to either the legacy or new implementation of `IPaymentProcessor` behind a stable interface, controlled by a percentage-based flag.
+**Solution:**
+```csharp
+public interface IPaymentProcessor
+{
+    Task<PaymentResult> ProcessAsync(PaymentRequest request);
+}
+
+public class FlagControlledPaymentRouter : IPaymentProcessor
+{
+    private readonly IPaymentProcessor _legacy;
+    private readonly IPaymentProcessor _new;
+    private readonly IFeatureFlagClient _flags;
+
+    public FlagControlledPaymentRouter(IPaymentProcessor legacy, IPaymentProcessor @new, IFeatureFlagClient flags)
+        => (_legacy, _new, _flags) = (legacy, @new, flags);
+
+    public Task<PaymentResult> ProcessAsync(PaymentRequest request)
+    {
+        var cutoverPercent = _flags.GetInt("payment-processor-cutover-percent", defaultValue: 0);
+        // stable hash of a request-scoped id, NOT Random — ensures the same entity
+        // consistently lands on the same implementation across retries
+        var bucket = Math.Abs(request.IdempotencyKey.GetHashCode()) % 100;
+        return bucket < cutoverPercent ? _new.ProcessAsync(request) : _legacy.ProcessAsync(request);
+    }
+}
+```
+**Time complexity:** O(1) per routing decision.
+**Space complexity:** O(1).
+**Optimized solution:** Persist the bucket assignment per entity (not recomputed per call) so a mid-request percentage change never causes the same logical entity to see the old implementation on retry and the new one on the original attempt.
+
+### Medium — Parallel Run comparator with side-effect suppression
+**Problem:** Shadow a new implementation against real traffic without its side effects reaching production, and log divergence.
+**Solution:**
+```csharp
+public class ParallelRunComparator : IPaymentProcessor
+{
+    private readonly IPaymentProcessor _authoritative;
+    private readonly IPaymentProcessor _shadowDryRun; // MUST be a dry-run variant: no real charge, no real ledger post
+    private readonly IDivergenceLog _log;
+
+    public async Task<PaymentResult> ProcessAsync(PaymentRequest request)
+    {
+        var authoritativeResult = await _authoritative.ProcessAsync(request);
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var shadowResult = await _shadowDryRun.ProcessAsync(request);
+                if (!shadowResult.ComputedAmount.Equals(authoritativeResult.ComputedAmount) ||
+                    shadowResult.Status != authoritativeResult.Status)
+                {
+                    await _log.RecordDivergenceAsync(request.IdempotencyKey, authoritativeResult, shadowResult);
+                }
+            }
+            catch (Exception ex)
+            {
+                // a shadow-path exception is itself a divergence signal — never let it fault the real request
+                await _log.RecordShadowFailureAsync(request.IdempotencyKey, ex);
+            }
+        });
+
+        return authoritativeResult; // shadow result never returned or acted on
+    }
+}
+```
+**Time complexity:** O(1) added to the critical path (shadow runs off-path).
+**Space complexity:** O(d) for d logged divergences.
+**Optimized solution:** Batch and rate-limit shadow-path execution under load (e.g., sample 10% of traffic for shadowing rather than 100%) once statistical confidence no longer requires full coverage, reducing the doubled-compute cost established in §7.
+
+### Hard — CDC-based reconciliation job
+**Problem:** Continuously verify a CDC-replicated target store matches its source, at both row and aggregate level.
+**Solution:**
+```csharp
+public class LedgerReconciliationJob
+{
+    public async Task<ReconciliationResult> RunAsync(DateRange window)
+    {
+        var sourceChecksum = await _source.ComputeChecksumAsync(window); // per-account, chunked
+        var targetChecksum = await _target.ComputeChecksumAsync(window);
+
+        if (sourceChecksum != targetChecksum)
+        {
+            var mismatchedAccounts = await FindMismatchedAccountsAsync(window);
+            return ReconciliationResult.Diverged(mismatchedAccounts);
+        }
+
+        var sourceTotal = await _source.SumBalancesAsync(window);
+        var targetTotal = await _target.SumBalancesAsync(window);
+        if (sourceTotal != targetTotal) // exact match required for money — no tolerance band
+            return ReconciliationResult.AggregateInvariantViolated(sourceTotal, targetTotal);
+
+        return ReconciliationResult.Clean;
+    }
+}
+```
+**Time complexity:** O(n) for n records in the window, chunked to bound memory.
+**Space complexity:** O(c) for c chunk size, not O(n).
+**Optimized solution:** Run incrementally against only the CDC stream's most-recent watermark forward (not the full dataset every run), with a periodic full-dataset sweep as a lower-frequency backstop — trading per-run cost for detection latency on the vast majority of runs.
+
+### Expert — Cutover fitness-function gate with automatic rollback
+**Problem:** Gate cutover-percentage advancement on live reconciliation and business-metric health, automatically rolling back on regression.
+**Solution:**
+```csharp
+public class CutoverGate
+{
+    public async Task<GateDecision> EvaluateAsync(int currentPercent)
+    {
+        var reconciliation = await _reconJob.GetLatestResultAsync();
+        var errorRate = await _metrics.GetErrorRateAsync(TimeSpan.FromMinutes(15));
+        var conversionRate = await _metrics.GetBusinessMetricAsync("payment-success-rate");
+
+        if (reconciliation.HasDivergence || errorRate > _thresholds.MaxErrorRate)
+            return GateDecision.RollBack(currentPercent > 0 ? currentPercent / 2 : 0,
+                reason: reconciliation.HasDivergence ? "reconciliation divergence" : "error rate breach");
+
+        if (conversionRate < _thresholds.MinAcceptableConversion)
+            return GateDecision.Hold(currentPercent, reason: "business metric below threshold — hold, do not advance");
+
+        return GateDecision.Advance(Math.Min(currentPercent + _stepSize, 100));
+    }
+}
+```
+**Time complexity:** O(1) per evaluation (reads precomputed metrics).
+**Space complexity:** O(1).
+**Optimized solution:** Deliberately inject a known-divergent synthetic reconciliation case on a schedule to confirm the gate's own divergence detection is genuinely wired and firing — an alert-liveness canary for the gate itself, not just the migration it protects.
+
+---
+
+## 12. System Design
+
+**Requirements**
+
+*Functional:*
+- Support behavior migration (Branch by Abstraction, gradual flag-controlled cutover) and data migration (dual-write or CDC) as independently-verified, concurrently-progressing tracks.
+- Continuously reconcile old and new data stores throughout the entire coexistence period, at both row and aggregate (e.g., ledger-total) granularity.
+- Provide an Anti-Corruption Layer translating between the legacy domain model and the new one for the full duration both are live.
+- Gate every cutover-percentage increment on an automated fitness function (reconciliation cleanliness, error rate, business-metric health).
+
+*Non-functional:*
+- Zero user-facing side effects from the Parallel Run's shadow path.
+- Rollback to any prior cutover percentage completes in under a minute (a config change, not a redeploy).
+- Reconciliation completeness: 100% of records checked at least once per 24 hours; a chunked, checkpointed design so a full sweep never blocks normal operation.
+- Full audit trail of every cutover-percentage change, every reconciliation run's result, and every rollback.
+
+**Architecture:** Flag-controlled router in front of both implementations → Parallel Run comparator (shadow path, side effects suppressed) → CDC pipeline (source transaction log → target store, plus one-time backfill) → reconciliation job (chunked, checksum + aggregate-invariant checks) → cutover gate (consumes reconciliation + business metrics, advances/holds/rolls back) → ACL sitting at the legacy/new domain boundary for both the synchronous call path and the CDC-replicated data path.
+
+**Components:** `FlagControlledRouter`, `ParallelRunComparator`, `AntiCorruptionLayer`, `CdcPipeline` (backfill + streaming), `ReconciliationJob`, `CutoverGate`, `DivergenceLog`, `DecommissionTracker` (a first-class component, not an afterthought — tracks the explicit completion criteria from §Advanced Q3/Q6 of §10).
+
+**Database selection:** The new store is chosen on its own steady-state merits (§04 of this domain's trade-off framework governs that choice); the legacy store is kept read-available throughout coexistence purely as the CDC source and rollback fallback, never re-architected mid-migration.
+
+**Caching:** Any cache fronting the legacy store must be explicitly invalidated/re-warmed at cutover, keyed off the same flag the router uses, to avoid serving stale-shaped data post-cutover.
+
+**Messaging:** CDC stream (ordered, per-partition) from source to target; divergence/rollback events published to an operational alerting channel, not just logged, since a silent divergence is exactly the failure mode this design exists to prevent.
+
+**Scaling:** CDC pipeline partitioned by a natural sharding key (e.g., account ID range) to scale replication throughput independently of either store's own capacity; reconciliation job chunked and parallelized across the same partitioning.
+
+**Failure handling:** Any dual-write secondary-write failure is retried with backoff and, on exhaustion, explicitly flagged (never silently swallowed); the cutover gate automatically halves the cutover percentage on any reconciliation divergence or error-rate breach, never proceeding on a fixed schedule regardless of live signal.
+
+**Monitoring:** Cutover-percentage-over-time; reconciliation-divergence rate; shadow-path (Parallel Run) divergence rate and shadow-failure rate; CDC replication lag; decommission-tracker completion status per dependent team.
+
+**Trade-offs:** This design accepts a longer timeline and a sustained dual-infrastructure cost in exchange for converting one large, hard-to-partially-roll-back cutover event into a sequence of small, continuously-verified, cheaply-reversible steps — the explicit trade this entire module's pattern set is built around.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** Behavior and data migration proceed on independently-verifiable tracks; every cutover-percentage change is gated and auditable; rollback is cheap at every phase except post-decommission.
+
+**Class diagram:**
+```mermaid
+classDiagram
+    class IPaymentProcessor {
+        <<interface>>
+        +ProcessAsync(request) PaymentResult
+    }
+    class FlagControlledRouter {
+        +ProcessAsync(request) PaymentResult
+    }
+    class ParallelRunComparator {
+        +ProcessAsync(request) PaymentResult
+    }
+    class AntiCorruptionLayer {
+        +TranslateToNewModel(legacyRecord) DomainOrder
+        +TranslateToLegacyModel(domainOrder) LegacyRecord
+    }
+    class CdcPipeline {
+        +StreamChangesAsync() IAsyncEnumerable~Change~
+        +RunInitialBackfillAsync() Task
+    }
+    class ReconciliationJob {
+        +RunAsync(window) ReconciliationResult
+    }
+    class CutoverGate {
+        +EvaluateAsync(currentPercent) GateDecision
+    }
+    class DecommissionTracker {
+        +RecordDependentMigrated(teamId) void
+        +IsSafeToDecommission() bool
+    }
+
+    FlagControlledRouter ..|> IPaymentProcessor
+    ParallelRunComparator ..|> IPaymentProcessor
+    FlagControlledRouter --> ParallelRunComparator
+    CdcPipeline --> AntiCorruptionLayer
+    ReconciliationJob --> CdcPipeline
+    CutoverGate --> ReconciliationJob
+    CutoverGate --> DecommissionTracker
+```
+
+**Sequence diagram:** the §3 sequence diagram (flag-controlled router forwarding to the authoritative legacy implementation while shadowing the new implementation off-path) and the §3 CDC data-flow diagram together cover this design's two concurrent tracks.
+
+**Design patterns used:** Strategy (`IPaymentProcessor` implementations selected by the router); Adapter (the ACL translating between legacy and new domain shapes); Decorator (`ParallelRunComparator` wraps the authoritative implementation, adding shadow-comparison behavior transparently); Chain of Responsibility (`CutoverGate` evaluating multiple independent conditions — reconciliation, error rate, business metric — before advancing).
+
+**SOLID mapping:** Single Responsibility (the router routes, the comparator compares, the ACL translates, the gate decides — each is independently testable); Open/Closed (a new implementation of `IPaymentProcessor` plugs in without modifying the router); Liskov (every `IPaymentProcessor` implementation, including the new one, must genuinely satisfy the same contract the legacy one did — a subtly non-substitutable "new" implementation is exactly what a Parallel Run exists to catch); Interface Segregation (routing, comparison, translation, and gating are distinct interfaces, not one god-interface); Dependency Inversion (the gate depends on abstractions over reconciliation results and metrics, not concrete implementations, so its evaluation logic is independently unit-testable).
+
+**Extensibility:** A new migration (a different service, a different data store) reuses the same `FlagControlledRouter`/`ParallelRunComparator`/`CutoverGate` shapes by implementing the relevant domain-specific `IPaymentProcessor`-equivalent interface and reconciliation logic — the migration *pattern* is reusable even though its *specifics* (what "divergence" means for this domain) are not, per the Expert-tier premature-generalization caution in §10.
+
+**Concurrency/thread safety:** The Parallel Run's shadow execution must not share mutable state with the authoritative path (fire-and-forget on an independent `Task`, no shared connection/transaction scope); the `CutoverGate`'s percentage state must be updated atomically (a compare-and-swap or a single-writer configuration store) to avoid two concurrent evaluations racing to apply conflicting rollback/advance decisions.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** Three months into a dual-write-based migration of a payments-ledger read model (old: SQL Server; new: a cloud-native distributed store), the nightly reconciliation job began silently passing clean every night — until an unrelated customer complaint about an incorrect statement balance led to a manual investigation that found the *new* store had been drifting from the *old* store for eleven days, undetected.
+
+**Root cause:** The reconciliation job compared row counts and a rolling checksum per account, but the checksum function had been computed over a serialized JSON representation of each row — and eight days prior, an unrelated deployment to the *new* store's write path had changed a decimal field's serialization from `"12.50"` to `"12.5"` (trailing-zero normalization introduced by a JSON library upgrade). The old store's checksum, computed independently over its own native decimal representation, was unaffected. Every account whose most recent write happened to include a trailing-zero decimal field now produced a *different* checksum on the new side than a numerically-identical value would have on the old side — but because the checksum comparison logic used a tolerance-based "if checksums differ by less than N mismatches, treat as noise" heuristic added months earlier to reduce false-positive paging, the growing but still-below-threshold mismatch count was silently absorbed rather than escalated.
+
+**Investigation:** Query logs showed the reconciliation job's mismatch count creeping from single digits to several hundred over the eleven days, always staying just under the alert threshold; the checksum function's actual implementation, not exercised in code review of the JSON-library upgrade (a change to a different service entirely), was the specific, non-obvious point of failure. Comparing a small sample of "matched" versus "mismatched" checksums side by side revealed the trailing-zero serialization difference within minutes once someone actually looked at raw values instead of trusting the aggregate pass/fail signal.
+
+**Tools:** The reconciliation job's own historical mismatch-count trend (once actually graphed, not just alerted on with a threshold); a manual side-by-side row diff on a handful of flagged accounts; the JSON-library changelog for the unrelated service that had introduced the serialization change.
+
+**Fix:** The checksum function was rewritten to compare against a canonical, numeric decimal representation (never a serialized string) so representation-format drift could never again masquerade as a real data mismatch. The "tolerance-based, sub-threshold mismatches treated as noise" heuristic was removed entirely and replaced with the money-specific rule established elsewhere in this course: an exact-match requirement for financial reconciliation, with any nonzero divergence triggering investigation rather than being averaged away.
+
+**Prevention:** (1) Reconciliation logic for financial data must compare canonical, type-aware values, never a serialization-dependent representation that a downstream, seemingly-unrelated library upgrade could silently change. (2) No tolerance/noise-suppression threshold on a money reconciliation check — the FT1 exact-match discipline in this module's own interview Q&A, now shown failing precisely because it had been quietly weakened. (3) A reconciliation job's own mismatch-count trend must be actively graphed and reviewed, not merely alerted on a static threshold — a slow, sub-threshold creep is itself a leading indicator worth surfacing before it crosses any fixed line.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Choosing the data-migration mechanism for moving a payments ledger's read model from a legacy relational store to a new store during an active, live migration.
+
+**Option A — Dual write (synchronous, application-level):**
+*Advantages:* No replication lag — the new store is always as current as the old one, since both are written in the same logical request; no dependency on a separate replication pipeline or its operational surface.
+*Disadvantages:* Partial-write-failure risk (§2.4) requires an explicit, ongoing reconciliation process to catch; touches every existing write path in application code, raising the risk surface of the legacy code being modified.
+*Cost:* Moderate — no new pipeline infrastructure, but ongoing reconciliation-job cost and engineering time to instrument every write path correctly.
+*Risk:* Silent, per-write partial failure if reconciliation isn't rigorous and continuous (§14's incident).
+
+**Option B — CDC (log-based, asynchronous):**
+*Advantages:* Zero changes to legacy application write paths — lower risk to already-fragile legacy code; a single, well-understood source of truth (the transaction log) rather than two independent write attempts.
+*Disadvantages:* Replication lag means the new store is always some bounded time behind; requires new, dedicated pipeline infrastructure (Debezium/native CDC) with its own operational burden (lag monitoring, backfill/stream stitching correctness).
+*Cost:* Higher upfront (pipeline infrastructure, initial backfill design) but lower ongoing per-write-path engineering cost.
+*Risk:* Replication lag surfacing as stale reads if cutover routes reads to the new store before lag is bounded and monitored.
+
+**Recommendation: CDC, specifically because the legacy write paths in this scenario are poorly understood, high-risk-to-modify mainframe/Oracle code** — avoiding touching them at all is worth accepting bounded replication lag and the upfront pipeline-build cost. Dual write is the better choice only when the legacy write paths are well-understood, low-risk to modify, and zero replication lag is a genuine hard requirement (e.g., a read-your-own-write UX requirement immediately after write) that CDC's inherent lag cannot satisfy. Either option requires the same continuous, exact-match, canonical-value reconciliation discipline established in §14 — the choice between them is about where the risk lives (application write-path risk vs. replication-lag risk), not whether reconciliation is needed at all.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** A migration's business case is almost never "the new system is technically better" in isolation — it's the combination of a concrete, current pain (an overrunning nightly settlement batch, an unmaintainable mainframe skillset) against the fourteen-month cost and coexistence-period risk demonstrated in §4. A Principal Engineer's job is making that trade explicit and quantified for stakeholders, not assuming the technical merits alone justify the investment.
+
+**Engineering trade-offs:** Every pattern in this module trades short-term complexity (running two implementations or two stores side by side, building translation logic, gating cutover) for long-term safety (verified correctness at every intermediate state, cheap rollback). The Principal-level judgment call is calibrating *how much* of this machinery a given migration's actual risk profile warrants — a low-consequence internal tool doesn't need a six-cycle Parallel Run; a regulated ledger does.
+
+**Technical leadership:** The §4 production example and the §14 incident share a lesson worth teaching explicitly to any team about to run a migration: a migration's hardest, highest-value work is very often not the new implementation itself but the boundary/reconciliation logic (the ACL's domain translation, the reconciliation job's exact-match discipline) — teams that under-invest here because it looks like "plumbing" are the ones who ship the incident in §14.
+
+**Cross-team communication:** A migration spanning a shared legacy dependency requires an explicit, visible, tracked dependent-migration status — informally assuming other teams are "probably migrating on a similar timeline" is precisely the assumption that leaves a dependent team's production traffic broken when the legacy system is eventually decommissioned.
+
+**Architecture governance:** Every migration of genuine, cross-team, hard-to-reverse consequence deserves its own ADR recording the chosen migration path, the risk thresholds gating each cutover increment, and the explicit decommissioning completion criteria — not as bureaucratic overhead, but because a migration's reasoning (why CDC over dual write, why this cutover sequencing) is exactly the kind of decision a future engineer facing renewed pressure to "just redo it differently" needs to be able to consult rather than re-litigate.
+
+**Cost optimization:** The sustained dual-infrastructure cost during coexistence is real and often underestimated at planning time — a Principal Engineer should insist this cost is explicitly budgeted and time-boxed (not open-ended), since an un-contracted, permanently-lingering coexistence period (§6's anti-pattern) quietly compounds this cost indefinitely.
+
+**Risk analysis:** The single highest-leverage risk-reduction investment across every pattern in this module is continuous, exact-match, canonical-value reconciliation — not more code review of the new implementation, not more unit tests, but an independent, ongoing check that the two systems' actual, current state genuinely agrees, since (per §14) that is precisely the class of failure that produces zero functional symptom until it's already caused customer-visible harm.
+
+**Long-term maintainability:** A migration that skips the decommissioning/contract phase leaves behind a permanent, undocumented dual-system reality that every future engineer touching either system must now understand — the single most durable value of this module's discipline is making "the migration is actually, fully done" a checkable, explicit state rather than an assumed one.
+
+---
+
+## 18. Revision
+
+**Key Takeaways:**
+- A migration's defining constraint is that every intermediate state, not just the final one, must be a fully correct production system.
+- Branch by Abstraction, Parallel Run, ACL, and dual-write/CDC data migration are four distinct techniques solving four distinct sub-problems (implementation swap, behavior validation, model-boundary translation, and data movement respectively) — a real migration typically needs several of them together, on independently-verified tracks.
+- Reconciliation — continuous, exact-match, canonical-value — is the single mechanism that actually closes the gap between "the migration mechanism looks correct" and "the migration is actually, currently correct."
+- Rollback cost is not uniform across a migration's phases — it's cheapest during gradual, flag-controlled cutover and most expensive after the old system is actually deleted, which is exactly why deletion should be deferred until confidence is thoroughly established.
+- A migration is not "done" at 100% cutover — genuine completion requires confirmed absence of remaining dependents and actual, not idle, decommissioning of the old system.
+
+**Interview Cheatsheet:**
+| Pattern | Solves | Key risk | Key mitigation |
+|---|---|---|---|
+| Branch by Abstraction | Swap an internal implementation live | Coupling callers to concrete impl directly | Interface + gradual flag cutover |
+| Parallel Run | Validate new behavior before trusting it | Side effects leaking from shadow path | Dry-run/suppressed side effects, async comparison |
+| Anti-Corruption Layer | Isolate a new model from a legacy/vendor one | Thin field-mapping instead of real semantic translation | Explicit domain-translation logic, treated as first-class design work |
+| Dual write | Zero-lag data sync | Silent partial-write failure | Continuous, exact-match reconciliation |
+| CDC | Data sync without touching legacy write paths | Replication lag; snapshot/stream stitching | Bounded-lag monitoring, careful backfill design |
+
+**Things Interviewers Love:** naming the specific failure mode each pattern introduces (not just its benefit); explicitly sequencing behavior and data migration as separate tracks; treating reconciliation as the load-bearing safety mechanism rather than an afterthought; giving concrete completion criteria for "the migration is done," not just "100% cutover reached."
+
+**Things Interviewers Hate:** describing a migration as "just add a flag and switch it," with no mention of data migration or reconciliation; treating dual writes as automatically consistent; an ACL described as "just a mapper"; no answer for what happens if a divergence is found mid-cutover.
+
+**Common Traps:** assuming CDC and dual writes are interchangeable with identical trade-offs (they trade lag for application-code risk, not equivalent); assuming a clean Parallel Run comparison for a few hours is sufficient validation (misses periodic/batch code paths); assuming "100% traffic cut over" equals "migration complete" (misses undecommissioned old systems and unconfirmed dependents).
 
 ---

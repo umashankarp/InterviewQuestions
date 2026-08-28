@@ -6,7 +6,183 @@
 
 ---
 
-## Interview Questions
+## 1. Fundamentals
+
+**What.** Tactical DDD is the implementation-level layer of Domain-Driven Design — the concrete building blocks (Entities, Value Objects, Aggregates, Aggregate Roots, Domain Services, Domain Events, Repositories, Factories) used to build a rich, invariant-enforcing model *within* a single, already-identified Bounded Context (Module 109). Where strategic DDD answers "where does this model boundary belong," tactical DDD answers "what, concretely, do I write inside that boundary so the model actually enforces the business's rules rather than merely storing its data."
+
+**Why it exists.** The alternative to tactical DDD is the anemic domain model — plain data classes with public getters/setters, all real logic pushed into separate "service" classes operating on that data from outside. An anemic model can represent *any* state, including states the business considers invalid (a negative balance, a shipped-but-unpaid order), because nothing in the model itself refuses to hold them. Tactical DDD's central idea is that a well-designed object should make its own invalid states structurally difficult or impossible to construct — validation and business rules live *with* the data they govern, not scattered across a service layer that may or may not remember to check them on every call site.
+
+**When to reach for it.** Wherever a domain concept has genuine invariants (rules that must always hold), meaningful identity that must be tracked over time, or is currently suffering from primitive obsession (a bare `decimal`/`string` standing in for something with real validation rules, like money or an email address). It is unnecessary ceremony for simple, low-risk data with no real invariants or identity concerns — Module 109's Advanced Q9 names this over-application risk explicitly, and it recurs here as a tactical-level anti-pattern (§6).
+
+**How, in one sentence.** Classify each domain concept as an Entity (has identity, tracked over its lifecycle) or a Value Object (fully defined by its attributes, immutable, interchangeable); group tightly-invariant-bound Entities/Value Objects into an Aggregate with a single Aggregate Root as its only external entry point; enforce every invariant synchronously, inside the Aggregate, on every construction and every mutating method; and reference other Aggregates only by ID, never by direct object reference.
+
+## 2. Deep Dive
+
+### 2.1 Entity vs. Value Object — the classification test, precisely
+
+The single most consequential classification decision in tactical DDD: does this concept need to be tracked, over time, as "this specific instance" distinct from another with identical current attributes (Entity — identity-based equality), or is it fully, completely characterized by its current attribute values with no meaningful distinction between two instances that happen to match (Value Object — value-based equality)? A `Trade` is an Entity (two trades with identical instrument/quantity/price executed at different times are still distinct trades, tracked separately). `Money` is a Value Object (two `Money(100, "USD")` instances are fully interchangeable).
+
+### 2.2 The Aggregate as the enforced consistency boundary
+
+An Aggregate is not merely "a group of related objects" — it is the unit within which every invariant is guaranteed to hold, atomically, after every single operation. The Aggregate Root is the sole object external code may reference; every mutation is expressed as a method call on the Root, which validates the resulting state before accepting the change. This single rule — no side-door mutation of an internal Entity or Value Object — is what makes the Aggregate's invariant guarantee mechanically enforceable rather than aspirational.
+
+### 2.3 Aggregate boundary sizing — the recurring cost axis
+
+A small Aggregate reduces optimistic-concurrency contention and transaction size but risks pushing a genuinely-required invariant outside the boundary into eventual consistency; a large Aggregate keeps more invariants synchronously guaranteed but multiplies contention risk under concurrent load (this module's Advanced Q4 develops a Black-Friday-scale production incident caused by exactly this). The default heuristic: include an object inside an Aggregate only if a genuine, must-be-synchronous invariant requires it — "these things feel related" is explicitly insufficient justification (Intermediate Q1).
+
+### 2.4 EF Core modelling implications
+
+Tactical DDD's patterns map onto EF Core with a few load-bearing, non-obvious choices:
+- **Value Objects as owned types** (`OwnsOne`/`OwnsMany` in EF Core, or C# `record`/`readonly struct` types mapped via `ComplexProperty` in EF Core 8+) rather than as separate entities with their own identity/table — a `Money` value object should not accidentally acquire an EF-generated primary key, which would silently turn it into an Entity in the database even though the domain model correctly treats it as a Value Object.
+- **Aggregate Root as the EF Core aggregate boundary** — configure navigation properties so only the Aggregate Root is directly queryable via `DbSet<T>`; internal Entities (e.g., `OrderLine`) should not have their own `DbSet<OrderLine>`, enforcing at the persistence layer the same root-only-access rule the domain model already enforces in memory.
+- **Backing fields for encapsulated collections** — expose `IReadOnlyCollection<OrderLine>` publicly while EF Core maps to a private `List<OrderLine>` backing field (`Metadata.Collection.HasField` in `OnModelCreating`), so external code cannot call `.Add()` directly on a collection returned from a getter — closing the exact "leaked internal reference" anti-pattern (§6) at the ORM level, not just by convention.
+- **`RowVersion`/`rowversion` column for optimistic concurrency** (Intermediate Q3's mechanism) mapped via `IsRowVersion()`, giving database-guaranteed, collision-free version tracking rather than an application-managed integer prone to double-increment bugs.
+- **One `DbContext` per Bounded Context** (Module 109 §2.5) — an EF Core `DbContext` spanning two contexts' Aggregates makes it trivial to navigate directly from one context's Aggregate into another's, silently reintroducing the exact ID-only cross-Aggregate-reference violation Intermediate Q2 warns against.
+
+### 2.5 Hidden cost: change-tracking overhead on oversized Aggregates
+
+EF Core's change tracker snapshots every tracked entity's property values to detect changes on `SaveChanges()`. An oversized Aggregate (§2.3) loaded with many internal Entities means the change tracker does proportionally more comparison work on every save — a purely mechanical, measurable performance cost layered on top of the concurrency-contention cost, reinforcing that Aggregate sizing is simultaneously a modeling-cleanliness, a contention, and a change-tracking-performance concern (§7 develops this further).
+
+### 2.6 Hidden cost: `AsNoTracking()` and Aggregate invariants
+
+A read-only query using `AsNoTracking()` (a standard EF Core performance optimization for read paths, e.g., feeding Client Reporting's projections in Module 109 §12) returns detached entities with no change-tracking. This is correct and desirable for pure reads — but a mistake to watch for is accidentally reusing a `AsNoTracking()`-loaded entity graph as the starting point for a *write* operation: because it's detached, re-attaching and saving it can bypass the Aggregate Root's own in-memory invariant-checking methods entirely if the code path naively sets properties and calls `Update()` rather than loading a properly-tracked Aggregate and calling its domain methods — a concrete, EF-Core-specific instance of Advanced Q7's "write path bypassing the Aggregate" risk.
+
+## 3. Visual Architecture
+
+### 3.1 Aggregate / entity relationship diagram — the `Order` Aggregate (Advanced Q1)
+
+```mermaid
+classDiagram
+ class Order {
+ <<Aggregate Root>>
+ -OrderId Id
+ -CustomerId customerId
+ -List~OrderLine~ lines
+ -OrderStatus status
+ -ShippingAddress shippingAddress
+ +AddLine(ProductId, Quantity) 
+ +RemoveLine(OrderLineId)
+ +Confirm()
+ +Ship()
+ +Total() Money
+ }
+ class OrderLine {
+ <<Entity — internal to Order>>
+ -OrderLineId Id
+ -ProductId productId
+ -Quantity quantity
+ -Money unitPrice
+ }
+ class Money {
+ <<Value Object>>
+ +Amount decimal
+ +Currency string
+ +Add(Money) Money
+ }
+ class ShippingAddress {
+ <<Value Object>>
+ +Street string
+ +City string
+ +PostalCode string
+ }
+ class OrderStatus {
+ <<enum>>
+ Draft
+ Confirmed
+ Shipped
+ }
+ class CustomerId {
+ <<Value Object — ID reference only>>
+ +Value Guid
+ }
+
+ Order "1" *-- "many" OrderLine : contains, root-mediated
+ Order --> ShippingAddress
+ Order --> CustomerId : references by ID only\n(no direct Customer reference)
+ OrderLine --> Money : unitPrice
+ Order ..> OrderStatus
+```
+
+The diagram's load-bearing detail is the two different relationship arrows: `Order *-- OrderLine` (composition, internal, mutated only through the root) versus `Order --> CustomerId` (a plain reference to an identifier, not to the `Customer` Aggregate itself) — visually encoding Intermediate Q1's sizing rule and Intermediate Q2's ID-only cross-Aggregate-reference rule in one picture.
+
+### 3.2 Invariant-enforcement flow through the Aggregate Root
+
+```mermaid
+sequenceDiagram
+ participant Ext as External code (Application layer)
+ participant Root as Order (Aggregate Root)
+ participant Line as OrderLine
+
+ Ext->>Root: AddLine(productId, quantity)
+ Root->>Root: validate: order not yet Shipped
+ Root->>Line: new OrderLine(productId, quantity, unitPrice)
+ Root->>Root: recompute Total(), validate against invariants
+ alt invariant violated
+ Root-->>Ext: throw DomainException
+ else valid
+ Root-->>Ext: success — Order now includes new line
+ end
+```
+
+Every mutation funnels through the Root, which is the only object with the authority to accept or reject the change — external code, and even `OrderLine` itself, never independently decides whether a change is valid.
+
+## 4. Production Example
+
+**Problem.** A prime brokerage's internal `Position` model was, for years, an anemic C# class: a `PositionRecord` with public `decimal Quantity`, `decimal AverageCost`, `string Currency` properties, freely settable from six different service classes (a trade-booking service, a corporate-actions service, a manual-adjustment admin tool, and three separate batch jobs). Nothing in `PositionRecord` itself prevented any of these six call sites from setting `Quantity` to a value inconsistent with the sum of its own booked trades, or setting `Currency` to a value that didn't match the instrument's actual denomination.
+
+**Architecture (after tactical DDD).** `Position` became a proper Aggregate Root: `PositionId` identity, an internal, root-mediated list of `PositionLot` Entities (each lot tracking its own booked quantity/cost for tax-lot-accounting purposes), and `Money`/`CurrencyCode` Value Objects replacing the bare `decimal`/`string` primitives. All six previous call sites were rewritten to go through explicit, named methods on `Position` — `Position.BookTrade(TradeId, Quantity, Money unitCost)`, `Position.ApplyCorporateAction(CorporateActionId, AdjustmentFactor)`, `Position.ApplyManualAdjustment(AdjustmentId, Quantity, string justification)` — with `Position` itself, not any calling service, responsible for validating each resulting state (e.g., `ApplyManualAdjustment` requires a non-empty `justification` and enforces a maximum single-adjustment size without a second approval, encoding a control that had previously existed only as an unenforced runbook instruction).
+
+**Implementation.** `Position`'s constructor and every mutating method independently re-validate the resulting `Quantity`/`Money`/lot-consistency invariants (Module 110's Intermediate Q8 principle — validation is not front-loaded only into construction), and `PositionLot`'s own quantity is never directly settable from outside `Position` — the internal list is exposed only as `IReadOnlyCollection<PositionLot>`, backed by EF Core's private-field mapping (§2.4).
+
+**Trade-offs.** The rewrite required touching all six previous call sites simultaneously (a genuinely large, coordinated change, executed via Branch by Abstraction and a Parallel Run per Module 109's migration-pattern precedent) rather than a purely additive change — and it deliberately made several previously-silent, technically-invalid operations (a manual adjustment with no justification string) now throw a `DomainException,` which required a short, planned period of triaging legitimate-but-now-rejected historical usage patterns before full cutover.
+
+**Lessons learned.** The Parallel Run phase surfaced that the corporate-actions batch job had, for roughly eighteen months, been applying a stock-split adjustment factor to `Quantity` without correspondingly adjusting `AverageCost` for a specific class of instruments — a real, previously-undetected data-quality bug the anemic model's total absence of invariant checking had silently allowed to compound, discovered only because the new `Position.ApplyCorporateAction` method's invariant check rejected the old job's output during shadow comparison. This is the concrete, general lesson Module 110's Advanced Q10 describes in the abstract: a rich, invariant-enforcing model doesn't just prevent *future* invalid states — its rollout is often the first time an organization discovers how many *past* states were already silently invalid.
+
+## 5. Best Practices
+
+- Classify every domain concept explicitly as Entity or Value Object using the identity-vs-attributes test (§2.1) before writing any code for it — don't default to Entity out of ORM habit.
+- Size Aggregates to the smallest boundary a genuine, must-be-synchronous invariant actually requires (§2.3); treat "these are related" as insufficient justification on its own.
+- Reference other Aggregates only by ID, never by direct object/navigation reference, even when the ORM makes the shortcut syntactically easy.
+- Validate invariants on every mutating method, not only at construction — most of an Aggregate's lifetime is spent being modified, not created.
+- Make Value Objects immutable and self-validating by construction; prefer C# `record`/`readonly struct` types over bare primitives for anything with real domain meaning (money, email, date ranges).
+- Use optimistic concurrency (a native `rowversion` column) as the default protection against concurrent Aggregate modification; reserve pessimistic locking for the rare, genuinely-high-contention exception.
+- Write deliberately adversarial, invalid-state-inducing tests asserting an Aggregate correctly *rejects* disallowed operations — not just that valid operations succeed.
+
+## 6. Anti-patterns
+
+- **Anemic domain model** — public getters/setters with no enforced invariants, all logic externalized to service classes (the Production Example's starting state).
+- **God Aggregate** — an oversized Aggregate spanning multiple, only-loosely-related concerns (e.g., `Order` including `Customer` profile data and `Inventory` stock counts), multiplying contention and change-tracking cost for invariants that don't actually require that scope (Advanced Q4's Black-Friday incident).
+- **Leaked internal reference bypassing the Aggregate Root** — a getter returning a mutable `List<T>` or a direct reference to an internal Entity, letting external code mutate state without the Root ever validating the result (Advanced Q6).
+- **Primitive obsession** — representing money, email, date ranges, or any concept with real validation rules as bare `decimal`/`string`/`DateTime` instead of a self-validating Value Object (Basic Q10).
+- **Multi-Aggregate transactions as routine practice** — wrapping updates to several Aggregates in one database transaction as a default habit rather than a rare, explicitly-reviewed exception, usually signaling a mis-drawn boundary (Intermediate Q6).
+- **Validation front-loaded only into the constructor**, leaving mutating methods unchecked and able to drive an already-valid Aggregate into an invalid state through ordinary later use (Intermediate Q8).
+- **Bypassing the Aggregate on write** — a raw SQL data-fix script, an ORM re-attachment of a detached, unvalidated entity, or an `AsNoTracking()`-loaded graph naively saved back (§2.6) — each silently defeating a well-designed Aggregate's invariant guarantee via a write path that never runs its validation logic (Advanced Q7).
+
+## 7. Performance Engineering
+
+- **Aggregate size directly drives both transaction/lock cost and EF Core change-tracking cost** (§2.3, §2.5) — every additional internal Entity inside an Aggregate is both more optimistic-concurrency contention risk under concurrent load and more per-`SaveChanges()` snapshot-comparison work; sizing discipline is a performance decision, not only a modeling-cleanliness one.
+- **Aggregate reconstitution cost** — every command against an Aggregate typically requires loading its complete current state first; for a large Aggregate or high command-throughput scenario, this becomes a genuine bottleneck (Module 110 Advanced Q5), mitigated primarily by keeping Aggregates small in the first place, and secondarily by snapshotting if the persistence mechanism is event-sourced.
+- **`AsNoTracking()` for read paths** — any query that only reads an Aggregate's state (feeding a read model/projection, never followed by a save) should use `AsNoTracking()` to skip change-tracking overhead entirely; conflating a read-only query with the tracked, mutation-ready load path is a common, avoidable performance cost.
+- **Value Object allocation cost** — C# `record` types allocate a new instance on every "modification" (by design, since they're immutable); for typical business-logic-rate Value Objects (an order's shipping `Money`) this is negligible, but a Value Object constructed at very high frequency in a genuine hot path (a pricing engine recomputing `Money` millions of times/sec) is a legitimate candidate for a `readonly struct` instead, avoiding heap allocation entirely (Module 110 Advanced Q5).
+- **Batch/bulk operations and Aggregate-at-a-time loading** — a Repository's Aggregate-granularity contract (load/save one whole Aggregate at a time) is correct for enforcing invariants but a poor fit for genuine bulk operations (e.g., re-pricing 500,000 positions overnight); such batch jobs typically use a separate, explicitly-lower-rigor bulk-update path (raw `ExecuteUpdate`/bulk SQL) reserved specifically for cases where per-row Aggregate invariant re-validation is either unnecessary or independently re-verified by a downstream reconciliation job — not routed through the same Aggregate Root path used for individual transactional operations.
+
+## 8. Security
+
+- **Invariant enforcement is a fraud/correctness control, not merely a modeling nicety** — the Production Example's `ApplyManualAdjustment` requiring a non-empty justification and rejecting an over-large single adjustment without a second approval converts a previously-unenforced runbook policy into a structurally-enforced control; an anemic model relying on procedural discipline alone is a real control gap in a financial system, not just an engineering-quality gap.
+- **The Aggregate Root as the sole write path is also the sole point authorization needs to be checked** — because every mutation is forced through a small, well-defined set of Root methods (§2.2), authorization logic (can this caller invoke `ApplyManualAdjustment`?) has one, complete, auditable enforcement point, rather than needing to be independently re-implemented at every one of several call sites an anemic model would otherwise allow to mutate state directly.
+- **Value Objects prevent a class of injection/malformed-data bugs structurally** — a self-validating `Money`/`AccountNumber` Value Object rejects malformed input at construction, before it can propagate into downstream logic or storage, rather than relying on validation being remembered at every call site (Basic Q10).
+- **Optimistic concurrency prevents a specific double-spend/race-condition class of fraud** — two concurrent attempts to withdraw from the same account, racing against a stale in-memory balance, are exactly what the `RowVersion`-guarded conditional update (Intermediate Q3, and Module 110 FT2) is designed to make impossible, not merely unlikely.
+- **Every write path must be covered, or the invariant guarantee is only nominal** — a raw SQL data-fix script, a misconfigured ORM re-attachment, or a stale-cache write-back (Advanced Q7) that bypasses the Aggregate Root doesn't just risk a data-quality bug — in a financial-services model, it's a bypassed control, and should be treated with the same seriousness as an authorization bypass, including periodic reconciliation-style auditing of persisted state against the Aggregate's own invariants as an independent detection net.
+
+## 9. Scalability
+
+- **The Aggregate is the natural sharding/partitioning boundary.** Because an Aggregate is already the enforced transactional-consistency unit, it is also the natural unit to shard or partition by (e.g., partitioning an `Account`/`Position` table by `AccountId`) — no cross-partition transaction is ever needed for a single Aggregate's own invariant, since by definition nothing outside that Aggregate needs to be updated atomically with it.
+- **Correctly-scoped Aggregates enable horizontal write scaling that an oversized Aggregate forecloses** — Advanced Q4's Black-Friday incident is precisely a scalability failure: an oversized `Order`-plus-`Customer`-plus-`Inventory` Aggregate created artificial contention on a single version counter that no amount of additional database capacity could relieve, because the bottleneck was a logical consistency boundary, not raw throughput.
+- **Read scaling is decoupled from Aggregate write-side design** — a well-designed Aggregate (small, root-mediated) is naturally CQRS-compatible (Module 110 Advanced Q9): the write-side Aggregate stays unchanged while a denormalized read model/projection scales independently for query-heavy workloads, without requiring speculative CQRS infrastructure to be built before an actual, measured read-scaling need exists.
+- **Context-per-service scaling (Module 109 §9) composes with Aggregate-per-shard scaling** — a Bounded Context's independent deployability (Module 109) combines with its Aggregates' independent shardability to give two, orthogonal scaling levers: scale the whole context's infrastructure independently of other contexts, and scale a given context's own Aggregate storage/throughput independently by Aggregate-ID-based partitioning within it.
+- **Eventual consistency across Aggregates is what makes this scaling model viable at all** — insisting on synchronous, cross-Aggregate consistency (Intermediate Q3's test) would force artificially large, jointly-locked Aggregates that cap horizontal scalability at whatever the most conservative joint invariant requires; deliberately relaxing non-essential cross-Aggregate rules to eventual consistency, backed by domain events, is a scalability decision as much as a modeling one.
+
+## 10. Interview Questions
 
 ### Basic (10)
 

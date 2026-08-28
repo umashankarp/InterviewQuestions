@@ -2,11 +2,162 @@
 
 > Domain: Performance Engineering | Level: Beginner → Expert | Prerequisite: [[../01-CSharp/02-Async-Await-Internals]] (thread-pool/async internals this module's CPU/thread profiling examines), [[../04-SQL-Server]] indexing modules (query-plan-level bottleneck diagnosis), [[../27-Observability/01-ObservabilityFundamentals-MetricsLogsTraces-OpenTelemetry]] (traces/metrics as the raw signal profiling tools build on)
 >
-> **Note on format:** Per user preference (see `CLAUDE.md`), this module and future modules in this domain cover only the 40 most-frequently-asked interview questions (10 per level), without the full 15-section deep-dive template.
+> **Format note (superseded):** This module originally shipped under the leaner, 40-Q&A-only format referenced below. Per the 2026-07-18 template-reversion decision (see `CLAUDE.md`), it has since been upgraded to the current full-template format — Fundamentals through Revision — while preserving the original 40 Q&A verbatim in §10.
 
 ---
 
-## Interview Questions
+## 1. Fundamentals
+
+**What:** Performance profiling is the deliberate, targeted measurement of *where* a running program spends its time, CPU cycles, memory, and I/O wait — down to the function, line, query, or lock. Bottleneck diagnosis is the follow-on discipline of interpreting that measurement to identify the single (or few) constraining resource(s) that, if relieved, would most improve the system's observed latency or throughput. Unlike monitoring, which watches aggregate production health continuously and passively, profiling is invasive and specific — it answers "why is *this* slow," not "is the system healthy."
+
+**Why:** Every performance-improvement effort that skips measurement risks optimizing a component that was never the actual constraint — the single most common and most expensive mistake in performance work. A trading-desk order-entry service, for example, might have an engineer spend two sprints hand-tuning a serialization routine that a flame graph would have shown consumes 2% of total request time, while a synchronous database call blocking a thread-pool thread accounts for 70% and goes untouched. Profiling exists to make that trade-off visible and evidence-based rather than intuition-based.
+
+**When:** Use profiling whenever a system's actual latency/throughput diverges from its expected or required behavior — a pre-release capacity check, a live production incident, a suspected regression after a deploy, or a periodic capacity/cost review. Use continuous, low-overhead sampling profilers in production for always-on visibility; reserve heavier, fully-instrumenting profilers for staging/reproducible investigation, since their overhead can itself distort the very measurement being taken (the "observer effect").
+
+**How (30,000-ft view):**
+```
+Symptom (high latency / high CPU / OOM / timeout)
+ │
+ ▼
+Collect signal: metrics → traces → profiler (increasing invasiveness/detail)
+ │
+ ▼
+Localize: which service → which function/query/lock → which resource (CPU/IO/lock/GC)
+ │
+ ▼
+Confirm hypothesis with a targeted, repeatable measurement
+ │
+ ▼
+Fix → re-measure against the SAME methodology → confirm the fix actually moved the metric
+```
+
+---
+
+## 2. Deep Dive
+
+### 2.1 Sampling vs. Instrumenting Profilers
+A **sampling profiler** (e.g., `dotnet-trace`, PerfView's sampling mode, Linux `perf`) periodically interrupts the running process (typically ~1kHz) and records the current call stack across all threads. Over thousands of samples, the proportion of samples containing a given function approximates the proportion of wall-clock/CPU time spent in it. Overhead is low (often <5%) because most of the program's execution is never touched — only sampled. An **instrumenting profiler** (e.g., a tracing profiler that injects entry/exit probes into every method) records exact timing for every call, giving precise counts and call-graph edges, but the injected probes can add 2–10x overhead and materially change thread-scheduling behavior — the profiler itself becomes a confound in exactly the concurrency-sensitive scenarios (lock contention, thread-pool starvation) it's often used to diagnose. Production profiling defaults to sampling for this reason; instrumenting profilers are reserved for reproducible, staging-only deep dives.
+
+### 2.2 The CLR's Own Cost Centers Profiling Must Distinguish
+A .NET flame graph mixes three genuinely different cost centers that require different fixes: (1) **application logic** — the business-logic code itself; (2) **JIT compilation** — first-call tiered compilation cost, visible as time attributed to `System.Runtime.CompilerServices` frames on cold paths, distorting short-lived process profiles (e.g., serverless cold starts) far more than long-running services; (3) **GC** — visible as time in `System.GC`/background GC threads, driven by allocation rate rather than any single hot function. Conflating these — e.g., concluding "the JSON serializer is slow" when the actual cost is GC pressure from the allocations that serializer happens to produce — leads to the wrong fix (rewriting the serializer's logic instead of pooling its buffers).
+
+### 2.3 Thread-Pool Starvation's Specific Signature
+The CLR thread pool grows slowly and conservatively (roughly one new thread every 500ms past the configured minimum, by design, to avoid oversubscribing the OS scheduler under transient bursts). A workload that blocks threads synchronously (`.Result`, `.Wait()`, a synchronous DB driver call) faster than the pool can grow produces a *distinctive* signature: CPU utilization stays low or moderate while request latency climbs sharply and the `ThreadPool` queue-length counter (visible via `dotnet-counters` or `ThreadPool.PendingWorkItemCount`) grows unboundedly. This is diagnostically different from genuine CPU saturation (where CPU utilization itself is pegged near 100%) and from GC-driven pauses (visible as periodic, correlated stalls in GC counters) — three distinct root causes that superficially all present as "the app got slow."
+
+### 2.4 Generational GC and Why Allocation Rate, Not Heap Size, Is the First Number to Check
+.NET's generational GC assumes most objects die young (the "generational hypothesis"). Gen-0 collections are cheap (microseconds, scanning only recently-allocated, small regions) and frequent; Gen-2/full collections are expensive (can pause for tens to hundreds of milliseconds on large heaps) and rare. A high *allocation rate* (bytes/sec, visible via `dotnet-counters`' `Allocation Rate`) drives Gen-0 frequency up even if the steady-state heap size stays small — meaning a service can have a small, stable heap and still suffer materially from GC overhead purely due to churn. Profiling should check allocation rate before heap size, since heap size alone can look healthy while GC still consumes 15–20% of total CPU time servicing a high churn rate.
+
+### 2.5 Lock Contention's Hidden Cost: Convoying
+A profiler showing time "in" `Monitor.Enter`/a `lock` statement understates the true cost of contention, because it doesn't show **convoying** — once several threads queue behind one lock, the OS's fairness/wake-up scheduling can serialize *unrelated* subsequent work behind the queue, propagating a narrow, momentary contention event into a much wider, cascading latency spike across seemingly-unrelated request paths. This is why a lock-contention finding should be evaluated by the actual critical-section duration and callers, not just the raw time-in-lock metric.
+
+### 2.6 The Observer Effect and Statistical Validity
+Any profiler changes the system it measures — a fully-instrumenting profiler can slow a hot loop by 5-10x, meaning its *absolute* timing numbers are unreliable even though its *relative* proportions (which function dominates) usually remain informative. A single profiling run is also a single sample from a noisy distribution (JIT state, OS scheduling, cache warmth all vary run-to-run) — a claimed "20% improvement" from one before/after run pair, without multiple runs and a variance estimate, is not statistically distinguishable from noise in many real workloads. Treat a single profiling session's absolute numbers as directional, not authoritative, and require repeated runs before declaring a fix confirmed.
+
+---
+
+## 3. Visual Architecture
+
+```mermaid
+flowchart TD
+ A[Latency/CPU symptom reported] --> B{Check dotnet-counters:<br/>CPU% / GC rate / ThreadPool queue}
+ B -->|CPU pegged, low GC, empty queue| C[Genuine CPU-bound:<br/>capture CPU flame graph]
+ B -->|Growing ThreadPool queue,<br/>CPU not pegged| D[Thread-pool starvation:<br/>find blocking sync call]
+ B -->|Periodic stalls correlated<br/>with GC events| E[GC pressure:<br/>check allocation rate]
+ C --> F[Localize hot function<br/>via flame-graph width]
+ D --> G[Search for .Result/.Wait/<br/>sync-over-async in hot path]
+ E --> H[Find high-allocation call site<br/>via allocation profiler]
+ F --> I[Fix, then re-measure<br/>with same methodology]
+ G --> I
+ H --> I
+```
+
+```mermaid
+sequenceDiagram
+ participant Client
+ participant API as API Service
+ participant DB as SQL Server
+ participant Trace as Distributed Tracer
+
+ Client->>API: POST /orders (t=0ms)
+ API->>Trace: span: validate (2ms)
+ API->>DB: span: INSERT order (t=2ms)
+ Note over DB: Lock wait on order_ledger table<br/>(concurrent settlement job)
+ DB-->>API: response (t=340ms) — 338ms in DB span
+ API-->>Client: 201 Created (t=342ms)
+ Note over Trace: Trace shows 338/342ms (99%)<br/>attributed to a single DB span —<br/>profiling effort correctly directed at DB, not API code
+```
+
+---
+
+## 4. Production Example
+
+**Problem:** A payments settlement service at a mid-size FinTech processed end-of-day batch reconciliation between an internal ledger and a card-network settlement file. After a routine deploy, p99 latency for the *unrelated*, concurrently-running real-time authorization API jumped from 80ms to 1.4 seconds, triggering a customer-facing incident, even though the deploy had touched only the batch reconciliation job.
+
+**Architecture:** Both the real-time authorization API and the batch reconciliation job ran against the same SQL Server instance and shared a connection pool sized for the authorization API's steady low-latency load; the batch job was a separate, independently-deployed service, believed to be fully isolated because it ran in a different container.
+
+**Investigation:** `dotnet-counters` on the authorization API showed CPU utilization at a normal 30%, ruling out a CPU-bound cause immediately. `ThreadPool` queue length was also flat. Distributed tracing (correlated via a shared trace ID across the two services' calls to the same database) showed the authorization API's slow requests spent >95% of their time in a single DB span — not in application code at all. A SQL Server blocking-chain query (`sys.dm_exec_requests` joined to `sys.dm_os_waiting_tasks`) revealed the authorization API's `INSERT` statements were blocked behind row-level locks held by the newly-deployed reconciliation job's `UPDATE` statements against the same `order_ledger` table, which the recent deploy had changed from batched, smaller transactions to one large, long-running transaction for "simplicity."
+
+**Root cause:** The reconciliation job's new, larger transaction held exclusive row locks for several seconds per batch, and SQL Server's default lock escalation converted many row locks into a table-level lock under the increased volume, blocking the authorization API's unrelated inserts entirely — a classic blocking chain invisible to either service's own application-level profiling, only visible via database-level lock diagnostics correlated against the trace.
+
+**Fix:** The reconciliation job was reverted to smaller, batched transactions (capped at 500 rows) with explicit `READ COMMITTED` isolation and no `TABLOCK` hints, restoring row-level-only locking; additionally, the two workloads were split onto separate connection pools with distinct `Resource Governor` classifications so a future regression in one workload's transaction size couldn't again starve the other's connection availability.
+
+**Trade-offs:** Smaller batched transactions in the reconciliation job increased its own total runtime by roughly 12% (more transaction-commit overhead) in exchange for eliminating cross-service lock contention — an explicitly accepted trade-off given the reconciliation job's overnight time budget was not latency-sensitive, while the authorization API's was.
+
+**Lessons learned:** Profiling the *symptomatic* service alone (the authorization API) would never have found the root cause, since none of its own code was slow — the bottleneck lived in a shared resource contended by an entirely different, seemingly-unrelated service. Distributed tracing that correlates spans against the same downstream dependency (the database), not just within one service's own call graph, was the tool that actually localized this. This is a direct instance of this course's recurring theme: a service's own health metrics can look entirely normal while it is, in fact, the victim of a resource-contention bottleneck imposed by a neighbor sharing the same infrastructure.
+
+---
+
+## 5. Best Practices
+- Always measure before proposing a fix; state the specific metric a fix is expected to move and by how much, then re-measure the same way afterward.
+- Prefer low-overhead sampling profilers for production and for any concurrency-sensitive investigation; reserve instrumenting profilers for reproducible, isolated staging sessions.
+- Check `dotnet-counters`' CPU%, GC allocation rate, and ThreadPool queue length together as a first-pass triage before reaching for a full flame graph — each has a distinct signature.
+- Correlate application-level tracing with database-level lock/wait diagnostics for any bottleneck that traces show concentrated in a single downstream-dependency span.
+- Run multiple profiling/benchmark iterations and compare distributions, not single samples, before declaring a fix confirmed.
+- Instrument proactively (tracing spans around every meaningfully expensive operation) before an incident, not retroactively during one.
+
+## 6. Anti-patterns
+- Optimizing the first plausible-looking hot function in a flame graph without checking whether it's actually application logic, JIT warm-up, or GC noise.
+- Diagnosing any latency spike as "probably GC" without checking GC counters first.
+- Assuming a service's own clean CPU/memory metrics rule it out as the cause when a shared downstream resource (DB, cache, message broker) may be the actual, externally-imposed bottleneck.
+- Profiling only in staging with synthetic, evenly-distributed data that hides production-specific skew.
+- Trusting a single before/after benchmark run as proof a fix worked, without accounting for run-to-run variance.
+- Adding threads to a workload that profiling has already shown to be I/O-bound rather than CPU-bound.
+
+---
+
+## 7. Performance Engineering
+
+**CPU:** Flame-graph width is the primary CPU-time signal; always distinguish self-time (time in the function's own code) from total-time (including callees) — a wide bar in total-time view can be entirely attributable to one callee, misleading the fix target if self-time isn't checked separately.
+
+**Memory/GC:** Track allocation rate (bytes/sec) as the leading indicator, not steady-state heap size. Object pooling (`ArrayPool<T>`, `ObjectPool<T>`) and `Span<T>`/`ReadOnlySpan<T>` for stack-allocated slicing reduce Gen-0 churn directly. Server GC (concurrent, background collection) reduces pause *frequency* for throughput-oriented services at the cost of larger per-pause duration variance; Workstation GC with concurrent mode favors lower, more predictable pause times for latency-sensitive, low-throughput services (e.g., a trading order-entry path).
+
+**Latency vs. throughput benchmarking:** BenchmarkDotNet handles JIT warm-up, multiple iterations, and statistical outlier rejection automatically for micro-benchmarks — hand-rolled `Stopwatch` loops without warm-up phases systematically overstate cold-path cost.
+
+**Allocations as a first-class cost:** A hot path allocating 50 bytes per call at 10,000 calls/sec generates 500KB/sec of garbage — seemingly trivial per-call but enough to double Gen-0 collection frequency under sustained load; profiling allocation *call sites* (not just aggregate rate) via an allocation profiler (e.g., `dotnet-trace` with the `gc-collect` provider) localizes exactly which code path to fix.
+
+---
+
+## 8. Security
+
+**Secrets in traces/profiles:** A full-instrumentation profiler or a verbose distributed trace can capture method arguments, SQL query text with embedded parameter values, or HTTP request/response bodies — in a payments or KYC context, this can mean card numbers, SSNs, or auth tokens land in a profiler's captured data or a trace-storage backend that wasn't designed or access-controlled for PII/PCI-scoped data. Profiling and tracing configuration must explicitly scrub or exclude sensitive fields (parameterized query capture without literal values, PII redaction at the span-attribute layer) before data leaves the process, not as an afterthought at the storage layer.
+
+**Access to production profiling tools:** Continuous production profilers and their captured flame-graph/trace data are themselves a sensitive asset — they can reveal internal architecture, third-party integration endpoints, and (if not scrubbed) customer data, so access must be scoped via the same least-privilege/audit-trail discipline as any other production diagnostic tool, with captured profiling data retained under the same data-retention policy as logs.
+
+**DoS-shaped risk from profiling overhead itself:** Enabling a heavy, fully-instrumenting profiler against a live, latency-sensitive production path (rather than a low-overhead sampler) can itself degrade the service enough to constitute a self-inflicted denial-of-service — a real operational risk during an active incident when the temptation to "just turn on full tracing" is highest.
+
+---
+
+## 9. Scalability
+
+**Horizontal implications of profiling findings:** A CPU-bound bottleneck found via profiling is a candidate for horizontal scaling (more instances sharing the parallelizable load) only if the workload is genuinely stateless/partitionable; a lock-contention or shared-database bottleneck (as in §4's production example) is *not* resolved by adding more instances of the contending service — it requires addressing the shared resource itself (finer-grained locking, connection-pool/isolation separation, or partitioning the shared data).
+
+**Profiling at scale — sampling a representative fleet subset:** Running a full instrumenting profiler against every production instance is prohibitively expensive; continuous, low-overhead sampling profilers run against a representative subset of the fleet (e.g., 5–10% of instances) provide statistically sufficient flame-graph coverage without materially impacting aggregate fleet capacity.
+
+**HA/DR relevance:** A bottleneck diagnosis performed only against a single-region deployment may miss cross-region replication lag or multi-region lock-contention patterns that only manifest under active-active topology — profiling methodology should explicitly account for whether the finding generalizes across the full deployment topology or is specific to the region/instance profiled.
+
+---
+
+## 10. Interview Questions
 
 ### Basic (10)
 
@@ -255,3 +406,294 @@
  **Why correct:** Explicitly connects performance-diagnosis discipline to the course's broader, central recurring theme, demonstrating cross-domain synthesis at a Principal-Engineer level.
  **Common mistakes:** Treating performance engineering as a technically isolated discipline unrelated to the course's broader governance/verification themes established in Kubernetes, DevOps, CI/CD, Observability, and Security.
  **Follow-ups:** "Why is this cross-domain recognition specifically valuable in a Principal Engineer interview?" (It demonstrates the ability to recognize one generalizable engineering principle recurring across every technical domain, rather than treating each domain's lessons as isolated, unconnected facts — precisely the kind of synthesis this course has repeatedly emphasized as distinguishing senior-level thinking.)
+
+---
+
+## 11. Coding Exercises
+
+### Easy
+**Problem:** Given a method that builds a large report string via repeated `+=` concatenation inside a loop of N iterations, identify and fix the performance defect.
+**Solution:**
+```csharp
+// Before: O(n^2) — each += allocates a new string, copying all prior content
+string BuildReport(List<string> lines) {
+ string result = "";
+ foreach (var line in lines) result += line + "\n";
+ return result;
+}
+
+// After: O(n) — StringBuilder amortizes growth via an internal, resizable buffer
+string BuildReport(List<string> lines) {
+ var sb = new StringBuilder(lines.Count * 32); // pre-size to reduce reallocations
+ foreach (var line in lines) sb.Append(line).Append('\n');
+ return sb.ToString();
+}
+```
+**Time complexity:** O(n²) → O(n). **Space complexity:** O(n) both, but with far fewer intermediate allocations in the fixed version. **Optimized solution:** Pre-sizing the `StringBuilder`'s capacity (as shown) avoids even the buffer's own internal reallocation-and-copy steps for a known/estimable output size.
+
+### Medium
+**Problem:** A hot-path method repeatedly queries `list.Count(x => x.Status == "Active")` inside a loop over a large collection, causing an accidental O(n²). Diagnose via profiling signature and fix.
+**Solution:**
+```csharp
+// Before: O(n*m) — re-scans the full list once per outer iteration
+foreach (var order in orders) {
+ int activeCount = allItems.Count(x => x.Status == "Active"); // re-evaluated every iteration, unrelated to `order`
+ Process(order, activeCount);
+}
+
+// After: compute once, O(n+m)
+int activeCount = allItems.Count(x => x.Status == "Active");
+foreach (var order in orders) {
+ Process(order, activeCount);
+}
+```
+**Time complexity:** O(n·m) → O(n+m). **Space complexity:** O(1) extra in both. **Optimized solution:** A flame graph would show `Count`/the LINQ predicate delegate as the dominant self-time frame with a call count matching `orders.Count * allItems.Count` — the diagnostic signature of an accidental nested-loop invariant hoisting opportunity.
+
+### Hard
+**Problem:** Diagnose and fix thread-pool starvation in an ASP.NET Core controller action that calls a synchronous, blocking legacy SDK method from within an otherwise-async pipeline.
+**Solution:**
+```csharp
+// Before: blocks a thread-pool thread synchronously waiting on an async operation
+public IActionResult GetBalance(string accountId) {
+ var balance = _legacyClient.GetBalanceAsync(accountId).Result; // sync-over-async: starves the pool under load
+ return Ok(balance);
+}
+
+// After: genuinely async all the way through; if the SDK is truly sync-only,
+// offload to a dedicated, bounded thread pool rather than starving the shared ASP.NET Core pool
+public async Task<IActionResult> GetBalance(string accountId) {
+ var balance = await _legacyClient.GetBalanceAsync(accountId); // if a real async overload exists, use it directly
+ return Ok(balance);
+}
+
+// If the SDK genuinely has no async overload:
+private static readonly SemaphoreSlim _legacyGate = new(Environment.ProcessorCount * 2);
+public async Task<IActionResult> GetBalanceLegacySync(string accountId) {
+ await _legacyGate.WaitAsync();
+ try {
+ var balance = await Task.Run(() => _legacyClient.GetBalanceSync(accountId)); // isolates blocking work to a bounded pool
+ return Ok(balance);
+ } finally { _legacyGate.Release(); }
+}
+```
+**Time complexity:** No algorithmic change; the fix addresses concurrency throughput, not per-call complexity. **Space complexity:** O(1) additional per request (a semaphore slot). **Optimized solution:** Diagnosed via `dotnet-counters`' `ThreadPool Queue Length` climbing under load while CPU stays moderate — the starvation signature from §2.3 — confirming the fix by re-running the same load test and observing the queue length stay flat.
+
+### Expert
+**Problem:** Given production trace data showing a service's p99 latency dominated by GC pauses, design and implement an allocation-reduction fix for a hot-path method that deserializes and re-serializes a high-volume market-data message, without changing its external contract.
+**Solution:**
+```csharp
+// Before: allocates a new byte[] and a new deserialized object graph per message
+public byte[] Transform(byte[] input) {
+ var msg = JsonSerializer.Deserialize<MarketDataMessage>(input); // heap allocation
+ msg.ProcessedAt = DateTime.UtcNow;
+ return JsonSerializer.SerializeToUtf8Bytes(msg); // second heap allocation
+}
+
+// After: uses Utf8JsonReader/Writer directly over pooled buffers, avoiding the
+// intermediate object-graph allocation entirely for a hot, high-volume path
+public int Transform(ReadOnlySpan<byte> input, Span<byte> output) {
+ var writer = new ArrayBufferWriter<byte>(output.Length);
+ using var jsonWriter = new Utf8JsonWriter(writer);
+ var reader = new Utf8JsonReader(input);
+ // Stream-copy tokens field-by-field, injecting ProcessedAt without materializing
+ // a managed MarketDataMessage object at all — eliminates two large allocations per message.
+ CopyAndAugment(ref reader, jsonWriter);
+ jsonWriter.Flush();
+ writer.WrittenSpan.CopyTo(output);
+ return writer.WrittenCount;
+}
+```
+**Time complexity:** O(n) in message size, same as before. **Space complexity:** O(1) additional heap allocation per message (pooled/stack buffers only) versus O(n) (full object graph + two byte arrays) before. **Optimized solution:** At 50,000 messages/sec, eliminating ~2 allocations/message removes ~100,000 allocations/sec from Gen-0 pressure — confirmed via `dotnet-counters`' Allocation Rate dropping proportionally and Gen-0 collection frequency (and therefore p99 pause-correlated latency) falling in the re-measured load test.
+
+---
+
+## 12. System Design
+
+**Scenario:** Design a **continuous production profiling platform** for a FinTech firm's trading and payments estate (roughly 400 microservices, mixed .NET/JVM, multi-region), so that any service's flame-graph history is available on demand during an incident without needing to attach a profiler live under pressure.
+
+**Step 1 — Understand the Problem and Establish Design Scope.**
+
+*Q: Should this profile every request, or a sample?* A: Continuous sampling only — full instrumentation of 400 services' production traffic is both cost- and latency-prohibitive.
+*Q: Does this replace existing APM/tracing?* A: No — it complements distributed tracing (which already exists) by adding CPU/allocation flame-graph depth tracing doesn't provide; the two must be correlatable by trace ID and timestamp.
+*Q: Multi-region?* A: Yes — profiling data must stay region-local for data-residency reasons (some services process EU customer data) and be queried per-region, not centrally aggregated across borders.
+*Q: What's explicitly out of scope?* A: Client-side/frontend profiling, and profiling of third-party/vendor-hosted services we don't control.
+
+**Functional requirements:**
+- Continuously sample CPU and allocation flame graphs from every registered service instance at low, fixed overhead.
+- Retain and index profiling data for a rolling 30-day window, queryable by service, instance, and time range.
+- Allow an on-call engineer to pull a flame graph for "this service, this time window" within seconds during an active incident.
+- Correlate profiling samples with a given distributed-trace ID when available.
+
+**Non-functional requirements:**
+- Per-instance CPU overhead of the profiling agent must stay under 2%.
+- No PII/PCI-scoped data (query parameter values, request bodies) captured in profiling data.
+- 99.9% availability for the query/read path during incidents (the platform must not itself be down when needed most).
+- Data-residency compliance: EU-region profiling data never leaves EU storage.
+
+**Back-of-the-envelope estimation:** 400 services × ~15 instances average = 6,000 instances. At 1kHz sampling with a compact ~200-byte stack-trace record per sample, aggregated and downsampled to 1 record/instance/sec for storage (post-aggregation, not raw): 6,000 records/sec × 200 bytes ≈ 1.2MB/sec ≈ 100GB/day ≈ 3TB for a 30-day retention window — comfortably within a standard time-series/columnar store's capacity, meaning the hard problem here is **query latency during an incident and per-instance overhead**, not raw storage volume.
+
+**Step 2 — Propose High-Level Design and Get Buy-In.**
+
+**Component glossary:**
+- **Profiling Agent** — a lightweight, per-instance sidecar/in-process sampler (e.g., .NET's `dotnet-trace` in continuous mode, or an eBPF-based sampler for language-agnostic coverage) collecting stack samples at 1kHz and locally aggregating them into periodic flame-graph deltas.
+- **Ingestion Gateway** — regional endpoint receiving aggregated samples from agents, performing PII scrubbing (dropping any captured string literals matching known-sensitive patterns) before persistence.
+- **Regional Time-Series Store** — stores aggregated flame-graph data, partitioned by region, service, and time.
+- **Query API** — serves flame-graph queries by service/instance/time-range, used by the incident-response UI and correlated against trace IDs.
+- **Retention/Compaction Job** — rolls off data past 30 days and progressively downsamples older data to reduce storage cost.
+
+**Two core flows:**
+1. **Ingest flow** — Agent samples → local aggregation (reduces per-instance data volume before it ever leaves the host) → regional Ingestion Gateway → scrub → Regional Store.
+2. **Query flow** — On-call engineer queries Query API for {service, time range} → Query API reads Regional Store → renders flame graph, optionally overlaid with the correlated trace span.
+
+**Step 3 — Design Deep Dive.**
+
+- **Overhead control:** Sampling rate is adaptive — 1kHz baseline drops to 100Hz automatically if the agent detects its own CPU consumption exceeding the 2% budget, trading fidelity for safety under the non-negotiable overhead constraint.
+- **Data-residency enforcement:** Each region's Ingestion Gateway only ever writes to that region's own store; the Query API federates queries per-region rather than aggregating cross-region, and a query spanning regions requires explicit, separately-authorized cross-region access.
+- **PII scrubbing:** The Ingestion Gateway applies a scrub pass before persistence (not at query time) — captured stack traces include method signatures and line numbers but never captured local-variable/argument values, structurally preventing PII/PCI leakage at the source rather than relying on redaction after the fact.
+- **Failure handling:** If the Ingestion Gateway is unavailable, agents buffer locally (bounded ring buffer, oldest-dropped) and retry — profiling data loss during an outage is acceptable (best-effort observability), but agent-side blocking on a down gateway is not, since that would turn an observability outage into a production outage.
+- **Query-path availability during an incident:** The Query API and Regional Store are deployed with standard HA (multi-AZ, read replicas) independent of the ingestion path's health, so an ingestion-side incident doesn't also take down the ability to query *already-ingested* historical data during the very incident that triggered the need to look at it.
+
+**Step 4 — Wrap-Up.** Not covered here: alerting directly off profiling data (vs. metrics), cross-language flame-graph normalization for the mixed .NET/JVM estate, and cost-based automatic downsampling tuning — each a legitimate follow-up. The closing architecture: Agent → regional Gateway (scrub) → regional Store, queried independently of ingestion health, with adaptive sampling protecting the non-negotiable 2% overhead budget.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** A reusable, in-process profiling-session abstraction for the .NET side of the platform in §12 — start/stop a bounded-duration CPU sampling session, aggregate results, and expose them without leaking resources under concurrent, overlapping requests for the same instance.
+
+```mermaid
+classDiagram
+ class IProfilingSession {
+ <<interface>>
+ +Start(TimeSpan duration) Task
+ +Stop() ProfilingResult
+ }
+ class SamplingProfilingSession {
+ -RingBuffer~StackSample~ buffer
+ -CancellationTokenSource cts
+ +Start(TimeSpan duration) Task
+ +Stop() ProfilingResult
+ }
+ class ProfilingSessionFactory {
+ +CreateSession(ProfilingMode mode) IProfilingSession
+ }
+ class ProfilingResult {
+ +FlameGraphNode Root
+ +DateTime StartedAt
+ +TimeSpan Duration
+ }
+ class OverheadGuard {
+ +CheckBudget() bool
+ +AdjustSamplingRate() int
+ }
+ IProfilingSession <|.. SamplingProfilingSession
+ ProfilingSessionFactory --> IProfilingSession
+ SamplingProfilingSession --> OverheadGuard
+ SamplingProfilingSession --> ProfilingResult
+```
+
+```mermaid
+sequenceDiagram
+ participant OnCall as On-Call Engineer
+ participant API as Query API
+ participant Agent as Profiling Agent
+ participant Guard as OverheadGuard
+
+ OnCall->>API: request session (serviceId, duration=60s)
+ API->>Agent: Start(60s)
+ Agent->>Guard: CheckBudget()
+ Guard-->>Agent: OK, sample at 1kHz
+ loop every ~1ms for 60s
+ Agent->>Agent: capture stack sample -> ring buffer
+ end
+ Agent->>Agent: Stop() -> aggregate buffer into FlameGraphNode tree
+ Agent-->>API: ProfilingResult
+ API-->>OnCall: rendered flame graph
+```
+
+**Design patterns used:** **Factory** (`ProfilingSessionFactory` decouples callers from the concrete sampling implementation, allowing an eBPF-based or JVM-based session type to be swapped in per-language without changing callers); **Strategy** (`OverheadGuard`'s adaptive rate logic is swappable independent of the sampling mechanism); **Bounded buffer/ring buffer** (fixed-capacity `RingBuffer<StackSample>` guarantees O(1) memory regardless of session duration, oldest-sample-dropped under pressure).
+
+**SOLID mapping:** SRP — `SamplingProfilingSession` only samples/aggregates; `OverheadGuard` only enforces the budget; separated so budget policy can change without touching sampling logic. OCP — new profiling modes (allocation profiling, lock-contention profiling) extend via new `IProfilingSession` implementations without modifying the factory's callers. DIP — `Query API` depends on `IProfilingSession`'s abstraction, not the concrete sampler, allowing the .NET agent and a future JVM agent to share the same calling contract.
+
+**Concurrency/thread safety:** The ring buffer uses a lock-free, single-producer (the sampling timer callback) design where possible — a `lock`-protected buffer would itself introduce contention into the exact hot paths being profiled, an unacceptable observer-effect risk for a profiling tool. Multiple overlapping `Start` calls for the same instance are serialized via a single active-session guard (a `CompareExchange`-based flag) rather than a blocking lock, rejecting a second concurrent session request outright rather than queuing it.
+
+**Extensibility:** New sampling strategies (allocation-rate sampling, lock-contention sampling) plug in as new `IProfilingSession` implementations; the `OverheadGuard` policy is independently configurable per deployment tier (a latency-critical trading service might set a stricter 1% overhead budget than a batch-oriented back-office service).
+
+---
+
+## 14. Production Debugging
+
+**Incident:** A risk-calculation service's p99 latency grew steadily from 300ms to 4 seconds over a two-week period, with no corresponding deploy, traffic increase, or infrastructure change — surfacing first as a breach of the service's SLO burn-rate alert rather than a hard outage.
+
+**Root cause:** An in-memory `ConcurrentDictionary<string, RiskFactorSnapshot>` cache, intended to hold the current trading day's risk factors keyed by instrument ID, was never evicting stale entries — a bug introduced when a refactor replaced a fixed daily cache-clear job with an intended-but-never-implemented sliding-TTL eviction. Over two weeks, the cache grew from its intended ~5,000 entries to over 400,000 (accumulating every instrument ID ever queried, including delisted and test instruments), inflating the Gen-2 heap and causing full GC pauses to grow proportionally longer as the "long-lived, supposedly-small" cache generation grew.
+
+**Investigation:** `dotnet-counters` showed Gen-2 GC pause duration climbing steadily and correlating precisely with the SLO burn-rate alert's timeline. A heap snapshot (via `dotnet-dump` / `dotnet-gcdump`) showed the `ConcurrentDictionary` instance retaining 400k+ entries — 80x its expected size — immediately identifying the specific object graph responsible for the abnormal Gen-2 growth. Cross-referencing entry timestamps in the dictionary's values against the known refactor's deploy date confirmed the eviction logic had silently stopped functioning at that point, two weeks prior — the classic slow-leak signature from §Expert Q1 requiring long-duration (multi-day) trend analysis rather than a short profiling snapshot to catch.
+
+**Tools:** `dotnet-counters` (GC pause/Gen-2 size trend), `dotnet-gcdump` (heap snapshot and object-graph inspection), git blame/deploy-history correlation.
+
+**Fix:** Restored explicit sliding-TTL eviction (a `Timer`-driven sweep removing entries older than the trading day boundary) and added an automated test asserting the cache's steady-state size stays within an expected bound under simulated sustained load — converting the previously-silent invariant ("this cache stays small") into an actively-tested one.
+
+**Prevention:** Added a dashboard metric and alert directly on the cache's entry count (not just heap size or GC pause duration), since a growing entry count is the earliest, most specific leading indicator of this exact failure mode — alerting on it catches the next instance of this bug class within hours rather than the two weeks it took the GC-pause-driven SLO alert to accumulate enough signal to fire.
+
+---
+
+## 15. Architecture Decision
+
+**Decision:** Which production profiling approach should the risk-calculation platform in §14 standardize on going forward: (A) always-on continuous low-overhead sampling profiling for every service, (B) profiling only reactively during active incidents, or (C) a hybrid — always-on lightweight metrics plus on-demand, triggerable deep profiling?
+
+| Option | Advantages | Disadvantages | Cost | Complexity | Scalability |
+|---|---|---|---|---|---|
+| **A. Always-on continuous profiling** | Historical flame-graph data available for any past incident, even ones not anticipated in advance (as in §14, where the trend had to be reconstructed after the fact) | Sustained per-instance overhead (even if small) across the entire fleet, 24/7, for value realized only during the fraction of time an incident is being investigated | Highest ongoing infra/storage cost | Highest — requires the full platform in §12 | Scales to entire fleet size linearly in storage; proven ingest-path design required |
+| **B. Reactive-only, attach on incident** | Zero steady-state overhead; simplest to build | No historical data before the incident was recognized — precisely the trend §14 needed and wouldn't have had; requires an engineer to correctly attach a profiler live, under incident pressure | Lowest infra cost | Lowest | Doesn't scale as an *investigative* tool for slow-onset issues; scales fine as a point tool |
+| **C. Hybrid — lightweight always-on metrics + on-demand deep profiling** | Cheap, always-on counters (GC rate, allocation rate, cache size) catch the *existence* of a slow-onset trend early (directly closing the gap §14's postmortem identified); full flame-graph profiling triggered only when a metric threshold is crossed, containing cost | Requires defining the right lightweight leading-indicator metrics in advance per service — an incomplete metric set still misses novel failure modes | Moderate — pays for cheap counters everywhere, deep profiling only situationally | Moderate | Scales well: metrics overhead is near-zero at any fleet size; deep-profiling cost scales only with actual incident frequency |
+
+**Recommendation:** **Option C**, with the specific lightweight metrics chosen per-service based on that service's own known risk patterns (e.g., cache entry counts for cache-heavy services, connection-pool utilization for DB-heavy services) — directly the fix applied in §14. Pure Option A's blanket, full continuous-flame-graph overhead across an entire 400-service fleet is difficult to justify given most services' profiling data is never actually queried; pure Option B's complete absence of historical trend data was the exact gap that let the §14 incident's root cause hide for two weeks before symptom-driven investigation began. Option C's cheap, ubiquitous leading-indicator metrics plus situational deep profiling captures most of Option A's early-detection value at a small fraction of its steady-state cost.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** Undiagnosed performance regressions in a payments/trading estate translate directly into missed SLAs, regulatory scrutiny (a settlement batch that runs past its cutoff window can trigger a real, reportable operational incident), and customer-facing latency that erodes trust in latency-sensitive products (trading, real-time payments). The cost of *not* investing in profiling infrastructure is not merely "engineers debug slower" — it's measured in incident duration, SLA penalty exposure, and the opportunity cost of engineers firefighting instead of building.
+
+**Engineering trade-offs:** Every profiling investment trades steady-state overhead/cost against incident-response speed and historical-diagnosis capability — a Principal Engineer's job is to right-size this trade-off per service tier rather than applying one blanket policy, exactly as argued in §15's Option C recommendation: a latency-critical trading path warrants a tighter overhead budget and more aggressive leading-indicator alerting than a low-criticality internal reporting batch job.
+
+**Technical leadership:** A Principal Engineer establishes the *methodology* (measure before fixing, distinguish CPU/GC/lock/IO signatures, require repeated runs before declaring a fix confirmed) as a team-wide discipline via code review and postmortem culture, not merely applying it personally — the value compounds when every engineer on the team reaches for the same rigor rather than one person being the designated "performance expert" bottleneck.
+
+**Cross-team communication:** Performance findings must be translated into terms each audience actually needs: an SRE needs the specific metric and threshold that will catch a recurrence; a product/business stakeholder needs the customer-facing impact and the cost/benefit of the fix; a fellow engineer needs the specific flame-graph/trace evidence and reproducible methodology — the same underlying finding, presented three different ways.
+
+**Architecture governance:** A Principal Engineer establishes standards (e.g., "every new cache must have an entry-count metric and an alert threshold, per the §14 postmortem's lesson") that get enforced via design review and, ideally, automated lint/test gates, converting a single incident's lesson into a durable, fleet-wide guardrail rather than a one-off fix.
+
+**Cost optimization:** Continuous profiling infrastructure (§12) has a real, ongoing cost — a Principal Engineer weighs that cost explicitly against the demonstrated cost of undiagnosed incidents (using §14-style postmortems as the evidence base), rather than either under-investing (leaving the organization blind to slow-onset regressions) or over-investing (paying full continuous-profiling overhead on every low-criticality service regardless of actual incident history).
+
+**Risk analysis:** The risk of *not* profiling is asymmetric and back-loaded — most of the time, nothing is wrong, and the investment looks unnecessary, until the one incident (as in §14) where two weeks of undetected degradation becomes an SLO-breaching, customer-facing event; a Principal Engineer explicitly names this asymmetry when justifying investment to stakeholders who see only the steady-state "nothing's broken" state.
+
+**Long-term maintainability:** Performance-diagnosis discipline and instrumentation coverage decay silently if not actively maintained — a metric that was meaningful when added can become stale as the system evolves (a cache-size alert threshold set for 5,000 entries needs revisiting if the business genuinely grows to require 50,000). Treating instrumentation and its thresholds as living artifacts requiring periodic review, not "set once" infrastructure, is what keeps the discipline effective years after it was first built.
+
+---
+
+## 18. Revision
+
+**Key Takeaways:**
+- Measure before optimizing; localize to the specific resource (CPU, GC, lock, I/O, shared downstream dependency) using the diagnostic signal suited to that layer.
+- Sampling profilers for production (low overhead); instrumenting profilers for reproducible staging deep dives.
+- A service's own clean metrics don't rule it out as the cause — shared-resource contention (as in §4) can make an innocent service the victim of a neighbor's regression.
+- Allocation rate, not heap size, is the leading GC-pressure indicator.
+- Thread-pool starvation has a distinct signature: growing queue length with moderate/low CPU.
+- Single before/after benchmark runs are not statistically reliable; require repeated measurement.
+
+**Interview Cheatsheet:**
+| Symptom | First metric to check | Likely cause |
+|---|---|---|
+| High latency, CPU pegged | CPU flame graph | Genuine CPU-bound / algorithmic |
+| High latency, CPU moderate, ThreadPool queue growing | `dotnet-counters` ThreadPool | Thread-pool starvation (sync-over-async) |
+| Periodic latency stalls | GC pause/Gen-2 counters | GC pressure — check allocation rate |
+| Latency concentrated in one DB span | Distributed trace + SQL lock DMVs | Blocking/lock contention, possibly cross-service |
+| Sharp cliff at a concurrency threshold | Load test at increasing concurrency | Resource-pool exhaustion |
+
+**Things Interviewers Love:** naming the specific tool and metric for each diagnostic step; distinguishing symptom from root cause explicitly; citing a real, numbers-backed production scenario; acknowledging the observer effect and measurement noise rather than treating profiler output as ground truth.
+
+**Things Interviewers Hate:** "I'd just add more servers/threads" without diagnosing the actual bottleneck first; treating GC as an unconditional villain without checking allocation rate; claiming a fix worked based on a single run; ignoring the possibility a shared resource, not the symptomatic service, is the actual cause.
+
+**Common Traps:** conflating flame-graph height (call depth) with time spent (width is the real signal); assuming ample RAM eliminates GC's CPU cost; assuming a staging profiling result generalizes to production's skewed real data; assuming vertical scaling or more threads fixes an I/O-bound or lock-contention problem.
+
+**Revision Notes:** Before an interview, be ready to walk through the full triage flow in §3's flowchart from memory, and have one concrete production incident (real or the §4/§14 style) ready to narrate end-to-end: symptom → tool → signal → root cause → fix → verification → prevention.

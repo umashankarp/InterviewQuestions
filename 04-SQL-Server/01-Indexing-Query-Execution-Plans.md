@@ -77,6 +77,44 @@ graph TB
 
 ---
 
+## 7. Performance Engineering
+
+**CPU**: An index seek's CPU cost scales with matching rows plus B+ tree depth (typically 3-4 levels even for a multi-million-row table, since each level fans out by hundreds of entries) — a scan's CPU cost scales linearly with every row/page touched, which is why a seek-vs-scan misdiagnosis is the single biggest CPU-cost lever in this module's scope. A hash join's build phase is CPU-intensive proportional to the smaller input's row count; a sort operator (feeding a merge join, or satisfying an `ORDER BY` with no supporting index) is O(n log n) CPU cost that a covering, ordered index can eliminate entirely.
+
+**Memory**: The optimizer requests a **memory grant** (for sort/hash workspace) sized from the same cardinality estimate driving plan selection — an underestimated grant causes a **spill to tempdb** (the sort/hash overflows to disk, visible in the plan as a `SpillToTempDb` warning, often a 10-100x slowdown for that operator); an overestimated grant wastes server memory and can starve concurrent queries waiting on `RESOURCE_SEMAPHORE` for their own grant. This is the same cardinality-estimation dependency as plan-shape selection (§2.4), just manifesting as a memory problem instead of a join-algorithm problem.
+
+**Execution-plan/compilation cost**: Every distinct query text (or one lacking parameterization) triggers a fresh compilation, consuming CPU and plan-cache memory — non-parameterized ad-hoc SQL (string-concatenated literals instead of parameters) is a classic **plan cache bloat** anti-pattern: thousands of single-use plans evict genuinely reusable ones and add per-execution compilation overhead that stored procedures/parameterized queries avoid.
+
+**Index write cost**: Every nonclustered index adds an update to every insert/update/delete touching its key or `INCLUDE` columns — a table with 8 indexes pays that cost 8 times per write; for a high-ingest FinTech ledger/order table, this is frequently the dominant cost driver, making "how many indexes does this table actually need" a genuine capacity-planning question, not just a design nicety.
+
+**Benchmarking**: Use `SET STATISTICS TIME, IO ON` for logical reads/CPU/elapsed time per statement, and the actual execution plan's operator-level warnings (spill, memory grant, excessive actual-vs-estimated rows) as the primary diagnostic signal — never benchmark against an empty or freshly-reindexed table, since fragmentation and realistic data-skew change both seek cost and cardinality estimates materially.
+
+**Caching**: SQL Server's **buffer pool** caches data/index pages in memory across executions — a "cold cache" first execution of a query touching pages not yet resident is dominated by physical I/O, while a warm cache serves entirely from memory; a working set (hot index pages for the most active accounts/instruments) that fits comfortably in buffer pool memory is a major, often-overlooked lever for OLTP latency, distinct from and additive to index design itself.
+
+## 8. Security
+
+**SQL injection and index/plan interaction**: String-concatenated dynamic SQL is both a classic injection vector *and* defeats the plan cache (each injected literal produces a distinct query text) — parameterized queries/stored procedures fix both problems simultaneously, which is a genuinely useful framing when explaining to a team why "just use parameters" is a security fix and a performance fix at once, not two separate asks.
+
+**Least privilege**: Grant `ALTER INDEX`/`CREATE INDEX` rights narrowly (a dedicated DBA/release-automation role), not broadly to application service accounts — an application account only ever needs `SELECT`/`INSERT`/`UPDATE`/`DELETE` on its own schema, never DDL rights that could let a compromised application identity silently drop or degrade production indexes.
+
+**Information disclosure via `INCLUDE` columns**: A covering index's `INCLUDE` list physically duplicates column data into the index's leaf pages — including a sensitive column (SSN, account number) purely to make one query covering widens that column's on-disk footprint and backup/restore exposure surface without a corresponding access-control benefit; weigh covering-index design against data-minimization, not purely against query speed.
+
+**Encryption at rest (TDE)**: Transparent Data Encryption encrypts data and index pages transparently at the storage-engine I/O layer — seeks/scans operate on decrypted in-memory buffer-pool pages exactly as without TDE, so index design and query-plan behavior are unaffected by enabling it; the cost is at the physical I/O layer (page encrypt/decrypt), not the logical seek/scan cost.
+
+**Audit logging**: Track DDL changes to indexes (`CREATE`/`DROP`/`ALTER INDEX`) via **SQL Server Audit** or Extended Events specifically — an unreviewed index drop by a well-intentioned cleanup script is a realistic, high-impact incident class (§14) in any production financial system, and having an audit trail of exactly who changed which index and when is the difference between a five-minute root-cause and a multi-hour one.
+
+## 9. Scalability
+
+**Read replicas**: Always On Availability Group **readable secondaries** offload reporting/analytical scans from the primary — but secondaries apply changes via log redo, not independent index maintenance, so a secondary's index state always trails the primary by the current redo lag; a reporting query relying on a secondary's index must tolerate that staleness, which matters materially for regulatory "as of now" reporting (cross-reference Module 19 Expert Q3).
+
+**Partitioning**: Partition-aligned indexes (an index sharing the base table's partition scheme) enable **partition elimination** — a query with a predicate on the partition key only scans/seeks the relevant partition(s), not the whole table — essential for a billion-row time-series/ledger table's both reporting-scan and retention (`SWITCH`-based archival) story.
+
+**Sharding**: Cross-shard index design is duplicated per shard with no engine-level cross-shard index — a query spanning shards requires application-level fan-out and merge, since no single B+ tree spans the shard boundary; index design decisions (covering columns, key order) must be made per-shard but are typically identical across shards for a uniformly-sharded schema.
+
+**HA/DR**: Index rebuild/reorganize operations generate substantial transaction-log volume, which must ship to every synchronous/asynchronous secondary in an Always On AG — scheduling large index maintenance requires accounting for secondary log-shipping bandwidth and redo-thread catch-up capacity, not just primary-side resource availability, to avoid growing replication lag as a side effect of routine maintenance.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -145,6 +183,42 @@ graph TB
  **Common mistakes:** Assuming system-versioned time equals business effective date; no index on validity columns (scans); unbounded history table; ignoring backdated corrections.
  **Follow-ups:** "System time vs. business time — why does a backdated correction break the naive model?" / "How do you keep the temporal history table's size manageable?" / "How does an append-only ledger give you as-of balances for free?"
 
+4. **Q: A firm wants a real-time, always-current aggregate (e.g., net position per instrument) computed from a high-ingest trades table, without hitting the aggregate query's cost on every read. Design this using an indexed view, and explain the restrictions/trade-offs.**
+ **A:** SQL Server's **indexed view** (a materialized, `SCHEMABINDING`-bound view with a unique clustered index) physically stores the aggregated result and — critically — **maintains it transactionally, synchronously, on every underlying `INSERT`/`UPDATE`/`DELETE`** to the base table(s), so reads never see a stale aggregate and never pay the aggregation cost at read time. Requirements/restrictions: the view must be `SCHEMABINDING`'d (base tables can't be altered incompatibly without dropping the view first), aggregates are restricted to a specific deterministic subset (`SUM`, `COUNT_BIG`, no `AVG`/`MAX`/`MIN` directly — compute `AVG` from `SUM`/`COUNT_BIG`), no outer joins, and several session `SET` options must be fixed (`ANSI_NULLS`, `QUOTED_IDENTIFIER`, etc.). The trade-off is symmetrical to any index: every write to the base trades table now also maintains the indexed view's clustered index synchronously, adding write latency/cost — appropriate specifically when the read pattern is frequent/latency-critical (a live risk dashboard) and the write volume/latency budget can absorb the added maintenance cost; for a very high-ingest table where writes are the bottleneck, a periodically-refreshed columnstore or a stream-processing aggregation (Kafka Streams/ksqlDB) pattern is usually the better trade rather than forcing every write to pay synchronous view-maintenance cost.
+ **Why correct:** Explains the synchronous, transactional maintenance mechanism, states the real restrictions (SCHEMABINDING, deterministic aggregates, no outer joins), and correctly frames the write-cost trade-off against read-latency benefit.
+ **Common mistakes:** Confusing an indexed view with a periodically-refreshed materialized view (SQL Server's is always synchronously current, not refresh-on-schedule); forgetting the aggregate-function restrictions; not weighing added write cost against the high-ingest table's throughput budget.
+ **Follow-ups:** "Why is `AVG` not directly supported?" (It isn't incrementally maintainable from a single stored value the way `SUM`/`COUNT_BIG` are — the engine requires you to store both and divide.) / "When would you prefer a columnstore over an indexed view for this?" (When the write-latency budget can't absorb synchronous maintenance and near-real-time, not synchronously-instant, freshness is acceptable.)
+
+5. **Q: A columnstore index is proposed for a historical trade/ledger analytics table currently served by rowstore indexes. Explain the internal difference and when this is the right call.**
+ **A:** A rowstore (B+ tree) index stores data row-by-row, optimized for point lookups/range seeks touching a small number of columns out of many; a **columnstore index** stores data column-by-column in compressed **segments** (each covering ~1 million rows), optimized for scanning a small number of columns across a very large number of rows — exactly the shape of analytical aggregation queries (`SUM(Amount) GROUP BY InstrumentId, Month`) common in ledger/trade reporting. Columnstore's **batch-mode execution** processes ~900 rows at a time instead of row-by-row, and per-segment **min/max metadata** enables **segment elimination** (skipping entire segments that can't match a predicate) analogous to partition elimination but at a finer grain. The trade-off: columnstore is poor for OLTP-style point lookups/frequent single-row updates (updates are handled via a delete-bitmap-plus-new-row mechanism, and heavy OLTP churn fragments the columnstore, requiring periodic reorganization to merge delta-store rowgroups back into compressed segments) — the right call specifically for a large, append-heavy or batch-loaded historical/analytical table serving aggregation-heavy reporting, not for the same table's live, high-frequency OLTP write path (which should keep its rowstore indexes, or the table should be split into an OLTP-current + archived-columnstore-historical pair).
+ **Why correct:** Explains column-store physical layout, batch-mode execution, segment elimination, and correctly scopes the recommendation to analytical/reporting workloads rather than OLTP.
+ **Common mistakes:** Adding columnstore to a table still under heavy single-row OLTP churn without considering delta-store fragmentation; assuming columnstore replaces rowstore indexes rather than complementing them for different workload shapes; ignoring segment elimination's dependence on data being reasonably sorted/loaded in a predicate-aligned order.
+ **Follow-ups:** "What is the delta store?" (A rowstore holding recently-inserted/updated rows not yet compressed into columnstore segments, merged in periodically.) / "Can a table have both a columnstore and rowstore index?" (Yes — a nonclustered columnstore alongside the table's normal rowstore clustered/nonclustered indexes, common for a "mostly OLTP, occasionally analytical" table.)
+
+6. **Q: An `Orders` table has 50 million historical rows but only ~50,000 are currently "open"/actionable — the OLTP hot path only ever queries open orders. Design an index minimizing both storage and write cost for this access pattern.**
+ **A:** A **filtered index** — `CREATE NONCLUSTERED INDEX IX_Orders_Open ON Orders(AccountId, Status) INCLUDE (...) WHERE Status IN ('Open','PartiallyFilled')` — indexes only the qualifying subset of rows, giving three compounding benefits: (1) the index is orders of magnitude smaller (indexing 50K rows instead of 50M), so it fits far more effectively in buffer pool memory and is dramatically cheaper to seek/scan; (2) write cost is paid only when a row's *current* state matches the filter predicate — an already-closed historical order being updated for an unrelated reason doesn't touch this index at all; (3) statistics on a filtered index are scoped to just the filtered subset, giving the optimizer a much more accurate cardinality estimate for open-order queries than a full-table index's statistics would. The caveat: the query's predicate must be provably compatible with (a subset of, or matching) the filter predicate for the optimizer to consider the filtered index at all — a query filtering on `Status = 'Cancelled'` obviously can't use it, and even a query using `Status = 'Open'` via a parameter rather than a literal can, in some cases, require `OPTION (RECOMPILE)` for the optimizer to prove compatibility at compile time rather than runtime.
+ **Why correct:** Correctly identifies the filtered-index solution and explains all three benefits (size, write cost, statistics accuracy) plus the predicate-compatibility caveat.
+ **Common mistakes:** Indexing the full 50M-row table when only the hot 50K-row subset is ever queried; not realizing filtered-index statistics are scoped to the filter and are more accurate for that subset than the table's general statistics.
+ **Follow-ups:** "Why might a parameterized query fail to use a filtered index while the literal-value version succeeds?" (The optimizer must prove the parameter's possible values are always compatible with the filter at compile time, which a literal makes trivial and a parameter can require `OPTION (RECOMPILE)` or `OPTIMIZE FOR` to resolve.) / "How does this compare to partitioning the table by status?" (Partitioning is a heavier-weight, whole-table physical reorganization; a filtered index is a lightweight, targeted structure for one specific hot-subset access pattern.)
+
+7. **Q: A nightly index-rebuild maintenance job on a multi-terabyte `Trades` table must complete within a shrinking maintenance window, and the table is now too large to rebuild in one pass without risking a missed window. What SQL Server capability addresses this, and how does it work internally?**
+ **A:** **Resumable Online Index Rebuild** (SQL Server 2017+, Enterprise Edition) lets an `ALTER INDEX... REBUILD WITH (ONLINE = ON, RESUMABLE = ON)` operation be explicitly **paused** (`ALTER INDEX... PAUSE`) — e.g., when the maintenance window closes — and **resumed** later (`ALTER INDEX... RESUME`) from its last committed progress point, rather than restarting from scratch or being forcibly killed mid-operation. Internally, it works by breaking the rebuild into internally-tracked batches, each committed as it completes, with the operation's log-space requirements bounded (unlike a traditional single-transaction rebuild, whose log growth is proportional to the entire index size) — this bounded-log-growth property is itself often the primary reason to use it even independent of the pause/resume capability, since a giant traditional rebuild's log growth can itself threaten to fill the transaction log on a busy production database. The trade-off: resumable rebuilds have a small additional overhead versus a traditional one-shot online rebuild, and require Enterprise Edition — justified specifically when the maintenance-window constraint or the log-growth risk (or both) make a traditional single-pass rebuild operationally unsafe.
+ **Why correct:** Explains the pause/resume mechanism, the internal batched-commit implementation, and the bounded-log-growth benefit as often the more important reason to adopt it.
+ **Common mistakes:** Thinking resumable rebuild is purely about pause/resume convenience without recognizing the bounded transaction-log growth as an equally important, often primary, motivation.
+ **Follow-ups:** "What happens if the connection running the rebuild is lost mid-operation without an explicit PAUSE?" (The operation remains resumable from its last internally-committed batch — it doesn't need to have been explicitly paused to be resumable later.) / "Does this require Enterprise Edition?" (Yes, as of the versions where it was introduced — a real cost/licensing consideration for the recommendation.)
+
+8. **Q: After a routine deployment, a previously-fast stored procedure regresses badly in production, but `UPDATE STATISTICS` doesn't fix it. How do you use Query Store to diagnose and remediate this specific class of regression, and how does it differ from the stale-statistics fix in §4?**
+ **A:** **Query Store** (SQL Server 2016+) persistently records every plan compiled for a query along with its runtime performance metrics over time — critically, unlike the plan cache (which is ephemeral and shows only the *current* plan), Query Store lets you directly compare the query's plan and performance **before and after the deployment**, immediately distinguishing "the plan changed" (a genuine plan regression, often from parameter sniffing on a newly-compiled plan, a statistics update, or a schema/index change shipped in the deployment) from "the plan is the same but runs slower" (pointing instead at a data-volume/contention change, not a plan problem at all). If Query Store confirms a plan regression specifically, **`sp_query_store_force_plan`** can pin the query to its previously-good plan immediately — a fast, safe mitigation buying time to properly diagnose *why* the optimizer chose the new plan, without needing to modify application code or wait for a stats-driven fix to naturally occur. This differs from the §4 stale-statistics incident specifically: that regression had *no* plan change at all (the same nested-loop plan just became wrong for the new data volume) and was fixed by correcting the input (statistics) the optimizer used; a Query-Store-diagnosed regression often *is* a plan change, requiring either forcing the prior plan or addressing why the optimizer's new choice is worse (e.g., a bad parameter-sniffing compile).
+ **Why correct:** Explains Query Store's before/after comparison capability, distinguishes plan-change regressions from same-plan slowdowns, and correctly contrasts this diagnostic path with the different §4 stale-statistics scenario.
+ **Common mistakes:** Reflexively running `UPDATE STATISTICS` for every regression without first checking via Query Store whether the plan actually changed; not knowing `sp_query_store_force_plan` exists as an immediate, safe mitigation.
+ **Follow-ups:** "Is forcing a plan a permanent fix?" (No — it's a stabilizing mitigation; the underlying reason the optimizer chose a worse plan should still be investigated and, ideally, addressed so forcing isn't relied on indefinitely.) / "What Query Store setting controls how much history is retained for this kind of before/after comparison?" (`QUERY_CAPTURE_MODE` and the retention/cleanup policy, which must be sized to actually retain data spanning the deployment being investigated.)
+
+9. **Q: A high-ingest table's inserts occasionally show severe waits on `PAGELATCH_EX` against **tempdb** pages (not the base table), correlating with heavy sort/hash-spill activity from a set of poorly-indexed reporting queries running concurrently. Diagnose the mechanism and the fix, distinguishing it from Expert Q1's base-table last-page contention.**
+ **A:** This is **tempdb allocation-page contention** — a distinct mechanism from Expert Q1's base-table last-page latch contention, though superficially similar. When many concurrent sessions need to allocate new pages in tempdb (for sort/hash spills, worktables, or the version store under RCSI/Snapshot Isolation), they all contend for the same small set of allocation metadata pages (GAM/SGAM/PFS pages) tracking free space — a genuine, well-known SQL Server scalability bottleneck at high concurrency, independent of any specific user table's key design. The fix has two standard parts: (1) **multiple tempdb data files** (a long-standing best practice — typically one file per up-to-8 logical CPU cores, all pre-sized equally) spreads the allocation-page contention across multiple files' independent allocation structures instead of one; (2) **trace flags 1117/1118** (or, on modern SQL Server versions, this behavior is default-on) ensure all tempdb files grow together proportionally and use uniform extent allocation, both reducing allocation-page hot-spotting. Critically, the *root* fix here is still addressing the poorly-indexed reporting queries causing the spills in the first place (§7's spill discussion) — the tempdb file configuration mitigates the *symptom's* severity under concurrent load, but eliminating unnecessary spills via correct indexing removes the underlying tempdb pressure entirely.
+ **Why correct:** Correctly distinguishes tempdb allocation-page contention from base-table last-page latch contention, prescribes the standard multiple-tempdb-files/trace-flag mitigation, and correctly identifies the poorly-indexed queries causing spills as the actual root cause to fix.
+ **Common mistakes:** Confusing this with Expert Q1's base-table sequential-key contention (different resource, different fix); treating multiple tempdb files as a complete fix rather than a mitigation for a root cause (unnecessary spills) that should also be addressed.
+ **Follow-ups:** "Why does RCSI/Snapshot Isolation add to this specific contention class?" (Its version store lives in tempdb, so a database-wide switch to RCSI adds a new, continuous source of tempdb allocation activity on top of whatever spill activity already existed.) / "How many tempdb files is 'enough'?" (A common starting heuristic is one file per logical core up to 8, then evaluate contention via `sys.dm_os_waiting_tasks` before adding more — not an unlimited scale-out lever.)
+
 ---
 
 ## 11. Coding Exercises
@@ -194,9 +268,157 @@ END
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-A reporting platform's query layer treats execution-plan analysis (estimated vs. actual row counts) as the mandatory first diagnostic step for any performance investigation, with automated monitoring (Advanced Q8) tracking cardinality-estimate accuracy for the organization's top business-critical queries proactively. The signature production lesson is precisely: a "slow query" incident that required zero query or index changes, only a statistics refresh — reinforcing that jumping straight to "add an index" without first examining the actual plan is a common, costly diagnostic shortcut to avoid. Principal-level guidance: build the execution-plan-first diagnostic discipline into the organization's standard incident-response runbook (Advanced Q10), since this single practice resolves a large fraction of real-world SQL Server performance incidents faster and more correctly than reflexive index/query changes.
+**Scenario**: Design the query-and-indexing layer for a **real-time trade blotter service** at a mid-size broker-dealer — traders and risk desks need sub-200ms views of "my current open orders and fills," while compliance/back-office needs historical range queries ("all trades for account X between two dates") against the same underlying data, and a nightly batch settlement job needs to scan large date ranges without degrading the live trading day.
+
+- **Functional requirements**: Live open-order/fill lookups by account/instrument (point-lookup-shaped); historical range queries by account+date (range-scan-shaped); nightly batch settlement scans by full-day date range; all three against data flowing from the same continuous order/execution ingest stream.
+- **Non-functional requirements**: p99 < 200ms for the live blotter lookup during market hours; the nightly batch scan must not measurably degrade live trading-hour latency; index/statistics maintenance must fit within a defined overnight/weekend maintenance window; the system must support point-in-time ("as of") reconstruction for regulatory inquiry.
+- **Architecture**: A single SQL Server OLTP database (Always On Availability Group, one primary + one synchronous secondary for HA, one asynchronous readable secondary for reporting/back-office offload) is the source of truth, fed by an ingest pipeline (order/execution events land via a message queue into a staging table, then upserted into the main `Orders`/`Executions` tables inside short transactions). The `Orders` table is **range-partitioned by trade date**, with the current day's partition kept small and hot, aligned nonclustered covering indexes on `(AccountId, Status)` (a filtered index scoped to open/actionable orders, per Expert Q6) serving the live blotter path, and a separate `(AccountId, TradeDate)` covering index serving the historical range-query path. The nightly batch settlement job runs against the **asynchronous readable secondary**, not the primary, so its large date-range scans never contend for locks/CPU with live trading-hour OLTP traffic (§9) — accepting a small, well-understood replication-lag staleness window for the batch's own read, which is acceptable since settlement runs after market close against a definitionally-closed trading day.
+- **Data model**: `Orders(OrderId PK, AccountId, InstrumentId, Status, TradeDate, ...)` clustered on `(TradeDate, OrderId)` (aligning the clustered key with the partition scheme, per §9), with the filtered `IX_Orders_Open` covering index and the `(AccountId, TradeDate)` covering index as described. `Status` moves through a `NOT_STARTED → EXECUTING → FILLED | CANCELLED` lifecycle exactly mirroring this course's standing status-enum convention; every status transition is a single, short, indexed `UPDATE` guarded by an idempotency/version check.
+- **Caching**: A short-TTL (2-5 second) read-through cache (Redis) sits in front of the live-blotter query path specifically, since the same "my open orders" view is polled repeatedly by the same trader's UI — this reduces buffer-pool/index pressure far more than any further index tuning could for a read-repeated-many-times-per-second pattern.
+- **Messaging**: Order/execution events arrive via a durable queue (Kafka/MSMQ-style), consumed idempotently (unique constraint on the event's idempotency key, per Module 19 Expert Q4) into the staging-then-upsert pipeline, decoupling ingest burstiness from the OLTP database's own write capacity.
+- **Scaling/failure handling**: The readable secondary absorbs reporting/batch load (§9); a secondary outage degrades reporting/batch freshness but never the primary's live-blotter availability (an intentional failure-isolation boundary); a primary failover (Always On automatic failover) is transparent to the live-blotter path within the AG's defined RPO/RTO, at the cost of a brief connection-retry window the client tier must handle gracefully.
+- **Monitoring**: Query Store (Expert Q8) tracks per-query plan stability across every deployment; execution-plan estimated-vs-actual row-count deviation is monitored continuously for the top N business-critical queries (Advanced Q8 of §10); replication lag on the readable secondary is monitored explicitly and surfaced to the batch job so a lag beyond a defined threshold delays, rather than silently runs against stale data.
+- **Trade-offs**: Splitting live-OLTP and reporting/batch traffic across primary/secondary adds AG operational complexity (failover testing, lag monitoring) versus a single-database design, accepted because it structurally guarantees the batch job can never be the cause of a trading-hours latency incident — directly the same class of fix as the reporting-query-blocks-writes lesson in Module 19 §4, applied here at the infrastructure-topology level instead of the isolation-level setting.
+
+## 13. Low-Level Design
+
+**Scenario**: Design a small, reusable **Missing-Index Advisory Service** that wraps SQL Server's raw `sys.dm_db_missing_index_details` DMV output (§2.6) with the human judgment layer §2.6 says is required — deduplicating near-identical suggestions, estimating write-cost impact, and scoring recommendations before a human ever sees them, directly operationalizing the Advanced Q10 governance guidance.
+
+### Class Diagram
+```mermaid
+classDiagram
+    class IIndexRecommendationSource {
+        <<interface>>
+        +GetRawRecommendationsAsync() IReadOnlyList~RawIndexRecommendation~
+    }
+    class DmvIndexRecommendationSource {
+        -SqlConnection _connection
+        +GetRawRecommendationsAsync() IReadOnlyList~RawIndexRecommendation~
+    }
+    class IIndexScoringStrategy {
+        <<interface>>
+        +Score(RawIndexRecommendation, ExistingIndexCatalog) ScoredRecommendation
+    }
+    class WriteCostAwareScoringStrategy {
+        +Score(RawIndexRecommendation, ExistingIndexCatalog) ScoredRecommendation
+    }
+    class IndexAdvisoryService {
+        -IIndexRecommendationSource _source
+        -IIndexScoringStrategy _scoring
+        -IExistingIndexRepository _existingIndexRepo
+        +GetGovernedRecommendationsAsync() IReadOnlyList~ScoredRecommendation~
+    }
+    class IExistingIndexRepository {
+        <<interface>>
+        +GetExistingIndexesAsync(string table) IReadOnlyList~ExistingIndex~
+    }
+    IIndexRecommendationSource <|.. DmvIndexRecommendationSource
+    IIndexScoringStrategy <|.. WriteCostAwareScoringStrategy
+    IndexAdvisoryService --> IIndexRecommendationSource
+    IndexAdvisoryService --> IIndexScoringStrategy
+    IndexAdvisoryService --> IExistingIndexRepository
+```
+
+```csharp
+public interface IIndexScoringStrategy
+{
+    ScoredRecommendation Score(RawIndexRecommendation raw, ExistingIndexCatalog existing);
+}
+
+public sealed class WriteCostAwareScoringStrategy : IIndexScoringStrategy
+{
+    public ScoredRecommendation Score(RawIndexRecommendation raw, ExistingIndexCatalog existing)
+    {
+        // Penalize recommendations overlapping an existing index's leading-column prefix (§Intermediate Q7)
+        // instead of surfacing a near-duplicate suggestion the DMV itself has no awareness of.
+        bool overlapsExisting = existing.HasOverlappingLeadingColumns(raw.Table, raw.EqualityColumns);
+        decimal estimatedWriteCostImpact = existing.GetTableWriteFrequency(raw.Table) * raw.EqualityColumns.Count;
+
+        return new ScoredRecommendation(raw, overlapsExisting, estimatedWriteCostImpact,
+            recommended: !overlapsExisting && raw.AvgUserImpact > 70m);
+    }
+}
+
+public sealed class IndexAdvisoryService
+{
+    private readonly IIndexRecommendationSource _source;
+    private readonly IIndexScoringStrategy _scoring;
+    private readonly IExistingIndexRepository _existingIndexRepo;
+
+    public IndexAdvisoryService(IIndexRecommendationSource source, IIndexScoringStrategy scoring,
+        IExistingIndexRepository existingIndexRepo)
+        => (_source, _scoring, _existingIndexRepo) = (source, scoring, existingIndexRepo);
+
+    public async Task<IReadOnlyList<ScoredRecommendation>> GetGovernedRecommendationsAsync()
+    {
+        var raw = await _source.GetRawRecommendationsAsync;
+        var catalog = await ExistingIndexCatalog.BuildAsync(_existingIndexRepo, raw);
+        return raw.Select(r => _scoring.Score(r, catalog)).Where(s => s.Recommended).ToList;
+    }
+}
+```
+
+### Sequence Diagram
+```mermaid
+sequenceDiagram
+    participant Job as Nightly Advisory Job
+    participant Svc as IndexAdvisoryService
+    participant Dmv as DmvIndexRecommendationSource
+    participant Repo as IExistingIndexRepository
+    participant Strategy as WriteCostAwareScoringStrategy
+
+    Job->>Svc: GetGovernedRecommendationsAsync
+    Svc->>Dmv: GetRawRecommendationsAsync
+    Dmv-->>Svc: raw DMV suggestions
+    Svc->>Repo: GetExistingIndexesAsync (per referenced table)
+    Repo-->>Svc: existing index catalog
+    loop each raw recommendation
+        Svc->>Strategy: Score(raw, catalog)
+        Strategy-->>Svc: ScoredRecommendation
+    end
+    Svc-->>Job: filtered, governed recommendations only
+```
+
+### Design Patterns / SOLID / Concurrency
+- **Strategy pattern**: `IIndexScoringStrategy` isolates the scoring/governance heuristic from DMV data access, letting the scoring rule evolve (e.g., adding a table-size-based penalty) without touching the DMV-reading code — directly the extensibility point Advanced Q10's governance process needs.
+- **Repository pattern**: `IExistingIndexRepository` abstracts existing-index lookup so the scoring strategy can be unit-tested against a fake catalog without a live database connection.
+- **S**ingle Responsibility: `DmvIndexRecommendationSource` only reads DMV data; `WriteCostAwareScoringStrategy` only scores; `IndexAdvisoryService` only orchestrates — each independently testable and replaceable.
+- **O**pen/Closed: a new scoring heuristic is added as a new `IIndexScoringStrategy` implementation, not by modifying the existing one or the orchestrating service.
+- **Concurrency/thread-safety**: The service is read-only against DMVs (no locking concerns of its own); it should be run as a scheduled, single-instance nightly job (not concurrently from multiple hosts) since DMV snapshot data is a point-in-time view whose interpretation assumes a single, consistent read — running it concurrently from multiple hosts risks producing conflicting, differently-timed recommendation sets with no benefit.
+
+## 14. Production Debugging
+
+### Incident: Trading-hours full-scan storm from an ORM-introduced implicit conversion
+- **Symptoms**: Mid-morning during peak trading hours, the `Orders` blotter API's p99 latency jumped from ~40ms to over 4 seconds, with CPU on the primary database spiking to sustained 95%+; no schema, index, or data-volume change had occurred that day.
+- **Investigation**: The actual execution plan for the blotter's core query showed a full **Clustered Index Scan** on `Orders` where an Index Seek on `IX_Orders_Open` had run the previous day — comparing query text between the two days revealed a same-morning application deployment had changed the account-id parameter's declared type from `int` to `string` in a newly-adopted ORM mapping layer, while the underlying `AccountId` column remained `int`.
+- **Tools**: `SET STATISTICS XML ON` and the Plan Explorer view to compare the actual plan's operator tree before/after; `sys.dm_exec_query_stats` to confirm the query text/parameter type had changed at the exact deployment timestamp.
+- **Root cause**: An **implicit conversion** (§2.3) — comparing the `int` `AccountId` column against a `string`-typed parameter forced SQL Server to convert the *column* side per row (since data-type precedence rules convert the lower-precedence type, and `string`/`varchar` outranks `int` in SQL Server's conversion precedence for this specific comparison), destroying sargability and forcing a full scan for every single blotter lookup, exactly as covered in §2.3/Intermediate Q5 but now surfacing as a real deployment-triggered production incident rather than a hypothetical.
+- **Fix**: Reverted the ORM parameter type mapping to `int`, restoring the Index Seek immediately with zero database-side changes; added a regression test asserting the blotter query's execution plan uses an Index Seek (not a scan) against a realistic data volume, run in CI against every future ORM/mapping-layer change.
+- **Prevention**: Added implicit-conversion detection to the standard pre-deployment checklist — running `sys.dm_exec_query_stats` joined to a check for mismatched declared-vs-column data types on the organization's top N business-critical queries as an automated CI gate, converting a class of bug that previously required a live production incident to surface into one caught before deployment.
+
+## 15. Architecture Decision
+
+**Decision**: How to scale read capacity for a growing mix of live OLTP blotter lookups and heavier back-office/compliance reporting queries against the same trade data, once a single, well-indexed primary database's CPU/IO is no longer sufficient headroom for both workloads together.
+
+| Option | Advantages | Disadvantages | Cost | Complexity | Maintainability | Performance | Scalability | Ops Overhead |
+|---|---|---|---|---|---|---|---|---|
+| **A. Add more/better covering indexes on the primary only** | Simplest change; no new infrastructure; directly addresses specific slow queries | Doesn't separate OLTP and reporting *load*, only *query efficiency* — a sufficiently large reporting scan still competes for the same CPU/IO/buffer-pool as live trading traffic; each new index adds write cost (§7) | Low | Low | High short-term, degrades as index count grows | Improves specific queries, doesn't fix contention | Limited — bounded by one server's total capacity | Low |
+| **B. Always On readable secondary for reporting/batch, primary reserved for live OLTP** | Structurally isolates reporting/batch load from live trading-hours latency (the §12 design); readable secondary can carry its own reporting-specific indexes not needed on the primary | Adds AG operational complexity (failover testing, replication-lag monitoring); reporting queries tolerate a small, bounded staleness window | Medium (AG licensing/infrastructure already common at this scale) | Medium | Good, well-understood pattern | Excellent for both workloads once separated | Good — secondary can scale independently for reporting growth | Medium (AG monitoring, lag alerting) |
+| **C. ETL/replicate into a dedicated analytical store (columnstore warehouse) for reporting** | Reporting workload fully isolated on dedicated, purpose-built analytical infrastructure; can use columnstore (Expert Q5) freely without any OLTP write-path concern at all | Highest staleness (batch/CDC-driven ETL lag, typically minutes-to-hours, not seconds); highest build/ops cost; a second data model/pipeline to maintain and keep correct | High | High | Requires a dedicated data-engineering ownership model | Best for genuinely large-scale historical analytics | Best — scales independently of the OLTP system entirely | High (ETL/CDC pipeline ownership, schema drift risk) |
+
+**Recommendation**: **Option B** (Always On readable secondary) for this scenario — it directly addresses the stated problem (live-OLTP-vs-reporting contention) with staleness (replication lag, typically sub-second to low-seconds under healthy conditions) well within back-office/compliance reporting's actual tolerance, at moderate incremental cost given the AG infrastructure a regulated trading system needs for HA/DR regardless. **Option C** becomes the right upgrade specifically once reporting needs grow into genuinely large-scale historical/analytical workloads (multi-year trend analysis, cross-instrument aggregation at massive scale) where even a readable secondary's OLTP-shaped indexes and rowstore layout stop being the right physical model — at which point B and C coexist (B for near-real-time back-office reporting, C for deep historical analytics) rather than C replacing B. **Option A alone** is never a durable end state once reporting load is genuinely material — it's a valid, low-cost first response to a *specific* slow query, but doesn't solve the structural contention problem this decision is actually about.
+
+## 17. Principal Engineer Perspective
+
+- **Business impact**: In a trading environment, a query-performance regression isn't merely an inconvenience — a blotter that takes 4 seconds to load during volatile market conditions has direct, measurable business cost (missed trading opportunity, potential regulatory best-execution scrutiny if order-management latency contributes to a documented execution-quality complaint) — this reframes "index tuning" from a purely technical concern into one with a defensible business-risk narrative worth using when prioritizing engineering time against feature work.
+- **Engineering trade-offs**: Every additional index is a standing, permanent trade of write-throughput/latency for read-performance — a Principal Engineer should treat "should we add this index" with the same rigor as any other capacity-affecting architectural decision, requiring an explicit write-cost estimate (§13's `WriteCostAwareScoringStrategy`) rather than approving index additions purely on the strength of a missing-index DMV hint.
+- **Technical leadership**: Champion "read the actual execution plan, check estimated-vs-actual rows" as the mandatory first diagnostic step for any performance investigation (Advanced Q10) — this single habit, demonstrated repeatedly in this module (§4's stale-statistics incident, §14's implicit-conversion incident), resolves a disproportionate share of real-world SQL Server incidents faster and more correctly than reflexive index or hardware changes, and is a teachable, transferable skill worth actively coaching across a team rather than leaving to individual experience.
+- **Cross-team communication**: Translate "seek vs. scan" for non-technical stakeholders concretely: "an index lets the database jump directly to the rows you need, like a book's index; without one, it has to read every single page to find them — and today's incident happened because a code change accidentally made the database unable to use its index for one specific, very frequently-run query."
+- **Architecture governance**: Require index-change review (both additions and drops) to go through the same change-management/audit-trail discipline as any other production schema change (§8's audit-logging requirement) — an unreviewed index drop is a realistic, high-impact incident class in any production financial system, and treating index changes as "just DDL, not worth a review" is a common, costly governance gap.
+- **Cost optimization**: In a cloud-hosted SQL Managed Instance/Azure SQL context, unnecessary table scans directly translate into billed compute (DTU/vCore) cost, not merely latency — a Principal Engineer evaluating cloud database spend should treat "how many of our top-cost queries are scanning instead of seeking" as a direct, quantifiable cost-reduction lever, not purely a performance one.
+- **Risk analysis and long-term maintainability**: An index inventory that's grown organically over years, purely reactive to individual DMV/incident-driven additions, accumulates redundant/overlapping indexes that add write cost without corresponding read benefit (§2.6) — periodic, deliberate index-portfolio review (not just reactive addition) is a long-term-maintainability practice a Principal Engineer should sponsor, distinct from and complementary to the reactive incident-response discipline this module otherwise centers on.
 
 ## 18. Revision
 **Key takeaways**: Clustered index = physical row order (one per table); nonclustered = separate structure + row locator (many per table). Seek (fast, scales with matches) vs. scan (slow, scales with table size) is the central performance distinction. Sargability (no functions/implicit conversions wrapping indexed columns in `WHERE`) is required for seeks to be possible at all. Covering indexes (`INCLUDE`) eliminate key-lookup cost. Stale statistics/parameter sniffing (cardinality misestimation) are extremely common root causes of sudden query regressions, often fixable without any index/query change at all — always check estimated-vs-actual row counts before assuming a missing index.

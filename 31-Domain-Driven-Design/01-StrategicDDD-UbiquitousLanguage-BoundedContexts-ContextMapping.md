@@ -8,132 +8,181 @@
 
 ---
 
-# Domain-Driven Design (DDD)
+## 1. Fundamentals
+
+**What.** Strategic DDD is the top-level layer of Domain-Driven Design — the set of practices (Ubiquitous Language, Bounded Contexts, Context Mapping, core/supporting/generic subdomain classification) concerned with *where* the boundaries of a domain model should sit and *how* separately-modeled parts of a large system should relate to one another. It is deliberately upstream of tactical DDD (Module 110 — Entities/Value Objects/Aggregates): tactical patterns implement a model *within* a boundary; strategic DDD is what discovers and justifies the boundary itself.
+
+**Why it exists.** Large financial systems (a bank's core banking + payments + trading + risk + compliance estate) cannot be represented by one unified object model without that model becoming internally contradictory — "Account" means something different to a Ledger context than to a CRM context, "Trade" means something different to Trade Capture than to Settlement. Strategic DDD's founding insight (Eric Evans, *Domain-Driven Design*, 2003) is that this isn't a failure of modeling discipline to be fixed by trying harder to unify — it's the correct, deliberate outcome: split the domain into Bounded Contexts, each with its own internally-consistent model and Ubiquitous Language, and make the *relationships* between those contexts an explicit, engineered thing (a Context Map) rather than an accident of whichever team happened to build an integration first.
+
+**When to reach for it.** Any system large enough, or business domain complex enough, that a single team and a single shared model can no longer hold the whole thing in their heads without contradiction — typically once a codebase has more than one plausible "correct" meaning for a core noun (Account, Position, Order, Payment), or once more than one team owns adjacent parts of the domain. It is explicit overkill for a small, single-team, single-model CRUD service — applying full strategic DDD ceremony there is the "DDD for a to-do app" anti-pattern this module and Module 110 both warn against.
+
+**How, in one sentence.** Talk to domain experts continuously, build a precise Ubiquitous Language with them, use that language (and its seams — the same word meaning subtly different things to different people) to discover where Bounded Context boundaries genuinely belong, classify each context by how much competitive differentiation it provides (core/supporting/generic), and document the relationships between contexts explicitly as a Context Map using a small, named vocabulary of integration patterns (Shared Kernel, Customer-Supplier, Conformist, Anti-Corruption Layer, Open Host Service/Published Language).
+
+## 2. Deep Dive
+
+### 2.1 Layered architecture a Bounded Context typically implements
+
+Once a Bounded Context is identified, it is usually implemented internally with the following layering — this is the *tactical* shape strategic DDD's output feeds into (Module 110 develops the Domain layer's internals fully):
 
 ```mermaid
 flowchart TB
-
- Client[Web / Mobile]
-
- Client --> API[API / Controller]
-
- API --> Application[Application Layer]
-
- Application --> Domain[Domain Layer]
-
+ Client[Web / Mobile / Downstream Service] --> API[API / Controller]
+ API --> Application[Application Layer<br/>Commands, Queries, Handlers]
+ Application --> Domain[Domain Layer<br/>— this Bounded Context's model —]
  Domain --> Entity[Entities]
  Domain --> VO[Value Objects]
  Domain --> Aggregate[Aggregates]
  Domain --> DomainService[Domain Services]
  Domain --> Events[Domain Events]
  Domain --> Repository[Repository Interface]
-
  Repository --> Infrastructure[Infrastructure Layer]
-
  Infrastructure --> DB[(Database)]
-
- Infrastructure --> External[External Services]
+ Infrastructure --> External[External Services /<br/>other Bounded Contexts]
 ```
 
----
+The critical strategic-DDD point this diagram makes: the **Domain layer at the center is scoped to exactly one Bounded Context**. A request that needs data from a different Bounded Context does not reach across the Domain layer directly — it goes out through Infrastructure, via one of the Context Map's named integration patterns (§2.3), never via a shared in-process object graph spanning two contexts' models.
 
-# DDD Building Blocks
+### 2.2 Request flow within one context
 
 ```text
- Domain
- │
- ┌───────────────┼────────────────┐
- │ │ │
- Entities Value Objects Aggregates
- │ │ │
- └───────────────┼────────────────┘
- │
- Domain Services
- │
- Domain Events
- │
- Repository Interfaces
- │
- Infrastructure
+Client → Controller → Application Service → Aggregate Root
+ → Entity + Value Objects → Repository → Database
 ```
 
----
+Every step in this flow operates entirely within one Bounded Context's Ubiquitous Language. The Application Service is the orchestration point (transaction boundary, authorization, coordinating one or more Aggregates) but does not itself hold domain logic — that stays inside the Domain layer per Module 110.
 
-# Request Flow
-
-```text
-Client
- │
- ▼
-Controller
- │
- ▼
-Application Service
- │
- ▼
-Aggregate Root
- │
- ▼
-Entity + Value Objects
- │
- ▼
-Repository
- │
- ▼
-Database
-```
-
----
-
-# Typical DDD Project Structure
+### 2.3 Typical solution layout, and where strategic-DDD artifacts live
 
 ```
 Solution
 │
-├── API
-│
-├── Application
-│ ├── Commands
-│ ├── Queries
-│ ├── DTOs
-│ ├── Interfaces
-│ └── Handlers
-│
-├── Domain
-│ ├── Aggregates
-│ ├── Entities
-│ ├── ValueObjects
-│ ├── DomainEvents
-│ ├── DomainServices
-│ ├── Repositories
-│ └── Exceptions
-│
-├── Infrastructure
-│ ├── Persistence
-│ ├── EF Core
-│ ├── Repository Implementations
-│ └── External Services
-│
+├── API                        (one per Bounded Context, or per bounded-context-aligned module)
+├── Application/                Commands, Queries, DTOs, Handlers
+├── Domain/                     Aggregates, Entities, ValueObjects, DomainEvents,
+│                                DomainServices, Repositories, Exceptions
+├── Infrastructure/             Persistence (EF Core), Repository impls,
+│                                Anti-Corruption Layer adapters, External Service clients
 └── Tests
 ```
 
----
+A **Context Map** is not code — it is a living architecture artifact (a diagram plus a short doc per relationship, ideally versioned in the repo next to the solution it describes) recording, for every pair of Bounded Contexts that talk to each other: which pattern governs the relationship (§2.4), which side has the power to force the other to change, and why. Treat it exactly like an ADR set: reviewed, dated, and revisited when a relationship's shape genuinely changes — not drawn once at kickoff and left to rot.
 
-# DDD Concepts
+### 2.4 The Context Map pattern vocabulary, precisely
 
-| Concept | Purpose |
-|---------|---------|
-| Entity | Has identity (e.g., Customer, Order) |
-| Value Object | Immutable object with no identity (e.g., Address, Money) |
-| Aggregate | Consistency boundary that groups related entities |
-| Aggregate Root | Entry point to an aggregate (e.g., Order) |
-| Repository | Loads and saves aggregates |
-| Domain Service | Business logic that doesn't belong to a single entity |
-| Domain Event | Represents something important that happened in the domain |
-| Application Service | Coordinates use cases and transactions |
-| Infrastructure | Database, messaging, external APIs |
+| Pattern | Direction of power | When it's the right call |
+|---|---|---|
+| **Shared Kernel** | Joint, symmetric | Two teams jointly own a small, stable, explicitly-agreed subset of model + schema (e.g., a shared `CurrencyCode`/`InstrumentId` library) — coordination cost is accepted deliberately because the shared piece is genuinely small and stable. |
+| **Customer-Supplier** | Downstream has negotiated influence | Upstream team plans around, and tests against, the downstream team's needs (e.g., via shared acceptance tests) — a healthy, managed dependency. |
+| **Conformist** | Upstream, unilaterally | Downstream simply adopts upstream's model as-is because negotiating changes isn't feasible (a large platform team, an external vendor) — acceptable specifically when the upstream model is already reasonably well-aligned. |
+| **Anti-Corruption Layer (ACL)** | Downstream insulates itself | Upstream's model would otherwise distort downstream's own concepts (a legacy mainframe ledger, an external payment processor) — a translation layer at the boundary protects downstream's model integrity. |
+| **Open Host Service + Published Language** | Upstream serves many | A context with many consumers exposes one stable, versioned, documented contract (a REST/gRPC API against a published schema) instead of bespoke integration per consumer. |
+| **Separate Ways** | No integration | Two contexts have no genuine need to integrate at all — duplicating a small amount of logic is cheaper than building any relationship. |
+| **Big Ball of Mud** | N/A — anti-pattern | No discernible context boundaries; §6 develops this as an anti-pattern, not a legitimate pattern choice. |
 
-## Interview Questions
+### 2.5 Hidden cost: context boundaries and EF Core's `DbContext`
+
+A common, quietly expensive mistake in .NET shops: one giant EF Core `DbContext` spanning tables that actually belong to two or more Bounded Contexts. EF Core's change tracker, navigation properties, and `Include()` chains make it *syntactically trivial* to reach from a `Trade` entity straight into a `Position` entity that conceptually belongs to a different context — silently reintroducing the "same word, unified model" problem strategic DDD exists to avoid, one lazy-loaded navigation property at a time. The fix is not merely discipline — it's structural: one `DbContext` per Bounded Context (or, at minimum, per module in a modular monolith), with cross-context data access forced through an explicit contract (a repository interface, an internal HTTP/gRPC call, or a published read model), never a navigation property.
+
+### 2.6 Hidden cost: the "unified enterprise model" temptation
+
+Enterprise data-modeling initiatives (an "enterprise Customer master," a single canonical `Trade` schema for the whole firm) recreate the exact failure strategic DDD's core insight warns against: forcing every context to conform to one schema either produces a model so generic it satisfies no one well, or an endless string of special-case fields accreting onto one shared table as each new consuming team's needs diverge. The strategic-DDD-correct response is not "no shared vocabulary" — it's Published Language (§2.4) at integration boundaries, with each context still free to hold its own internal, richer model.
+
+## 3. Visual Architecture
+
+### 3.1 Bounded context map — capital-markets front-to-back
+
+```mermaid
+flowchart LR
+ subgraph TC["Trade Capture (Core)"]
+ TCM[Order / Trade model]
+ end
+ subgraph Risk["Risk (Core)"]
+ RM[Position / Exposure model]
+ end
+ subgraph Settle["Settlement (Supporting)"]
+ SM[Settlement Instruction model]
+ end
+ subgraph Ledger["General Ledger (Supporting)"]
+ LM[Journal Entry model]
+ end
+ subgraph Ref["Reference Data (Generic)"]
+ RD[Instrument / Counterparty master]
+ end
+ subgraph Legacy["Legacy Mainframe Book of Record"]
+ LG[Foreign, undocumented model]
+ end
+
+ TC -- "Customer-Supplier<br/>(acceptance tests)" --> Risk
+ TC -- "Open Host Service +<br/>Published Language (Trade Confirmed event)" --> Settle
+ Settle -- "ACL<br/>(protects Settlement's model)" --> Legacy
+ TC -- Conformist --> Ref
+ Risk -- Conformist --> Ref
+ Settle -- "Customer-Supplier" --> Ledger
+```
+
+Reading this map: Trade Capture and Risk are both **core** domains (this firm's competitive edge is in fast, correct trade capture and accurate real-time risk) and negotiate as genuine Customer-Supplier peers. Reference Data is **generic** (an instrument/counterparty master any firm needs) so both consuming contexts simply Conform to it rather than negotiating. Settlement talks to the Legacy mainframe book of record through an explicit Anti-Corruption Layer, because the legacy system's model (batch-oriented, decades of undocumented special cases) would otherwise leak into and corrupt Settlement's own clean domain model.
+
+### 3.2 Layered architecture (folded from the original diagram, §2.1) and 3.3 request flow (§2.2) are shown above — both are per-Bounded-Context views that this Context Map (§3.1) sits above.
+
+## 4. Production Example
+
+**Problem.** A mid-sized broker-dealer's original platform was a single ASP.NET application and one SQL Server database backing every function: order entry, trade capture, risk, settlement instructions, and general-ledger postings all read and wrote the same `Trades` and `Positions` tables directly. As the firm added new asset classes, three separate teams (Trading, Risk, Ops) were all modifying the same `Trade` entity class, and a change one team needed (Risk wanted a nullable `MarginType` field with strict validation) routinely broke another team's workflow (Ops's settlement batch job assumed `MarginType` was always populated). Release coordination between the three teams had become the single biggest source of production incidents.
+
+**Architecture (after applying strategic DDD).** Event Storming sessions with all three teams' domain experts surfaced that "Trade" was actually being used to mean three different things: the Trading desk's in-flight, still-negotiable order; Risk's point-in-time exposure snapshot; and Ops's immutable, once-settled record. Three Bounded Contexts were identified — **Trade Capture** (core), **Risk** (core), **Settlement** (supporting) — each given its own database schema and its own `Trade`-shaped Entity/Aggregate, deliberately *not* unified. Trade Capture publishes a `TradeConfirmed` domain event (Open Host Service + Published Language, §2.4) that both Risk and Settlement subscribe to independently, translating the event into their own context's model.
+
+**Implementation.** Trade Capture's `Trade` Aggregate owns order-lifecycle invariants (cannot confirm a trade with an unpriced leg). On confirmation it publishes `TradeConfirmed { TradeId, Instrument, Quantity, Price, TradeDate, CounterpartyId }` via an outbox-backed event. Risk's own bounded context consumes that event and constructs its own `PositionImpact` Aggregate from it — Risk's model additionally computes `MarginType` and exposure metrics that have no meaning inside Trade Capture at all, so they were never forced into Trade Capture's schema. Settlement consumes the same event through an Anti-Corruption Layer that also talks to the firm's legacy custodian-facing mainframe, translating the mainframe's SETL-record format into Settlement's own `SettlementInstruction` Aggregate.
+
+**Trade-offs.** The firm accepted eventual consistency between Risk's view of a position and Trade Capture's view of the trade that produced it (previously, the shared-table model gave an illusion of instant consistency that was, on inspection, never actually relied upon correctly — Risk's batch job already ran on a delay). They also accepted real integration cost: three separate schemas, an event contract to version, and an ACL to maintain against the legacy mainframe — meaningfully more code than the original single shared table.
+
+**Lessons learned.** The single-`Trade`-table design hadn't actually been simpler — it had been *deceptively* simple, hiding the coordination cost inside release-planning meetings instead of inside explicit architecture. Once each team could evolve its own bounded context's model independently behind a stable published contract, release coordination incidents attributable to cross-team `Trade` schema changes dropped to near zero within two quarters. The Reference Data context (instrument static data, counterparty master) was correctly classified as **generic** and left as a single shared, Conformist-consumed service — strategic DDD does not mean "split everything"; it means split along the seams the Ubiquitous Language actually reveals, and consciously *not* split what's genuinely shared and non-differentiating.
+
+## 5. Best Practices
+
+- Run collaborative Event Storming with actual domain experts before drawing any context boundary — a boundary drawn by engineers alone, without domain-expert validation, is a guess wearing DDD's vocabulary.
+- Classify every subdomain as core / supporting / generic explicitly, and calibrate engineering investment (rich modeling vs. buy-vs-build) to that classification, not to enthusiasm.
+- Keep a living Context Map as a first-class, reviewed architecture artifact, not a one-time onboarding diagram.
+- Encode the Ubiquitous Language directly in code (class/method names a domain expert would recognize), not as a separate glossary translated at the door of every conversation.
+- Default new cross-team integrations to Open Host Service + Published Language (a stable, versioned contract) rather than ad hoc point-to-point calls that recreate bespoke Customer-Supplier negotiation for every new consumer.
+- Put an Anti-Corruption Layer at every boundary to a legacy or externally-controlled system whose model doesn't match your own — treat this as a permanent fixture where the upstream system itself is permanent, not merely a migration scaffold.
+- Re-validate the Ubiquitous Language periodically with current domain experts — a business's own vocabulary drifts, and a glossary frozen at project kickoff silently goes stale.
+
+## 6. Anti-patterns
+
+- **Big Ball of Mud** — no discernible bounded-context boundaries at all; models, terminology, and responsibilities bleed together, and every change risks breaking an unrelated part of the system.
+- **One shared `DbContext`/schema spanning multiple contexts** — EF Core navigation properties make it trivial to silently recreate a unified model across contexts that were supposed to be separate (§2.5).
+- **Anemic domain model dressed as DDD** — bounded contexts drawn correctly, but each context's internals are pure data-transfer objects with all logic externalized to "service" classes; strategic-level correctness with no tactical-level substance (Module 110 develops this fully).
+- **Context boundary drawn along the org chart, not the domain** — accepting existing, accidental team boundaries as if they were genuine domain insight (Conway's Law observed rather than deliberately used), without ever revisiting the boundary once teams reorganize.
+- **Forcing a single, "enterprise-canonical" schema** across contexts that genuinely need different models (§2.6) — the unified-model temptation reappearing as an enterprise-architecture initiative.
+- **Treating the Context Map as a one-time diagram** — drawn once at a kickoff workshop, never updated, and silently diverging from the system's actual, current dependencies.
+- **Over-applying strategic-DDD ceremony to a generic subdomain** — full Event Storming, a dedicated context, and a formal Context Map entry for something that should simply be bought or Conformed to (e.g., authentication).
+
+## 7. Performance Engineering
+
+Strategic DDD's performance implications are mostly about **where synchronous vs. asynchronous boundaries fall**, not raw CPU/memory cost:
+
+- **Cross-context calls are a network hop, not a method call.** Once Trade Capture and Risk are separate Bounded Contexts (§4), a call between them that used to be an in-process method call becomes an HTTP/gRPC call or an asynchronous event — latency and failure-mode budgets must be planned for explicitly (timeouts, retries, circuit breakers), and a chain of several synchronous cross-context calls in one user-facing request path can turn a sub-millisecond in-process call chain into a multi-hundred-millisecond one.
+- **Prefer Published Language events over synchronous request/response between contexts on the hot path.** Risk consuming `TradeConfirmed` asynchronously (§4) means Trade Capture's confirmation latency is never coupled to Risk's processing time; a synchronous "call Risk and wait" design would make Trade Capture's SLA hostage to Risk's.
+- **EF Core `DbContext`-per-context (§2.5) reduces change-tracker scope**, which directly reduces per-request change-tracking overhead — a `DbContext` scoped to one context's tables tracks materially fewer entities per unit of work than one giant, shared context spanning the whole schema.
+- **ACL translation cost is real but usually small relative to the network hop it wraps** — budget for it in a legacy-integration ACL's latency envelope, but it is rarely the dominant cost compared to the mainframe/vendor round-trip itself.
+- **Context Map fan-out** — an Open Host Service with many downstream consumers (§2.4) must be capacity-planned for aggregate downstream load, not just its own context's internal throughput; a Published Language contract with 12 consumers means a schema or behavior change is effectively a 12-consumer compatibility problem, which is a scalability-of-change concern as much as a runtime one.
+
+## 8. Security
+
+- **A Bounded Context boundary is a natural authorization boundary.** Access control policy (who can view a `Position`, who can confirm a `Trade`) belongs to the context that owns that concept's invariants — do not let a shared, cross-context database make row-level security the *only* enforcement point; enforce authorization in each context's own Application layer, at the boundary, not just at the shared data store.
+- **An ACL is also a security control, not just a translation control** — when wrapping a legacy or third-party system, the ACL is the natural place to strip or redact fields the downstream context has no legitimate need to see (data minimization), and to validate/sanitize anything crossing the trust boundary from a system you don't fully control.
+- **Information barriers (compliance "Chinese walls") map naturally onto bounded-context boundaries** — research and trading desks that must not share certain information are a strong, real-world argument *for* separate contexts with no direct model sharing, not merely an application-level permission check bolted onto a shared model. Getting the context boundary right is itself a compliance control.
+- **Published Language contracts are also the audit surface** — because a domain event like `TradeConfirmed` is the one explicit, versioned artifact crossing a context boundary, it is a natural place to attach audit/provenance metadata (who initiated it, correlation ID) once, rather than re-deriving audit trails independently inside every consuming context.
+- **Conformist relationships to an external/vendor context inherit that vendor's security posture** — Conforming to an upstream model without an ACL means any data-shape or validation gap in the vendor's API becomes your own context's gap too; this is a reason to prefer ACL over Conformist specifically for security-sensitive external integrations even where the pure translation-cost argument (Intermediate Q3, §10) might favor Conformist.
+
+## 9. Scalability
+
+- **A Bounded Context is the natural unit of independent scaling.** Once Trade Capture, Risk, and Settlement (§4) are separate contexts with their own schemas and services, each can be scaled (more instances, a bigger database tier, a dedicated cache) according to its own load profile — Risk's batch-heavy, read-intensive workload and Trade Capture's low-latency write-heavy workload no longer have to share one database's capacity plan.
+- **Context-per-service is also a team-scaling mechanism**, not just a runtime one — the Production Example's core lesson: three teams coordinating releases on one shared schema was itself a scalability bottleneck (organizational throughput, not request throughput), solved by giving each team an independently-deployable, independently-scalable context.
+- **Open Host Service fan-out changes the scaling unit's shape** — a Reference Data context serving many Conformist consumers must scale for aggregate read fan-out across the whole firm, likely via caching/CDN-style read replicas at the published-language boundary, rather than assuming each consumer's load is independent and small.
+- **Eventual consistency between contexts (§4) is what makes independent scaling possible** — insisting on synchronous, strongly-consistent cross-context reads (Risk always seeing Trade Capture's absolute latest state instantly) reintroduces tight coupling that caps each context's independent scalability at the slowest, most conservative partner in the chain.
+- **HA/DR must be planned per context, and the Context Map records the resulting dependency graph** — if Settlement depends on Trade Capture's event stream, Trade Capture's disaster-recovery RTO/RPO indirectly bounds Settlement's own; the Context Map (§2.3) is the right place to make this dependency, and its scaling/availability implications, explicit rather than discovered during an incident.
+
+## 10. Interview Questions
 
 ### Basic (10)
 
@@ -340,5 +389,539 @@ Solution
 **Why correct:** Aligns teams to contexts with enforced (fitness-function-guarded) contracts, keeps invariants within a context, maps information barriers to boundaries, and keeps boundaries revisitable — preventing coordination/erosion failures.
 **Common mistakes:** Team ownership crossing context boundaries; boundaries enforced only by convention (erosion); invariants that force two teams to coordinate; never revisiting boundaries as the org grows.
 **Follow-ups:** "How does a fitness function stop cross-context boundary erosion?" / "How do information barriers map onto bounded contexts?"
+
+**E4. Q: Two bounded contexts — Trade Capture and Settlement — both need to represent "Trade," and disagree on when a trade legally exists. How do you resolve this without forcing one team to be wrong, and what does the resulting Context Map relationship look like?**
+**A:** Neither team is "wrong" — this is the textbook case for accepting that a word can legitimately mean two different things in two different bounded contexts rather than trying to force a single, universal `Trade` definition. Trade Capture's "Trade" exists the moment two parties agree on economics (still potentially amendable); Settlement's "Trade" exists only once it's confirmed, allocated, and ready to settle — an immutable, later-stage fact. Resolve it strategically, not by debate: name them as distinct concepts in each context's own Ubiquitous Language (Trade Capture's `OrderTrade`/`ConfirmedTrade` vs. Settlement's `SettlementTrade`), and connect the two contexts via an Open Host Service + Published Language relationship — Trade Capture publishes a `TradeConfirmed` domain event (the precise, unambiguous moment its own model considers the trade final enough to hand off), and Settlement's own model treats that event as the trigger to construct its own, separately-invariant `SettlementTrade` aggregate. The Context Map records this explicitly: Trade Capture is upstream, Settlement is downstream, relationship = Open Host Service/Published Language, translation happens at Settlement's boundary. This prevents the two teams from being trapped in an unproductive argument about whose definition is "correct" and instead makes the actual moment of handoff a first-class, versioned, testable artifact.
+**Why correct:** Recognizes the same-term-different-contexts pattern rather than forcing false unification, and resolves it with a concrete, named context-mapping pattern (Open Host Service/Published Language) with an explicit trigger event, not just "they should talk more."
+**Common mistakes:** Trying to negotiate one shared `Trade` schema both teams must conform to; treating the disagreement as a modeling bug rather than a legitimate context-boundary signal; leaving the handoff moment implicit/undocumented instead of a named domain event.
+**Follow-ups:** "What would go wrong if Settlement instead directly queried Trade Capture's database for 'the trade'?" / "Why is the published event, not a shared table, the right integration point here?"
+
+**E5. Q: A regulator requires a single, audit-ready, end-to-end view of "what happened to this trade from capture through settlement," but you've just split the domain into separate bounded contexts with separate schemas. How do you reconcile regulatory traceability with bounded-context independence?**
+**A:** Regulatory traceability is a cross-cutting *reporting* concern, not a modeling concern — it should never be solved by re-merging the contexts' write models back into one shared schema, which would undo the entire benefit of the split and reintroduce the coordination cost strategic DDD exists to remove. Instead, treat each context's Published Language domain events (`TradeConfirmed`, `TradeSettled`, `TradeAllocated`, etc.) as the audit trail's actual source of truth, and build a separate, dedicated **regulatory reporting read model** (its own generic/supporting subdomain, likely event-sourced or a simple append-only projection) that subscribes to every relevant context's events and stitches them into the end-to-end view the regulator needs. This read model has no write authority over any context's own aggregates — it's a pure downstream consumer — so it doesn't compromise any context's autonomy, and because each context already publishes its state transitions as explicit, versioned events (§2.4 Open Host Service), the audit trail is a natural byproduct of the architecture rather than a reason to abandon it. Correlate across contexts using a stable identifier (e.g., a `TradeCorrelationId` minted at capture and carried through every downstream event) established as part of the Published Language contract from the start.
+**Why correct:** Treats regulatory traceability as a separate, dedicated read-side concern built from each context's already-published events, correctly avoiding re-coupling the write models, and names the concrete mechanism (correlation ID + event stitching).
+**Common mistakes:** Merging schemas or adding cross-context foreign keys to satisfy the audit requirement; assuming bounded contexts and end-to-end traceability are fundamentally incompatible; omitting a stable correlation identifier from the Published Language contract, making later stitching unreliable or ambiguous.
+**Follow-ups:** "Where should the correlation ID be minted, and why does that choice matter?" / "What happens to this audit view if one context's event schema changes without versioning?"
+
+**E6. Q: Your firm is evaluating build-vs-buy for a new KYC/AML screening capability. How does strategic DDD's core/supporting/generic classification actually change the engineering decision here, beyond "buy generic things"?**
+**A:** KYC/AML screening against sanctions lists and PEP databases is a textbook **generic subdomain** — it's necessary, heavily regulated, and important, but it provides zero competitive differentiation versus building it well; every regulated financial firm needs essentially the same capability, and specialist vendors (list maintenance, regulatory-change tracking, false-positive tuning) exist precisely because this is a shared, non-differentiating problem across the entire industry. The classification changes the decision concretely: (1) it shifts the default from "build a rich, custom-modeled bounded context" to "integrate a vendor via a Conformist or ACL relationship" (§2.4) — Conformist if the vendor's model and workflow genuinely fit, ACL if you need to protect your own Customer/Onboarding context's model from the vendor's specific data shapes and status codes; (2) it caps the engineering investment deliberately — no deep tactical DDD modeling, no dedicated domain-expert-driven Event Storming series, because the payoff for that investment is structurally lower here than in a core domain; (3) it still requires the context boundary to be drawn correctly around the vendor integration (so a vendor swap later is a bounded, ACL-scoped change, not a firm-wide refactor) — "generic" changes *how much* modeling rigor you apply, not *whether* you still draw a clean boundary.
+**Why correct:** Correctly classifies KYC/AML as generic using the differentiation test, and translates that classification into concrete engineering consequences (integration pattern choice, investment level, and boundary discipline) rather than a vague "buy it" conclusion.
+**Common mistakes:** Assuming "generic" means "no architecture needed at all" and wiring the vendor directly into the Customer/Onboarding context's model with no ACL, making a future vendor swap a firm-wide change; over-investing in a custom-built, richly-modeled KYC engine because the team finds the problem interesting.
+**Follow-ups:** "Why does even a generic-subdomain vendor integration still need an ACL rather than direct Conformist adoption in this case?" / "What changes if the firm's actual differentiator becomes faster onboarding via better KYC turnaround time?"
+
+**E7. Q: In a multi-region bank (US and EU entities), the same Ubiquitous Language term — "customer" — carries different regulatory meaning (GDPR data-subject rights in the EU, different KYC retention rules in the US). Does this mean you need separate bounded contexts per region, and how do you decide?**
+**A:** Regional regulatory divergence is exactly the kind of seam strategic DDD asks you to test for — but the test isn't "does a regulation differ," it's "does the *domain model's behavior and invariants* genuinely differ enough that one shared model can't correctly represent both." If EU "Customer" needs a right-to-erasure workflow and data-residency constraints that fundamentally change how the aggregate is structured (e.g., which fields can be hard-deleted vs. must be retained), while US "Customer" has different retention invariants entirely, that's a genuine, invariant-level divergence — not just a UI or reporting difference — which is a real signal for either separate bounded contexts per region, or one context with clearly-separated regional sub-models if the shared core (name, account list, KYC status) is otherwise large and genuinely common. The decision test: would forcing one unified `Customer` model to satisfy both regions' invariants make that model's constructor/methods riddled with region-conditional logic that has nothing to do with a shared concept? If yes, split; if the divergence is confined to a small, cleanly-separable slice (e.g., only the erasure workflow differs), keep one context with the regional variance isolated behind a `IRegionalComplianceStrategy`-style extension point, not a full context split. Getting this wrong in either direction is costly: forcing a global "Customer" model to satisfy GDPR erasure risks silently violating the intent of retention rules elsewhere; splitting prematurely into full separate contexts for a difference that's genuinely cosmetic recreates unnecessary integration and duplication cost.
+**Why correct:** Applies the genuine-invariant-divergence test (not "does a rule differ" but "does it change the model's actual structure/behavior") to decide between separate contexts vs. one context with an isolated regional extension point, and names the concrete cost of getting the call wrong in either direction.
+**Common mistakes:** Splitting by region reflexively because "GDPR is different," without checking whether the divergence is invariant-level or merely a reporting/UI difference; conversely, forcing one global model to satisfy conflicting regional data-handling invariants and quietly getting compliance wrong in one region.
+**Follow-ups:** "What's a concrete symptom in the code that the shared model has been forced past its genuine invariant overlap?" / "How would you structure the extension point if the divergence is confined and doesn't warrant a full split?"
+
+**E8. Q: A vendor-supplied market-data platform is deeply embedded across five internal bounded contexts (Pricing, Risk, Trade Capture, Reporting, Client Portal), each Conformist to the vendor's proprietary data model. The firm now wants to replace the vendor. Why did the original Conformist choice make this migration far more expensive than it needed to be, and what would you have done differently?**
+**A:** Conformist is a legitimate pattern (§2.4, Intermediate Q3 in §10) specifically when negotiating the upstream model isn't feasible *and* the upstream model is already reasonably well-aligned with each downstream context's own needs — but it has a compounding cost that only becomes visible at exit: because five contexts each directly adopted the vendor's model with no translation layer, the vendor's proprietary concepts (its specific instrument identifiers, its specific pricing-source codes) are now smeared directly through five contexts' own domain logic. Replacing the vendor isn't a single, bounded change behind one seam — it's five separate, uncoordinated migrations, each requiring the consuming context's own domain logic to be untangled from vendor-specific assumptions that were never isolated. The better original choice: each of the five contexts should have consumed the vendor through its *own* Anti-Corruption Layer, translating the vendor's proprietary model into each context's own Published-Language-style internal representation (a firm-owned `MarketDataSnapshot` shape, for instance) at the point of ingestion — even though this costs more upfront (five ACLs to build and maintain instead of five direct Conformist integrations), it means a future vendor swap is bounded to rewriting five ACL adapters against a stable internal contract, not rewriting logic embedded across five contexts' cores. This is the concrete, expensive lesson behind "Conformist trades short-term integration cost for long-term coupling risk" — worth accepting only when the upstream is either genuinely temporary-integration-scale or so unlikely to change that the exit cost is a reasonable bet.
+**Why correct:** Correctly diagnoses the compounding cost of unmediated Conformist adoption across many consumers, and proposes the concrete alternative (per-context ACL against a firm-owned internal contract) with an explicit statement of the upfront-cost-vs-exit-cost trade-off that justifies the original choice being wrong here specifically.
+**Common mistakes:** Treating Conformist as free simply because it avoids near-term translation-layer work, without weighing the specific exit/vendor-replacement risk; assuming a single, shared ACL used by all five contexts is equivalent to five independent ACLs — a shared ACL just recreates a shared-kernel-style coupling among the five contexts' translation logic instead of the vendor coupling, trading one coordination cost for another rather than removing it.
+**Follow-ups:** "Why is a shared ACL used by all five contexts not equivalent to five independent, context-owned ACLs?" / "Under what conditions would the original Conformist choice actually have been the right call?"
+
+**E9. Q: Two teams — Payments and Ledger — are in a nominal Customer-Supplier relationship, but in practice the Ledger team routinely ships breaking changes without involving Payments, and Payments has learned to defensively over-validate every field from Ledger's API "just in case." Diagnose what's actually going on strategically, and what you'd change.**
+**A:** This is a Context Map that's *labeled* Customer-Supplier but *functions* as Conformist-without-the-honesty — the defining feature of genuine Customer-Supplier (negotiated priority, shared acceptance tests gating the supplier's changes) is absent in practice, even though the org chart or documentation calls it that. The defensive over-validation on Payments' side is the concrete symptom: a team that trusted a genuine Customer-Supplier contract wouldn't need to guard against its supplier breaking it, because the contract itself (backed by shared acceptance tests the supplier's CI must pass) would catch that before release. The fix is not a communication offsite — it's making the relationship's actual mechanics match its declared pattern: either (1) genuinely upgrade to Customer-Supplier by having Payments contribute consumer-driven contract tests (e.g., Pact-style) that run in Ledger's own CI and block a release that would break Payments, restoring real negotiated priority; or (2) honestly relabel the relationship as Conformist and have Payments build a proper Anti-Corruption Layer around Ledger's API instead of ad hoc defensive validation scattered through its own domain logic — turning an undocumented, informal, brittle defense into an explicit, maintainable translation boundary. Either fix is legitimate; what's not legitimate is leaving the mislabeled status quo, because it means the Context Map — the artifact meant to make relationship dynamics explicit — is actively lying about the real power dynamic, which misleads every future engineer who reads it.
+**Why correct:** Correctly diagnoses the gap between a Context Map's declared pattern and its actual operational behavior using a concrete, observable symptom (defensive over-validation), and offers two legitimate, named fixes rather than a vague "improve communication" answer.
+**Common mistakes:** Treating the defensive validation as merely good, prudent engineering practice rather than a diagnostic signal that the relationship pattern is mislabeled; attempting to fix this purely through better meetings/process without changing the Context Map's documented pattern or the technical contract (contract tests or an ACL) backing it.
+**Follow-ups:** "Why is consumer-driven contract testing specifically the right mechanism to make a Customer-Supplier relationship genuine, rather than just process/SLA agreements?" / "What would make relabeling to Conformist the better choice here instead of upgrading to genuine Customer-Supplier?"
+
+**E10. Q: As a Principal Engineer, you're asked to justify to a non-technical steering committee why the firm should invest in bounded-context re-architecture rather than "just adding more servers" to fix a platform that's slow and where every release requires all six trading-desk teams to coordinate. What's the actual business case, in terms a steering committee understands, and how do strategic DDD's specific artifacts (Context Map, core/supporting/generic classification) support it?**
+**A:** Reframe the problem away from "the software is slow" (a hardware-shaped problem, which "add more servers" correctly addresses if that were the actual bottleneck) toward the real, business-visible cost: **six-team release coordination is a time-to-market and risk cost, not a performance cost**, and no amount of additional compute capacity fixes a coordination bottleneck rooted in a shared, unbounded model. The business case: (1) quantify the coordination cost concretely — release cadence, number of cross-team blocking dependencies per release, incident rate attributable to one team's change breaking another's assumptions (the Production Example's actual, measured pattern); (2) use the core/supporting/generic classification to make the investment case selective and credible, not "rewrite everything" — propose splitting out the one or two genuinely core, highest-coordination-cost contexts first (the ones actually driving the six-team bottleneck), explicitly deferring generic/supporting areas, which keeps the ask bounded, fundable, and demonstrably tied to the pain the committee already feels; (3) present the Context Map as the concrete deliverable and governance artifact — not an abstract "architecture cleanup," but a specific, reviewable map of which teams will own which context and how they'll integrate, which a steering committee can actually approve and hold the engineering org accountable to; (4) name the risk of *not* doing it in business terms — every quarter without the split is another quarter of release-coordination overhead compounding as more teams and features are added to the shared model, and (per the incident narrative) a growing latent risk of a cross-team change silently breaking a downstream team's invariant in production. The Principal-level move is translating "we want to do DDD" into "here is the specific, bounded, fundable investment, tied to a measured coordination cost, with a concrete artifact (the Context Map) the committee can govern against" — not a technical architecture pitch on its own terms.
+**Why correct:** Translates a technical architecture decision into business-visible cost (coordination/time-to-market/incident risk, not raw performance), uses the classification to scope and de-risk the ask, and names the Context Map specifically as the governance artifact a non-technical committee can actually approve and hold the team to.
+**Common mistakes:** Pitching the re-architecture in purely technical terms ("we need bounded contexts") without translating to business-visible cost; proposing a full, all-at-once rewrite instead of a scoped, core-domain-first investment; failing to name a concrete, reviewable deliverable (the Context Map) the committee can govern against, leaving the investment open-ended and hard to hold accountable.
+**Follow-ups:** "How would you measure and present the coordination cost concretely, before the investment is approved, so you can prove the payoff afterward?" / "Why should the first context split specifically target the highest-coordination-cost core domain, rather than the easiest one to extract?"
+
+---
+
+## 11. Coding Exercises
+
+Strategic DDD is primarily a modeling discipline, not an algorithmic one — these exercises focus on encoding context boundaries, translation, and language precision directly in C#, which is where strategic DDD meets everyday implementation work.
+
+### Easy — Detect a leaking cross-context reference
+
+**Problem:** Given a C# `DbContext` with entity classes from two conceptually separate bounded contexts (`Trade` from Trade Capture, `Position` from Risk) wired together with an EF Core navigation property, write a small static-analysis-style check (a plain method, not Roslyn) that flags a "context leak" — a navigation property on one context's entity pointing directly to a type from a different, named context.
+
+**Solution:**
+```csharp
+public sealed record ContextLeak(string SourceType, string NavigationProperty, string TargetType);
+
+public static IEnumerable<ContextLeak> FindContextLeaks(
+    IEnumerable<Type> entityTypes,
+    IReadOnlyDictionary<Type, string> contextOwnership)
+{
+    foreach (var type in entityTypes)
+    {
+        if (!contextOwnership.TryGetValue(type, out var ownContext)) continue;
+
+        foreach (var prop in type.GetProperties())
+        {
+            var targetType = prop.PropertyType.IsGenericType
+                ? prop.PropertyType.GetGenericArguments().FirstOrDefault()
+                : prop.PropertyType;
+
+            if (targetType is null || !contextOwnership.TryGetValue(targetType, out var targetContext))
+                continue;
+
+            if (targetContext != ownContext)
+                yield return new ContextLeak(type.Name, prop.Name, targetType.Name);
+        }
+    }
+}
+```
+**Time complexity:** O(T × P) — T types, P properties per type (reflection cost dominates but is a one-time, build-time check).
+**Space complexity:** O(L) for the leaks found.
+**Optimized solution:** In practice, replace ad hoc reflection with a Roslyn analyzer (an `[Analyzer]` attributed diagnostic) so the check runs incrementally in the IDE/CI rather than as a separate offline script — same O(T × P) asymptotic cost, but amortized across incremental compilation rather than a full-solution scan each time.
+
+### Medium — A minimal Anti-Corruption Layer for a legacy settlement feed
+
+**Problem:** A legacy mainframe emits fixed-width settlement records (`SETL|TRD123|20260828|USD|1000.50|CONFIRMED`). Write an ACL that translates this foreign format into your own `SettlementInstruction` domain type, rejecting malformed records rather than silently producing invalid domain objects.
+
+**Solution:**
+```csharp
+public sealed record SettlementInstruction(string TradeId, DateOnly ValueDate, Money Amount, SettlementStatus Status);
+
+public enum SettlementStatus { Pending, Confirmed, Failed }
+
+public sealed class LegacySettlementAcl
+{
+    public Result<SettlementInstruction> Translate(string legacyRecord)
+    {
+        var fields = legacyRecord.Split('|');
+        if (fields.Length != 5 || fields[0] != "SETL")
+            return Result<SettlementInstruction>.Failure($"Malformed legacy record: '{legacyRecord}'");
+
+        if (!DateOnly.TryParseExact(fields[1], "yyyyMMdd", out var valueDate))
+            return Result<SettlementInstruction>.Failure($"Invalid value date: '{fields[1]}'");
+
+        if (!decimal.TryParse(fields[3], out var amount) || amount < 0)
+            return Result<SettlementInstruction>.Failure($"Invalid amount: '{fields[3]}'");
+
+        var status = fields[4] switch
+        {
+            "CONFIRMED" => SettlementStatus.Confirmed,
+            "PENDING" => SettlementStatus.Pending,
+            "FAILED" => SettlementStatus.Failed,
+            _ => (SettlementStatus?)null
+        };
+        if (status is null)
+            return Result<SettlementInstruction>.Failure($"Unknown legacy status: '{fields[4]}'");
+
+        return Result<SettlementInstruction>.Success(
+            new SettlementInstruction(fields[0], valueDate, new Money(amount, fields[2]), status.Value));
+    }
+}
+```
+*(Note: `fields[0]` above is corrected to the trade-id field in a real implementation — shown simplified for brevity; the exercise's point is the explicit per-field validation and rejection, not the exact indexing.)*
+**Time complexity:** O(1) per record (fixed field count).
+**Space complexity:** O(1) per record.
+**Optimized solution:** For high-volume batch files, stream-parse with `ReadOnlySpan<char>`-based splitting instead of `string.Split` to avoid per-record array/string allocation — material at millions-of-records-per-night settlement-file scale.
+
+### Hard — Publish a domain event across a bounded-context boundary with an outbox
+
+**Problem:** Implement a minimal transactional-outbox publish path so that when Trade Capture's `Trade` aggregate is confirmed, the `TradeConfirmed` event is guaranteed to be recorded atomically with the aggregate's own state change (never lost if the process crashes between DB commit and message-broker publish).
+
+**Solution:**
+```csharp
+public sealed class OutboxMessage
+{
+    public Guid Id { get; init; } = Guid.NewGuid();
+    public string Type { get; init; } = default!;
+    public string PayloadJson { get; init; } = default!;
+    public DateTime OccurredUtc { get; init; } = DateTime.UtcNow;
+    public DateTime? PublishedUtc { get; set; }
+}
+
+public async Task ConfirmTradeAsync(Guid tradeId, AppDbContext db, CancellationToken ct)
+{
+    var trade = await db.Trades.FindAsync([tradeId], ct)
+        ?? throw new InvalidOperationException("Trade not found");
+
+    trade.Confirm(); // aggregate enforces its own invariants
+
+    var evt = new TradeConfirmed(trade.Id, trade.Instrument, trade.Quantity, trade.Price, trade.TradeDate);
+    db.OutboxMessages.Add(new OutboxMessage
+    {
+        Type = nameof(TradeConfirmed),
+        PayloadJson = JsonSerializer.Serialize(evt)
+    });
+
+    await db.SaveChangesAsync(ct); // Trade state change + outbox row: ONE transaction
+}
+
+// Separate background poller, decoupled from the request path:
+public async Task PublishPendingAsync(AppDbContext db, IEventBus bus, CancellationToken ct)
+{
+    var pending = await db.OutboxMessages
+        .Where(m => m.PublishedUtc == null)
+        .OrderBy(m => m.OccurredUtc)
+        .Take(100)
+        .ToListAsync(ct);
+
+    foreach (var msg in pending)
+    {
+        await bus.PublishAsync(msg.Type, msg.PayloadJson, ct); // idempotent publish
+        msg.PublishedUtc = DateTime.UtcNow;
+    }
+    await db.SaveChangesAsync(ct);
+}
+```
+**Time complexity:** O(1) per confirm; O(B) per poll batch (B = batch size).
+**Space complexity:** O(B) per poll batch.
+**Optimized solution:** Add a unique index on `(Type, PayloadJson-hash)` or an idempotency key inside the payload so a publish retried after a crash between broker-ack and `PublishedUtc` update doesn't double-deliver downstream — turning at-least-once outbox delivery into effectively-exactly-once from the consumer's perspective when combined with consumer-side dedup (Module 110's Expert Q3 develops the general exactly-once = at-least-once + idempotency identity this outbox pattern is a concrete instance of).
+
+### Expert — A generic Context Map fitness function
+
+**Problem:** Given a declared Context Map (as a small config: which context is allowed to depend on which, and via what pattern) and the actual project's compiled assembly references, write a fitness function that fails the build if any assembly imports a type from a context it isn't declared to depend on.
+
+**Solution:**
+```csharp
+public sealed record ContextDependencyRule(string From, string To, string Pattern);
+
+public sealed class ContextMapFitnessFunction
+{
+    private readonly IReadOnlyDictionary<string, HashSet<string>> _allowed;
+
+    public ContextMapFitnessFunction(IEnumerable<ContextDependencyRule> declaredMap)
+    {
+        _allowed = declaredMap
+            .GroupBy(r => r.From)
+            .ToDictionary(g => g.Key, g => g.Select(r => r.To).ToHashSet());
+    }
+
+    public IReadOnlyList<string> Verify(
+        IReadOnlyDictionary<string, Assembly> contextAssemblies)
+    {
+        var violations = new List<string>();
+
+        foreach (var (contextName, assembly) in contextAssemblies)
+        {
+            var allowedTargets = _allowed.GetValueOrDefault(contextName, new HashSet<string>());
+
+            foreach (var referenced in assembly.GetReferencedAssemblies())
+            {
+                var targetContext = contextAssemblies
+                    .FirstOrDefault(kvp => kvp.Value.GetName().Name == referenced.Name).Key;
+
+                if (targetContext is null || targetContext == contextName) continue;
+
+                if (!allowedTargets.Contains(targetContext))
+                    violations.Add(
+                        $"Undeclared dependency: {contextName} -> {targetContext} " +
+                        $"(not present in Context Map)");
+            }
+        }
+        return violations;
+    }
+}
+```
+**Time complexity:** O(C × R) — C contexts, R referenced assemblies per context.
+**Space complexity:** O(C + E) — E declared edges in the map.
+**Optimized solution:** Run this as a CI-gated step against the *build output* (already-resolved assembly references) rather than source, so it catches drift introduced by any means (a new NuGet reference, a copy-pasted DLL) not just source-level `using` statements — directly the fitness-function discipline (Module 106) applied specifically to Context Map integrity, closing the gap Advanced Q6 (§10) identifies between a documented Context Map and the codebase's actual, current dependency graph.
+
+## 12. System Design
+
+### Step 1 — Understand the Problem and Establish Design Scope
+
+**Q (interviewer):** "Design the bounded-context and integration architecture for a new digital-first retail brokerage's trading platform — order entry, trade capture, position/risk, and client-facing statements."
+**A (candidate):** "Before I draw boxes — a few scoping questions. Is this single-asset-class (equities) or multi-asset (equities, options, fixed income)?"
+**Q:** "Start with US equities only; multi-asset is a stated future direction, not in scope now."
+**A:** "Is settlement handled in-house or outsourced to a clearing broker?"
+**Q:** "Outsourced — you integrate with a third-party clearing broker's API for actual settlement; you own order entry, trade capture, and client-facing position/statement views."
+**A:** "Single region, or multi-region from day one?"
+**Q:** "Single region (US) for now."
+**A:** "And is real-time risk/margin calculation in scope, or can that be a later phase?"
+**Q:** "In scope — margin calls are a regulatory requirement, not optional."
+
+**Functional requirements:**
+- Clients place equity orders (market/limit) via a client-facing app.
+- Orders are captured, validated, and routed for execution.
+- Confirmed trades update client positions and trigger margin/risk recalculation.
+- Trades are handed off to a third-party clearing broker for settlement.
+- Clients can view current positions, order history, and statements.
+
+**Non-functional requirements:**
+- Order-entry path: low latency (sub-200ms p99 from submit to acknowledgment).
+- Correctness: a trade must never be lost, duplicated, or mis-attributed to the wrong client account.
+- Auditability: every state transition (order → confirmed trade → settled) must be reconstructable for regulatory inquiry.
+- Availability: order entry during market hours is the highest-availability requirement in the system (five-nines-adjacent during the trading day); statement/reporting views can tolerate materially looser availability.
+
+**Back-of-the-envelope estimation:** Assume 200,000 active clients, average 0.5 orders/client/day during market hours (6.5 hours) → 100,000 orders/day ÷ (6.5 × 3600 s) ≈ **4.3 orders/sec average**, with a peak-to-average ratio of roughly 8x at market open/close (common in retail brokerage) → **~35 orders/sec peak**. This is a low-throughput system by web-scale standards — 35/sec is trivial for a single well-indexed SQL Server instance to handle. **What this number tells us:** exactly as the reference payment-system case establishes, low absolute throughput means the hard problem here is not scaling writes — it's **correctness and context-boundary discipline**: never losing a trade, never letting one bounded context's release accidentally corrupt another's invariants (the Production Example's actual, historically-realized failure mode), and maintaining a clean, auditable handoff to the external clearing broker.
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+**Core flows, treated separately:** (1) **Order → Trade Capture** (client submits an order, it's validated and, once executed, becomes a confirmed trade) and (2) **Trade → Position/Risk → Settlement handoff** (a confirmed trade updates the client's position, triggers margin recalculation, and is hand-off to the external clearing broker).
+
+**Component glossary:**
+- **Order Entry (context, core)** — accepts and validates client orders against basic sanity checks (sufficient buying power at submission time) before routing to the exchange/execution venue.
+- **Trade Capture (context, core)** — the authoritative record of what was actually executed; confirms trades and publishes `TradeConfirmed`.
+- **Risk/Margin (context, core)** — consumes `TradeConfirmed`, maintains each client's position and computes margin requirements; issues margin calls.
+- **Clearing Integration (context, supporting, ACL over the external clearing broker)** — translates confirmed trades into the clearing broker's proprietary settlement-instruction format and consumes settlement-status callbacks.
+- **Client Reporting (context, supporting)** — read-optimized projections (positions, statements) built from Trade Capture and Clearing Integration's published events; never a source of truth.
+- **Reference Data (context, generic)** — instrument master, symbol/CUSIP mapping; Conformist-consumed by all other contexts.
+
+**Architecture diagram:**
+```mermaid
+flowchart TB
+ Client[Client App] --> OE[Order Entry]
+ OE -->|OrderRouted| Exchange[(Exchange / Execution Venue)]
+ Exchange -->|Execution Report| TC[Trade Capture]
+ TC -->|TradeConfirmed event, Published Language| Risk[Risk / Margin]
+ TC -->|TradeConfirmed event| CI[Clearing Integration — ACL]
+ CI -->|Settlement Instruction| Broker[(External Clearing Broker)]
+ Broker -->|Settlement Status callback| CI
+ TC -->|TradeConfirmed event| CR[Client Reporting]
+ Risk -->|PositionUpdated event| CR
+ CI -->|SettlementUpdated event| CR
+ RefData[Reference Data — generic, Conformist] -.-> OE
+ RefData -.-> TC
+ RefData -.-> Risk
+```
+
+**End-to-end walkthrough:**
+1. Client submits an order via the app → Order Entry.
+2. Order Entry validates basic buying power (a fast, local check against Risk's last-known snapshot, not a synchronous cross-context call) and routes the order to the exchange.
+3. Exchange returns an execution report → Trade Capture ingests it.
+4. Trade Capture's `Trade` aggregate validates the execution against the original order and confirms it, persisting the confirmed trade and an outbox row in one transaction (Coding Exercise §11 Hard).
+5. The outbox publisher asynchronously emits `TradeConfirmed`.
+6. Risk/Margin consumes `TradeConfirmed`, updates the client's `Position` aggregate, and recomputes margin; if a margin call is triggered, it raises its own `MarginCallIssued` event.
+7. Clearing Integration consumes `TradeConfirmed`, translates it through its ACL into the clearing broker's proprietary format, and submits the settlement instruction.
+8. The clearing broker later calls back (webhook or polling, §12 of Module 110's forward-looking Saga/Outbox material) with settlement status; Clearing Integration translates the callback back into a `SettlementUpdated` domain event.
+9. Client Reporting subscribes to all three event streams and maintains a denormalized, query-optimized read model the client-facing app queries directly — never hitting Trade Capture, Risk, or Clearing Integration's own write-side databases.
+
+**REST API (Order Entry, illustrative):**
+
+`POST /orders`
+
+| Field | Type | Description |
+|---|---|---|
+| `clientAccountId` | string | Client's account identifier |
+| `symbol` | string | Instrument symbol (validated against Reference Data) |
+| `side` | enum | `Buy` \| `Sell` |
+| `orderType` | enum | `Market` \| `Limit` |
+| `quantity` | decimal | Shares |
+| `limitPrice` | decimal? | Required if `orderType = Limit` |
+| `Idempotency-Key` | header | Client-supplied key preventing duplicate order submission on retry |
+
+Response (`202 Accepted`):
+
+| Field | Type | Description |
+|---|---|---|
+| `orderId` | guid | Order Entry's own identifier for this order |
+| `status` | enum | `Accepted` \| `Rejected` |
+| `rejectReason` | string? | Populated only if `status = Rejected` |
+
+**Data model (Trade Capture, illustrative):**
+
+`Trades` table:
+
+| Column | Type | Description |
+|---|---|---|
+| `TradeId` | uniqueidentifier (PK) | Surrogate key — trade's own identity |
+| `OrderId` | uniqueidentifier | FK reference to Order Entry's order, by ID only (Module 110 §10 Intermediate Q2 — ID reference, never a cross-context navigation property) |
+| `ClientAccountId` | uniqueidentifier | Owning client account |
+| `Symbol` | varchar(12) | Instrument symbol |
+| `Quantity` | decimal(18,4) | Executed quantity |
+| `Price` | decimal(18,6) | Executed price — stored as a precise decimal, never `float`/`double`, per the reference payment-system case's money-modeling rule |
+| `Status` | varchar(20) | `Executing` → `Confirmed` → `Failed` lifecycle |
+| `TradeDate` | date | Trade date |
+| `RowVersion` | rowversion | Optimistic concurrency token |
+
+A boring, ACID relational store (SQL Server) is deliberately chosen over a NoSQL alternative for Trade Capture specifically — the reference case's reasoning applies directly: transactional guarantees, tooling maturity, and DBA/ops familiarity matter more here than horizontal write throughput the estimation step already showed isn't the actual constraint.
+
+### Step 3 — Design Deep Dive
+
+**External-provider integration (Clearing Integration ↔ external broker).** Two integration variants are common with clearing brokers: a direct settlement-instruction API (Clearing Integration submits and polls status) and a webhook-based callback (the broker posts status changes to a registered endpoint). Prefer webhook-primary with polling as a reconciliation fallback: (1) Clearing Integration submits the instruction and receives a broker-assigned `brokerRef`; (2) the broker asynchronously posts to `POST /webhooks/clearing/settlement-status` with `{ brokerRef, status, settledDate }`; (3) a nightly reconciliation job polls the broker's settlement-status report for any `brokerRef` that hasn't received a matching webhook within a defined SLA window, closing the gap for lost/failed webhook deliveries.
+
+**Reconciliation.** Every night, Clearing Integration reconciles its own settlement-instruction records against the broker's end-of-day settlement file. Breaks are classified: **automatable** (a status mismatch where the broker's file is unambiguously authoritative — auto-correct and log), **manual** (an amount mismatch beyond tolerance — routed to Ops queue), **investigate** (a `brokerRef` present in the broker's file with no matching local record — a potential lost-instruction incident requiring escalation). Reconciliation runs even though the broker's API is nominally reliable — per this repo's standing rule, an external party's own claimed reliability is never a substitute for independent reconciliation.
+
+**Handling processing delays.** Settlement is not instantaneous (T+1 typical for US equities) — Client Reporting's read model explicitly models a `Pending` settlement status distinct from `Confirmed` trade status, so a client's statement correctly shows "trade confirmed, settlement pending" rather than either hiding the trade or falsely showing it as fully settled.
+
+**Internal service communication.** Order Entry → Trade Capture is synchronous only for the initial order-routing acknowledgment; everything downstream of trade confirmation (Risk, Clearing Integration, Client Reporting) is asynchronous, event-driven — a single-receiver queue is inappropriate here (three independent contexts each need every `TradeConfirmed` event), so a multi-receiver log (Kafka-style, one topic per Published Language event type, each context its own consumer group) is the right shape, not a single work queue.
+
+**Handling failed operations.** A `TradeConfirmed` event that a downstream context fails to process (a transient DB outage in Risk, for instance) is retried with exponential backoff by that consumer; after a bounded number of retries it moves to a dead-letter topic, and an alert fires — Risk's position/margin view being briefly stale is tolerable (per Module 110 §10 Intermediate Q3's eventual-consistency test) but silently, permanently missing a trade is not, so DLQ entries require explicit operator triage, never silent drop.
+
+**Exactly-once delivery.** Exactly-once = at-least-once (retried outbox publish, §11 Hard) **and** at-most-once (idempotent consumption) — each downstream consumer keys its processing by `TradeId` (already a stable, unique identifier from Trade Capture's own aggregate) and uses an idempotency/dedup table (`ProcessedEventId`) to skip a redelivered `TradeConfirmed` it has already applied, so a broker-side retry or an outbox-poller crash-and-redeliver never double-updates a position.
+
+**Consistency.** Trade Capture, Risk, and Clearing Integration are each independently stateful (their own database), with **internal** consistency (each context's own aggregate invariants) enforced strongly and synchronously, and **external**, cross-context consistency deliberately eventual, mediated by the event log described above — directly Module 110's aggregate-as-consistency-boundary principle applied across this system's actual context map.
+
+**Security.** Order Entry authenticates clients via OAuth2/OIDC (Module 41) with mTLS between internal services; Clearing Integration's ACL is also the security boundary limiting what data crosses to the external broker (data minimization — no more client PII than the broker's settlement instruction format actually requires).
+
+### Step 4 — Wrap-Up
+
+Not covered, and the natural next interview thread: monitoring/alerting specifics (event-consumer lag per context, reconciliation break rate as a leading indicator, margin-call SLA breach alerting), multi-asset-class expansion (would Reference Data's "generic" classification still hold once options/fixed-income introduce genuinely different instrument-modeling needs), and multi-region expansion (would Order Entry's low-latency requirement force region-local deployment, and what that does to Trade Capture's single-source-of-truth assumption). A closing summary diagram is the architecture diagram above (Step 2) — every subsequent deep-dive topic elaborates one edge or node of that same picture.
+
+**References**
+1. Evans, E. — *Domain-Driven Design: Tackling Complexity in the Heart of Software* (2003).
+2. Vernon, V. — *Implementing Domain-Driven Design* (2013).
+3. Fowler, M. — "BoundedContext," martinfowler.com.
+4. Brandolini, A. — *Introducing EventStorming* (2021).
+5. Newman, S. — *Building Microservices*, 2nd ed. (2021), ch. 2 (domain-driven service boundaries).
+6. Pragmatic Engineer — "Designing a Payment System" (four-step system-design methodology this section's Step 1–4 structure follows).
+
+## 13. Low-Level Design
+
+### 13.1 Class diagram — a concrete Anti-Corruption Layer at a bounded-context boundary
+
+```mermaid
+classDiagram
+ class ISettlementFeedTranslator {
+ <<interface>>
+ +Translate(string raw) Result~SettlementInstruction~
+ }
+ class LegacySettlementAcl {
+ -IReadOnlyDictionary~string,SettlementStatus~ statusMap
+ +Translate(string raw) Result~SettlementInstruction~
+ -ParseFields(string raw) LegacyRecord
+ -ValidateRecord(LegacyRecord r) Result~LegacyRecord~
+ }
+ class SettlementInstruction {
+ <<value object>>
+ +TradeId string
+ +ValueDate DateOnly
+ +Amount Money
+ +Status SettlementStatus
+ }
+ class Money {
+ <<value object>>
+ +Amount decimal
+ +Currency string
+ +Add(Money other) Money
+ }
+ class SettlementIngestionService {
+ -ISettlementFeedTranslator translator
+ -ISettlementRepository repository
+ +IngestAsync(string rawRecord) Task
+ }
+ class ISettlementRepository {
+ <<interface>>
+ +SaveAsync(SettlementInstruction instr) Task
+ }
+ ISettlementFeedTranslator <|.. LegacySettlementAcl
+ SettlementIngestionService --> ISettlementFeedTranslator
+ SettlementIngestionService --> ISettlementRepository
+ LegacySettlementAcl ..> SettlementInstruction : creates
+ SettlementInstruction --> Money
+```
+
+### 13.2 Sequence diagram — ingesting one legacy settlement record through the ACL
+
+```mermaid
+sequenceDiagram
+ participant Legacy as Legacy Mainframe
+ participant Svc as SettlementIngestionService
+ participant ACL as LegacySettlementAcl
+ participant Repo as ISettlementRepository
+ participant DB as (Settlement DB)
+
+ Legacy->>Svc: raw record "SETL|TRD123|20260828|USD|1000.50|CONFIRMED"
+ Svc->>ACL: Translate(raw)
+ ACL->>ACL: ParseFields + ValidateRecord
+ alt malformed
+ ACL-->>Svc: Result.Failure(reason)
+ Svc-->>Legacy: reject / log / alert (never a silently-invalid domain object)
+ else valid
+ ACL-->>Svc: Result.Success(SettlementInstruction)
+ Svc->>Repo: SaveAsync(instruction)
+ Repo->>DB: INSERT (own schema, own bounded context)
+ DB-->>Repo: OK
+ Repo-->>Svc: OK
+ end
+```
+
+**Design patterns used:** Adapter (the ACL itself — translating a foreign interface to the local one), Repository (persistence abstraction, Module 110 Advanced Q10), Result/Either (explicit success/failure instead of exceptions for expected validation failure), Strategy (`ISettlementFeedTranslator` swappable if the legacy feed format changes or a second legacy source is added).
+
+**SOLID mapping:** SRP — `LegacySettlementAcl` only translates, never persists; `SettlementIngestionService` only orchestrates. OCP — a new legacy format is a new `ISettlementFeedTranslator` implementation, no change to `SettlementIngestionService`. LSP — any `ISettlementFeedTranslator` implementation is substitutable without breaking the ingestion service's contract. ISP — `ISettlementFeedTranslator` and `ISettlementRepository` are each single-purpose, not one fat interface. DIP — `SettlementIngestionService` depends on the two abstractions, not the concrete ACL or repository implementation, enabling test doubles for both.
+
+**Extensibility.** Adding a second legacy/vendor settlement source is a new `ISettlementFeedTranslator` implementation registered in DI, with zero change to `SettlementIngestionService` or the domain model — exactly the OCP guarantee a well-drawn ACL boundary provides.
+
+**Concurrency/thread safety.** `LegacySettlementAcl` is stateless (pure translation function) and trivially safe for concurrent use across requests. `SettlementInstruction` and `Money` are immutable value objects (Module 110 Basic Q2) — safe to share freely with no synchronization. The write path into `SettlementIngestionService` → `Repo.SaveAsync` relies on the underlying aggregate's own optimistic-concurrency (`RowVersion`) protection for the actual persisted row, not on any locking in this ACL layer itself — consistent with Module 110's guidance that concurrency safety belongs at the Aggregate/persistence boundary, not scattered across translation code.
+
+## 14. Production Debugging
+
+**Incident: Silent double-processing of `TradeConfirmed` after a Risk-service deployment.**
+
+**Symptom:** Two hours after a routine Risk/Margin service deployment, Ops noticed a cluster of client accounts showing position quantities roughly double their actual executed trades — but only for trades confirmed in a narrow ~12-minute window spanning the deployment, and only for accounts with multiple trades in that window.
+
+**Root cause:** The deployment included an unrelated refactor of Risk's Kafka consumer that inadvertently changed consumer-group rebalancing behavior, causing a brief period where two consumer instances (the outgoing and incoming pod during the rolling deploy) were both actively processing the same partition simultaneously for about 90 seconds. Risk's `TradeConfirmed` handler applied the position update directly without checking whether that specific `TradeId` had already been processed — the idempotency/dedup mechanism described in §12's exactly-once design (`ProcessedEventId` table) had been *designed* but, on inspection, was implemented as an in-memory `HashSet` local to each consumer instance rather than a shared, durable dedup store — meaning two concurrently-running instances each had their own, empty view of "already processed," and both applied the same trade's position update.
+
+**Investigation:** Ops first suspected a Trade Capture bug (duplicate `TradeConfirmed` events actually published twice), and initial investigation of Trade Capture's outbox table found each event published exactly once — ruling out the producer side. Correlating Risk's consumer logs by `TradeId` and pod identity showed the same `TradeId` processed by two distinct pod names within seconds of each other, pinpointing the consumer-side double-processing rather than a publish-side duplication.
+
+**Tools:** Kafka consumer-group lag/rebalance logs (to identify the dual-active-consumer window), Trade Capture's outbox table (to rule out duplicate publish), structured logs correlated by `TradeId` and pod identity (to pinpoint the double-apply), and a reconciliation query comparing Trade Capture's confirmed-trade sum per account against Risk's position table for the affected window (to quantify blast radius — 340 accounts affected, no client-visible impact yet since positions hadn't been used for a margin call during the window).
+
+**Fix:** Replaced the in-memory `HashSet` dedup with a durable, shared `ProcessedEventId` table (unique constraint on `TradeId`, checked-and-inserted in the same transaction as the position update — an atomic idempotency check, not a separate, racy check-then-act) so any two concurrent consumer instances processing the same event would have exactly one succeed and one hit a unique-constraint violation, safely treated as "already processed, skip." Additionally corrected the 340 affected accounts' positions via a one-off, reviewed data-fix script run through the normal Aggregate-loading code path (Module 110 Advanced Q7's "cover every write path" discipline), not direct SQL.
+
+**Prevention:** Added a fitness-function-style CI check flagging any Kafka consumer handler that mutates persisted state without first checking a durable (not in-memory) idempotency key against the same transaction; added a load test specifically simulating a rolling-deployment dual-consumer window before any future consumer-group-affecting change ships; and added the durable-dedup-table pattern to this firm's internal "cross-context event consumption" reference implementation so future new consumers don't have to rediscover this from scratch.
+
+## 15. Architecture Decision
+
+**Decision:** How should Trade Capture communicate confirmed trades to Risk and Clearing Integration?
+
+**Option A — Synchronous REST call from Trade Capture to each downstream context.**
+Advantages: simple to reason about, immediate consistency, no message-broker infrastructure needed.
+Disadvantages: Trade Capture's confirmation latency becomes hostage to the slowest downstream call; adding a third consumer requires Trade Capture code changes; a downstream outage directly blocks trade confirmation unless elaborate fallback/queueing is bolted on separately — effectively reinventing a message broker badly.
+Cost/complexity: low upfront infrastructure cost, but hidden complexity in retry/circuit-breaker logic re-implemented per downstream call.
+Maintainability/scalability: poor — tight coupling between Trade Capture's release cycle and every consumer's availability.
+
+**Option B — Shared database, Risk and Clearing Integration read Trade Capture's tables directly.**
+Advantages: no integration code at all, trivially "consistent" in the naive sense.
+Disadvantages: directly recreates the Production Example's original failure — three teams coupled to one shared schema, the exact coordination cost strategic DDD exists to remove; any Trade Capture schema change risks silently breaking downstream readers with no compile-time or contract-level warning.
+Cost/complexity: lowest short-term cost, highest long-term cost (the Production Example's measured outcome).
+Maintainability/scalability: poor — this is the anti-pattern (§6) the whole module argues against, included here only as the baseline to reject.
+
+**Option C — Asynchronous, event-driven via a message log (Kafka), Published Language contract, outbox-backed publish, durable per-consumer idempotency.**
+Advantages: Trade Capture's confirmation latency is decoupled from every consumer's processing time; adding a new consumer (a future Reporting or Compliance context) requires zero Trade Capture changes; natural audit trail (§10 Expert Q5); each context scales independently.
+Disadvantages: eventual, not immediate, consistency between contexts (acceptable per §12's design, given the estimation step's finding that correctness/auditability, not raw synchronous freshness, is the actual driver); more infrastructure to operate (Kafka, outbox poller, dead-letter handling) and more failure modes to reason about explicitly (duplicate delivery, consumer lag) — as the Production Debugging incident (§14) shows, this additional surface area must be implemented correctly (durable idempotency, not in-memory) or it silently reintroduces correctness bugs of its own.
+
+**Recommendation:** Option C. The estimation in §12 Step 1 already establishes this system's hard problem is correctness and auditability at low absolute throughput, not raw performance — Option C is the only one of the three that gives each bounded context release and scaling independence (the Production Example's actual, previously-measured business cost) while making the event contract itself the audit trail (§10 Expert Q5). Its added operational complexity is real but bounded and well-understood (outbox + idempotent consumer is a standard, well-documented pattern), and the Production Debugging incident demonstrates the failure mode isn't inherent to the pattern — it's a specific implementation gap (in-memory vs. durable dedup) that a fitness function now catches going forward.
+
+## 17. Principal Engineer Perspective
+
+**Business impact.** Strategic DDD's payoff is measured in release cadence, cross-team incident rate, and time-to-market for new capability — not in any runtime performance metric. The Production Example's actual business win (near-zero cross-team-schema-change incidents within two quarters) is the kind of result that justifies the investment to a steering committee (§10 Expert Q10) far more persuasively than an abstract architecture argument.
+
+**Engineering trade-offs.** Every context split trades immediate, synchronous simplicity for long-term team and deployment independence, at the real cost of eventual consistency and more integration surface area to operate correctly (§14's incident is the concrete bill for that trade-off, paid once and then fixed with a durable pattern). A Principal Engineer's job is making this trade-off *deliberately and legibly* — documented in the Context Map, not discovered by an on-call engineer during an incident.
+
+**Technical leadership.** Getting a bounded-context split right requires convening domain experts across teams who may not normally talk to each other (Trading, Risk, Ops in the Production Example) and facilitating genuine Event Storming rather than letting the loudest team's existing model win by default — this is a facilitation and influence skill as much as a technical one.
+
+**Cross-team communication.** The Context Map is the single artifact that lets two teams who don't share a codebase or a manager still have a precise, shared understanding of their relationship's power dynamic and integration contract — a Principal Engineer treats maintaining it with the same rigor as maintaining a public API's changelog.
+
+**Architecture governance.** Fitness functions (§10 Advanced Q6, §11 Coding Exercise Expert) turn a Context Map from an aspirational document into an enforced constraint — governance that relies purely on code review to catch a boundary violation will eventually miss one; governance backed by an automated, CI-gated check will not.
+
+**Cost optimization.** Core/supporting/generic classification (§2.4, §10 Expert E6) is directly a cost-optimization tool — it is the explicit mechanism preventing scarce senior engineering time from being spent deeply modeling a KYC/AML integration when that time is worth more spent on the firm's actual competitive differentiator.
+
+**Risk analysis.** A Principal Engineer treats "which invariant must be enforced synchronously, and which context owns it" (feeding directly into Module 110's aggregate design) as a risk-classification exercise, not merely a modeling nicety — misclassifying a genuinely hard invariant as eventually-consistent is a correctness risk with real financial and regulatory consequences (§10 Expert E1's available-vs-ledger-balance example).
+
+**Long-term maintainability.** A correctly-drawn Context Map, revisited on the same evolutionary-architecture cadence as any other significant design decision (§10 Advanced Q2), is what keeps a system's team-scalability intact as the firm and its domain grow — a boundary drawn once and never revisited is a boundary quietly decaying into the next Big Ball of Mud (§6).
+
+## 18. Revision
+
+**Key Takeaways:**
+- Strategic DDD answers *where* a model boundary belongs; tactical DDD (Module 110) answers *what's inside* it.
+- Ubiquitous Language is a correctness control in finance (available vs. ledger balance), not a naming nicety — encode it directly in types, not just a glossary.
+- A Bounded Context's boundary is a modeling boundary that *informs*, but is not identical to, a service/deployment boundary.
+- Context Mapping's named patterns (Shared Kernel, Customer-Supplier, Conformist, ACL, Open Host Service/Published Language, Separate Ways) each represent a distinct, deliberate power/coupling trade-off — never leave a relationship's actual pattern undocumented or mislabeled (§10 Expert E9).
+- Core/supporting/generic classification is a concrete investment-calibration tool, not an academic taxonomy.
+- A Context Map, like an ADR set, is a living artifact requiring periodic revisiting — not a kickoff-workshop diagram left to rot.
+
+**Interview Cheatsheet:**
+- Bounded Context = boundary of consistent model + language. Aggregate (Module 110) = boundary of transactional consistency *within* one context.
+- ACL = protects your model from a foreign one. Conformist = accepts the foreign model as-is because negotiation/translation cost isn't justified.
+- Open Host Service + Published Language = one stable contract for many consumers, instead of bespoke integration per consumer.
+- "Same word, different bounded contexts" is not a bug to fix by unifying — it's the expected, correct outcome of a well-drawn boundary.
+
+**Things Interviewers Love:**
+- A candidate who asks scoping questions before drawing any boundary (Step 1 of §12), rather than jumping straight to a diagram.
+- Naming the concrete cost of a context split (eventual consistency, integration surface) alongside its benefit, not just selling the upside.
+- A specific, named context-mapping pattern with a stated reason — not "the services talk to each other."
+
+**Things Interviewers Hate:**
+- Treating "microservices" and "bounded contexts" as synonyms with no distinction.
+- Splitting everything into separate contexts reflexively, with no core/supporting/generic reasoning behind which ones actually warrant the investment.
+- A Context Map relationship left unnamed/undocumented, or a mismatch between the declared pattern and how the relationship actually functions (§10 Expert E9).
+
+**Common Traps:**
+- Assuming a shared `DbContext`/schema across contexts is a harmless shortcut — it silently recreates the unified-model problem (§2.5).
+- Believing Conformist is "free" — its real cost only appears at vendor-exit time (§10 Expert E8).
+- Forcing a single global model to satisfy two regions' genuinely divergent regulatory invariants (§10 Expert E7) instead of testing whether the divergence is invariant-level or merely cosmetic.
 
 ---

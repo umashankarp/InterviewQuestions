@@ -72,6 +72,50 @@ graph TB
 
 ---
 
+## 7. Performance Engineering
+
+**CPU/Memory:** MVCC's tuple-versioning means every `UPDATE` is effectively an `INSERT` + a tombstone-mark — on a hot ledger-posting table doing thousands of status transitions per second, this doubles the working set the buffer cache must hold relative to a hypothetical in-place-update engine, directly increasing shared_buffers pressure and page eviction churn.
+
+**Query planner:** The planner's row-count estimates come from `pg_statistics`, refreshed by `ANALYZE` (run automatically by `autovacuum` after a threshold of changed rows, but frequently stale immediately after a large bulk load). A reconciliation query joining `trades` and `settlements` on `(account_id, trade_date)` — two correlated columns the default single-column statistics can't capture — routinely mis-estimates row counts and picks a nested-loop join where a hash join would be an order of magnitude faster; `CREATE STATISTICS trades_acct_date_stats (dependencies) ON account_id, trade_date FROM trades;` followed by `ANALYZE` closes exactly this gap.
+
+**Connection pooling (pgbouncer):** In **transaction pooling mode** (the mode that actually gives PostgreSQL connection-scaling headroom, since a single physical backend serves many logical client connections sequentially), session-level state — `SET search_path`, prepared statements via `PREPARE`, advisory locks held across statements, temp tables — does **not** survive between transactions, because the underlying physical connection may be handed to a different client the instant the transaction commits. A team using an ORM's server-side prepared-statement caching against a pgbouncer transaction-pooled endpoint will see intermittent "prepared statement does not exist" errors under load — the fix is either session pooling mode (losing most of the connection-scaling benefit) or disabling server-side prepare in the driver and relying on pgbouncer's own statement caching.
+
+**WAL cost:** Every tuple version written also writes to the WAL — a high-churn table (the vacuum-bloat incident's root cause) doesn't just bloat the heap, it multiplies WAL volume, which directly increases replication lag risk (Module 22 §7) and checkpoint I/O. `wal_compression = on` reduces WAL volume for full-page writes at a modest CPU cost, worth enabling on any high-TPS OLTP primary.
+
+**Benchmarking:** Benchmark query plans against production-representative data volume and statistics freshness, never against a freshly-`ANALYZE`d, artificially small staging copy — the correlated-columns misestimation above is invisible until the planner is actually reasoning about production-scale skew.
+
+**Caching:** Application-level caching (Redis) in front of PostgreSQL should still respect `JSONB`'s native indexing strength for semi-structured lookups before reaching for an external cache purely to avoid a query the database could serve efficiently itself.
+
+---
+
+## 8. Security
+
+**Row-Level Security (expanded):** Beyond the multi-tenant policy already shown (§10 Advanced Q8), RLS policies can be scoped per role (`CREATE POLICY... TO analyst_role USING (...)`) so a read-only reporting role sees a masked or restricted row subset distinct from what a service account performing writes sees — a single table, multiple enforced views, all at the engine layer rather than trusted to every application code path.
+
+**Roles and privilege separation:** Follow least-privilege via role hierarchy (`CREATE ROLE app_readonly; GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_readonly;`) rather than granting broad `ALL PRIVILEGES` to a single application role — a payments service's read-replica-serving reporting endpoint should run under a role that structurally cannot `UPDATE` a ledger table, so a SQL-injection or application bug can't escalate beyond what the role's own grants permit, a second, engine-enforced layer beneath application authorization exactly as RLS is.
+
+**`pg_hba.conf`:** Controls *which* authentication method applies per (database, user, source-address, connection-type) tuple — `hostssl` entries reject any non-TLS connection attempt outright at the network layer, and `scram-sha-256` (not `md5`, which is cryptographically weaker and increasingly deprecated) should be the standard password-authentication method. A common FinTech-audit finding is a `pg_hba.conf` with a trailing permissive `host all all 0.0.0.0/0 md5` rule left from initial setup, silently widening the actual attack surface far beyond what the application's documented access pattern implies.
+
+**Encryption:** In-transit: `ssl = on` plus `hostssl`-only `pg_hba.conf` rules enforce TLS for every client connection, including replication connections (Module 22 §8). At-rest: PostgreSQL has no native Transparent Data Encryption; rely on disk/volume-level encryption (AWS EBS encryption, Azure Disk encryption) for the data files, and `pgcrypto`'s `pgp_sym_encrypt`/`pgp_sym_decrypt` for column-level encryption of specific highly sensitive fields (e.g., a stored card-verification value, though PCI-DSS scope reduction argues for never storing this at all rather than encrypting it).
+
+**Injection:** Parameterized queries (`$1`, `$2` placeholders via the driver, never string-concatenated SQL) remain the primary defense — PostgreSQL's `EXECUTE` with dynamically-built SQL inside `PL/pgSQL` functions is a common, easy-to-miss injection vector when a function accepts a table/column name as a parameter; use `format('%I', ident)` (identifier-quoting) rather than naive string interpolation. Pin a function's `search_path` explicitly (`SET search_path = public, pg_temp`) to prevent a "trojan-horse function" attack where a malicious schema earlier in an unpinned search path shadows a built-in function call.
+
+---
+
+## 9. Scalability
+
+**Horizontal scaling:** Read replicas (streaming physical replication, Module 22 §2.2) offload read traffic from the primary; logical replication (Module 22 §2.2) additionally enables selective, fan-out replication to multiple independently-schema'd subscribers (a reporting warehouse, a fraud-detection pipeline) without burdening the primary with each subscriber's own query load.
+
+**Vertical scaling:** A single PostgreSQL primary's write throughput is ultimately bounded by WAL-write I/O and single-writer contention on hot rows — vertical scaling (faster storage, more memory for `shared_buffers`) delays but doesn't eliminate the ceiling a genuinely write-heavy, single-primary architecture eventually hits.
+
+**Partitioning/Sharding:** Table partitioning (Module 22 §2.1) addresses maintenance-operation cost at scale, not write-throughput scaling by itself, since all partitions still live on one primary. True horizontal write-sharding requires an extension like **Citus** (distributing partitions/shards across multiple physical nodes with a coordinator routing queries) or application-level sharding — a materially larger architectural commitment than partitioning alone, justified only once a single primary's vertical ceiling is a genuine, demonstrated constraint.
+
+**High Availability / Disaster Recovery:** Streaming replication with a standby ready for promotion (Module 22 §3), ideally with automated, fenced failover orchestration (Patroni/etcd or a managed service's built-in failover) rather than manual intervention — covered in full in Module 22 §12 and §15.
+
+**CAP-adjacent trade-off:** Synchronous vs. asynchronous replication (Module 22 §2.3) is PostgreSQL's concrete instantiation of the availability/consistency trade-off at the replication layer — the scalability lever (more replicas, more read capacity) and the durability lever (synchronous acknowledgment) pull in different directions and must be sized deliberately per workload's actual tolerance for committed-data loss on failover.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -146,6 +190,48 @@ graph TB
  **Common mistakes:** `double precision` for money; the `money` type; no separate currency code; implicit rounding.
  **Follow-ups:** "Why is the `money` type's locale coupling a problem?" / "How do you represent a JPY vs. a BHD amount's scale?" / "How do you avoid a lossy cast between the app and the column?"
 
+4. **Q: Your reporting service uses pgbouncer in transaction pooling mode for connection scaling; after enabling it, an ORM-driven service starts intermittently throwing "prepared statement 'S_1' does not exist." Diagnose and fix.**
+ **A:** Transaction pooling mode multiplexes many logical client sessions onto few physical backends, handing a physical connection to a *different* client the instant a transaction commits — but the ORM driver's server-side prepared statements (`PREPARE`) are backend-session-scoped, not connection-string-scoped, so a statement prepared on one logical "connection" can vanish (or, worse, collide with another client's same-named statement) once pgbouncer reassigns the underlying physical backend. Fix: either disable server-side prepared statements in the driver (most ORMs/drivers, e.g. Npgsql, expose a `Max Auto Prepare` / prepare-mode setting; set it to rely on pgbouncer's own statement handling instead) or move that specific workload to session pooling mode (at the cost of losing most of pgbouncer's connection-scaling benefit) — never "just retry the error," which papers over the mismatch instead of resolving it. The Principal framing: pgbouncer's pooling mode is a session-state contract, not just a performance knob — any session-scoped feature (prepared statements, advisory locks held across statements, `SET`-level GUCs, temp tables) must be audited against the chosen pooling mode before rollout, not discovered via a production intermittent-error investigation.
+ **Why correct:** Correctly attributes the error to transaction-pooling's session-state discontinuity and gives both viable fixes with their trade-off.
+ **Common mistakes:** Treating the error as transient/flaky and retrying; enabling session pooling globally as a blanket fix, silently discarding the connection-scaling benefit that motivated pgbouncer's adoption in the first place.
+ **Follow-ups:** "What other session-scoped features break under transaction pooling?" / "Why does session pooling mode lose most of the scaling benefit?" / "How would you audit an existing service for this risk before migrating it to transaction pooling?"
+
+5. **Q: A nightly batch job needs a single-leader "only one instance runs at a time" guarantee across several horizontally-scaled worker pods, without provisioning a separate distributed-lock service. Design this using PostgreSQL advisory locks, and state the failure mode to watch for.**
+ **A:** Use a **session-level advisory lock** (`pg_try_advisory_lock(job_id)`) — a lightweight, application-defined lock keyed by an arbitrary bigint, held by whichever session acquires it first and automatically released when that session disconnects, requiring no schema/row to model the lock. Each worker pod attempts `SELECT pg_try_advisory_lock(12345);` on startup; only the pod that receives `true` proceeds, others exit or wait. The failure mode: if the winning pod's *connection* silently drops without a clean disconnect (a network partition rather than a process exit) while running under a connection pooler like pgbouncer in transaction pooling mode, the advisory lock's lifetime is tied to the underlying physical backend session — pgbouncer's transaction-mode multiplexing means the "session" the lock is scoped to may not correspond 1:1 to the logical worker's actual lifetime, risking either a premature release (another pod starts concurrently) or the lock never releasing until pgbouncer's own connection is recycled. The correct posture: advisory locks require a direct session-mode connection (not transaction-pooled) to have a meaningful, predictable lifetime, and even then are a same-database, single-primary coordination mechanism — not a substitute for a genuine distributed-consensus lock service across independent failure domains. The Principal framing: advisory locks are a real, low-overhead tool for single-database leader election, but their correctness is contingent on connection lifetime being unambiguous — exactly the same session-state-discontinuity risk transaction pooling introduces for prepared statements (Expert Q4), recurring here with higher stakes since the leader-election guarantee itself is at risk, not just an error message.
+ **Why correct:** Gives the correct advisory-lock pattern, and correctly identifies the connection-pooling interaction as the specific failure mode to design around.
+ **Common mistakes:** Using advisory locks under transaction-pooled connections without recognizing the session-lifetime ambiguity; treating advisory locks as a general-purpose distributed lock across multiple databases/regions.
+ **Follow-ups:** "Why must advisory locks use a session-mode, not transaction-pooled, connection?" / "What happens if the holding session crashes without releasing?" / "When would you reach for a real distributed-lock service instead?"
+
+6. **Q: A `trades` table stores a `JSONB` column holding full order-book snapshots (often tens of kilobytes each) alongside small relational columns. After months in production, the table's `VACUUM` times balloon and query latency on the small columns degrades even though those columns' own data volume hasn't grown. Explain the mechanism and the fix.**
+ **A:** PostgreSQL's page size is fixed at 8KB, and any row (tuple) that wouldn't fit is **TOASTed** — large column values are compressed and/or sliced into chunks stored in a separate, automatically-managed side table (`pg_toast.pg_toast_<oid>`), with the main table storing only a small pointer. A large `JSONB` snapshot column forces most rows into TOAST storage, and critically, **`VACUUM` must also process the TOAST table** — a table with heavy TOAST usage effectively has two vacuum workloads, and the TOAST table's own bloat (from JSONB updates, which under MVCC still write a full new tuple, including a full new TOASTed chunk set, even for a small field change elsewhere in the row) directly degrades vacuum throughput for the whole logical table, including its small, unrelated columns, because they physically share the same table's vacuum cycle. Fix: split the large `JSONB` payload into a separate table (`trade_snapshots(trade_id, snapshot jsonb)`, `FOREIGN KEY` back to `trades`) so `trades`' own hot, frequently-queried small columns get their own, much cheaper vacuum cycle independent of the large-payload table's TOAST churn — a normalization decision driven specifically by MVCC/TOAST vacuum cost, not by classic relational-modeling concerns. The Principal framing: TOAST is usually invisible, but under MVCC's copy-on-write tuple model, a wide, frequently-updated column silently taxes vacuum cost for every other column in the same physical row — schema decisions for high-churn tables must account for this coupling explicitly.
+ **Why correct:** Correctly explains TOAST's mechanism, why it couples an unrelated small column's vacuum cost to a large JSONB column's churn, and gives the normalization fix.
+ **Common mistakes:** Assuming column size only affects that column's own storage/query cost, missing the shared-table vacuum-cost coupling; increasing `autovacuum` aggressiveness without addressing the underlying schema coupling.
+ **Follow-ups:** "Why does updating one small column still bloat a TOASTed large column's storage?" / "How would you detect TOAST-driven bloat via `pg_stat_user_tables`/`pg_total_relation_size`?" / "When is keeping a large JSONB column inline still the right call?"
+
+7. **Q: A daily reconciliation query joining `trades` and `settlements` on `(account_id, trade_date)` regressed from 200ms to 40 seconds after a routine data-volume increase, with `EXPLAIN` showing a nested-loop join the planner chose confidently (low estimated cost) despite it being catastrophically wrong at actual scale. Diagnose and fix without rewriting the query.**
+ **A:** The planner estimates a join's selectivity by multiplying each predicate's independent selectivity, assuming column independence — `account_id` and `trade_date` are **correlated** in practice (a given account trades on a bounded, clustered set of dates, not uniformly across the whole date range), so the default single-column statistics dramatically *underestimate* the actual matching row count, making a nested-loop join look artificially cheap to the planner. This is invisible at low data volume (both plans are fast enough that the misestimation doesn't matter) and becomes catastrophic once volume grows enough that the *actual* row count the nested loop must iterate diverges sharply from the *estimated* one. Fix, without touching the query: `CREATE STATISTICS trades_stats (dependencies, ndistinct) ON account_id, trade_date FROM trades; ANALYZE trades;` — extended statistics let the planner model the correlation directly, correcting its row-count estimate and causing it to switch to a hash join on its own. The Principal framing: a query regression with no code change is almost never "PostgreSQL got slower" — it's the planner's statistics no longer matching production data's actual correlation structure, and `CREATE STATISTICS` is the targeted, non-invasive fix for exactly this shape of misestimation, distinct from an index problem (Advanced-tier expression/partial-index fixes) or a vacuum-bloat problem (Production Example).
+ **Why correct:** Correctly diagnoses correlated-column misestimation as the mechanism (not an index or bloat problem) and gives the precise, non-query-rewriting fix.
+ **Common mistakes:** Reflexively adding an index without first confirming via `EXPLAIN (ANALYZE, BUFFERS)` that the actual vs. estimated row counts diverge; rewriting the query instead of fixing the underlying statistics gap.
+ **Follow-ups:** "How do you confirm this is a correlation problem via `EXPLAIN (ANALYZE, BUFFERS)`?" / "What does `CREATE STATISTICS`'s `dependencies` kind actually model?" / "Why does this regression only appear at higher data volume?"
+
+8. **Q: Two services concurrently transfer funds between the same pair of accounts — Service A debits account 1 then credits account 2; Service B (a reversal) debits account 2 then credits account 1 — and under load the system deadlocks. Diagnose using `pg_locks`, and give the fix.**
+ **A:** Both transactions acquire row-level locks on the two account rows, but in **opposite order** — A locks account 1 then waits for account 2 (held by B); B locks account 2 then waits for account 1 (held by A) — a classic circular wait. PostgreSQL's deadlock detector (running periodically, `deadlock_timeout`, default 1s) detects the cycle and aborts one transaction with a `40P01` error, which is correct behavior, not a bug — the bug is that the application has no consistent lock-acquisition order and, commonly, no retry logic for `40P01`. Diagnosis: join `pg_locks` against `pg_stat_activity` to see which two backends held/waited-for which relations at the moment of the deadlock (PostgreSQL also logs the full deadlock detail — both queries and the lock cycle — to the server log automatically when a deadlock occurs). Fix: enforce a **consistent lock-acquisition order** across every code path that touches multiple account rows in one transaction — e.g., always lock the lower `account_id` first, regardless of whether the operation is logically a "debit-then-credit" or a "credit-then-debit" — which eliminates the possibility of a circular wait by construction, plus retry-on-`40P01` as a defense-in-depth safety net for any lock-ordering gap that slips through review. The Principal framing: a deadlock in a double-entry ledger is not primarily a database problem to tune away — it's a missing application-level invariant (a global, consistent multi-row lock order) that the database's deadlock detector is correctly, if expensively, surfacing.
+ **Why correct:** Correctly diagnoses the circular-wait mechanism, gives the `pg_locks`/`pg_stat_activity` diagnosis path, and the structural (lock-ordering) fix plus retry as defense-in-depth.
+ **Common mistakes:** Treating `40P01` as a transient error to blindly retry without also fixing the underlying lock-ordering gap; increasing `deadlock_timeout` as if that resolves the deadlock rather than merely detecting it later.
+ **Follow-ups:** "Why is a consistent lock order sufficient to eliminate circular waits by construction?" / "What does PostgreSQL's server log show automatically on a deadlock?" / "Why is retry-on-40P01 still necessary even with correct lock ordering?"
+
+9. **Q: A payments platform must retain the ability to restore the database to any point in time within the last 30 days for regulatory audit and incident-forensics purposes (SOX-adjacent retention requirement), not merely recover from the most recent backup. Design this using PostgreSQL's native capabilities.**
+ **A:** **Point-in-Time Recovery (PITR)**: take periodic base backups (`pg_basebackup`) and continuously archive every completed WAL segment (`archive_mode = on`, `archive_command` shipping each segment to durable, immutable storage — e.g., S3 with object-lock/versioning for tamper-evidence, itself a relevant control for an audit requirement). Recovery to any specific point within the retention window replays the base backup plus the archived WAL stream up to a target timestamp/LSN/named restore point (`recovery_target_time`), reconstructing the exact database state at that instant — not just "as of the last nightly backup." Retention: keep 30+ days of archived WAL plus base backups spanning that window (a base backup older than the retention floor, plus all WAL after it, must be retained; a base backup taken specifically to bound WAL-replay time for a 30-day-old restore target). Critically distinct from replication (Module 22 §2.2): a physical replica keeps the database only *currently* consistent with the primary and has no ability to restore to an arbitrary *past* point — PITR's archived WAL, not a live replica, is what actually provides the audit/forensics capability. Test restores periodically against the actual retention window, not just verify archiving is running — an untested restore path is not a verified capability. The Principal framing: regulatory point-in-time restorability is a distinct requirement from both routine backup/restore and from HA/DR replication, satisfied specifically by WAL archiving with a sized retention window, and its correctness must be validated by periodic actual restore drills, not by archiving-pipeline uptime alone.
+ **Why correct:** Correctly distinguishes PITR from both live replication and routine backup, gives the concrete WAL-archiving mechanism, and requires restore-drill verification.
+ **Common mistakes:** Assuming a streaming replica satisfies a point-in-time-restore requirement; sizing WAL retention against typical operational recovery needs rather than the actual regulatory retention window; never testing an actual restore.
+ **Follow-ups:** "Why doesn't a streaming replica satisfy this requirement?" / "What determines how far back a base backup needs to go for a 30-day target?" / "How would you verify the restore capability actually works, not just that archiving is running?"
+
+10. **Q: A hot lookup index on a payments-authorization table (`idx_auth_lookup_card_token`) has grown to 3x its expected size relative to the table's row count, and authorization-lookup latency has crept up even though the table itself is well-vacuumed and not bloated. Diagnose, and explain why index bloat is a distinct problem from table bloat.**
+ **A:** Table-level `VACUUM` reclaims dead tuples from the heap, but B-tree **index bloat** is a related but distinct phenomenon: high-churn `UPDATE`/`DELETE` traffic on indexed columns leaves the index's own internal pages with a growing fraction of dead/half-empty pages that ordinary vacuum reclaims *space* from but doesn't necessarily *compact* — a B-tree index can retain a larger, sparser physical structure than its logical entry count warrants, especially under a workload with many `UPDATE`s that touch the indexed column (each such `UPDATE`, unable to use HOT since the indexed column itself changed, requires inserting a new index entry, while the old one becomes dead), inflating I/O cost for every index lookup and scan even though the table's own row count and heap size look fine. Diagnosis: compare `pg_relation_size` of the index against a fresh, equivalently-populated index's expected size (or use `pgstattuple`'s index-aware variant to directly measure the live-vs-dead-space ratio within the index). Fix: `REINDEX INDEX CONCURRENTLY idx_auth_lookup_card_token;` — rebuilds the index from scratch without holding the exclusive lock a plain `REINDEX` requires, safe to run against a live, 24/7 authorization-lookup path with no read/write downtime, unlike plain `REINDEX` which blocks all access to the table for the rebuild's duration. The Principal framing: index bloat is operationally distinct from table bloat — it degrades exactly the hot-path lookup performance the index exists to protect, can occur even on a well-vacuumed table, and its fix (`REINDEX CONCURRENTLY`) is a separate operational lever from `VACUUM` tuning, both of which a Principal-level operational runbook for a high-TPS OLTP table must cover explicitly, not assume one implies the other.
+ **Why correct:** Correctly distinguishes index bloat from table bloat, explains the HOT-ineligibility mechanism driving it, and gives the zero-downtime fix.
+ **Common mistakes:** Assuming a well-vacuumed table implies its indexes are equally healthy; running plain `REINDEX` (not `CONCURRENTLY`) against a live, latency-sensitive production table, causing an avoidable outage.
+ **Follow-ups:** "Why can't HOT updates avoid this specific index-bloat cause?" / "Why must `REINDEX CONCURRENTLY` be used instead of plain `REINDEX` on a live table?" / "How would you monitor for index bloat proactively rather than reactively?"
+
 ---
 
 ## 11. Coding Exercises
@@ -193,9 +279,147 @@ VACUUM (VERBOSE, ANALYZE) orders;
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-A high-write-volume order-processing platform tunes per-table autovacuum settings deliberately for its hottest tables, monitors dead-tuple ratios as a first-class operational metric (Advanced Q2), and layers Row-Level Security (Hard exercise) beneath application-layer multi-tenant authorization as defense-in-depth, directly closing the same risk class as the captive-dependency cross-tenant incident at the database layer instead. The signature production lesson is precisely: "PostgreSQL uses MVCC too" is true but conceals a genuinely distinctive operational responsibility (vacuum tuning) with no SQL Server equivalent — any SQL-Server-to-PostgreSQL migration plan must explicitly address this, not assume behavioral equivalence.
+**Scenario:** Design the core PostgreSQL data layer for a multi-tenant payments-authorization platform (think a card-issuing processor's real-time authorization service) migrating off SQL Server, expected to handle 2,000 authorization requests/second sustained, with regulatory requirements for point-in-time auditability and strict per-tenant data isolation.
+
+**Functional requirements:** Authorize/decline a card transaction against a live balance/limit check; record every authorization attempt immutably; support per-tenant (issuing-bank) data isolation; support 30-day point-in-time restorability for audit (Expert Q9).
+
+**Non-functional requirements:** p99 authorization-decision latency under 150ms; zero committed-authorization data loss on primary failure (informs the synchronous-replication trade-off, Module 22 §2.3); horizontal read-scaling for a separate, high-volume reporting workload without impacting authorization-path latency.
+
+**Back-of-the-envelope estimation:** 2,000 TPS sustained authorization writes, each a small row (~200 bytes) plus one `JSONB` audit-detail column (~1KB average) → roughly 2,400 KB/s of new tuple data, before WAL amplification (MVCC writes both the heap tuple and a WAL record for it, roughly doubling the physical write volume for the same logical change, §7). At this churn rate, the authorization table's dead-tuple generation rate is exactly the kind of workload the Production Example's vacuum-tuning incident describes — the numbers tell us this table needs proactive, tuned `autovacuum`, not default settings, from day one, not discovered reactively.
+
+**Architecture:** A single, vertically-scaled primary (write-authoritative, since authorization decisions require a strongly-consistent, immediately-visible balance check — an eventually-consistent read here risks a double-authorization) with synchronous replication to one standby in a separate availability zone (Module 22 §2.3, sized against the zero-committed-loss requirement) plus one or more asynchronous read replicas serving the reporting workload, isolated from authorization-path latency entirely.
+
+**Components:** `authorizations` table (range-partitioned by day, Module 22 §2.1, for efficient archival and per-partition vacuum); Row-Level Security policies scoping every query to the requesting tenant (§8, §10 Advanced Q8); pgbouncer in transaction pooling mode in front of the authorization service's connection-heavy request pattern (§7), with prepared-statement usage audited against pooling mode per Expert Q4; WAL archiving to immutable object storage for PITR (Expert Q9).
+
+**Database selection:** PostgreSQL over SQL Server here specifically for `JSONB`'s native indexable storage of variable-shape authorization-detail payloads (§2.5) and RLS as a database-enforced tenant-isolation layer (§8) — both directly informing this migration's design, not incidental choices.
+
+**Caching:** A short-TTL, per-account balance/limit cache (Redis) in front of the authorization hot path reduces read load on the primary for the common case, with the primary remaining the strongly-consistent source of truth for the actual authorize/decline decision — cache is an optimization for the read, never the decision itself.
+
+**Messaging:** Post-authorization events (approved/declined) published via an outbox table (§10 Advanced Q2's `FOR UPDATE SKIP LOCKED` pattern) to downstream fraud-scoring and notification consumers, avoiding the dual-write problem between the authorization commit and the event publish.
+
+**Scaling:** Read replicas absorb reporting load; range partitioning bounds per-partition vacuum/index-maintenance cost as the table grows; `Citus` sharding (§9) is deliberately deferred unless the single primary's vertical write ceiling becomes a demonstrated constraint, not adopted preemptively.
+
+**Failure handling:** Synchronous-replica unavailability blocks primary commits under strict `synchronous_commit`, a deliberate consistency-over-availability choice for authorization data (mirroring Module 22 Expert Q1's ledger DR posture) — mitigated via quorum-based `ANY 1 (...)` synchronous-standby configuration (Module 22 Advanced Q3) rather than a single named standby.
+
+**Monitoring:** Dead-tuple ratio per table (Production Example), replication lag on both the synchronous standby and async read replicas, pgbouncer pool saturation, and authorization-path p99 latency as the primary business-facing SLO.
+
+**Trade-offs:** Strong consistency (synchronous replication, single-writer authorization) is chosen over multi-region write availability, because a lost or duplicated authorization decision is a worse business outcome than added commit latency — the same reasoning Module 22's ledger DR design applies, now at the schema/system-design level rather than only the replication-configuration level.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** Model an authorization request/decision atomically and idempotently; enforce per-tenant isolation at the data layer; avoid lock-ordering deadlocks (Expert Q8) when a single authorization touches both a balance row and a limit-counter row.
+
+**Class diagram:**
+```mermaid
+classDiagram
+ class AuthorizationRequest {
+ +Guid IdempotencyKey
+ +Guid TenantId
+ +Guid AccountId
+ +decimal Amount
+ +string CurrencyCode
+ }
+ class AuthorizationService {
+ -IAuthorizationRepository repo
+ +Authorize(AuthorizationRequest) AuthorizationResult
+ }
+ class IAuthorizationRepository {
+ <<interface>>
+ +TryInsertIdempotent(request) bool
+ +LockAccountRowsInOrder(accountIds) void
+ +RecordDecision(id, decision) void
+ }
+ class PostgresAuthorizationRepository {
+ +TryInsertIdempotent(request) bool
+ +LockAccountRowsInOrder(accountIds) void
+ +RecordDecision(id, decision) void
+ }
+ AuthorizationService --> IAuthorizationRepository
+ PostgresAuthorizationRepository ..|> IAuthorizationRepository
+```
+
+**Sequence diagram:**
+```mermaid
+sequenceDiagram
+ participant Client
+ participant Svc as AuthorizationService
+ participant DB as PostgreSQL Primary
+
+ Client->>Svc: Authorize(request, Idempotency-Key)
+ Svc->>DB: INSERT ... ON CONFLICT (idempotency_key) DO NOTHING
+ alt already processed
+ DB-->>Svc: 0 rows affected
+ Svc-->>Client: return cached prior decision
+ else new request
+ DB-->>Svc: 1 row inserted
+ Svc->>DB: SELECT ... FOR UPDATE ORDER BY account_id (lock ordering, Expert Q8)
+ Svc->>DB: check balance/limit, UPDATE decision
+ DB-->>Svc: commit
+ Svc-->>Client: approve/decline
+ end
+```
+
+**Design patterns used:** Repository (isolates SQL/RLS-session-variable concerns behind `IAuthorizationRepository`); Idempotent-Receiver (the `ON CONFLICT DO NOTHING` unique-key insert, the database-native realization of the idempotency-key discipline named in Module 22 Expert Q1's ledger framing); Unit of Work (the whole authorization decision commits or rolls back as one transaction).
+
+**SOLID mapping:** Single Responsibility (`AuthorizationService` orchestrates; `PostgresAuthorizationRepository` owns SQL/locking specifics); Open/Closed (a new persistence backend implements `IAuthorizationRepository` without changing `AuthorizationService`); Liskov (any `IAuthorizationRepository` implementation must genuinely honor the lock-ordering contract — a naive implementation that locks rows in request-arrival order rather than a canonical order would silently reintroduce Expert Q8's deadlock risk despite satisfying the interface's method signature); Interface Segregation (idempotent-insert, row-locking, and decision-recording are separable methods); Dependency Inversion (`AuthorizationService` depends on the abstraction, never on `Npgsql`/SQL directly).
+
+**Concurrency/thread safety:** Idempotency is enforced by a unique constraint at the database layer (safe under arbitrary concurrent duplicate requests, not merely application-layer deduplication); lock ordering (always lock the lower `account_id` first, Expert Q8) is enforced inside `LockAccountRowsInOrder`, a single, audited chokepoint every code path touching multiple account rows must go through — not left to each caller to individually get right.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** Three weeks after the authorization platform (§12) went live, p99 authorization latency spiked from 80ms to 1.2 seconds during a daily peak-traffic window, correlating with a spike in `40P01` (deadlock) errors in the application logs — a distinct incident from, but downstream of, the same lock-ordering discipline Expert Q8 establishes.
+
+**Root cause:** A new "linked-account limit pooling" feature had been added, where a single authorization could touch a *variable-length list* of linked account rows (a family/corporate card pooling arrangement), and the feature's implementation locked accounts in the order they appeared in the linked-account list returned by an upstream service — an order that was **not** canonically sorted, and in fact varied per request depending on that upstream service's own non-deterministic result ordering. Two concurrent authorizations against overlapping linked-account sets, each locking in a different order, produced exactly the circular-wait deadlock pattern Expert Q8 describes structurally — except this time the discipline (canonical lock ordering) had been correctly applied to the *original* single-pair transfer code path and never re-applied when the linked-account feature introduced a new, variable-cardinality locking pattern.
+
+**Investigation:** `pg_stat_activity` joined against `pg_locks` during the incident window showed multiple backends blocked waiting on `RowExclusiveLock` for overlapping sets of account rows; PostgreSQL's server log (deadlock detail logged automatically, §10 Expert Q8) confirmed the specific query pattern — the linked-account authorization path — as the consistent source of every deadlock in the window, not the original single-account authorization path.
+
+**Tools:** `pg_locks`/`pg_stat_activity` join query for real-time lock-wait visibility; server log deadlock detail for retrospective analysis; `pg_stat_statements` to confirm the linked-account query's `40P01` error count specifically, isolating it from background noise.
+
+**Fix:** The linked-account authorization path was changed to sort the account-ID list canonically (`ORDER BY account_id`) immediately before the locking step, regardless of the order the upstream linked-account-resolution service returned — restoring the same "always lock in canonical order" invariant the original single-pair code path already honored. A code-review checklist item was added: any new code path acquiring locks on more than one row from the same table within a transaction must explicitly document and justify its lock-acquisition order.
+
+**Prevention:** The checklist item generalizes Expert Q8's fix beyond the specific code path it was originally applied to — the recurring lesson (echoing the CRDT-composition and cross-field-invariant pattern this course documents elsewhere) is that a correctly-applied discipline on one code path provides no guarantee a *new* code path touching the same shared resource will inherit it; the discipline must be re-verified explicitly at every new multi-row-locking code path, not assumed to propagate automatically from the original fix.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Choosing a connection-management strategy for the authorization platform's PostgreSQL primary under 2,000 TPS sustained load.
+
+**Option A — Direct application-to-database connections (no pooler):** *Advantages:* No additional infrastructure component; full session-state fidelity (prepared statements, advisory locks behave exactly as documented, no Expert Q4/Q5-style surprises). *Disadvantages:* PostgreSQL's per-connection memory overhead and connection-establishment cost make thousands of concurrent application-instance connections directly against the primary both expensive and a real risk of exhausting `max_connections` under a traffic spike or a connection-leak bug. *Cost:* Low infrastructure cost, high risk cost. *Risk:* High — a connection-storm (e.g., a redeploy causing every application instance to reconnect simultaneously) can itself take the primary down.
+
+**Option B — pgbouncer, session pooling mode:** *Advantages:* Full session-state fidelity preserved (no Expert Q4-style prepared-statement breakage); still reduces raw TCP/auth overhead versus direct connections. *Disadvantages:* Each logical client still holds a physical backend for its entire session's duration, so the connection-scaling benefit relative to Option A is modest — doesn't meaningfully reduce backend count under genuinely high concurrent-session volume. *Cost:* Low-moderate (one additional lightweight component). *Risk:* Low, but doesn't solve the actual scaling problem at 2,000 TPS.
+
+**Option C — pgbouncer, transaction pooling mode, with session-scoped features explicitly audited:** *Advantages:* Genuine connection-scaling benefit — many logical sessions multiplexed onto a small, bounded pool of physical backends, directly addressing Option A's connection-storm risk. *Disadvantages:* Requires explicit auditing and adaptation of every session-scoped feature (prepared statements, advisory locks, `SET`-level GUCs) per Expert Q4/Q5 — a real, non-zero engineering cost, and a source of production incidents (Expert Q4) if skipped. *Cost:* Moderate (audit effort upfront) but low ongoing. *Risk:* Low, contingent on the audit being genuinely thorough and re-run whenever a new session-scoped feature is introduced.
+
+**Recommendation: Option C**, specifically because the authorization platform's 2,000 TPS scale makes Option A's connection-storm risk unacceptable and Option B's marginal scaling benefit insufficient — but only paired with an explicit, standing audit (mirroring §14's checklist-generalization lesson) of every session-scoped feature against transaction-pooling semantics, re-run on every new feature addition, not performed once at initial pgbouncer adoption and assumed to remain valid.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** An authorization-path outage or elevated-latency incident directly blocks revenue-generating transactions in real time — unlike a reporting-pipeline delay, which degrades a downstream, non-blocking capability, the authorization path's failure modes (§14's deadlock incident, the original vacuum-bloat incident) have immediate, visible business cost, which is why this module's monitoring recommendations (§7, §12) treat dead-tuple ratio and lock-wait visibility as first-class, not secondary, operational signals.
+
+**Engineering trade-offs:** The consistent thread across this module — MVCC's always-on tuple-versioning, RLS's engine-enforced isolation, synchronous replication's consistency-over-availability choice — is that PostgreSQL's defaults trade some operational complexity (vacuum tuning, replication-slot/lock-order discipline) for stronger baseline correctness guarantees than an engineer coming from SQL Server's more locking/tempdb-centric model might expect; a Principal Engineer's job in a migration is making these trades *explicit* in the design review, not letting them surface first as production incidents.
+
+**Technical leadership:** §14's deadlock incident illustrates a durable leadership lesson: a correctly-applied discipline (canonical lock ordering) on one code path does not automatically propagate to a structurally similar but distinct new code path — technical leadership here means encoding the discipline as a reviewable, checkable rule (the checklist item) rather than trusting it to be independently rediscovered by whoever writes the next multi-row-locking feature.
+
+**Cross-team communication:** The linked-account feature team (§14) built a structurally correct feature in isolation but didn't know to ask whether their new locking pattern needed the same discipline the original authorization-transfer code already had — surfacing exactly the kind of cross-team knowledge-transfer gap a Principal Engineer's design-review process exists to close, by making implicit invariants (canonical lock ordering) explicit, documented, and part of any new code's review checklist rather than tribal knowledge held only by the original implementers.
+
+**Architecture governance:** Every table with meaningfully high write churn should have its `autovacuum` tuning, dead-tuple monitoring, and (where multi-row transactions touch it) documented lock-ordering convention recorded as part of its schema's own governance documentation — not left to be independently rediscovered per incident, mirroring this course's recurring "convert hard-won incident lessons into fleet-wide structural safeguards" pattern (Module 22 §17).
+
+**Cost optimization:** pgbouncer's transaction-pooling mode (§15 Option C) is chosen specifically because it avoids the higher infrastructure cost of scaling `max_connections`/primary memory to accommodate direct high-concurrency connections (Option A) — a deliberate cost-vs-audit-effort trade, not a default reached for without comparing the alternatives.
+
+**Risk analysis:** The recurring risk pattern across this module is the same shape repeatedly: a mechanism that is individually, provably correct (MVCC, RLS, a lock-ordering discipline, an advisory lock) fails specifically at a boundary — a migration assumption, a new code path, a connection-pooling mode's session-state contract — rather than at its own core correctness. Risk registers for a PostgreSQL-backed platform should explicitly track these boundary conditions (pooling-mode/session-state audits, lock-ordering coverage across all multi-row-locking code paths, PITR restore-drill currency) as standing, periodically-re-verified items, not one-time checks.
+
+**Long-term maintainability:** What decays over time, across this module's incidents and the Production Example, is the correspondence between an original design assumption (a table's expected churn rate, a code path's lock order, a session's connection-pooling compatibility) and the system's current, evolved reality as new features and traffic patterns are added — the practice that keeps this from compounding indefinitely is the same one this course applies elsewhere: periodic, structural re-audit of these assumptions against actual current behavior, not a one-time validation at initial design time.
+
+---
 
 ## 18. Revision
 **Key takeaways**: PostgreSQL's MVCC is always-on (not an opt-in setting like SQL Server's RCSI) — every UPDATE creates a new tuple, requiring `VACUUM` to reclaim old ones. Unvacuumed bloat degrades performance and, in the extreme, risks transaction ID wraparound (a severe, PostgreSQL-specific failure mode). Partial and expression indexes solve problems (non-sargable predicates, small selective subsets) differently than typical SQL Server approaches. `JSONB` (not `JSON`) is the right choice for queryable/indexable semi-structured data. Row-Level Security provides database-enforced, code-path-independent access control as a genuine defense-in-depth layer.

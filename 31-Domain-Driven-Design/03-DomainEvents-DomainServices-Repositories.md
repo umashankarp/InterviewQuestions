@@ -6,7 +6,238 @@
 
 ---
 
-## Interview Questions
+## 1. Fundamentals
+
+**What:** Domain Events, Domain Services, and Repositories are the three tactical DDD building blocks that sit *around* the Aggregate: a **Domain Event** is an immutable record that something significant already happened inside an Aggregate's transaction ("`TradeSettled`"); a **Domain Service** is a stateless operation that genuinely doesn't belong to any single Aggregate (computing a cross-currency settlement amount using a shared FX-rate concept); a **Repository** is the collection-like abstraction that lets domain and application code load and save whole Aggregates without knowing whether the backing store is SQL Server, Cosmos DB, or a flat file.
+
+**Why:** Without these three, a codebase collapses back into two familiar failure modes: an **anemic domain model**, where Aggregates are bags of properties and all real logic lives in "manager" or "helper" classes with no Ubiquitous-Language home; and a **persistence-leaky domain**, where `DbContext`/`IQueryable` types show up inside business logic, coupling the domain model to a specific ORM and making it impossible to unit-test without a database. Domain Events solve the "how do other parts of the system react to what just happened, without this Aggregate knowing or caring who's listening" problem. Domain Services solve the "this logic is real business logic, but it doesn't belong to one specific Aggregate" problem. Repositories solve the "how do we persist an Aggregate without the domain model depending on infrastructure" problem.
+
+**When:** Domain Events — any state transition another bounded context, another Aggregate, or an audit/notification/reporting concern needs to react to (`PaymentSettled`, `TradeBooked`, `MarginCallIssued`). Domain Services — genuinely cross-Aggregate logic (settlement netting across multiple trades) or logic requiring an external domain concept (an FX-rate provider) that no single Aggregate should own. Repositories — always, for any Aggregate that needs to be persisted and reloaded; never for pure read/reporting projections, which should bypass the Aggregate entirely.
+
+**How (30,000-ft view):**
+```
+Application Service
+   │
+   ├─ loads Aggregate via IRepository<T>           (Repository)
+   ├─ calls Aggregate.Method() → invariant enforced  (Aggregate)
+   │      └─ Aggregate.Raise(new DomainEvent(...))   (Domain Event, queued not published)
+   ├─ (optionally) calls a DomainService for cross-Aggregate logic
+   ├─ commits via Unit of Work — Aggregate state + outbox row, ONE transaction
+   └─ background dispatcher publishes the queued event AFTER commit succeeds
+```
+
+---
+
+## 2. Deep Dive
+
+### 2.1 Domain Events Are a Notification Mechanism, Not (by Default) a Storage Mechanism
+A Domain Event, as covered here, is transient — raised, dispatched to in-process handlers or an outbox, then discarded. This is a deliberate scope boundary against Event Sourcing (Domain 35): in Event Sourcing, events *are* the system of record and the Aggregate's current state is a fold over its full event history; here, the Aggregate's current state is stored directly (a `Trades` table with current columns), and the Domain Event is a *side effect* of a state change already durably recorded another way. Conflating the two is a real, recurring design mistake — a team that starts raising Domain Events "just in case we want Event Sourcing later" without committing to event-sourced persistence ends up maintaining two divergent sources of truth (the current-state table and an ad hoc event log) with no reconciliation discipline.
+
+### 2.2 The C# Mechanics of Raising and Collecting Events
+```csharp
+public abstract class AggregateRoot
+{
+    private readonly List<IDomainEvent> _pendingEvents = new();
+    public IReadOnlyCollection<IDomainEvent> PendingEvents => _pendingEvents.AsReadOnly();
+    protected void Raise(IDomainEvent domainEvent) => _pendingEvents.Add(domainEvent);
+    public void ClearPendingEvents() => _pendingEvents.Clear();
+}
+
+public sealed class SettlementInstruction : AggregateRoot
+{
+    public SettlementInstructionId Id { get; }
+    public SettlementStatus Status { get; private set; }
+
+    public void MarkSettled(Instant settledAt)
+    {
+        if (Status != SettlementStatus.PendingSettlement)
+            throw new DomainException($"Cannot settle instruction {Id} in status {Status}.");
+        Status = SettlementStatus.Settled;
+        Raise(new SettlementInstructionSettled(Id, settledAt));
+    }
+}
+```
+Two hidden costs engineers underestimate: (1) `PendingEvents` must be cleared *after* a successful commit, not before — clearing early and then having the commit fail silently discards a fact that should have been retried; (2) every mutating method that can raise more than one event (e.g., a batch `ApplyPartialFills` loop) must guarantee event order matches the order the invariants were actually enforced in, since a downstream consumer replaying `PartialFillApplied` events out of order can compute the wrong remaining quantity.
+
+### 2.3 Why the Outbox Is Not Optional for Cross-Service Domain Events
+Publishing directly from inside the Application Service, right after `SaveChanges()`, is the naive default:
+```csharp
+await _repository.SaveAsync(instruction);
+await _bus.PublishAsync(instruction.PendingEvents); // dual-write hazard
+```
+If the process crashes between the two lines, or the bus publish throws after the DB commit already succeeded, the event is lost — silently, with the settlement instruction sitting `Settled` in the database forever with no downstream system ever told. The fix is the **transactional outbox**: write the Aggregate's row *and* one outbox row per pending event inside the same `DbContext.SaveChangesAsync()` call (same transaction, same atomicity), then a separate, independently-retrying background relay reads unpublished outbox rows and publishes them, marking each `Processed` only on confirmed delivery. This turns "the event was raised" from a hope into a durable, at-least-once guarantee — Domain 37 develops the pattern's full mechanics; this module needs only the guarantee it provides.
+
+### 2.4 EF Core Modelling: Keeping Domain Events Out of the Persisted Shape
+`PendingEvents` must never be mapped as a persisted column — it's transient, in-memory-only state, cleared after dispatch. In EF Core:
+```csharp
+modelBuilder.Entity<SettlementInstruction>()
+    .Ignore(x => x.PendingEvents);
+```
+A `DbContext.SaveChangesAsync` override is the natural interception point for outbox-row generation, because it's the one place that already has access to every tracked Aggregate about to be committed:
+```csharp
+public override async Task<int> SaveChangesAsync(CancellationToken ct = default)
+{
+    var events = ChangeTracker.Entries<AggregateRoot>()
+        .SelectMany(e => e.Entity.PendingEvents)
+        .ToList();
+
+    foreach (var evt in events)
+        OutboxMessages.Add(OutboxMessage.From(evt));
+
+    var result = await base.SaveChangesAsync(ct);
+
+    foreach (var entry in ChangeTracker.Entries<AggregateRoot>())
+        entry.Entity.ClearPendingEvents();
+
+    return result;
+}
+```
+This is the concrete, EF-Core-specific realization of Advanced Q2's outbox preview — the event insertion happens in the *same* `SaveChangesAsync` call as the Aggregate's own row update, so both commit or neither does.
+
+### 2.5 Repository Query Cost and the N+1-Across-Aggregates Trap
+A Repository loading a whole Aggregate graph (`SettlementInstruction` with its `Legs` collection) is correct for a single load-mutate-save cycle. It becomes a performance liability when application code loops over a collection of Aggregates and, for each one, triggers a separate lazy-loaded query for a related Aggregate referenced only by ID — e.g., iterating 500 pending settlement instructions and, for each, calling `_customerRepository.GetById(instruction.CustomerId)` inside the loop produces 501 round trips. The fix is not to widen the Aggregate boundary (that reintroduces the oversized-Aggregate contention risk); it's either a dedicated batched Repository method (`GetByIdsAsync(IEnumerable<CustomerId>)`) or, if this is a read-heavy reporting need rather than a load-mutate-save need, bypassing the Repository/Aggregate path entirely for a direct projection query (Intermediate Q4's CQRS preview).
+
+### 2.6 Domain Service Statelessness and DI Lifetime
+A Domain Service should be registered with a **transient or singleton** DI lifetime, never scoped-with-mutable-state — because a Domain Service holding no instance state is what keeps it safely reusable and testable without hidden cross-call contamination:
+```csharp
+services.AddScoped<ISettlementNettingService, SettlementNettingService>(); // fine — scoped for its DI-injected repository deps, but the type itself holds zero mutable fields
+```
+The subtle bug this section exists to name: a team adds a private field to a Domain Service to "cache" something computed on an earlier call within the same request, turning what looked stateless into a service whose correctness now depends on call order — the exact loss of the property that made it safe to share and reuse in the first place.
+
+---
+
+## 3. Visual Architecture
+
+```mermaid
+sequenceDiagram
+    participant AppSvc as Application Service
+    participant Agg as SettlementInstruction (Aggregate)
+    participant DB as SQL Server (Aggregate table + Outbox table)
+    participant Relay as Outbox Relay (background)
+    participant Bus as Message Broker
+    participant Ledger as Ledger Context (consumer)
+    participant Notif as Notification Context (consumer)
+
+    AppSvc->>Agg: MarkSettled(settledAt)
+    Agg->>Agg: enforce invariant, Raise(SettlementInstructionSettled)
+    AppSvc->>DB: SaveChangesAsync() — Aggregate row + Outbox row, ONE transaction
+    DB-->>AppSvc: commit OK
+    Note over AppSvc: PendingEvents cleared only after commit succeeds
+    loop poll every N ms
+        Relay->>DB: SELECT TOP N * FROM Outbox WHERE Processed = 0
+        Relay->>Bus: Publish(SettlementInstructionSettled)
+        Bus-->>Relay: ack
+        Relay->>DB: UPDATE Outbox SET Processed = 1
+    end
+    Bus->>Ledger: SettlementInstructionSettled
+    Ledger->>Ledger: post ledger entry (own transaction)
+    Bus->>Notif: SettlementInstructionSettled
+    Notif->>Notif: send client confirmation (own transaction)
+```
+
+```mermaid
+graph TB
+    subgraph "Domain layer — no outward dependencies"
+        IRepo["IRepository&lt;SettlementInstruction&gt;<br/>(interface only)"]
+        Agg2["SettlementInstruction Aggregate"]
+        DomSvc["ISettlementNettingService<br/>(Domain Service)"]
+        Evt["SettlementInstructionSettled<br/>(Domain Event, immutable)"]
+    end
+    subgraph "Infrastructure layer"
+        RepoImpl["EfSettlementInstructionRepository<br/>(implements IRepository)"]
+        Outbox["Outbox table"]
+        Relay2["Outbox Relay"]
+    end
+    IRepo -.implemented by.-> RepoImpl
+    Agg2 -- raises --> Evt
+    RepoImpl -- SaveChangesAsync --> Outbox
+    Outbox --> Relay2
+    Relay2 -- at-least-once --> Kafka["Kafka topic: settlement.events"]
+```
+
+---
+
+## 4. Production Example
+
+**Problem:** A multi-asset trade-settlement platform's Settlement bounded context needed to notify two other contexts — Ledger (post the cash/securities entries) and Notification (send the client a confirmation) — the moment a `SettlementInstruction` moved to `Settled`, without Settlement's own transaction depending on either downstream context's availability or latency.
+
+**Architecture:** `SettlementInstruction` is the Aggregate Root, owning its `Legs` (cash leg, securities leg) as internal parts because the invariant "both legs must transition to `Settled` atomically, or neither does" needs synchronous, same-transaction enforcement. `Customer` and `Instrument` are referenced by ID only. An `ISettlementNettingService` Domain Service computes net cash movement across multiple instructions sharing a common counterparty and settlement date — genuine cross-Aggregate logic that doesn't belong to any single `SettlementInstruction`. `IEfSettlementInstructionRepository` persists via EF Core; `SaveChangesAsync` is overridden per §2.4 to write outbox rows in the same transaction.
+
+**Implementation:** `MarkSettled` raises `SettlementInstructionSettled { InstructionId, CustomerId, SettledAmount, Currency, SettledAt }`. The outbox relay (a `BackgroundService` polling every 500ms, batch size 200) publishes to a Kafka topic `settlement.events`. Ledger's consumer posts the entry inside its own transaction, keyed by an idempotency key derived from `InstructionId` (so replays from at-least-once delivery don't double-post). Notification's consumer is a simple, best-effort side effect with its own retry/DLQ.
+
+**Trade-offs:** Choosing at-least-once delivery via the outbox meant every consumer had to be built idempotent from day one — real, non-optional engineering cost — in exchange for the guarantee that a `Settled` instruction's downstream effects are never silently lost even across a process crash. The team explicitly rejected synchronous, in-transaction calls to Ledger from within Settlement's own commit, because that would make Settlement's own commit success depend on Ledger's availability — a coupling the eventual-consistency test correctly rejected, since "the ledger entry posts within a few seconds of settlement" tolerates brief delay with no correctness violation, unlike the cash/securities leg invariant itself.
+
+**Lessons learned:** Six weeks after launch, a production incident showed the outbox relay's poll query (`SELECT TOP 200 * FROM Outbox WHERE Processed = 0 ORDER BY CreatedAt`) had no index on `(Processed, CreatedAt)`, so as unprocessed-row volume grew during a Kafka broker maintenance window, the poll query degraded from 4ms to 1.2s, compounding the backlog it was trying to drain — the classic self-reinforcing-lag pattern. The fix added the missing filtered index (`WHERE Processed = 0`) and an alert on outbox-row age (Advanced Q4's exact monitoring gap named directly), catching the same class of failure before it becomes a client-facing settlement-confirmation delay next time.
+
+---
+
+## 5. Best Practices
+- Raise Domain Events from inside the same mutating Aggregate method that enforces the invariant, never as a separate, easily-forgotten step in the Application Service.
+- Clear `PendingEvents` only after a successful commit, never before — an early clear silently discards a fact that should be retried on save failure.
+- Write outbox rows in the exact same transaction as the Aggregate's own state change (§2.3/§2.4) for any event a different service or bounded context needs to durably observe.
+- Keep Repository interfaces in the domain layer, in domain vocabulary (`GetById`, `Add`) — never leak `IQueryable`, `DbSet`, or ORM-specific types into the interface signature.
+- Scope Domain Services narrowly to genuine cross-Aggregate coordination; delegate the actual state mutation and invariant check back to each Aggregate's own methods.
+- Index the outbox table's polling predicate (`Processed`, `CreatedAt`) before volume, not after an incident forces it.
+- Make every Domain-Event consumer idempotent by design (dedupe on a stable business key) — at-least-once delivery is the default and non-idempotent handlers are a matter of when, not if, they double-process.
+
+## 6. Anti-patterns
+- **Dual-write publishing** — publishing to a broker directly after `SaveChanges()` without an outbox, silently losing events on a crash between the two calls (§2.3).
+- **Leaked `IQueryable` Repository** — a Repository method returning `IQueryable<T>` for callers to filter arbitrarily, defeating the entire persistence-abstraction purpose and producing untraceable, unreviewed SQL.
+- **Generic `IRepository<T>`** — a single repository interface for every Aggregate type, forcing Aggregate-specific query needs into awkward, leaky generic escape hatches.
+- **Domain Service creeping into an anemic-model refuge** — logic that genuinely belongs on a specific Aggregate pushed into a Domain Service "for convenience," reintroducing the anemic-model failure one layer up.
+- **Intra-Aggregate events** — raising a Domain Event for communication *within* a single Aggregate's own internals, where a direct method call would do, adding ceremony with none of the cross-boundary decoupling benefit.
+- **Unmonitored outbox backlog** — no alert on oldest-unprocessed-row age, so a stalled relay (broker outage, poison message) silently accumulates a growing correctness gap with zero visibility until a downstream context notices missing data.
+- **Fat event payloads that leak internal state** — a Domain Event carrying an entire internal Aggregate snapshot (including fields irrelevant, or worse sensitive, to any consumer) rather than the minimal, deliberately-designed set of facts a consumer actually needs (§8).
+
+---
+
+## 7. Performance Engineering
+
+**CPU/Memory:** Per-event serialization cost (JSON/Avro) for outbox rows is typically negligible versus the DB round trip itself; batch-inserting outbox rows within the same `SaveChangesAsync` call avoids N separate round trips for N raised events.
+
+**Latency:** The original request's latency is bounded by the Aggregate's own commit (including the outbox insert), not by downstream publish/consume latency — this is the entire point of deferring actual dispatch to an asynchronous relay; a request should never block on a broker round trip for a fire-and-react Domain Event.
+
+**Throughput:** Outbox relay throughput is governed by poll interval × batch size; under-provisioning batch size relative to steady-state event volume produces a backlog that grows monotonically even with no incident, a common mis-sizing mistake distinct from the indexing incident in §4.
+
+**Scalability:** Fan-out cost is proportional to the number of downstream consumers per event type, not to the number of raised events overall — a single `SettlementInstructionSettled` consumed by both Ledger and Notification costs two independent, parallel deliveries, not a synchronous chain.
+
+**Benchmarking:** Load-test the outbox poll query specifically under realistic *unprocessed-row* volume (thousands of backlogged rows during a simulated consumer outage), not an empty table — the query plan that's fast against zero rows can degrade badly without the filtered index from §4's incident.
+
+**Caching:** Not directly applicable to event dispatch; a Repository's `GetById` read path can benefit from a short-lived cache for hot Aggregates, provided cache invalidation is tied to the same commit that raises the corresponding Domain Event.
+
+---
+
+## 8. Security
+
+**Threats:** A Domain Event payload crossing a bounded-context or tenant boundary can leak data the receiving context has no legitimate need for and no authorization to hold — e.g., a `SettlementInstructionSettled` event carrying full customer PII when Notification only needs a masked reference and a template key.
+
+**Mitigations:** Design each Domain Event's payload as its own deliberately minimal, published contract — not a serialized dump of the Aggregate — reviewed the same way a public API contract is reviewed; apply field-level redaction/tokenization for any PII crossing into a context with a narrower data-access scope.
+
+**OWASP mapping:** Broken access control if a Repository's query methods don't scope results to the caller's tenant/entitlement (a settlement-instruction Repository that doesn't filter by the caller's authorized customer set); sensitive data exposure if event payloads over-share.
+
+**AuthN/AuthZ:** Repository-layer authorization should be explicit and testable — either the Repository itself accepts and enforces a tenant/entitlement context on every query, or the Application Service enforces it before calling the Repository; relying on "the caller will remember to filter" is the same class of side-door risk as bypassing the Aggregate Root.
+
+**Secrets:** Outbox and broker infrastructure credentials follow standard secrets-management practice; a compromised outbox relay identity should have write access scoped to the outbox table only, not the full Aggregate schema.
+
+**Encryption:** Event payloads containing financial or PII data require the same in-transit (TLS to the broker) and at-rest (encrypted outbox table, encrypted topic storage) posture as the Aggregate's own persisted data — an event is a copy of sensitive facts and inherits the same protection obligation as the source.
+
+---
+
+## 9. Scalability
+
+**Horizontal scaling:** Domain-Event-driven decoupling is itself a scaling mechanism — Settlement's write throughput no longer depends on Ledger's or Notification's processing capacity, since each consumes asynchronously at its own pace; a slow or backed-up consumer never throttles the producing Aggregate's own commit rate.
+
+**Vertical scaling:** Repository/read-model scaling: a Repository's write-optimized `GetById`+full-graph load pattern doesn't scale for read-heavy reporting; a separate, denormalized read model (populated by the same Domain Events) scales reads independently of the write-side Aggregate store (Intermediate Q4/Advanced Q5's CQRS preview).
+
+**Replication/Partitioning:** Outbox tables can be partitioned by Aggregate type or by a hash of Aggregate ID to keep the polling query's working set bounded as volume grows; broker topics are typically partitioned by Aggregate ID to preserve per-Aggregate event ordering for consumers that need it.
+
+**Load balancing:** Multiple outbox relay instances must coordinate (e.g., `SELECT ... FOR UPDATE SKIP LOCKED` or a partition-owner assignment) to avoid double-publishing the same row — a naive multi-instance relay with no coordination reintroduces a duplicate-delivery risk on top of the already-expected at-least-once semantics.
+
+**High Availability:** A relay instance crashing mid-batch is safe by construction — unprocessed rows simply remain `Processed = 0` and are picked up by the next poll cycle or another instance; the durability guarantee lives in the outbox table, not in any single relay process's uptime.
+
+---
+
+## 10. Interview Questions
 
 ### Basic (8)
 
@@ -58,6 +289,18 @@
  **Common mistakes:** Publishing a Domain Event's exact internal shape directly to external consumers without any translation, tightly coupling other services to this context's internal model and violating the Anti-Corruption Layer/Published-Language discipline in the reverse direction (this context "corrupting" its consumers instead of being corrupted by them).
  **Follow-ups:** "Why does this distinction matter for how freely an internal Domain Event's shape can be refactored?" (An internal Domain Event, since it's not itself the external contract, can be freely renamed/restructured as the internal model evolves; the external integration event, once published as a Published Language, requires the same careful, versioned-schema discipline any public contract does.)
 
+9. **Q: What is the relationship between a Domain Event and a "Notification" or "Integration" event that gets serialized onto a message broker?**
+ **A:** The Domain Event is the in-process object raised by the Aggregate; before it leaves the bounded context, it's typically mapped into a deliberately-designed integration-event contract (its own DTO shape, versioned independently) that gets serialized onto the outbox/broker — the internal Domain Event's C# type is never itself the wire format, so the internal type can be freely refactored without breaking external consumers who only ever see the translated contract.
+ **Why correct:** States the translation boundary (internal type vs. deliberately-versioned wire contract) precisely, matching Basic Q8's translation-step point.
+ **Common mistakes:** Serializing the internal Domain Event class directly (e.g., `JsonSerializer.Serialize(domainEvent)`) onto the broker, which silently couples every external consumer to the internal type's exact shape, breaking them the moment that internal type is refactored for an unrelated, purely internal reason.
+ **Follow-ups:** "What's a concrete refactor that would break consumers under direct serialization but not under a translated contract?" (Renaming an internal field for internal clarity — under direct serialization this is a breaking wire-format change; under a translated contract, the mapping layer absorbs the rename and the wire contract stays stable.)
+
+10. **Q: Why is a Repository's `Add`/`Save` method typically designed to accept and persist a whole Aggregate, rather than exposing separate methods to update individual fields?**
+ **A:** Because the Aggregate Root is the sole authority over its own valid states — any operation that could update a single field independently of the Aggregate's own invariant-checking methods would let calling code bypass those invariants entirely (the exact Root-only-access violation); persisting only ever the Aggregate's *current, already-validated* full state, produced by calling its own methods first, is what keeps the Repository's role limited to storage, never business-rule enforcement.
+ **Why correct:** Connects the Repository's whole-Aggregate persistence granularity back to the invariant-enforcement boundary rather than treating it as an arbitrary interface-design choice.
+ **Common mistakes:** Adding convenience methods like `UpdateStatus(id, newStatus)` directly on a Repository "to avoid loading the whole Aggregate for a small change" — this is precisely the side-door invariant bypass the whole-Aggregate persistence discipline exists to prevent.
+ **Follow-ups:** "Is there ever a legitimate exception to whole-Aggregate persistence?" (A narrowly-scoped, explicitly-reviewed bulk operation — e.g., a batch status flip driven by an external, already-validated settlement file — may use a direct, audited SQL update outside the Repository, but this is a deliberate, rare exception, not a general pattern.)
+
 ### Intermediate (8)
 
 1. **Q: How does a Domain Service coordinate logic across multiple Aggregates without itself becoming a repository of business rules that should live elsewhere?**
@@ -108,6 +351,18 @@
  **Common mistakes:** Introducing Domain Events generically without tracing back to which specific cross-Aggregate rule (identified via the synchronous-vs-eventual test) each event actually exists to satisfy, resulting in events raised without a clear, traceable business justification for their existence.
  **Follow-ups:** "What happens if the handler reacting to a Domain Event fails partway through updating the second Aggregate?" (This is exactly the reliability gap Intermediate Q2's Outbox-pattern preview and Advanced Q8's "verify the verifier" discussion address — a failed or silently-dropped handler execution needs its own detection and retry mechanism, not an assumption that "the event was raised" is equivalent to "the reaction definitely, successfully happened.")
 
+9. **Q: What is the "Inbox" pattern, and why does a Domain-Event consumer often need one alongside the producer's Outbox?**
+ **A:** The Inbox pattern is the consumer-side mirror of the Outbox: before processing an incoming event, the consumer checks (and records, within the same local transaction as processing the event's effect) a durable "already-processed" marker keyed by the event's unique ID — this is what actually makes an at-least-once-delivered event safe to process exactly once from the business-outcome's perspective, since the broker/outbox only guarantees the message arrives at least once, not that the consumer's side effect (e.g., posting a ledger entry) only happens once.
+ **Why correct:** Names the specific consumer-side mechanism (a durable, transactionally-consistent dedup marker) that converts at-least-once delivery into effectively-once processing, distinct from and complementary to the producer's Outbox.
+ **Common mistakes:** Assuming the Outbox alone guarantees "the event is only processed once" — the Outbox guarantees durable, at-least-once *delivery*; whether the consumer's *processing* is idempotent is an entirely separate, consumer-owned responsibility the Inbox pattern addresses.
+ **Follow-ups:** "Where does the Inbox's dedup check need to live relative to the consumer's own business-effect transaction?" (In the same transaction as the business effect — e.g., inserting the processed-event-ID row and posting the ledger entry must commit or roll back together, otherwise a crash between the two reintroduces the exact gap the Inbox exists to close.)
+
+10. **Q: Critique a Domain Service that internally calls a Repository to load an Aggregate, mutates its public properties directly via reflection or internal setters "to avoid needing a new method on the Aggregate," and then saves it.**
+ **A:** This is a severe violation of the Root-only-access discipline, made worse by being deliberately engineered around the language's own protection (reflection, or an `internal` setter exposed to the Domain Service's assembly) — it produces state changes that never passed through any invariant-checking method at all, meaning the persisted Aggregate can end up in a state its own class was specifically designed to make unreachable; the correct fix is always adding (or reusing) a proper, invariant-enforcing method on the Aggregate itself, even if that requires a short, deliberate design conversation about what that method's contract should be.
+ **Why correct:** Identifies the specific, deliberate-circumvention severity (bypassing language-level protection, not just an accidental oversight) and states the only correct fix (a proper Aggregate method), rather than treating it as a minor style issue.
+ **Common mistakes:** Treating this as acceptable "pragmatism" under deadline pressure — every such shortcut is a specific, traceable instance of the anemic-model-recurrence failure this domain's entire capstone identifies as the single most persistent anti-pattern across all four modules.
+ **Follow-ups:** "How would a code reviewer catch this pattern before it merges?" (A static-analysis/architecture-fitness-function rule flagging reflection-based field access or use of `internal` setters from outside the Aggregate's own assembly boundary — turning a manual review habit into an enforced, automated gate.)
+
 ### Advanced (7)
 
 1. **Q: Design the concrete Domain Event, Domain Service, and Repository set for the `Order` Aggregate established, including a pricing calculation that genuinely needs a Domain Service.**
@@ -152,6 +407,24 @@
  **Common mistakes:** Ending the module without explicitly naming which specific, forward domain each preview (CQRS, Event Sourcing, Saga, Outbox) connects to, leaving the reader to rediscover these connections independently rather than being given the explicit roadmap this course consistently provides.
  **Follow-ups:** "Why was it correct for this module to preview these four future domains only briefly, rather than developing any of them fully here?" (Each is substantial enough to warrant its own dedicated domain with its own full trade-off analysis — attempting to fully develop Outbox, CQRS, Event Sourcing, or Saga here would either duplicate those domains' eventual content or force a premature, under-justified depth this tactical-DDD module's own scope doesn't call for.)
 
+8. **Q: A `SettlementInstructionSettled` event handler in the Ledger context throws a `DbUpdateException` (a transient deadlock) roughly 0.1% of the time. Design the retry/DLQ strategy, and explain why "just retry forever" is wrong.**
+ **A:** The handler's exception must first be classified: a transient deadlock is retryable, so the consumer should retry with a bounded backoff (e.g., 3 attempts, exponential: 200ms/1s/5s) directly in the message-processing pipeline before giving up on that specific delivery attempt. If all bounded retries fail, the message moves to a **dead-letter queue (DLQ)** rather than being retried indefinitely — "retry forever" is wrong because a non-transient failure (e.g., a genuinely malformed payload, or a downstream schema mismatch) would otherwise block the consumer's entire partition/queue indefinitely, since most broker consumers process in order and a stuck message at the head of the queue prevents every message behind it from being processed at all (head-of-line blocking). The DLQ is then a monitored, explicitly reviewed queue — not a silent graveyard — with an alert on DLQ depth and a runbook for manual/automated replay once the root cause (a bad deploy, a downstream outage) is fixed.
+ **Why correct:** Distinguishes retryable transient failures from non-retryable ones, names the specific mechanical reason unbounded retry is harmful (head-of-line blocking), and treats the DLQ as an actively monitored mechanism rather than a dumping ground.
+ **Common mistakes:** Retrying every failure indefinitely regardless of classification, which for a genuinely non-transient failure (a poison message) blocks the entire partition's throughput; or routing to a DLQ with no monitoring, silently accumulating undelivered settlement facts with the exact same visibility gap Advanced Q4 already names for the outbox itself.
+ **Follow-ups:** "Why must the DLQ alert be on *depth*, not just *existence of any message*?" (A single DLQ message may be an expected, rare edge case already being investigated; a growing depth signals a systemic, ongoing failure — depth trend is the actionable signal, not the binary presence of any message at all.)
+
+9. **Q: A code reviewer flags that a new `IOrderRepository.GetTopSpendingCustomersLastQuarter()` method has been added directly to the Order Aggregate's Repository interface. Critique this, and connect it to this module's CQRS preview.**
+ **A:** This method has nothing to do with loading a whole `Order` Aggregate for a load-mutate-save cycle — it's a multi-Order, aggregate-spanning analytical query that doesn't need Aggregate invariant enforcement at all, and adding it to `IOrderRepository` both bloats the write-side interface with a read-only reporting concern and, in a typical EF Core implementation, would materialize far more data (full `Order` graphs) than the report actually needs, for a query that will only ever read three or four summary fields per customer. The fix, again, is Intermediate Q4's principle: this belongs to a separate, direct read/query path — not necessarily full CQRS with dedicated infrastructure, but at minimum a distinct `IOrderReportingQueries` interface backed by a simple, denormalized query, decoupled from the Aggregate-oriented Repository entirely.
+ **Why correct:** Identifies the specific mismatch (write-oriented Repository interface polluted with an unrelated, expensive analytical read) and applies the already-established read/write separation principle concretely rather than abstractly.
+ **Common mistakes:** Accepting the addition "because it's convenient to have everything Order-related in one interface," which is exactly the interface-bloat and inefficient-materialization cost Intermediate Q4 warns against, now made concrete with a specific, realistic method signature.
+ **Follow-ups:** "At what point would this reporting need justify actual CQRS infrastructure (a separate, event-projected read store) rather than just a direct query?" (Once the direct query's own performance or freshness requirements can no longer be met against the write-side schema — e.g., the report needs sub-second freshness across a sharded write store — the same complexity-justifying threshold this course applies everywhere before adopting additional architectural machinery.)
+
+10. **Q: A settlement Domain Service needs the current FX rate to compute a cross-currency net amount. Should it call an external FX-rate API directly, or should this be modeled differently — and what does this imply for testability?**
+ **A:** The Domain Service itself should depend on an abstraction — an `IFxRateProvider` interface defined in the domain layer, exactly mirroring the Repository's own dependency-inversion discipline (Basic Q6) — with the concrete implementation (an HTTP client calling a market-data vendor, cached with a short TTL) living in infrastructure. This keeps the Domain Service's actual business logic (how to compute a net amount given a rate) unit-testable in complete isolation, by supplying a fake `IFxRateProvider` returning a fixed rate, with zero network dependency or flakiness in the test — directly reusing Intermediate Q5's distinction between fast, database/network-free domain-logic tests and slower, real-infrastructure integration tests, now applied to an external market-data dependency rather than a database.
+ **Why correct:** Applies the same dependency-inversion and test-layering discipline already established for Repositories to a different kind of external dependency (a market-data provider), showing the pattern generalizes rather than being Repository-specific.
+ **Common mistakes:** Having the Domain Service instantiate and call an HTTP client directly, coupling core settlement-calculation logic to network availability and vendor-specific response shapes, and making the logic's own correctness untestable without mocking an entire HTTP pipeline.
+ **Follow-ups:** "What happens to the Domain Service's correctness if the FX-rate provider is temporarily unavailable mid-settlement-run?" (This becomes an explicit failure-handling decision the Application Service must make — retry with backoff, fall back to a last-known-good cached rate within a defined staleness tolerance, or fail the specific instruction and flag it for manual review — never silently proceeding with an undefined or zero rate.)
+
 ### Expert (FinTech Principal Panel)
 
 **E1. Q: A payment aggregate raises a `PaymentSettled` domain event. In a bank, what's the difference between an in-process domain event and a durable integration event, and why does treating "the event was raised" as "the fact is safely recorded and downstream will be told" cause real money incidents?**
@@ -172,4 +445,403 @@
 **Common mistakes:** Stuffing transfer logic inside one account aggregate; using a distributed transaction across services for a transfer; two untracked mutations instead of a modeled `Transfer`; no compensation/idempotency when legs cross a boundary.
 **Follow-ups:** "When does the 'one aggregate per transaction' guideline correctly bend for money?" / "What changes when the two accounts live in different services?"
 
+**E4. Q: A risk-management system needs to react to `PositionUpdated` events from three different trading contexts (Equities, FX, Fixed Income) to recompute portfolio-level VaR. Design the Domain Event contract so it doesn't tightly couple Risk to each trading context's internal model, and explain the consequence of getting this wrong.**
+**A:** Each trading context should publish its own, deliberately-minimal integration event (an ACL-shaped contract, not its internal `Position` Aggregate's full shape) — e.g., `{ PositionId, InstrumentId, AssetClass, Quantity, MarketValue, AsOf }` — normalized to a shared, cross-context vocabulary for asset class and currency that Risk consumes uniformly regardless of which trading context produced it. If Risk instead subscribes to each context's internal domain-event shape directly, three things go wrong: (1) Risk's consumer code forks into three different parsing paths, one per trading context's internal model, directly coupling Risk's correctness to internal refactors none of the three trading teams have any reason to coordinate with Risk about; (2) a field rename inside, say, Equities' internal `Position` Aggregate silently breaks Risk's VaR computation with no compile-time or contract-test signal, since there was never a stable, versioned contract to test against; (3) VaR aggregation logic itself becomes asset-class-conditional spaghetti instead of operating over one normalized shape. The Principal framing: cross-context risk aggregation must consume a stable, ACL-normalized integration-event contract per producing context, not each context's raw internal event — because the moment Risk's correctness depends on three teams' internal refactor discipline instead of one owned, versioned contract, a single unannounced internal rename becomes a silent, undetected VaR-miscalculation incident.
+**Why correct:** Designs a normalized, ACL-shaped integration event per producing context, names the specific coupling failure of consuming internal shapes directly, and ties it to a concrete, plausible incident (silent VaR miscalculation from an internal rename).
+**Common mistakes:** Subscribing directly to each trading context's internal Domain Event type; no shared normalization for asset class/currency; treating a schema/contract test as optional since "we control both sides internally."
+**Follow-ups:** "What contract-testing mechanism would catch the silent-rename failure before production?" / "Why is per-context normalization better than a single shared 'Position' type across all three trading contexts?"
+
+**E5. Q: Your firm's Payments bounded context repository for `Transaction` exposes a method `GetByCustomerId(customerId)` used by both the payment-processing write path and an internal fraud-analytics dashboard's read path. A P1 incident traces slow payment processing to lock contention on the `Transactions` table caused by the dashboard's heavy analytical queries. Diagnose and fix.**
+**A:** *Diagnosis:* The Repository is being used for two structurally different workloads through the same interface and, critically, against the same underlying table — the payment-processing write path needs fast, narrow, single-customer lookups as part of a load-mutate-save cycle under row-level locking; the fraud dashboard needs broad, scan-heavy analytical reads that, under SQL Server's default isolation, take shared locks that block the write path's row-level locks long enough to cause real payment-processing latency (a classic OLTP-vs-OLAP contention pattern, made worse by sharing one Repository abstraction that obscured the fact two very different workloads were colliding on one table). *Fix:* Split the read path off the Aggregate Repository entirely — introduce a dedicated, read-only `FraudAnalyticsQueries` component querying either a read replica or a denormalized reporting store populated asynchronously from `TransactionPosted` Domain Events (Intermediate Q4's CQRS preview turned into a real production fix, not a hypothetical); the payment-processing write path keeps its narrow, fast `IRepository<Transaction>.GetById` unchanged, now free of dashboard-induced contention. Additionally, set the dashboard's queries to `READ COMMITTED SNAPSHOT` (or query the replica) so even before the read-model migration ships, contention drops immediately. The Principal framing: sharing one Repository, and one underlying table, across a latency-critical write path and a scan-heavy analytical read path is a production availability risk hiding inside what looks like reasonable code reuse — split the read path onto its own store or replica the moment the two workloads' access patterns genuinely diverge, because the incident is what "no CQRS, ever" actually costs once real load arrives.
+**Why correct:** Correctly diagnoses OLTP-vs-OLAP lock contention from workload sharing on one table/interface, and fixes it by separating the read path via replica/read-model rather than tuning the shared path indefinitely.
+**Common mistakes:** Adding indexes or query hints to the shared method as a first response without recognizing the two workloads shouldn't share a data-access path at all; assuming `NOLOCK` is a safe general fix rather than a correctness trade-off requiring explicit sign-off (dirty reads) for a financial dashboard.
+**Follow-ups:** "Why is `READ COMMITTED SNAPSHOT` a safer interim fix than `NOLOCK` for a fraud dashboard?" / "What Domain Event would drive the eventual denormalized read model?"
+
+**E6. Q: Compliance requires every mutation to a `ClientMandate` Aggregate (an investment restriction, e.g. 'no tobacco holdings') to be reconstructable for audit — who changed it, when, and what the prior value was — for seven years. Does this require Event Sourcing, or can it be satisfied with the Domain-Event/Repository model already covered, and what's the trade-off?**
+**A:** It does not strictly require Event Sourcing — the audit requirement can be satisfied by (a) the `ClientMandate` Aggregate raising a `MandateChanged { MandateId, ChangedBy, ChangedAt, PreviousValue, NewValue, Reason }` Domain Event on every mutating method, and (b) a durable, append-only audit-log table populated from that event (via the same outbox mechanism, or a dedicated audit-event handler), separate from the Aggregate's own current-state table. This gives full reconstructability of "who changed what, when" without making the *application's* runtime state model event-sourced — the Aggregate is still loaded from, and persisted to, its current-state table via the ordinary Repository; only the *audit trail* is event-derived. The trade-off against genuine Event Sourcing: this approach requires deliberately, manually ensuring every mutating method actually raises a sufficiently detailed audit event (a discipline gap Event Sourcing structurally can't have, since the event log *is* the only way state changes at all) — a missed or under-detailed audit event here is a real, silent compliance gap that a code-review checklist and a fitness-function test (asserting every public mutating method on an audited Aggregate raises at least one event) must actively guard against. The Principal framing: satisfy a seven-year audit requirement with a durable audit-event log fed by Domain Events raised alongside ordinary current-state persistence — full Event Sourcing is unnecessary machinery for an audit-trail requirement alone — but treat "every mutation raises a sufficiently detailed event" as a discipline that must be enforced by review/tooling, not assumed, since unlike genuine Event Sourcing this model has no structural guarantee that a developer didn't forget.
+**Why correct:** Correctly distinguishes an audit-trail requirement (satisfiable via Domain Events + a separate audit log) from a full Event-Sourcing requirement, and names the specific discipline gap (a missed event) this lighter-weight approach must guard against that Event Sourcing structurally can't have.
+**Common mistakes:** Reaching for full Event Sourcing purely because "we need an audit trail," paying its full operational cost (snapshotting, replay tooling, event-schema versioning across seven years) for a requirement a much simpler mechanism satisfies; or building the audit log without a fitness function guaranteeing coverage, leaving a silent compliance gap.
+**Follow-ups:** "What specific test would catch a new mutating method on `ClientMandate` that forgot to raise an audit event?" / "Why would seven years of retained audit events eventually need their own retention/archival strategy regardless of which approach was chosen?"
+
+**E7. Q: Two engineers disagree: one wants `SettlementInstructionSettled` to include the full settled `Money` amount as a `decimal`; the other insists on a `string`. Resolve this, tying it back to the CLAUDE.md reference standard's own guidance on modelling money.**
+**A:** The `string` argument wins, and for the same reason the payment-system reference design insists on it: floating-point and even `decimal` arithmetic performed independently on both the producer and consumer sides of a serialized boundary (JSON) can silently diverge due to differing default rounding/culture-parsing behavior across languages, runtimes, or even different versions of the same JSON library — a `decimal` that round-trips correctly in a same-language, same-process context is not guaranteed to round-trip identically once it crosses a serialization boundary into a consumer written in a different stack, or even a different .NET serializer configuration. Representing the settled amount as a `string` (e.g., `"152340.50"`) paired with an explicit currency and scale field forces every consumer to parse deliberately, with an explicit, reviewed parsing/rounding strategy, rather than trusting an implicit numeric-type round-trip that can silently drift by fractions of a cent at real volume — and at settlement volume, "silently drifts by fractions of a cent" is exactly the kind of discrepancy that surfaces, expensively, at end-of-day reconciliation. The Principal framing: serialize money crossing a bounded-context or process boundary as a string with explicit currency/scale, never a raw numeric type, because a numeric type's round-trip fidelity across serialization boundaries is an implementation detail no team should have to trust blindly at settlement-critical precision.
+**Why correct:** Applies the reference standard's specific money-modelling guidance (string, not decimal, across a serialization boundary) with the concrete underlying reason (cross-stack/cross-serializer round-trip risk), not just as a memorized rule.
+**Common mistakes:** Treating `decimal` as inherently safe because "it's not floating point" — the risk isn't decimal's own precision (which is fine within one process); it's the lack of a guaranteed, universal round-trip contract once the value is serialized and deserialized by a different consumer's stack.
+**Follow-ups:** "Does this same argument apply to the Aggregate's own internal, in-process representation of money?" (No — internally, within one process, a well-chosen numeric `Money` Value Object with explicit currency is fine and idiomatic; the string representation is specifically a wire-format/serialization-boundary decision, not an internal-modelling one.)
+
+**E8. Q: A Domain Service `MarginCallEvaluator` reads a client's current positions (via Repository) and current market prices (via an external `IMarketDataProvider`) to decide whether to raise a `MarginCallRequired` Domain Event. During a fast market move, the evaluator runs against slightly stale cached prices and fails to raise a margin call that should have fired. What's the architectural lesson, beyond "the cache TTL was too long"?**
+**A:** The deeper lesson is that a Domain Service making a risk-critical decision (does this warrant a margin call) was allowed to silently substitute a *staleness-unaware* dependency (a cache with no explicit staleness contract communicated to the calling logic) for a *staleness-aware* one, without the decision logic itself ever reasoning about how stale is too stale for this specific decision. The fix isn't merely shortening the TTL (a magnitude tweak that just moves the same risk to a smaller, still-nonzero window); it's making staleness an explicit, first-class input to the evaluation — `IMarketDataProvider` should expose price *and* its as-of timestamp, and `MarginCallEvaluator` should have an explicit policy ("refuse to evaluate, or escalate to a fresher fetch, if the price is older than N seconds during a volatility-flagged period") rather than silently trusting whatever the cache happens to currently hold. This generalizes: any Domain Service whose output is a risk-relevant judgment call, not just a convenience computation, must treat the *freshness* of every external input it depends on as part of its own contract, not an invisible property of its dependency's implementation. The Principal framing: a risk-critical Domain Service must make staleness of every external input an explicit, policy-governed part of its own decision logic — silently trusting a cached dependency's freshness is a hidden assumption that, on a fast market move, converts a caching-layer implementation detail into a missed margin call.
+**Why correct:** Identifies the root cause as an implicit staleness assumption embedded in a risk-critical decision, not merely a mistunable cache parameter, and proposes making freshness an explicit, policy-governed input rather than a magnitude fix.
+**Common mistakes:** Treating "reduce the cache TTL" as sufficient remediation without addressing that the decision logic itself has no explicit staleness awareness at all — the same failure mode recurs at a smaller scale the next time market volatility outpaces whatever TTL was chosen.
+**Follow-ups:** "How would you test that the evaluator correctly refuses to act on stale data?" (A unit test supplying a fake `IMarketDataProvider` returning a price with an old `AsOf` timestamp during a simulated volatile period, asserting the evaluator escalates or refuses rather than silently proceeding — a deterministic, database/network-free test per Intermediate Q5's testing-layer discipline.)
+
+**E9. Q: As a Principal Engineer reviewing a new bounded context's design doc, you see: "We'll use Domain Events for everything so the system stays loosely coupled." What's your specific pushback, and what governance mechanism would you put in place instead?**
+**A:** The pushback is that "Domain Events for everything" is a slogan, not a design decision — it conflates genuine cross-boundary decoupling (where eventual consistency is an acceptable, deliberately-chosen trade-off, per the synchronous-vs-eventual invariant test) with intra-Aggregate or same-transaction communication where a direct method call is both simpler and strictly more correct (Advanced Q5's exact critique). Blanket adoption without per-relationship justification produces a system where every interaction — including ones that genuinely need synchronous, same-transaction correctness — is modeled as fire-and-forget, silently reintroducing correctness gaps the team won't discover until an audit or reconciliation catches a case where "eventually" wasn't actually good enough. The governance mechanism: require every proposed cross-Aggregate or cross-context Domain Event, at design-review time, to explicitly answer the synchronous-vs-eventual test in writing (an ADR-style entry: "why is eventual consistency acceptable here, and what's the maximum tolerable staleness window") — a proposal that can't answer this concretely is a signal the team reached for the pattern reflexively rather than deliberately. The Principal framing: "Domain Events for everything" is not an architecture, it's the absence of one — the correct governance posture is a per-relationship, written justification requiring the team to explicitly state why eventual consistency is acceptable and how stale is tolerable, catching reflexive pattern-adoption before it ships as an unreviewed, systemic correctness gap.
+**Why correct:** Rejects the blanket policy specifically, not generically, by naming the concrete correctness risk (intra-boundary communication modeled as eventually-consistent when it needed synchronicity) and proposes a concrete, enforceable governance artifact rather than just "use better judgment."
+**Common mistakes:** Accepting "loose coupling" as an unconditional good without asking what correctness property is being traded away for it in each specific relationship; giving only vague pushback ("that seems risky") without a concrete, actionable review mechanism the team can actually apply going forward.
+**Follow-ups:** "What's a concrete example of a relationship this design doc's blanket policy would get wrong?" (Two internal parts of the same Aggregate, or a same-transaction invariant like the settlement instruction's cash/securities leg atomicity — either genuinely needs synchronous enforcement, and modeling it as a Domain Event would silently permit a transiently invalid intermediate state.)
+
+**E10. Q: Six months post-launch, a Principal Engineer is asked to estimate the cost of migrating the Settlement context's Domain-Event-driven integration with Ledger from at-least-once-with-idempotent-consumer to full Event Sourcing for Settlement itself. What's the actual scope of that migration, and what would make you push back on it?**
+**A:** The scope is much larger than "just replay events instead of reading current state" — it requires: (1) re-deriving every existing `SettlementInstruction`'s full historical event stream from whatever data currently exists (often impossible to do perfectly for historical records that predate event-raising discipline, since not every past mutation was necessarily captured as a well-formed event); (2) redesigning the Repository layer entirely, from a load-current-row model to an append-event/replay-to-current-state model, including snapshotting strategy for Aggregates with long histories; (3) versioning every event schema ever raised, indefinitely, since Event Sourcing makes the event log itself the permanent system of record rather than a transient side effect; (4) retraining the team on an entirely different debugging and querying mental model (no more `SELECT * FROM SettlementInstructions WHERE Status = 'Pending'` — that now requires either a maintained projection or replaying every stream). The pushback: this is justified only if the business need genuinely requires Event Sourcing's *specific* benefits — full historical replay for as-of-any-point-in-time state reconstruction, or genuine temporal audit/what-if analysis — not merely "it would be architecturally purer" or "we already raise Domain Events so we're halfway there" (a false halfway: raising notification events is a small fraction of the actual migration's scope). If the existing Domain-Event/Outbox/Repository model already satisfies the actual audit requirement (per E6's lighter-weight approach), a full Event Sourcing migration is a large, multi-quarter investment being proposed to solve a problem the current design doesn't actually have. The Principal framing: estimate Event Sourcing migration cost honestly as a full re-architecture of persistence, historical-data reconstruction, schema versioning, and team mental model — not an incremental step from "we already raise Domain Events" — and push back hard whenever the stated justification is architectural purity rather than a concrete, unmet business requirement only genuine event-sourced replay can satisfy.
+**Why correct:** States the full, realistic scope of an Event-Sourcing migration (historical reconstruction, Repository redesign, permanent schema versioning, team retraining) rather than understating it as incremental, and gives the specific business-justification bar a Principal Engineer should hold the proposal to.
+**Common mistakes:** Underestimating the migration as "we already have Domain Events, so we're most of the way there" — conflating a transient notification mechanism with the permanent, replayable system-of-record Event Sourcing actually requires; approving the migration on architectural-preference grounds without a concrete, unmet business requirement.
+**Follow-ups:** "What's the single hardest part of this migration to get right?" (Reconstructing a faithful historical event stream for Aggregates that existed before event-raising discipline was in place — any gap or inference error there permanently corrupts the replayed history for that Aggregate going forward.)
+
 ---
+
+## 11. Coding Exercises
+
+### Easy: Raise and Collect a Domain Event
+**Problem:** Implement `AggregateRoot` with a private pending-events list and a `SettlementInstruction` Aggregate whose `MarkSettled` method both enforces a status invariant and raises a `SettlementInstructionSettled` event.
+**Solution:**
+```csharp
+public interface IDomainEvent { DateTime OccurredAt { get; } }
+
+public abstract class AggregateRoot
+{
+    private readonly List<IDomainEvent> _events = new();
+    public IReadOnlyCollection<IDomainEvent> PendingEvents => _events;
+    protected void Raise(IDomainEvent e) => _events.Add(e);
+    public void ClearPendingEvents() => _events.Clear();
+}
+
+public record SettlementInstructionSettled(Guid InstructionId, DateTime OccurredAt) : IDomainEvent;
+
+public class SettlementInstruction : AggregateRoot
+{
+    public Guid Id { get; }
+    public string Status { get; private set; } = "PendingSettlement";
+    public SettlementInstruction(Guid id) => Id = id;
+
+    public void MarkSettled()
+    {
+        if (Status != "PendingSettlement")
+            throw new InvalidOperationException($"Cannot settle from status {Status}.");
+        Status = "Settled";
+        Raise(new SettlementInstructionSettled(Id, DateTime.UtcNow));
+    }
+}
+```
+**Time complexity:** O(1) per raise/mark. **Space complexity:** O(k) for k pending events per Aggregate instance.
+**Optimized solution:** For high-fan-out Aggregates raising many events per operation, pre-size the internal list (`new List<IDomainEvent>(capacity: 4)`) to avoid repeated array growth; functionally identical otherwise since the operation is already O(1) amortized.
+
+### Medium: Transactional Outbox Write in EF Core
+**Problem:** Override `SaveChangesAsync` so every pending Domain Event on any tracked Aggregate is persisted as an `OutboxMessage` row in the same transaction as the Aggregate's own changes.
+**Solution:**
+```csharp
+public class OutboxMessage
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Type { get; set; } = default!;
+    public string Payload { get; set; } = default!;
+    public DateTime OccurredAt { get; set; }
+    public bool Processed { get; set; }
+}
+
+public class AppDbContext : DbContext
+{
+    public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
+
+    public override async Task<int> SaveChangesAsync(CancellationToken ct = default)
+    {
+        var aggregates = ChangeTracker.Entries<AggregateRoot>()
+            .Select(e => e.Entity)
+            .Where(a => a.PendingEvents.Count > 0)
+            .ToList();
+
+        foreach (var agg in aggregates)
+            foreach (var evt in agg.PendingEvents)
+                OutboxMessages.Add(new OutboxMessage
+                {
+                    Type = evt.GetType().Name,
+                    Payload = JsonSerializer.Serialize(evt, evt.GetType()),
+                    OccurredAt = evt.OccurredAt
+                });
+
+        var result = await base.SaveChangesAsync(ct); // ONE transaction: aggregate rows + outbox rows
+
+        foreach (var agg in aggregates) agg.ClearPendingEvents();
+        return result;
+    }
+}
+```
+**Time complexity:** O(n) in total pending events across tracked Aggregates. **Space complexity:** O(n) for the serialized payloads staged in the same `SaveChanges` call.
+**Optimized solution:** Batch-serialize using `System.Text.Json`'s `Utf8JsonWriter` directly into a pooled buffer for high-throughput settlement runs (thousands of Aggregates per batch) to reduce allocation churn versus per-event `Serialize` string allocation.
+
+### Hard: Idempotent Outbox Relay with At-Least-Once Delivery
+**Problem:** Implement a background relay that polls unprocessed outbox rows, publishes them, and marks them processed — safe to run as multiple concurrent instances without double-publishing the same row.
+**Solution:**
+```csharp
+public class OutboxRelay : BackgroundService
+{
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IEventBus _bus;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            // SKIP LOCKED avoids double-claiming a row across concurrent relay instances
+            var batch = await db.OutboxMessages
+                .FromSqlRaw(@"SELECT TOP 200 * FROM OutboxMessages WITH (READPAST, UPDLOCK)
+                               WHERE Processed = 0 ORDER BY OccurredAt")
+                .ToListAsync(stoppingToken);
+
+            foreach (var msg in batch)
+            {
+                try
+                {
+                    await _bus.PublishAsync(msg.Type, msg.Payload, stoppingToken);
+                    msg.Processed = true;
+                }
+                catch
+                {
+                    // leave Processed = false; next poll retries — publish must be idempotent downstream
+                }
+            }
+            await db.SaveChangesAsync(stoppingToken);
+            await Task.Delay(TimeSpan.FromMilliseconds(500), stoppingToken);
+        }
+    }
+}
+```
+**Time complexity:** O(batch size) per poll cycle. **Space complexity:** O(batch size) materialized per cycle.
+**Optimized solution:** Move claiming to a dedicated `ClaimedBy`/`ClaimedAt` column with a lease timeout instead of `READPAST`/`UPDLOCK`, so a crashed relay instance's claimed-but-unpublished rows are automatically reclaimed after the lease expires rather than requiring the row-lock to be held for the publish call's full duration (which ties DB lock lifetime to broker latency — a real production anti-pattern under broker slowness).
+
+### Expert: Idempotent Consumer with an Inbox Table
+**Problem:** Implement a Ledger-context consumer for `SettlementInstructionSettled` that posts a ledger entry exactly once even under at-least-once delivery, using an Inbox table.
+**Solution:**
+```csharp
+public class SettlementSettledHandler
+{
+    private readonly LedgerDbContext _db;
+
+    public async Task HandleAsync(SettlementInstructionSettledIntegrationEvent evt, CancellationToken ct)
+    {
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+
+        bool alreadyProcessed = await _db.InboxMessages
+            .AnyAsync(m => m.EventId == evt.EventId, ct);
+        if (alreadyProcessed) { await tx.CommitAsync(ct); return; } // safe no-op replay
+
+        _db.LedgerEntries.Add(new LedgerEntry
+        {
+            InstructionId = evt.InstructionId,
+            Amount = decimal.Parse(evt.SettledAmount, CultureInfo.InvariantCulture),
+            Currency = evt.Currency,
+            PostedAt = DateTime.UtcNow
+        });
+        _db.InboxMessages.Add(new InboxMessage { EventId = evt.EventId, ProcessedAt = DateTime.UtcNow });
+
+        await _db.SaveChangesAsync(ct); // ledger entry + inbox marker, ONE transaction
+        await tx.CommitAsync(ct);
+    }
+}
+```
+**Time complexity:** O(1) per event (one indexed existence check plus one insert pair). **Space complexity:** O(1) additional per processed event (one Inbox row).
+**Optimized solution:** For very high-volume consumers, replace the `AnyAsync` existence check with a unique constraint on `InboxMessages.EventId` and catch the resulting `DbUpdateException` on duplicate insert — trading one round trip (check-then-insert) for a single insert-and-catch, at the cost of relying on the database's constraint-violation path for the (rare) duplicate case rather than an explicit branch.
+
+---
+
+## 12. System Design
+
+**Scenario:** Design the event-driven integration layer connecting a Settlement bounded context to Ledger, Notification, and Regulatory-Reporting contexts in a multi-asset trade-settlement platform processing ~40,000 settlement instructions/day (peak ~8/sec at market close), where every settled instruction must reliably, durably reach all three downstream contexts, survive a Settlement-service crash or Kafka broker outage with zero silent data loss, and give operations a clear signal within 2 minutes if delivery falls behind.
+
+**Requirements:**
+- *Functional:* Settlement publishes one durable fact per completed instruction; Ledger, Notification, and Regulatory-Reporting each independently consume and react exactly-once-in-effect; a stuck or failing consumer must not block Settlement's own write throughput.
+- *Non-functional:* At-least-once delivery with idempotent consumers; end-to-end delivery latency p95 < 5s under normal load; outbox backlog age alert within 2 minutes of falling behind; horizontal scalability to 10x peak volume without redesign; 7-year auditability of every published event.
+
+**Architecture:** Settlement's `SettlementInstruction` Aggregate raises `SettlementInstructionSettled` on `MarkSettled`. The `SaveChangesAsync` override (§2.4) writes the Aggregate's row and one `OutboxMessages` row in one transaction. A pool of `OutboxRelay` instances (§11 Hard exercise) polls with `SKIP LOCKED`-style claiming and publishes to a Kafka topic `settlement.instruction.settled`, partitioned by `InstructionId` hash to preserve per-instruction ordering. Ledger, Notification, and Regulatory-Reporting each run their own consumer group, each with its own Inbox table (§11 Expert exercise) for idempotent processing, and each with its own DLQ for non-retryable failures.
+
+**Components:** `SettlementInstruction` Aggregate + `IRepository<SettlementInstruction>`; `OutboxMessages` table (indexed on `(Processed, OccurredAt)`, per §4's incident); `OutboxRelay` background service (horizontally scaled, lease-based claiming); Kafka topic (partitioned, 7-day retention minimum for replay); three independent consumer groups each with an Inbox table and DLQ; a monitoring pipeline emitting `outbox_oldest_unprocessed_age_seconds` and per-consumer-group `consumer_lag`.
+
+**Database selection:** SQL Server for the Aggregate + Outbox (already the system of record for Settlement, ACID guarantees needed for the atomic Aggregate+outbox write); Kafka for durable, replayable, ordered fan-out (chosen over a simple queue specifically because Regulatory-Reporting needs replay-from-offset for late-onboarding and audit reconstruction, which a queue that deletes on ack can't provide).
+
+**Caching:** Not on the write/publish path (would violate the durability guarantee); a short-TTL read cache is acceptable only on Ledger's own read-side queries of already-posted entries, never on the pending-outbox path itself.
+
+**Messaging:** Kafka, partitioned by `InstructionId`, at-least-once delivery, consumers required to be idempotent via the Inbox pattern; each consumer group scales independently by adding partitions/consumers without affecting Settlement's own write path at all.
+
+**Scaling:** Outbox relay instances scale horizontally with lease-based row claiming (no double-publish); Kafka partition count scales consumer parallelism; Settlement's own write throughput is entirely decoupled from all three downstream consumers' processing speed, satisfying the non-functional requirement that a stuck consumer never throttles Settlement.
+
+**Failure handling:** Relay crash mid-batch — unprocessed rows remain `Processed = 0`, picked up by another instance (§9 HA). Consumer crash after processing but before Inbox commit — the Inbox insert and the business effect (ledger post) are one transaction, so a crash before commit means neither happened, and redelivery correctly reprocesses from scratch; a crash after commit but before broker ack means Kafka redelivers, and the Inbox check makes the redelivery a safe no-op. Non-retryable consumer failures land in that consumer's own DLQ after bounded retries (§Advanced Q8), never blocking other consumer groups.
+
+**Monitoring:** Outbox oldest-unprocessed-row age (alert > 2 min, per the non-functional requirement, directly closing the exact incident in §4); per-consumer-group lag; DLQ depth per consumer; end-to-end p95 latency (instruction-settled timestamp to each consumer's Inbox-commit timestamp).
+
+**Trade-offs:** Kafka's operational complexity (partitioning, consumer-group management, broker capacity planning) versus a simpler queue is justified specifically by the audit-replay requirement; a simpler point-to-point queue would be sufficient and lower-complexity if Regulatory-Reporting's replay need didn't exist — this is a deliberate, requirement-driven choice, not a default "always use Kafka" reflex.
+
+---
+
+## 13. Low-Level Design
+
+```mermaid
+classDiagram
+    class AggregateRoot {
+        <<abstract>>
+        -List~IDomainEvent~ _pendingEvents
+        +PendingEvents : IReadOnlyCollection~IDomainEvent~
+        #Raise(IDomainEvent)
+        +ClearPendingEvents()
+    }
+    class SettlementInstruction {
+        +Id : Guid
+        +Status : string
+        +MarkSettled()
+    }
+    class IDomainEvent {
+        <<interface>>
+        +OccurredAt : DateTime
+    }
+    class SettlementInstructionSettled {
+        +InstructionId : Guid
+        +OccurredAt : DateTime
+    }
+    class IRepository~T~ {
+        <<interface>>
+        +GetById(id) T
+        +Add(T entity)
+    }
+    class EfSettlementInstructionRepository {
+        -AppDbContext _db
+        +GetById(id) SettlementInstruction
+        +Add(SettlementInstruction e)
+    }
+    class ISettlementNettingService {
+        <<interface>>
+        +ComputeNet(instructions) Money
+    }
+    class SettlementNettingService {
+        -IFxRateProvider _fx
+        +ComputeNet(instructions) Money
+    }
+    class OutboxRelay {
+        +ExecuteAsync()
+    }
+
+    AggregateRoot <|-- SettlementInstruction
+    SettlementInstruction ..> SettlementInstructionSettled : raises
+    SettlementInstructionSettled ..|> IDomainEvent
+    IRepository~T~ <|.. EfSettlementInstructionRepository
+    ISettlementNettingService <|.. SettlementNettingService
+    EfSettlementInstructionRepository --> OutboxRelay : writes outbox rows consumed by
+```
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant AppSvc as SettlementApplicationService
+    participant Repo as IRepository~SettlementInstruction~
+    participant Agg as SettlementInstruction
+    participant DB as AppDbContext
+
+    Client->>AppSvc: SettleInstruction(id)
+    AppSvc->>Repo: GetById(id)
+    Repo->>DB: SELECT ... (tracked)
+    DB-->>Repo: SettlementInstruction row
+    Repo-->>AppSvc: SettlementInstruction
+    AppSvc->>Agg: MarkSettled()
+    Agg->>Agg: check invariant, Raise(SettlementInstructionSettled)
+    AppSvc->>DB: SaveChangesAsync()
+    DB->>DB: write Aggregate row + Outbox row (1 txn)
+    DB-->>AppSvc: OK
+    AppSvc->>Agg: ClearPendingEvents()
+```
+
+**Design patterns used:** Domain Event (notification, §2.1-2.2); Repository (persistence abstraction, Basic Q3/Q6); Domain Service (`SettlementNettingService`, cross-Aggregate coordination); Unit of Work (implicit in `DbContext`, Intermediate Q6); Specification (optional, for expressive Repository query criteria, Intermediate Q7).
+
+**SOLID mapping:** SRP — `SettlementInstruction` owns invariant enforcement only, `EfSettlementInstructionRepository` owns persistence only, `OutboxRelay` owns delivery only. OCP — new event types extend `IDomainEvent` without modifying `AggregateRoot`. LSP — any `IRepository<T>` implementation is substitutable behind the domain-defined interface. ISP — `IRepository<SettlementInstruction>` exposes only the methods this Aggregate's use cases need, not a bloated generic surface. DIP — the domain layer depends on `IRepository`/`IFxRateProvider` abstractions it defines itself; infrastructure implements them (Basic Q6).
+
+**Extensibility:** A new downstream consumer (e.g., a future Sanctions-Screening context) subscribes to the existing `settlement.instruction.settled` topic with zero changes to Settlement's own code — the Outbox/event-driven design is extension-open by construction (OCP applied architecturally, not just at the class level).
+
+**Concurrency/thread safety:** `SettlementInstruction`'s optimistic concurrency (a `RowVersion` column) guards against two concurrent `MarkSettled` calls both succeeding against a stale read; the Unit of Work's commit either succeeds atomically (Aggregate row + outbox row) or fails and the caller retries — never a partial write. `OutboxRelay` instances use `SKIP LOCKED`/lease-based claiming specifically so concurrent relay instances never double-claim and double-publish the same row (§11 Hard exercise, §9 load balancing).
+
+---
+
+## 14. Production Debugging
+
+**Incident:** Ledger's settlement-entry count silently drifted below Settlement's settled-instruction count by a growing margin over several days — end-of-day reconciliation flagged 340 missing ledger entries for otherwise-correctly-settled instructions, with no errors, no alerts, and no exceptions logged anywhere in Settlement.
+
+**Root cause:** A prior, unrelated migration had added a new `SettlementInstructionAmended` event type (for a rare compliance-driven amendment flow) and, in doing so, a developer had refactored `SaveChangesAsync`'s outbox-writing loop to filter `ChangeTracker.Entries<AggregateRoot>()` by `e.State == EntityState.Modified` only — excluding newly-`Added` Aggregates, since the amendment flow only ever modified existing rows. This silently broke outbox-row generation for every *newly created* `SettlementInstruction` from that point forward: the Aggregate's own row still saved correctly (via ordinary `SaveChangesAsync` persistence, unaffected by the filter), but its `SettlementInstructionSettled` event, raised at creation-plus-immediate-settlement in a fast-settlement flow, was silently never written to the outbox at all.
+
+**Investigation:** Confirmed via `git log` and code review that the `SaveChangesAsync` override's `ChangeTracker.Entries<AggregateRoot>()` filter had an `EntityState.Modified` condition added in a commit three weeks prior. Cross-referenced the 340 missing instructions against their creation timestamps — every one was created (not just amended) after that commit's deploy date, confirming the filter, not a broker or relay failure, was the root cause. The outbox table itself showed zero rows for these 340 instructions at all — not stuck-unprocessed rows, but genuinely never-written rows, ruling out a relay or Kafka delivery problem entirely and pointing squarely at the write-side filter.
+
+**Tools:** SQL query comparing `SettlementInstructions` (Status = Settled) against `OutboxMessages` (by `InstructionId` embedded in payload) to find the exact gap set; `git blame` on `SaveChangesAsync` to trace the introducing commit; a temporary diagnostic log added to the override to confirm, in a staging repro, that `EntityState.Added` Aggregates were indeed being skipped by the existing filter.
+
+**Fix:** Removed the `EntityState.Modified`-only filter; outbox-row generation now runs for every tracked `AggregateRoot` with pending events regardless of `EntityState` (`Added`, `Modified`, or even `Unchanged`-but-mutated-via-a-method-that-only-raised-an-event-without-a-persisted-field-change, an edge case the fix also had to account for). Backfilled the 340 missing ledger entries via a reviewed, one-off reconciliation script cross-referencing Settlement's own audit log for the true settled amounts.
+
+**Prevention:** Added an integration test asserting that creating and immediately settling a new `SettlementInstruction` in one `SaveChangesAsync` call produces exactly one outbox row — a regression test directly targeting this specific `EntityState`-filter class of bug. Added a production reconciliation job (not just end-of-day, but hourly) comparing settled-instruction count against outbox-row count per hour, alerting on any nonzero gap within 60 minutes rather than waiting for the next full end-of-day reconciliation cycle — closing the multi-day silent-drift window this incident took to surface.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** How should Settlement reliably notify Ledger, Notification, and Regulatory-Reporting of a settled instruction?
+
+**Option A — Direct synchronous call from Settlement to each downstream context's API, inside Settlement's own transaction (via a distributed transaction or a "call-then-hope" pattern).**
+Advantages: simplest to reason about at small scale; immediate consistency. Disadvantages: couples Settlement's own commit success/latency to three downstream services' availability; no durability across a crash between commit and the calls; distributed transactions across services are themselves a well-known reliability and scalability liability. Cost: low initial build cost, high production-incident cost. Complexity: low to build, high to operate correctly. Maintainability: poor — any new consumer requires modifying Settlement's own code. Scalability: poor — Settlement's throughput is bounded by the slowest downstream call.
+
+**Option B — In-process Domain Event dispatch immediately after commit, no Outbox.**
+Advantages: simpler than a full outbox/broker pipeline; no additional infrastructure. Disadvantages: an event is silently lost if the process crashes between commit and dispatch (Advanced Q2's exact gap); handlers running in-process still couple Settlement's request latency to handler execution time unless explicitly backgrounded. Cost: low. Complexity: low. Maintainability: moderate. Scalability: moderate, but the durability gap is a real, unacceptable risk for money-movement facts.
+
+**Option C — Transactional Outbox + Kafka, independent consumer groups with Inbox-pattern idempotency (the approach built out in this module).**
+Advantages: durable, at-least-once delivery guaranteed even across a crash; Settlement's write throughput fully decoupled from every downstream consumer; new consumers subscribe with zero change to Settlement's code (OCP, §13); replay capability for audit/late-onboarding via Kafka retention. Disadvantages: real operational complexity (partition management, consumer-group monitoring, Inbox-table overhead per consumer, outbox-table growth requiring pruning); every consumer must be built idempotent, a non-optional engineering cost. Cost: higher upfront build and ongoing operational cost. Complexity: highest of the three. Maintainability: excellent once built — new consumers are additive, not invasive. Scalability: excellent — this is the design that scales to 10x volume without redesign.
+
+**Recommendation:** Option C. For a money-movement fact (a settled instruction) that three independent, business-critical downstream contexts must durably observe, the durability and decoupling guarantees are not optional nice-to-haves — Option A's coupling risk and Option B's silent-loss gap are both unacceptable for financial correctness at this platform's scale and regulatory profile. The higher operational cost of Option C is the correct trade against the alternative: a P1 incident (§14, or the entitlement-flags-style silent gap) whose actual cost, once end-of-day reconciliation eventually surfaces it, dwarfs the ongoing cost of running and monitoring the outbox/Kafka pipeline properly from day one.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** A silently-dropped `SettlementInstructionSettled` event isn't an engineering abstraction failure — it's a missed ledger posting that surfaces, expensively, as a reconciliation break, a delayed or incorrect client confirmation, or worse, a regulatory-reporting gap discovered by an auditor rather than by the firm itself. A Principal Engineer evaluates every Domain-Event/Outbox design decision against "what does 'this fact was lost for N hours/days' actually cost the business," not merely "is the code clean."
+
+**Engineering trade-offs:** Every reliability guarantee in this module (the Outbox, idempotent consumers, DLQ monitoring) has a real, ongoing operational cost — more infrastructure, more moving parts, more on-call surface area. The judgment call is calibrating that cost against the actual criticality of the fact being communicated: a `SettlementInstructionSettled` event driving a ledger post warrants the full Outbox/Inbox treatment; a low-stakes internal UI-refresh notification inside the same platform may not, and building the heavier pattern everywhere regardless of stakes is its own form of over-engineering.
+
+**Technical leadership:** A Principal Engineer establishes the *review gate* — every new cross-context Domain Event proposal answers the synchronous-vs-eventual test and states its idempotency and staleness contract explicitly (Expert E9) — rather than personally reviewing every individual event definition; scaling correctness discipline across a growing org means encoding the discipline into a checklist and a fitness function, not into one person's memory.
+
+**Cross-team communication:** The Repository interface and the Domain Event contract are the two artifacts most likely to be silently, unilaterally changed by a team unaware of who else depends on them (§14's incident is exactly this, internally, and Expert E4's cross-context version externally) — a Principal Engineer pushes for these to be genuinely reviewed, versioned contracts with contract tests, not informal conventions trusted to hold by memory across team boundaries.
+
+**Architecture governance:** The recurring theme across this module's Expert tier — "the event was raised" is not the same claim as "the fact was durably recorded and every downstream system was told" — is exactly the kind of declared-vs-actual gap that requires an explicit, continuously-running verification mechanism (outbox-age alerts, DLQ-depth alerts, hourly reconciliation per §14's prevention) rather than a one-time design review's approval standing in as ongoing assurance.
+
+**Cost optimization:** Outbox-table growth and Kafka retention both carry real, compounding storage cost at settlement volume; a Principal Engineer sets an explicit, reviewed retention/archival policy (e.g., prune processed outbox rows after 30 days once downstream replay windows have passed, archive Kafka topic data to cold storage beyond the operational retention window) rather than letting "just keep everything, storage is cheap" become an unbounded, unmonitored cost and eventual query-performance liability (§4's own indexing incident is a preview of what unmanaged growth costs operationally, not just financially).
+
+**Risk analysis:** The single highest-risk failure mode this module's whole toolkit exists to prevent is a silent one — a lost event, a bypassed invariant, an unmonitored backlog — precisely because silent failures don't trigger an incident response until a downstream, often much more expensive, detection mechanism (reconciliation, an audit, a client complaint) eventually surfaces them; a Principal Engineer treats "how would we know if this silently broke" as a mandatory question for every new Domain-Event relationship, not an afterthought.
+
+**Long-term maintainability:** A codebase where Repositories stay free of leaked ORM types, Domain Services stay narrowly scoped, and Domain Events carry deliberately minimal, versioned contracts is one where a new engineer six months from now can trust the domain layer's own code as the source of truth for business rules — the alternative (logic scattered across services, controllers, and ad hoc Repository methods) is a maintainability tax paid by every future change, compounding for as long as the anti-pattern goes uncorrected.
+
+---
+
+## 18. Revision
+
+**Key Takeaways:**
+- A Domain Event is an in-process, at-most-once, non-durable notification by default — durability across a service/process boundary requires the transactional Outbox, not an assumption.
+- A Repository's whole job is presenting an in-memory-collection illusion over an Aggregate, hiding persistence tech entirely — never leak `IQueryable`, `DbSet`, or ORM types into its interface.
+- A Domain Service earns its existence only for genuine cross-Aggregate coordination logic that doesn't belong to any single Aggregate — it delegates actual mutation back to the Aggregates' own methods, never bypassing them.
+- "The event was raised" ≠ "the downstream effect definitely happened" — this gap is closed only by an explicit, monitored mechanism (Outbox age, DLQ depth, Inbox-based idempotent consumption), never by design-time trust alone.
+- Money crossing a serialization boundary is a `string` with explicit currency/scale, never a raw numeric type — internal, in-process representation is a separate decision from the wire contract.
+
+**Interview Cheatsheet:**
+- Domain Event = past-tense fact, immutable, raised inside a mutating Aggregate method, dispatched after commit.
+- Outbox = event row written in the *same transaction* as the Aggregate's own state change; a separate relay publishes at-least-once.
+- Inbox = consumer-side dedup marker, written in the *same transaction* as the consumer's own business effect, converting at-least-once delivery into effectively-once processing.
+- Repository = Aggregate-granularity persistence abstraction, interface in the domain layer (DIP), implementation in infrastructure.
+- Domain Service = stateless, narrowly-scoped cross-Aggregate coordination; never mutates an Aggregate's fields directly.
+
+**Things Interviewers Love:**
+- Naming the dual-write problem by name and explaining exactly why the Outbox closes it.
+- Distinguishing at-least-once delivery from exactly-once *processing*, and naming the Inbox pattern as the mechanism that bridges them.
+- Concrete, numbered incident narratives (a missing index on an outbox poll query; a silent `EntityState` filter bug) rather than abstract pattern recitation.
+- Explicitly stating the money-as-string rationale rather than treating it as a memorized rule.
+
+**Things Interviewers Hate:**
+- Claiming a system is "exactly-once" without qualifying at-least-once-delivery-plus-idempotent-consumer as the actual mechanism.
+- A Repository interface leaking `IQueryable` "for flexibility" with no acknowledgment of the coupling cost.
+- Treating Domain Events as a universal communication style rather than a deliberate, justified choice for genuine cross-boundary decoupling.
+- No answer to "how would you know if this silently failed in production."
+
+**Common Traps:**
+- Assuming the Outbox alone guarantees exactly-once processing (it guarantees durable, at-least-once *delivery* — the Inbox/idempotency is a separate, consumer-owned responsibility).
+- Reaching for full Event Sourcing to satisfy an audit requirement a simpler Domain-Event-plus-audit-log design already solves (E6).
+- Widening an Aggregate boundary to avoid an N+1 query instead of fixing the actual query pattern (§2.5).
+- Forgetting that a code change to a `SaveChangesAsync` override's filter logic can silently break outbox-row generation with zero exceptions thrown anywhere (§14).

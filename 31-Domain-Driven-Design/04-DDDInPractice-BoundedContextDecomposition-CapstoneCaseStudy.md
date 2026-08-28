@@ -6,7 +6,176 @@
 
 ---
 
-## Interview Questions
+## 1. Fundamentals
+
+**What:** "DDD in practice" is the discipline of sequencing strategic decisions (where do the boundaries go, and why) before tactical ones (how is the model implemented inside one already-identified boundary) — this capstone demonstrates that sequencing end-to-end on one running case study, moving from an e-commerce platform's context map through to a fuller, realistic FinTech platform decomposition.
+
+**Why:** A team that jumps straight to Aggregates and Repositories without first validating bounded-context boundaries against the real business produces technically clean tactical code implementing the *wrong* model — a mistake that's expensive precisely because it's invisible until cross-team coordination or a reorg forces a painful, late correction. This capstone exists to show the full arc — strategic discovery, boundary validation, tactical implementation, ongoing verification — as one coherent, load-bearing sequence rather than a checklist of independently-applicable patterns.
+
+**When:** Any greenfield platform decomposition, any legacy-system boundary re-evaluation (a merger, a new regulatory-driven capability, a scaling-driven service extraction), and any point where a team notices the Ubiquitous Language spoken by domain experts has drifted away from what the code's structure still assumes.
+
+**How (30,000-ft view):**
+```
+1. Event Storming with domain experts → surface real business events & language
+2. Classify subdomains (Core / Supporting / Generic) → calibrate investment
+3. Draw bounded-context boundaries where language/ownership genuinely diverges
+4. Assign a context-mapping pattern to every cross-context relationship
+5. Implement tactical DDD (Aggregates, Domain Events, Repositories) INSIDE each context
+6. Guard every boundary with a fitness function, re-verify continuously — never trust the diagram
+```
+
+---
+
+## 2. Deep Dive
+
+### 2.1 Why Sequencing, Not Pattern Selection, Is the Actual Skill
+Every individual DDD pattern (Aggregate, Repository, Bounded Context) is independently well-documented; the actual, hard-to-teach skill this capstone targets is *sequencing* — recognizing that a tactical decision (should `Order` and `Payment` be one Aggregate?) is unanswerable until the strategic decision (are Ordering and Payment even the same bounded context?) is already settled, and that a strategic decision is unanswerable until real Event Storming with domain experts has actually happened, not merely inferred from an existing schema.
+
+### 2.2 FinTech Platform Decomposition — Extending the Case Study
+Where the original e-commerce case study decomposed into Catalog/Ordering/Customer/Payment/Shipping, this capstone extends the same discipline to a realistic multi-line FinTech platform (a firm running trade execution, settlement, ledger, risk, and client-reporting): **Trade Capture** (Core — the platform's differentiating logic), **Settlement** (Core — money/securities movement correctness), **Ledger** (Core — the system of record for every posted entry), **Risk/Margin** (Core — real-time exposure calculation), **Client Onboarding/KYC** (Supporting — necessary but not differentiating), **Market Data** (Generic — almost always bought, not built), **Regulatory Reporting** (Supporting, heavily compliance-constrained). Multiple Core contexts in one platform is itself a signal worth naming explicitly: FinTech platforms often have *several* genuinely core subdomains simultaneously (unlike a simpler e-commerce platform with one obvious Core), meaning investment calibration is per-context, not a single platform-wide "this is our one Core system" decision.
+
+### 2.3 Trade Capture ↔ Settlement: A Customer-Supplier Relationship With a Hard Money Invariant Downstream
+Trade Capture is upstream (a trade must exist before it can settle); Settlement is the customer. But unlike the Ordering↔Shipping relationship in the original case study, this relationship carries a hard financial correctness constraint: Settlement must never act on a trade Trade Capture hasn't durably, correctly recorded — meaning the integration event (`TradeBooked`) crossing this boundary must be delivered with the full Outbox/Inbox durability discipline covered, not a best-effort notification, because a lost `TradeBooked` event here isn't a UX inconvenience, it's a missed settlement obligation.
+
+### 2.4 Ledger as a Shared Downstream Consumer Across Multiple Core Contexts
+Both Settlement and Trade Capture (for fee postings) and Risk (for margin postings) publish events Ledger consumes to post entries. This is a **many-producers-one-consumer** topology, distinct from the original case study's simpler pairwise relationships — it means Ledger's Inbox-based idempotency (Module 03 §2.3/§11) must dedupe correctly *per producing context*, since two different contexts' events legitimately share no business key, and Ledger's own bounded-context boundary must stay strictly append-only/auditable regardless of which upstream context is currently posting to it.
+
+### 2.5 Repository/Read-Model Scaling Across a Multi-Context Platform
+A client-facing "portfolio summary" view spanning Trade Capture, Settlement status, and Ledger balances is the clearest instance of the CQRS preview (Module 03 Advanced Q5) at platform scale: no single context's Aggregate Repository can efficiently serve this cross-context read, and forcing it through three separate Aggregate-granularity Repository calls per request multiplies both latency and cross-context coupling. The correct answer is a dedicated, denormalized read model populated by subscribing to each context's already-published Domain Events — the same mechanism, now serving a genuinely cross-context reporting need rather than a single context's own reporting need.
+
+### 2.6 Context-Map Governance at Platform Scale — Why One Fitness Function Isn't Enough
+With five-plus Core/Supporting contexts, the number of pairwise relationships requiring an explicit context-mapping decision and a fitness function grows combinatorially, not linearly — a platform with 7 contexts has up to 21 potential pairwise relationships. A Principal Engineer's actual governance job at this scale is maintaining a living context map (an architecture decision record per relationship, each with its own fitness function) rather than trusting that "we did DDD" as a one-time exercise scales automatically to every new relationship added as the platform grows.
+
+---
+
+## 3. Visual Architecture
+
+```mermaid
+graph TB
+    subgraph "Core subdomains"
+        TC[Trade Capture]
+        ST[Settlement]
+        LG[Ledger]
+        RK[Risk / Margin]
+    end
+    subgraph "Supporting subdomains"
+        KYC[Client Onboarding / KYC]
+        REG[Regulatory Reporting]
+    end
+    subgraph "Generic subdomain"
+        MD[Market Data — 3rd-party vendor]
+    end
+
+    TC -- "TradeBooked (Customer-Supplier, Outbox-durable)" --> ST
+    TC -- "TradeBooked (fee posting)" --> LG
+    ST -- "SettlementInstructionSettled (Outbox-durable)" --> LG
+    ST -- "SettlementInstructionSettled" --> RK
+    RK -- "MarginCallRequired" --> KYC
+    TC -- "TradePositionChanged" --> RK
+    LG -- "LedgerEntryPosted" --> REG
+    MD -. "ACL: normalized price feed" .-> TC
+    MD -. "ACL: normalized price feed" .-> RK
+    KYC -- "ClientOnboarded (Open Host Service)" --> TC
+
+    classDef core fill:#2b6cb0,color:#fff;
+    classDef supporting fill:#718096,color:#fff;
+    classDef generic fill:#a0aec0,color:#1a202c;
+    class TC,ST,LG,RK core;
+    class KYC,REG supporting;
+    class MD generic;
+```
+
+```mermaid
+graph LR
+    subgraph "Cross-context read model (CQRS, §2.5)"
+        E1[TradeBooked] --> RM[(Portfolio Summary<br/>Read Model)]
+        E2[SettlementInstructionSettled] --> RM
+        E3[LedgerEntryPosted] --> RM
+        RM --> API["GET /portfolio/{clientId}/summary"]
+    end
+```
+
+---
+
+## 4. Production Example
+
+**Problem:** A firm's trading platform launched Trade Capture, Settlement, and Ledger as three separate bounded contexts per this capstone's decomposition, but Risk/Margin was bolted on eighteen months later by a different team under deadline pressure, directly subscribing to Trade Capture's *internal* `Position` Aggregate's raw change-tracking events (not a deliberately-designed, ACL-shaped integration event) to compute real-time margin exposure — a shortcut that shipped a working margin calculation two weeks faster than designing a proper published contract would have.
+
+**Architecture:** Risk's `MarginCallEvaluator` (Module 03 Expert E8) consumed Trade Capture's internal event shape directly, meaning every field Trade Capture's Aggregate happened to expose internally — including fields with no defined external contract or versioning discipline — was implicitly part of Risk's dependency surface, undocumented and untested against.
+
+**Implementation:** This worked without incident for fourteen months, because Trade Capture's internal model happened not to change in any way that affected the specific fields Risk's evaluator read.
+
+**Trade-offs:** The team explicitly weighed "ship margin calculation two weeks faster" against "build a proper ACL-shaped contract first" and chose speed — a defensible short-term trade-off that was never revisited once the feature shipped and the deadline pressure passed, becoming permanent by default rather than by decision.
+
+**Lessons learned:** Trade Capture's team, unaware Risk depended on their internal event shape at all (there was no published contract, so no contract test, and no entry in the platform's context map documenting the relationship), refactored an internal field name during an unrelated cleanup. Risk's margin evaluator began silently reading a null value for that field, defaulting (via an unguarded null-coalescing fallback already in the code) to treating the affected positions as zero-exposure — suppressing real margin calls for those positions for eleven hours until a risk analyst's manual spot-check caught an implausibly low aggregate exposure figure. The root cause was strategic, not tactical: the relationship between Trade Capture and Risk had never been assigned a context-mapping pattern at all (Advanced Q6's exact diagnostic — this is the strategic Event-Storming gap, not a code defect), because the shortcut bypassed the discovery step this entire capstone's discipline exists to enforce. The fix retrofitted an ACL-shaped `PositionChanged` integration event with an explicit, versioned contract, a contract test in CI, and an entry in the platform's living context map (§2.6) — plus, critically, a platform-wide audit finding two other undocumented direct-internal-event subscriptions elsewhere, each retrofitted the same way before they produced their own incident.
+
+---
+
+## 5. Best Practices
+- Run Event Storming before drawing any bounded-context boundary, including for a context being added to an already-decomposed platform — a boundary added under time pressure without discovery recreates schema-first/shortcut risk (§4's incident) regardless of how mature the rest of the platform's decomposition is.
+- Assign an explicit context-mapping pattern (and a fitness function) to every cross-context relationship, with zero exceptions for "just this once, we're on a deadline."
+- Calibrate tactical DDD investment per context against the core/supporting/generic classification — not uniformly across the whole platform.
+- Keep a living, reviewed context map (an ADR per relationship) as the platform grows, rather than treating an initial decomposition diagram as permanently authoritative.
+- Route cross-context reporting/read needs through a dedicated, event-populated read model rather than chaining multiple Aggregate Repository calls across contexts.
+- Treat "we did DDD at launch" as a starting condition requiring ongoing verification, not a permanent, self-maintaining guarantee.
+
+## 6. Anti-patterns
+- Drawing bounded-context boundaries around existing database schemas or technical layers instead of genuine Ubiquitous-Language divergence.
+- Subscribing directly to another context's internal event/Aggregate shape instead of a deliberately-designed, versioned integration-event contract (§4's incident).
+- Over-splitting a single cohesive concept (e.g., "Checkout" vs. "Ordering") into two contexts that don't actually have distinct language.
+- A "distributed monolith" — bounded contexts identified correctly on a diagram but never actually enforced in code, so cross-context coupling creeps back in after extraction.
+- Applying full tactical DDD rigor uniformly to Generic/low-complexity contexts that don't warrant the investment.
+- Letting a context's published contract silently drift with no contract test catching a breaking change before it reaches a dependent context.
+
+---
+
+## 7. Performance Engineering
+
+**CPU/Memory:** Cross-context read models (§2.5) trade write-side ingestion cost (subscribing to and materializing events from several contexts) for read-side query simplicity — the right trade for a genuinely cross-context reporting need, wasteful if only one context's data is actually required.
+
+**Latency:** A synchronous call chain spanning multiple bounded contexts (Client request → Trade Capture → Settlement → Ledger, each waiting on the next) accumulates latency linearly and couples availability multiplicatively; the Domain-Event/Outbox decoupling from Module 03 is what keeps each context's own request latency bounded by its own work only.
+
+**Throughput:** Ledger's many-producers-one-consumer topology (§2.4) means its ingestion throughput must be provisioned against the *sum* of Trade Capture's, Settlement's, and Risk's combined publish rate, not any single producer's rate in isolation — a common under-provisioning mistake when a new producing context is added without revisiting Ledger's own consumer capacity.
+
+**Scalability:** Each bounded context scales independently by design — Settlement's peak-volume scaling needs (market close) are decoupled from Client Onboarding's steady, much lower request volume, provided no synchronous cross-context call chain reintroduces coupling.
+
+**Benchmarking:** Load-test Ledger's consumer specifically under the *combined* peak of all producing contexts simultaneously (a realistic market-close scenario), not each producer's peak tested in isolation, since isolated per-producer testing would miss the many-producers-one-consumer contention risk.
+
+**Caching:** A cross-context read model is itself a form of materialized cache; its staleness bound (how far behind the source contexts' events it's allowed to lag) must be an explicit, monitored SLA, not an implicit assumption.
+
+---
+
+## 8. Security
+
+**Threats:** A cross-context integration event carrying more data than the consuming context is entitled to (e.g., Ledger receiving full client PII in a `TradeBooked` event when it only needs an anonymized account reference) violates data-minimization and can turn a routine integration into a compliance-scope expansion for the receiving context.
+
+**Mitigations:** Every published integration-event contract is reviewed for minimality exactly as an external API would be (§4's incident's fix included this review, retroactively); apply field-level tokenization/redaction for PII crossing into a context with a narrower regulatory scope (e.g., Market Data, a third-party-adjacent Generic context, should never receive client-identifying data at all).
+
+**OWASP mapping:** Broken access control if a cross-context read model's API doesn't enforce the same entitlement checks the source contexts individually enforced; sensitive data exposure if an integration event over-shares (recurring from Module 03 §8, now at platform scale with more producer/consumer pairs to audit).
+
+**AuthN/AuthZ:** A context-map entry should record not just the data contract but the entitlement boundary — which context is authorized to receive which fields — reviewed the same way a database access grant would be, since an undocumented direct-subscription (§4) is also, structurally, an unreviewed and unaudited data-access grant.
+
+**Secrets:** Each context's own broker/consumer credentials should be scoped narrowly to the specific topics it's authorized to consume — a compromised Risk-context consumer identity should not be able to subscribe to Client Onboarding's KYC-document events.
+
+**Encryption:** Regulatory Reporting's ingestion of `LedgerEntryPosted` events, given its compliance-sensitive downstream use, requires the same encrypted-in-transit/at-rest posture as Ledger's own source data — an integration event inherits its source's protection obligation, not a lesser one, when the consuming context is itself compliance-scoped.
+
+---
+
+## 9. Scalability
+
+**Horizontal scaling:** Each bounded context's Domain-Event-driven decoupling (Module 03 §9) is the platform-level scaling mechanism — Trade Capture's market-open write surge doesn't throttle Client Onboarding's steady traffic, and vice versa, because no synchronous cross-context call chain ties their capacity together.
+
+**Vertical scaling:** Ledger's many-producers-one-consumer topology (§2.4) is the platform's most likely single scaling bottleneck as more Core contexts are added — its consumer capacity must be explicitly re-evaluated (not silently assumed sufficient) every time a new context is onboarded as a producer.
+
+**Replication/Partitioning:** Cross-context read models (§2.5) can be partitioned by client/account ID to scale query load horizontally, independent of how each source context partitions its own write-side data.
+
+**Load balancing:** Each context's consumer group scales its own partition/consumer count independently, per Module 03 §9 — a platform-wide load-balancing decision is never a single, centralized concern once contexts are genuinely decoupled.
+
+**High Availability:** A single context's outage (e.g., Market Data's third-party vendor going down) should degrade only the specific downstream capability that genuinely depends on live pricing, not cascade into unrelated contexts — verifying this requires explicitly testing each context's failure-isolation boundary, not assuming decomposition alone guarantees it.
+
+---
+
+## 10. Interview Questions
 
 ### Basic (8)
 
@@ -58,6 +227,18 @@
  **Common mistakes:** Treating each DDD pattern as independently applicable without checking whether earlier decisions in the same system still make sense in light of it — e.g., choosing an Aggregate boundary in isolation without first confirming the subdomain classification that boundary's investment level should be based on.
  **Follow-ups:** "What's the single biggest connecting thread across this case study's decisions?" (Every tactical decision — the Order Aggregate's exact boundary, which events cross into which other contexts, which context-mapping pattern governs each relationship — ultimately traces back to Ordering's Core classification and the specific business behaviors domain experts described it needing, not to a technical preference chosen independently of that classification.)
 
+9. **Q: In the extended FinTech decomposition (§2.2), why might a platform have several Core subdomains at once, unlike the original e-commerce case study's single obvious Core (Ordering)?**
+ **A:** A trading/settlement platform's differentiating value doesn't live in one place — Trade Capture, Settlement, Ledger, and Risk each carry genuinely business-critical, correctness-sensitive logic that would be unacceptable to under-invest in, unlike a typical e-commerce platform where Ordering alone is usually the clear differentiator and everything else is more clearly Supporting or Generic; the core/supporting/generic classification is a per-context judgment, not a rule guaranteeing exactly one Core subdomain per platform.
+ **Why correct:** Correctly identifies that the classification framework doesn't presuppose a single Core, and explains why a FinTech platform's specific characteristics (multiple money-correctness-critical concerns) make several simultaneous Core contexts realistic.
+ **Common mistakes:** Assuming every platform has exactly one Core subdomain by definition, forcing an artificial ranking among genuinely-equally-critical contexts rather than recognizing multiple contexts can independently warrant full tactical DDD investment.
+ **Follow-ups:** "Does having multiple Core contexts change how investment is calibrated within each one?" (No — each Core context still individually earns full tactical rigor on its own merits; having several doesn't dilute any single one's investment case, it just means the platform's engineering-leadership attention is spread across more high-stakes contexts simultaneously.)
+
+10. **Q: Why does the Ledger context in §2.4 need its Inbox-based idempotency to dedupe "per producing context," rather than a single global dedup key?**
+ **A:** Ledger receives events from multiple, independent upstream contexts (Trade Capture, Settlement, Risk) that share no common business-key namespace — a `TradeId` from Trade Capture and an `InstructionId` from Settlement are structurally unrelated identifiers, so a single global Inbox key scheme would either collide incorrectly across producers or fail to actually dedupe redelivered messages from either; the Inbox key must be scoped to (producing context, that context's own event ID) so redelivery detection stays correct independently per source.
+ **Why correct:** Identifies the specific structural reason (no shared business-key namespace across independent producers) that a naive single-dedup-key design breaks in a many-producers-one-consumer topology.
+ **Common mistakes:** Assuming one Inbox table with one dedup key column is sufficient regardless of how many distinct upstream contexts publish into it, risking either false-positive dedup (incorrectly treating two different producers' events as duplicates) or missed dedup (failing to catch a genuine redelivery) depending on how the flawed key was constructed.
+ **Follow-ups:** "What's the concrete Inbox schema fix?" (A composite key — `(ProducingContext, EventId)` — or simply namespacing `EventId` itself to already be globally unique across producers, e.g., a GUID assigned at each event's point of origin rather than a producer-local sequence number.)
+
 ### Intermediate (8)
 
 1. **Q: Walk through how Event Storming would surface this case study's Ordering ↔ Shipping relationship, and what context-mapping pattern would you assign it.**
@@ -107,6 +288,18 @@
  **Why correct:** Connects DDD's context-mapping discipline directly to the specific distributed-monolith diagnostic criteria, explaining the causal mechanism (explicit, honored contracts) rather than just asserting the anti-pattern is avoided.
  **Common mistakes:** Believing bounded-context identification alone (without an actually-honored context map and published contract) is sufficient to prevent a distributed monolith — a beautifully identified bounded context whose team still allows silent, uncontracted synchronous coupling to creep in will still end up with the exact coordination-tax symptoms once extracted into separate services.
  **Follow-ups:** "What ongoing mechanism keeps a context's published contract from silently drifting after initial extraction?" (The same fitness-function discipline from Question 3/ — a contract test (e.g., Pact) run continuously in CI verifying the published contract's actual, current shape, not a one-time design document trusted indefinitely.)
+
+9. **Q: The Client Onboarding/KYC context publishes `ClientOnboarded` as an Open Host Service, consumed by Trade Capture before it will accept trades for a new client. What happens, from a context-mapping perspective, if Risk also needs to know a client is onboarded, but with different fields than Trade Capture needs?**
+ **A:** Both Trade Capture and Risk consume the *same* Open Host Service/Published Language contract from KYC (KYC doesn't build a bespoke contract per consumer — that would be the Customer-Supplier anti-pattern of one-off, unmanaged integrations), but each consumer applies its *own* Anti-Corruption Layer on the receiving side, extracting only the fields it actually needs into its own internal shape — Trade Capture might only need `ClientId` and `TradingPermissions`, while Risk needs `ClientId` and `RiskRating`; both map from the identical published contract, just into different internal models.
+ **Why correct:** Correctly distinguishes the producer-side contract (one shared, stable Open Host Service) from each consumer's own, independent ACL-based extraction, showing multiple consumers don't require multiple bespoke producer contracts.
+ **Common mistakes:** Assuming each consuming context needs its own custom-negotiated contract from KYC, which would multiply KYC's maintenance burden linearly with consumer count instead of publishing one well-designed, sufficiently general contract every consumer can extract from independently.
+ **Follow-ups:** "What would signal that one shared Open Host Service contract is no longer sufficient?" (If Risk needed a field KYC's published contract doesn't carry and never will by design — e.g., raw underlying KYC-document content KYC deliberately excludes from its public contract for compliance-scope reasons — that's a signal for a separate, more tightly-scoped integration, not a reason to bloat the shared contract.)
+
+10. **Q: How would a Principal Engineer explain, to a non-technical stakeholder, why the Risk context's incident (§4) was a process failure, not just a coding mistake?**
+ **A:** The actual defect wasn't a bug in any specific line of code — every line worked exactly as written; the failure was that a cross-context dependency was created without ever going through the platform's own decision process (Event Storming, a context-mapping pattern assignment, a published contract, a contract test) that exists specifically to catch this class of risk before it ships — meaning the fix isn't "review this code more carefully," it's "make it structurally harder to add an undocumented cross-context dependency at all" (a governance and tooling fix, e.g., a fitness function scanning for cross-context internal-type references in CI), because the same time pressure that produced this shortcut once will produce it again unless the process itself, not just this instance, changes.
+ **Why correct:** Correctly reframes the incident as a process/governance gap rather than an isolated code defect, and proposes a structural fix (automated detection) rather than a purely behavioral one ("be more careful next time"), which is the substantively stronger, more durable answer.
+ **Common mistakes:** Explaining the incident purely in terms of the specific null-handling bug that caused the eleven-hour visible symptom, missing that the null-handling bug was a downstream consequence of the real, structural root cause — the absence of a governed contract in the first place.
+ **Follow-ups:** "Why is 'be more careful next time' specifically insufficient as the primary fix here?" (Because the original shortcut was taken by a competent team under ordinary, recurring deadline pressure — the same pressure will recur on the next feature, so a fix that depends on individual discipline rather than an automated or process gate will very likely fail the same way again.)
 
 ### Advanced (7)
 

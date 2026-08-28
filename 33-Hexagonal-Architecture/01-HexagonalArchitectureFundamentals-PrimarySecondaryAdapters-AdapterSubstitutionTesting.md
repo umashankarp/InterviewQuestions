@@ -2,15 +2,214 @@
 
 > Domain: Hexagonal Architecture | Level: Beginner → Expert | Prerequisite: [[32-Clean-Architecture/03-CleanVsHexagonalVsOnion-ComparativeSynthesis]], [[32-Clean-Architecture/04-Capstone-LegacyPaymentSettlementEngineRefactor]] (takes as given: the shared Dependency Rule/Dependency Inversion substance already established as identical across Clean, Hexagonal, and Onion Architecture, and the Primary/Driving-vs-Secondary/Driven-Adapter vocabulary already introduced — this module develops that vocabulary and Cockburn's original 2005 formulation in the full depth deliberately deferred, reusing the `SettlementInstruction` case study throughout)
 >
-> **Note on format:** Per the standing user preference (see `CLAUDE.md`), this module covers the **top 30 most frequently asked interview questions**, curated by real interview frequency across all four levels (8 Basic / 8 Intermediate / 7 Advanced / 7 Expert) rather than a fixed 10-per-level count, without the full 15-section deep-dive template.
+> **Note on format (updated):** This module originally shipped under the leaner top-30-Q&A-only format. It has since been upgraded, per a targeted one-off request, to the repo's fuller deep-dive template — §7/§8/§9 Performance/Security/Scalability, §11–§15/§17 Coding Exercises through Principal Engineer Perspective, and a closing §18 Revision, all added; Interview Questions expanded to the full 40 (10 per level). The original 30-question Q&A set is preserved verbatim under §10, with 10 new questions added per tier to reach 40. §16 Enterprise Case Study is deliberately skipped (jumping §15 → §17) to stay complementary to sibling Module 118's own worked capstone rather than duplicating it.
 >
 > **Domain scope note:** `33-Hexagonal-Architecture` is scoped to 2 modules (117–118, standard depth): this Fundamentals module and a capstone (118) built around Hexagonal's specific testability-first framing in a regulated trading/payments context. Framed under the Elite FinTech Interview Panel lens (`CLAUDE.md`, established 2026-07-18).
 
 ---
 
-## Interview Questions
+## The Running Case Study
 
-### Basic (8)
+A bank's **Settlement Engine** processes `SettlementInstruction`s — netting balances, moving instructions through `NOT_STARTED → PENDING_APPROVAL → APPROVED → SETTLED` (or `REJECTED`) — reused throughout this module exactly as introduced in the existing Interview Questions below (see §10 Basic Q3–Q8). A second, complementary scenario — a **card-payment authorization service** wired to two different payment-gateway vendors — is introduced fresh in §4 Production Example, deliberately distinct from sibling Module 118's Order Execution Engine capstone so the two files illustrate Hexagonal's substitution principle against two different concrete problems rather than repeating one story.
+
+---
+
+## 1. Fundamentals
+
+**What:** Hexagonal Architecture (Cockburn, 2005; "Ports and Adapters") places an application's business logic — the **core** — at the center, with no dependency on any specific delivery mechanism (HTTP, a message queue) or any specific infrastructure technology (a database, a payment gateway, a message broker). The core exposes and consumes **Ports** — interfaces expressed entirely in the core's own vocabulary. Every Port is satisfied by an **Adapter**: a **Primary (driving) Adapter** calls *into* the core through a Port the core implements; a **Secondary (driven) Adapter** is called *out to* by the core through a Port the core defines but does not implement.
+
+**Why:** Left alone, business logic tends to accrete direct references to whatever framework or infrastructure happens to be nearest — an ASP.NET Core `HttpContext` reaching into a repository method, an Entity Framework `DbSet` referenced from inside a domain method. Every such reference is a small, compounding tax: the logic becomes harder to unit-test (it now needs a real HTTP pipeline or a real database to even construct), harder to reuse across a second delivery channel, and harder to reason about in isolation. Hexagonal Architecture's specific fix is architectural, not disciplinary — it makes the dependency direction structurally enforced (the core defines the Ports; outer code implements or calls them, never the reverse), so this decay is a compile-time-visible violation, not merely a code-review nit.
+
+**When:** The pattern earns its ceremony when (a) the core's business logic is genuinely non-trivial — validation rules, state machines, invariants worth protecting from framework noise; (b) the system realistically needs more than one delivery mechanism or more than one infrastructure implementation over its lifetime (multiple channels, a vendor migration, a test-double substitution need); or (c) the cost of a logic bug is high enough that fast, infrastructure-free unit testing is worth investing in deliberately. A small CRUD-only script or a genuinely single-channel, single-vendor, low-stakes utility gets little from the ceremony and can reasonably skip it.
+
+**How (at a glance):**
+```text
+                         ┌─────────────────────────┐
+  Primary Adapters  ---> │   Primary Port(s)        │
+  (drive the core)       │        ↓                  │
+  e.g. REST Controller   │   Application Core        │
+  Kafka consumer         │   (Use Cases + Entities)  │
+  Batch job               │        ↓                  │
+                         │   Secondary Port(s)       │  ---> Secondary Adapters
+                         └─────────────────────────┘       (driven by the core)
+                                                             e.g. EF Core Repository,
+                                                             Payment Gateway client,
+                                                             SWIFT message gateway
+```
+A Primary Port (e.g., `IProcessSettlementInputPort`) is *implemented by the core itself* (`ProcessSettlementUseCase`) — an external Primary Adapter (a Controller) merely calls into it. A Secondary Port (e.g., `ISettlementRepository`) is *defined by the core* but *implemented by an external Secondary Adapter* (`EfCoreSettlementRepository`) — the core calls out through it. This direction asymmetry, while both sides are equally "pluggable," is the single most commonly missed precision point in interviews (see §10 Basic Q4).
+
+---
+
+## 2. Deep Dive
+
+### 2.1 How Substitution Actually Works in C# — Interfaces + DI Container Swapping
+Nothing exotic is happening mechanically: a Port is a plain C# `interface` living in the `Domain`/`Application` assembly; a production Adapter and a test Adapter are both ordinary classes implementing that interface. Substitution is just **which concrete type gets registered against the interface** — at two different points in the object graph's construction:
+- **In production**, `Program.cs`'s composition root calls `services.AddScoped<ISettlementRepository, EfCoreSettlementRepository>()`; the ASP.NET Core DI container resolves `ProcessSettlementUseCase`'s constructor dependency to that registration.
+- **In a unit test**, no DI container is typically involved at all — the test simply calls `new ProcessSettlementUseCase(new InMemorySettlementRepository(), ...)` directly, or, for broader integration-style tests, a `WebApplicationFactory`-based test host re-registers the interface against a test double via `services.Replace(ServiceDescriptor.Scoped<ISettlementRepository, InMemorySettlementRepository>())` after the normal composition root has run.
+
+`ProcessSettlementUseCase`'s own source code is byte-for-byte identical in both cases — it holds a field of type `ISettlementRepository`, never `EfCoreSettlementRepository` or `InMemorySettlementRepository` by name, so the compiler physically prevents it from depending on either concrete type.
+
+### 2.2 Compile-Time vs. Runtime Enforcement
+The Dependency Rule (core never references outer-ring types) is enforced at **compile time** by C#'s type system and project-reference graph — if `Domain.csproj` doesn't reference `Infrastructure.csproj`, `ProcessSettlementUseCase` *cannot* reference `EfCoreSettlementRepository` even by accident; the build fails. This is stronger than a code-review convention and is why Hexagonal/Clean/Onion's shared substance is genuinely load-bearing in C#, not merely aspirational. What compile-time enforcement does *not* give you: behavioral equivalence between two Adapters satisfying the same Port — that's a runtime, test-time concern (§10 Intermediate Q6's contract test), not something the compiler can check.
+
+### 2.3 DI Container Resolution Internals
+`Microsoft.Extensions.DependencyInjection`'s `ServiceCollection` builds a list of `ServiceDescriptor`s (interface type, implementation type, lifetime) at startup; `BuildServiceProvider()` compiles this into a resolvable graph once. Each `AddScoped<TPort, TAdapter>()` call is simply an entry in that list. Swapping an Adapter for a test never touches `ProcessSettlementUseCase`'s compiled IL at all — it only changes which `ServiceDescriptor` the container consults when asked to resolve `ISettlementRepository`. This is why substitution is "free" at the type-system level: the cost lives entirely in *maintaining two (or more) Adapters and keeping them behaviorally consistent*, never in the mechanics of swapping them.
+
+### 2.4 Threading and Async Boundary Considerations
+A Port's method signatures should be `async`/`Task`-returning whenever any real Adapter behind it is I/O-bound (a database call, an HTTP call to a payment gateway) — even if today's only implementation is a synchronous in-memory fake. Defining `Task<SettlementInstruction> GetById(SettlementId id)` up front, with the in-memory fake simply returning `Task.FromResult(...)`, avoids a breaking signature change later when a real, I/O-bound Adapter is introduced — a small but frequently-missed piece of "design the Port for its real Adapters, not just its current test double."
+
+### 2.5 Memory/Allocation Cost of the Boundary
+Each Port call typically allocates: an `async` state-machine object (per `await`), and any DTO/Value Object passed across the boundary. At ordinary application throughput this is unremarkable Gen 0 garbage; at genuinely high throughput it becomes worth measuring (see §7 Performance Engineering) rather than assumed to be a problem — the indirection itself (an interface/virtual dispatch call) costs nanoseconds, dwarfed by any real I/O the Adapter performs.
+
+### 2.6 Hidden Costs — What "Just Add an Interface" Doesn't Tell You
+The visible cost of Hexagonal Architecture is trivial: define an interface, implement it twice. The **hidden**, compounding costs are: (a) every Secondary Port now needs at least one production Adapter *and* one validated test-double Adapter to realize the testability benefit safely (§10 Intermediate Q8's "unvalidated fake" risk); (b) a **contract test** (§10 Intermediate Q6) — a shared test suite run against every Adapter satisfying a Port — is required to keep multiple Adapters behaviorally honest, and that suite itself needs maintaining as new scenarios are discovered; (c) DTO/boundary-mapping code at every Primary Port adds real, if modest, ongoing translation-layer maintenance. None of this is a reason to avoid the pattern for a genuinely complex, high-stakes core — but presenting Hexagonal Architecture as free ("just add an interface") consistently underweights this ongoing discipline cost, a point Module 118's Deep Dive §2.6 develops further at full production scale.
+
+---
+
+## 3. Visual Architecture
+
+### The Hexagon Itself
+```mermaid
+graph TB
+    subgraph Core["Application Core (Hexagon)"]
+        UC[ProcessSettlementUseCase]
+        AGG[SettlementInstruction Aggregate]
+        UC --> AGG
+    end
+
+    PP["Primary Port:<br/>IProcessSettlementInputPort"] --> UC
+    PA1[SettlementsController<br/>REST] --> PP
+    PA2[Kafka/SWIFT Consumer] --> PP
+    PA3[Batch Replay Tool] --> PP
+
+    UC --> SP1["Secondary Port:<br/>ISettlementRepository"]
+    UC --> SP2["Secondary Port:<br/>ISwiftMessageGateway"]
+
+    SP1 -.production.-> A1[EfCoreSettlementRepository]
+    SP1 -.test.-> A2[InMemorySettlementRepository]
+    SP2 -.production.-> A3[SwiftMessageGateway]
+    SP2 -.test.-> A4[FakeSwiftMessageGateway]
+```
+
+### Sequence — Substitution at Test Time vs. Production
+```mermaid
+sequenceDiagram
+    participant Test as xUnit Test
+    participant UC as ProcessSettlementUseCase
+    participant FakeRepo as InMemorySettlementRepository
+    participant RealApp as Program.cs (Composition Root)
+    participant RealRepo as EfCoreSettlementRepository
+
+    Note over Test,FakeRepo: TEST TIME
+    Test->>UC: new ProcessSettlementUseCase(new InMemorySettlementRepository())
+    Test->>UC: Execute(input)
+    UC->>FakeRepo: SaveAsync(instruction)
+    FakeRepo-->>UC: OK (in-memory dictionary write)
+
+    Note over RealApp,RealRepo: PRODUCTION
+    RealApp->>RealApp: services.AddScoped(ISettlementRepository, EfCoreSettlementRepository)
+    RealApp->>UC: DI resolves ProcessSettlementUseCase
+    UC->>RealRepo: SaveAsync(instruction)
+    RealRepo-->>UC: OK (SQL Server write)
+```
+
+### Component View — Multiple Primary Adapters, One Core
+```mermaid
+graph LR
+    subgraph Channels
+        C1[REST API]
+        C2[Kafka Consumer]
+        C3[Batch Job]
+    end
+    Channels --> Port[IProcessSettlementInputPort]
+    Port --> Core[ProcessSettlementUseCase<br/>identical, unmodified code path]
+```
+
+---
+
+## 4. Production Example — Payment-Gateway Adapter Substitution
+
+**Problem:** A digital-payments company's checkout service authorizes card payments through a single hard-coded integration with its original payment-processor vendor. A cost/redundancy initiative requires adding a **second** vendor (for negotiated-rate competition and single-vendor-outage resilience) without duplicating the checkout service's own fraud-scoring, 3-D Secure step-up, and idempotent-retry logic — logic that had, over two years, accumulated substantial vendor-specific edge-case handling directly inside the checkout Controller.
+
+**Architecture:** The team introduced a Secondary Port, `IPaymentGatewayClient`, defined entirely in the core's own vocabulary (`AuthorizeAsync(PaymentAuthorizationRequest) -> PaymentAuthorizationResult`, with a vendor-agnostic `PaymentAuthorizationResult` capturing `Approved`/`Declined`/`RequiresStepUp`/`GatewayUnavailable` — deliberately *not* the original vendor's own response shape). `AuthorizePaymentUseCase` (implementing the Primary Port `IAuthorizePaymentInputPort`) became the single, shared home for fraud-scoring and retry logic, calling out through `IPaymentGatewayClient` with zero awareness of which vendor answers.
+
+**Implementation:** Two Secondary Adapters were built: `PrimaryVendorGatewayAdapter` (wrapping the original vendor's SDK) and `SecondaryVendorGatewayAdapter` (wrapping the new vendor's REST API) — each translating its own vendor-specific response codes into the shared `PaymentAuthorizationResult` shape. A **contract test** suite (`PaymentGatewayClientContractTests`, run against both Adapters plus a third, in-memory `FakePaymentGatewayClient` used in `Application.Tests`) asserted identical behavior for: a clean approval, a hard decline, a 3-D-Secure step-up requirement, and — critically — a **timeout with an ambiguous outcome** (the request may or may not have actually authorized funds on the vendor's side before the connection dropped).
+
+**Trade-offs:** Building and maintaining two full production Adapters plus a three-way contract suite cost roughly six additional engineer-weeks beyond a "just add an if/else for the second vendor inside the Controller" shortcut — but the shortcut would have left fraud-scoring and idempotent-retry logic duplicated (and inevitably diverging) across two code paths, exactly the "logic leaks outward into an Adapter" anti-pattern already flagged for the settlement case study.
+
+**Lessons learned:** The contract test's **ambiguous-timeout scenario** caught a real, pre-launch divergence: `PrimaryVendorGatewayAdapter` correctly mapped a timeout to a `GatewayUnavailable` result that triggered the Use Case's idempotency-key-based safe-retry path; `SecondaryVendorGatewayAdapter`'s first draft instead threw an unhandled `HttpRequestException` on timeout, which — had it shipped — would have bypassed the Use Case's retry-safety logic entirely and risked a **duplicate charge** on retry. The fix (mapping the new vendor's timeout to the identical `GatewayUnavailable` result) was made and verified by the shared contract test *before* the first production customer ever saw the second vendor — precisely the value Port/Adapter substitution and contract testing are designed to deliver: a class of integration bug caught in a fast, deterministic test run, not in a live customer's failed checkout.
+
+---
+
+## 5. Best Practices
+- Name a Port for the **capability** it represents ("authorize a payment," "persist a settlement instruction"), not for its underlying mechanism — `IPaymentGatewayClient`, not `IStripeHttpClient`.
+- Write a **contract test** for every Secondary Port with more than one Adapter, and run it against *every* Adapter satisfying that Port, including the in-memory test double — not just the "most real" one.
+- Keep DTOs at externally-consumed Primary Ports distinct from internal domain types, so a domain refactor doesn't silently become an external breaking change (Cockburn's own formulation doesn't mandate this, but the reasoning holds regardless of vocabulary).
+- Register long-lived, expensive-to-construct Secondary Adapters (a persistent gateway connection) with an appropriately long DI lifetime (`Singleton`), constructed eagerly so a connectivity failure surfaces at startup, not on first use.
+- Treat a Port's method signatures as `async`/`Task`-based from the start if any realistic Adapter behind it will be I/O-bound, even if the first implementation is a synchronous fake.
+
+## 6. Anti-patterns
+- **Logic leaking outward:** duplicating a validation rule inside a Controller "for a quick early rejection" instead of keeping it solely inside the Use Case — creates divergent, unmaintained copies of the same rule.
+- **Infrastructure leaking inward:** an EF Core attribute or a vendor SDK type appearing on a Domain Entity or inside a Use Case.
+- **Unvalidated fakes:** an in-memory test double that doesn't actually enforce the same constraints (concurrency conflicts, `NOT NULL` behavior, timeout semantics) as the real Adapter, giving false test confidence — closed by a contract test, not by avoiding fakes.
+- **God Ports:** one large `ISettlementService` interface bundling read, write, and reporting capabilities instead of several narrow, single-capability Ports — violates Interface Segregation and forces every Adapter to implement methods it may not need.
+- **Environment branching inside the core:** `if (environment == "Test")` logic inside a Use Case instead of swapping Adapters at the composition root — reintroduces the exact coupling the pattern exists to prevent.
+
+---
+
+## 7. Performance Engineering
+
+**CPU:** Interface-dispatch cost through a Port (a vtable lookup) is on the order of nanoseconds — irrelevant next to any real I/O an Adapter performs (a database round-trip, a payment-gateway HTTP call, typically single-digit to double-digit milliseconds). Profile before assuming Port indirection is a bottleneck; it essentially never is outside genuinely latency-obsessive, sub-microsecond workloads.
+
+**Memory/Allocations/GC:** Each Port call allocates a DTO and, if `async`, a state-machine object — ordinary Gen 0 garbage at typical application throughput. At meaningfully higher throughput, `readonly struct` Value Objects and pooling (`ObjectPool<T>`) become worth *measuring* before adopting, not assumed necessary by default.
+
+**Latency:** Budget latency per hop realistically — the Port/Adapter layering itself adds negligible, consistent overhead; real latency variability comes from the Adapter's own external call (a payment gateway's P99 response time, not the interface call reaching it). Track P50/P99/P99.9 for the full request path, not just the core's own processing time.
+
+**Throughput:** Benchmark the full pipeline (Primary Adapter → Use Case → Secondary Adapter) under realistic peak load — a payment-authorization service should be load-tested against Black-Friday-style burst volume, not steady-state average traffic.
+
+**Benchmarking:** A fully-controlled in-memory Adapter (with configurable, tunable simulated latency) makes an excellent, deterministic load-testing harness for the core's own logic, decoupled from any real vendor's rate limits — reuse the same Adapter substitution mechanism for performance testing that's used for correctness testing.
+
+**Caching:** A Secondary Port whose Adapter serves relatively stable, non-critical-path data (e.g., a merchant-category lookup) is a reasonable caching candidate with an appropriately calibrated TTL; a Secondary Port gating a correctness-critical decision (a payment-authorization result, a position/risk check) should not be cached at all.
+
+---
+
+## 8. Security
+
+**Where security concerns belong:** Authentication and authorization are fundamentally **driving/Primary Adapter concerns** — verifying *who is calling* and *whether they're allowed to invoke this capability* happens at the boundary, before or as part of a Primary Adapter's translation into a Port call (an ASP.NET Core `[Authorize]` attribute on a Controller, a message-consumer's own identity-verification step) — never inside the application core itself, which should remain concerned only with business rules, not with *how* a caller proved their identity. The core may still enforce **object-level authorization** business rules (e.g., "does this caller's account actually own this settlement instruction") as part of its own logic, since that's a business invariant, not a transport-level authentication concern — the line is: authenticating a caller's identity is a Primary Adapter's job; deciding whether an already-authenticated caller's request is *valid against business state* is the core's.
+
+**Threats:** Unauthorized invocation of a Primary Port (a compromised internal caller submitting fraudulent instructions); credential/secret compromise for a Secondary Adapter's external connection (a payment gateway's API key); man-in-the-middle tampering with a message crossing a Port boundary; replay of a previously-valid request.
+
+**Mitigations:** Authentication and coarse-grained authorization enforced entirely at Primary Adapters (never duplicated, and never solely relied upon, inside the core); object-level/business-rule authorization enforced inside the core, where the actual business context to evaluate it correctly lives; mutual TLS and short-lived, rotated credentials for every Secondary Adapter's external connection; idempotency keys on every Primary Port call whose repetition could cause a duplicate side effect (exactly the payment-authorization retry scenario in §4).
+
+**Keeping the core framework-free:** A Use Case implementing a Primary Port must never reference `HttpContext`, a JWT-validation library, or any other transport-specific security API directly — if it needs to know "who is calling," that information should arrive as an already-validated, already-authenticated identity value passed into the Port's input DTO by the Primary Adapter, not be re-derived by the core from raw request/header data.
+
+**Secrets:** Payment-gateway API keys and connection credentials belong in a managed secrets store referenced by configuration, never embedded in a Secondary Adapter's own source or config file, with rotation automated rather than manual.
+
+---
+
+## 9. Scalability
+
+**Horizontal scaling:** Primary Adapters (an order/settlement-consuming background service, a payment-authorization API) scale horizontally by running multiple instances behind partition-aware routing where ordering guarantees matter (e.g., partitioning by account/merchant ID), or behind a plain load balancer where no such ordering requirement exists.
+
+**Vertical scaling:** Less relevant than horizontal partitioning for most Port/Adapter-structured systems, though a Secondary Adapter managing a persistent connection (a payment gateway's pooled HTTP client, a message-broker connection) benefits from adequate single-instance connection-pool sizing.
+
+**Caching:** As in §7 — cache only non-correctness-critical Secondary Port reads; never cache a Port whose result gates an authorization or risk decision.
+
+**Replication/Partitioning:** A Secondary Port's underlying data store (e.g., `ISettlementRepository`'s database) can be partitioned/sharded by a natural business key (account, merchant) independently of the Port's own interface — the Use Case remains unaware of the partitioning scheme entirely, since it's wholly an Adapter-side concern.
+
+**Load balancing:** Route Primary Adapter traffic with awareness of any ordering guarantees the core's business rules require (e.g., FIFO processing per account); a naive round-robin balancer that ignores this can silently violate an ordering invariant the core assumes holds.
+
+**High Availability:** A Secondary Adapter integrating an external vendor (a payment gateway, a venue connection) should support failover to a documented backup endpoint; the multiple-Adapter-per-Port principle (§10 Intermediate Q3) extends naturally to a disaster-recovery Adapter satisfying the identical Port and contract test.
+
+**Disaster Recovery:** A tested DR runbook should specify how in-flight Primary Port calls are reconciled after a failover — e.g., replaying a batch of not-yet-confirmed payment authorizations against the vendor's own idempotency-key-aware retry semantics, rather than assuming no in-flight state existed at the moment of failover.
+
+**CAP theorem:** A Secondary Port gating a correctness-critical decision (payment authorization, position/risk checks) should favor consistency over availability under partition — reject or hold rather than risk an incorrect approval; a Secondary Port serving non-critical, read-heavy operational data can reasonably favor availability with eventual consistency.
+
+---
+
+## 10. Interview Questions
+
+### Basic (10)
 
 1. **Q: What specific problem was Alistair Cockburn originally solving when he proposed Hexagonal Architecture in 2005, in his own stated motivation?**
  **A:** Cockburn's own writing frames the core motivation as **enabling an application's logic to be developed and tested in isolation from its eventual runtime environment** — specifically, so that a UI, a database, and any other external mechanism could each be "plugged in" or "plugged out" of the application's core on an equal footing, including plugging in a *test harness* in place of any real external mechanism; the driving concern was symmetry and testability first, with the more commonly-cited "swap your database easily" benefit (the version of this same benefit) being a secondary, downstream consequence of that same symmetry rather than the primary motivation.
@@ -60,7 +259,19 @@
  **Common mistakes:** Confusing this fast, in-process test-double substitution with the *integration test* (which deliberately uses the real database technology to verify the real Adapter's own correctness) — both are valid, necessary testing techniques, but they test different things: the test-double substitution verifies the *application core's* logic in isolation; the integration test verifies the *real Adapter's* own implementation correctness, a distinction Intermediate Q6 develops fully.
  **Follow-ups:** "Would a test using this in-memory substitution ever need a real database at all?" (No — that's precisely the benefit: this specific class of test runs with zero infrastructure, exactly the already-established headline benefit, now demonstrated with Cockburn's own specific substitution vocabulary and technique.)
 
-### Intermediate (8)
+9. **Q: State, in one sentence a newcomer could repeat back, the difference between a Port and an Adapter.**
+ **A:** A Port is the *interface* — the capability the core offers or requires, expressed in the core's own vocabulary; an Adapter is the *concrete implementation* of that interface, translating between the core's vocabulary and one specific external mechanism (a specific database, a specific vendor's API, a specific transport).
+ **Why correct:** Captures the interface-versus-implementation distinction precisely and simply, the correct newcomer-level mental model before Basic Q3–Q4's fuller precision is introduced.
+ **Common mistakes:** Using "Port" and "Adapter" interchangeably, or calling any interface in the codebase a "Port" regardless of whether it represents a genuine application-core boundary capability.
+ **Follow-ups:** "Is `ISettlementRepository` the Port or the Adapter?" (The Port — `EfCoreSettlementRepository` is the Adapter implementing it.)
+
+10. **Q: Can a valid Hexagonal-Architecture system have zero Secondary Ports, or zero Primary Adapters beyond exactly one?**
+ **A:** Yes to both, in principle — the *minimum* valid shape is a core with at least one Primary Port (something must trigger it) and however many Secondary Ports its actual business logic genuinely requires, which could be zero for a pure computation with no external dependency at all; having exactly one Primary Adapter is entirely normal and doesn't violate the pattern — the *symmetry principle* says multiple Adapters *can* plug into a Port unchanged, not that multiple Adapters *must* exist for the design to be valid.
+ **Why correct:** Correctly distinguishes "the architecture supports N Adapters per Port" from "the architecture requires N > 1 Adapters per Port," a distinction easy to overstate when the symmetry principle is first introduced.
+ **Common mistakes:** Assuming a system "isn't really Hexagonal" unless it currently has multiple Adapters wired in for demonstration purposes — the structural guarantee (the core *could* accept another Adapter with zero core changes) is what matters, not how many Adapters happen to exist today.
+ **Follow-ups:** "If a Port has exactly one Adapter today, is defining the Port at all still worth the ceremony?" (Only if testability-via-substitution, or a realistically foreseeable second Adapter, genuinely justifies it — see Expert Q9's over-abstraction caution.)
+
+### Intermediate (10)
 
 1. **Q: Describe Cockburn's own substitution technique in more mechanical depth — how does "a test becomes just another Adapter" work in practice?**
  **A:** Cockburn's framing treats a test itself as structurally identical in kind to any other Adapter — just as `EfCoreSettlementRepository` is a Secondary Adapter satisfying `ISettlementRepository` for production use, a test class constructing an `InMemorySettlementRepository` and wiring it directly into `ProcessSettlementUseCase` (bypassing the DI container and ASP.NET Core entirely) is, in exactly the same structural sense, "plugging a test Adapter into a Secondary Port"; on the Primary side, a test can similarly act as its own Primary Adapter — directly instantiating `ProcessSettlementUseCase` and calling its `Execute` method the same way a real Controller would, without needing any actual HTTP infrastructure — meaning a single unit test can exercise the application core through the exact same Port interfaces production Adapters use, with the test itself occupying both the Primary-Adapter role (driving the interaction) and providing Secondary-Adapter test doubles (satisfying what the core requires).
@@ -110,7 +321,19 @@
  **Common mistakes:** Concluding that test doubles/fakes are inherently risky and should be avoided in favor of always testing against real infrastructure — this throws away Basic Q8's entire, genuine testability benefit; the correct fix is validating the fake via a contract test (Intermediate Q6), not abandoning fakes altogether.
  **Follow-ups:** "How would you specifically design the contract test to catch this exact gap?" (Include an explicit scenario in the shared contract-test suite — "given two concurrent loads of the same instruction, saving the second after the first has already saved must throw a concurrency exception" — run against both `InMemorySettlementRepository` and `EfCoreSettlementRepository`; if the in-memory fake doesn't throw, this specific contract test fails immediately, exposing the gap before it ever reaches a Use-Case-level test relying on that fake's now-known-incorrect behavior.)
 
-### Advanced (7)
+9. **Q: Walk through, mechanically, how ASP.NET Core's test host (`WebApplicationFactory`) substitutes a test Adapter for an integration test, versus how a plain unit test does it.**
+ **A:** A plain unit test bypasses DI entirely — `new ProcessSettlementUseCase(new InMemorySettlementRepository(), ...)` — with the test itself acting as the composition root. `WebApplicationFactory<TEntryPoint>` boots the *real* `Program.cs` composition root first (registering `EfCoreSettlementRepository` as normal), then the test overrides `ConfigureWebHost` to call `services.Replace(ServiceDescriptor.Scoped<ISettlementRepository, InMemorySettlementRepository>())` (or an equivalent `RemoveAll`+`AddScoped` pair) *after* the normal registrations run, swapping just that one Secondary Port's registration while leaving the rest of the real HTTP pipeline (routing, model binding, the real Primary Adapter) intact — useful specifically when the test wants to exercise the real Controller/Primary-Adapter code, not just the Use Case in isolation.
+ **Why correct:** Distinguishes the two genuinely different substitution mechanics (bypass DI entirely vs. override one registration inside a real host) and correctly identifies when each is the right tool — unit-level core testing versus Primary-Adapter-inclusive integration testing.
+ **Common mistakes:** Assuming both testing styles use the identical mechanism, or using `WebApplicationFactory`'s heavier host-boot machinery for tests that only need the Use Case in isolation, needlessly slowing the test suite.
+ **Follow-ups:** "Why would a team deliberately want the real Controller included in a test, rather than testing the Use Case alone?" (To verify request/response DTO mapping, routing, and status-code translation — concerns that live in the Primary Adapter, not the core, and so aren't exercised by a Use-Case-only unit test.)
+
+10. **Q: Distinguish "Adapter substitution for a fast unit test" from "Adapter substitution for swapping real production infrastructure" (e.g., replacing a legacy on-prem message queue with Kafka) — are they the same technique?**
+ **A:** Mechanically, yes — both are "register a different concrete class against the same Port interface." The difference is entirely in what's being optimized for: a test-time substitution swaps in a deliberately *simplified*, fast, in-process fake purely to isolate the core's logic from real infrastructure latency and setup cost; a production infrastructure swap replaces one *fully-featured, real* Adapter with another equally real Adapter (both implementing the complete, real contract, verified by the identical contract test), motivated by cost, performance, or vendor-lock-in reasons rather than test speed.
+ **Why correct:** Correctly identifies the shared mechanism while distinguishing the different motivating context and the different bar each substituted Adapter must clear (a test fake only needs to satisfy the contract test's scenarios; a production replacement Adapter needs to be a fully production-ready implementation).
+ **Common mistakes:** Assuming a database swap is somehow architecturally different from a test-double swap — both are the identical Port/Adapter substitution mechanism; only the *purpose* and the *completeness bar* for the new Adapter differ.
+ **Follow-ups:** "Which of the two is more commonly actually exercised in a typical project's lifetime?" (Test-time substitution, exercised on essentially every test run; a genuine production infrastructure swap is comparatively rare — directly the point already established distinguishing Cockburn's primary motivation (testability) from the secondary, less-frequently-realized database-swapping benefit.)
+
+### Advanced (10)
 
 1. **Q: Design the full, concrete Primary-Port symmetry example: `IProcessSettlementInputPort` served by three structurally different Primary Adapters (REST Controller, Kafka consumer, batch-replay tool), showing the actual C# shape of each.**
  **A:** Port: `public interface IProcessSettlementInputPort { Task<ProcessSettlementOutputData> Execute(ProcessSettlementInputData input); }`, implemented by `ProcessSettlementUseCase`. **REST Adapter:** `SettlementsController`'s action method deserializes the HTTP request body, maps to `ProcessSettlementInputData`, calls `_port.Execute(input)`, maps the result to an HTTP response. **Kafka consumer Adapter:** a hosted background service's message-handler callback receives a raw SWIFT/ISO 20022 Kafka message, calls `_swiftGateway.Parse(rawMessage)` (the Secondary Port from Basic Q6) to get `ProcessSettlementInputData`, then calls the identical `_port.Execute(input)`. **Batch-replay Adapter:** a scheduled job reading a file of previously-received-but-unprocessed instructions, deserializing each into `ProcessSettlementInputData`, and calling `_port.Execute(input)` in a loop — all three Adapters are structurally different (different triggering mechanisms, different input sources) but converge on the identical Port call, with `ProcessSettlementUseCase`'s own code shared, unchanged, and unaware of which Adapter invoked it.
@@ -154,7 +377,25 @@
  **Common mistakes:** Building a fitness function that only checks the Dependency Rule (inner rings don't reference outer ones) and assuming that's sufficient coverage for "Hexagonal Architecture compliance" — the Dependency Rule check, while necessary, says nothing about whether Port substitutability is genuinely, currently verified via contract tests, which is this module's own distinct, additional concern this fitness function specifically needs to also assert.
  **Follow-ups:** "What would this fitness function have caught in Advanced Q5's incident, had it existed at the time?" (Nothing directly — the incident's actual gap was a missing *specific test scenario* within an existing contract-test suite, not a missing contract test entirely; this fitness function catches the coarser-grained "no contract test exists at all" gap, while Advanced Q5's fix (adding the specific scenario) addresses a finer-grained gap this particular fitness function's assertion granularity doesn't reach — a useful, honest limitation to name rather than overclaim this fitness function's coverage.)
 
-### Expert (7)
+8. **Q: Design the side-by-side composition-root code for `ISettlementRepository`'s test vs. production DI registration, and explain why the test registration should not live in `Program.cs` itself.**
+ **A:** Production, in `Program.cs`: `services.AddScoped<ISettlementRepository, EfCoreSettlementRepository>();`. Test, in the test project's `WebApplicationFactory`-derived fixture: `builder.ConfigureServices(services => { services.RemoveAll<ISettlementRepository>(); services.AddScoped<ISettlementRepository, InMemorySettlementRepository>(); });` — kept entirely in the *test project*, never in `Program.cs`, because `Program.cs` should describe exactly one thing: how the application is *actually, really* wired for production; branching it based on "are we currently under test" reintroduces an environment-awareness concern into the composition root that the test host's own override mechanism already handles cleanly, without polluting production startup code with test-only paths.
+ **Why correct:** Gives the concrete, correct code for both sides and explains specifically why the override belongs in the test project, not as conditional logic inside the real composition root.
+ **Common mistakes:** Adding an `if (isTestEnvironment)` branch directly inside `Program.cs` — this is a milder but real version of the same "environment branching where it doesn't belong" anti-pattern, now at the composition-root level rather than inside the core.
+ **Follow-ups:** "Would this same reasoning apply to the paper/UAT/live environment branching in the trading-engine capstone?" (No — that's a *legitimate*, deliberate multi-environment production concern properly handled via separate `AddPaperTradingAdapters`/`AddLiveAdapters` extension methods called from `Program.cs` based on real configuration, not a test-only override; the distinction is whether the branching represents a genuine, deployed environment tier versus a test-only substitution.)
+
+9. **Q: What specific problem arises when a Primary Adapter (e.g., a Controller) contains business validation logic instead of the core, beyond "it's poor separation of concerns" — trace the concrete failure.**
+ **A:** Concretely: a second Primary Adapter added later (a Kafka consumer, a batch-replay tool, per Basic Q5) will not automatically inherit validation logic that lives inside the first Adapter's Controller class — each new entry point must remember to reimplement it, and in practice at least one eventually won't, silently admitting invalid state through that specific channel while every other channel correctly rejects it; this is the exact multiple-Primary-Adapter symmetry principle's failure mode when logic placement violates it.
+ **Why correct:** Traces the abstract "poor separation of concerns" complaint to its concrete, observable failure — a silently inconsistent validation gap across channels, discovered only when the non-conforming channel is actually exercised.
+ **Common mistakes:** Treating this purely as a style/maintainability complaint rather than identifying the specific, concrete correctness gap (inconsistent enforcement across channels) it produces once a second Primary Adapter exists.
+ **Follow-ups:** "How would a Port contract test catch this, if at all?" (It wouldn't directly — a Port contract test verifies Secondary Adapter behavioral consistency; this specific gap is a Primary-Adapter-side issue better caught by a fitness function asserting no business-rule-shaped logic exists in the `Infrastructure`/Adapter-hosting assembly, or by disciplined code review.)
+
+10. **Q: Design a compile-time or CI-time check enforcing "no Port interface may reference any Adapter type," beyond the basic Dependency Rule fitness function already established for rings.**
+ **A:** A `NetArchTest`-based (or equivalent) assertion scoped specifically to the `Domain`/`Application` assembly's Port interfaces: `Types.InAssembly(assembly).That().AreInterfaces().And().ResideInNamespace("...Ports").Should().NotHaveDependencyOn("...Infrastructure").GetResult().IsSuccessful` — run as a mandatory CI gate on every pull request, failing the build the moment any Port's method signature or XML-doc-referenced type would require an `Infrastructure`-assembly reference to compile; this is a narrower, Port-specific instance of the general Dependency Rule fitness function, worth calling out explicitly because a Port signature leaking an Adapter-specific type (e.g., a Secondary Port method accidentally typed to accept an `SqlConnection` parameter) is a particularly damaging violation, since every Adapter — not just one class — is then forced to depend on that leaked type.
+ **Why correct:** Gives a concrete, runnable fitness-function design specifically targeting Port-signature purity, correctly framing it as a specific, high-value instance of the already-established general Dependency Rule check rather than an unrelated new technique.
+ **Common mistakes:** Assuming the general Dependency Rule fitness function (core doesn't reference Infrastructure) automatically also catches this — it does, in substance, but calling it out specifically for Port signatures is worth doing because a violation here has an outsized blast radius (every Adapter, not just one internal class, inherits the leaked dependency).
+ **Follow-ups:** "What's a realistic, subtle way a Port signature could leak an Adapter-specific type without an obviously named parameter like `SqlConnection`?" (A Port method returning a type that itself, transitively, references an Infrastructure-assembly type in one of its own properties — e.g., a "generic" `Result<T>` wrapper type that was accidentally defined in `Infrastructure` rather than `Domain`, silently pulling every Port using it into a dependency-rule violation.)
+
+### Expert (10)
 
 1. **Q: From a Principal Engineer's perspective, when should a team deliberately favor Cockburn's more symmetric, testability-first framing over Clean Architecture's more DTO-prescriptive framing for a specific component, and vice versa?**
  **A:** Favor the symmetric, testability-first framing specifically for components whose primary engineering risk is **business-logic correctness under complex, hard-to-manually-reproduce scenarios** — exactly this case study's netting/concurrency logic, — where the ability to rapidly construct many precise, adversarial Adapter-substituted test scenarios (the adversarial invariant tests, now via easy Port substitution) delivers outsized value; favor Clean Architecture's more prescriptive DTO-boundary framing for components whose primary engineering risk is **external-contract stability under independent evolution** — a Primary Port exposed to multiple external teams or systems that deploy independently and can't tolerate an accidental breaking change (the risk). In practice, most Core-subdomain financial components, including this case study's `SettlementInstruction` processing, genuinely need *both* — this isn't a binary choice between the two framings but a recognition that different components, or even different Ports on the same component, may call for leaning on one framing's emphasis more heavily than the other's.
@@ -198,6 +439,24 @@
  **Common mistakes:** Summarizing this module as "Hexagonal Architecture has Primary and Secondary Ports, that's the main difference from Clean Architecture" — this restates the already-covered vocabulary distinction without capturing this module's own genuinely new, additive contribution: the contract-testing discipline and the elevated, explicit emphasis on substitutability as the pattern family's original and most practically valuable goal.
  **Follow-ups:** "How would you demonstrate this habit concretely to a new team member joining a project using this pattern?" (Show them a Port interface, ask them to identify or write its contract test, and have them add a new, deliberately-behaviorally-divergent test double to see the contract test correctly fail — a hands-on demonstration that directly, concretely internalizes the "substitutability requires explicit verification, not assumption" principle this module has established as its central, lasting lesson.)
 
+8. **Q: Where does a Cockburn-style test Adapter fall in the classic test-double taxonomy (dummy/stub/fake/mock/spy), and why does the specific category matter?**
+ **A:** An `InMemorySettlementRepository` is specifically a **fake** — a real, working (if simplified) implementation of the Port's full contract, backed by an in-memory data structure rather than a real database — distinct from a **stub** (returns canned responses to specific calls, with no real internal behavior) or a **mock** (additionally asserts *how* it was called — verifying specific method invocations occurred). The category matters because a fake, unlike a stub or mock, is expected to genuinely *behave* correctly across a range of inputs (which is exactly why it's contract-testable against the real Adapter in the first place) — a stub or mock is typically used for narrower, single-scenario unit tests of the Use Case's own orchestration logic and isn't a meaningful contract-test subject in the same sense, since it was never designed to behave like a complete, working implementation.
+ **Why correct:** Precisely places Cockburn-style substitution Adapters within the standard test-double taxonomy and explains why that specific classification (fake, not stub/mock) is what makes contract testing (Intermediate Q6) a meaningful, apt technique for it.
+ **Common mistakes:** Using "mock" as a generic catch-all term for any test double, obscuring the specific reason a fake — and not a mock or stub — is the right tool for Adapter substitution testing at the Port boundary.
+ **Follow-ups:** "When would a stub or mock be the more appropriate choice over a fake, in this same case study?" (A narrow Use-Case-orchestration unit test verifying "was `ISwiftMessageGateway.Publish` called exactly once with the correct instruction ID" is a legitimate mock-verification use case — distinct from, and complementary to, the broader fake-based, contract-tested substitution used for full behavioral testing.)
+
+9. **Q: Critique a team that defines a dedicated Port and dual Adapters (production + fake) for every single method that happens to call an external system, even ones with no realistic second implementation or independent testing need — e.g., a one-off, rarely-called "notify compliance officer via internal Slack webhook" call.**
+ **A:** This is a genuine over-abstraction risk — Basic Q10 already established that a Port's value comes from either enabling meaningful testability or supporting a realistically foreseeable second Adapter, neither of which clearly applies to a rarely-called, single-purpose notification with no correctness-critical behavior worth contract-testing and no plausible vendor swap on the horizon; the ongoing cost (an interface, at least one Adapter, DI registration, and the cognitive overhead of "is this a Port I need to worry about substituting") is real and compounds across a codebase, while the benefit here is marginal. A pragmatic middle ground: a thin, directly-injected wrapper class (still testable via a simple mock, without the full Port/contract-test ceremony) may be entirely sufficient for genuinely low-stakes, unlikely-to-change integrations.
+ **Why correct:** Correctly identifies this as a case where the pattern's ceremony cost isn't justified by either of its two genuine benefits (testability of complex logic, realistic multi-Adapter need), applying the same calibration discipline used throughout this course rather than treating "always use a Port" as a blanket rule.
+ **Common mistakes:** Applying Hexagonal Architecture's full Port/Adapter/contract-test ceremony uniformly to every single external call in a codebase regardless of its actual complexity or stakes, producing needless abstraction overhead without a commensurate benefit.
+ **Follow-ups:** "What would change your answer if this notification call actually needed a fallback SMS Adapter for on-call escalation?" (That's exactly the "realistically foreseeable second Adapter" condition — at that point, a proper Port with both Adapters becomes genuinely justified.)
+
+10. **Q: As a Principal Engineer, how do you decide Port granularity — one large Port per subsystem (e.g., a single `ISettlementService` covering persistence, notification, and reporting) versus many small, single-capability Ports?**
+ **A:** Favor many small, single-capability Ports (`ISettlementRepository`, `ISwiftMessageGateway`, a separate reporting Port) over one large, bundled interface — per the Interface Segregation Principle already established as one of this pattern's SOLID pillars, a bundled Port forces every Adapter (including every test fake) to implement methods it may not need for its specific use, and forces every consumer of the Port to depend on the full bundle even if it only needs one capability; the concrete, decisive test is: "if I add a new capability to this bundled interface, does every existing Adapter now need a code change (even a trivial `NotImplementedException` stub) just to keep compiling?" — if yes, the Port is too coarse. The counter-consideration: excessive fragmentation (a separate Port for every single method) adds real registration and cognitive overhead without a corresponding benefit when the methods are always used together by the same callers and always change together — the right granularity groups methods that share a genuine, cohesive capability and a genuine, shared reason to change, not smaller or larger for its own sake.
+ **Why correct:** Gives a concrete, decisive test (does adding a capability force unrelated Adapters to change) for detecting an overly coarse Port, while honestly naming the opposite failure mode (excessive fragmentation) rather than presenting "smaller is always better" as an unconditional rule.
+ **Common mistakes:** Treating Interface Segregation as a mandate for maximally fine-grained, single-method interfaces everywhere, without weighing the real cognitive and registration overhead that excessive fragmentation adds when methods genuinely belong together.
+ **Follow-ups:** "Does this same granularity calibration apply identically to Primary Ports as to Secondary Ports?" (The same underlying principle applies, though Primary Ports are more often naturally singular per genuine use case — Basic Q3's "complete, cohesive capability" framing — since a Primary Port typically represents one specific business operation an external actor triggers, making excessive bundling less common on the Primary side in practice than on the Secondary side, where "just add one more repository method" temptation is more frequent.)
+
 ### FinTech Principal Panel — High-Frequency Question
 
 **FT1. Q: For a trading/order-execution engine, classify the primary vs. secondary adapters, and show how adapter substitution lets you test the engine's behavior against *market-venue and payment-rail failure modes* — partial fills, rejects, timeouts — that you can't reliably trigger against a live venue. Why is this the decisive advantage of hexagonal for a regulated engine?**
@@ -205,6 +464,341 @@
 **Why correct:** Correctly classifies primary vs. secondary adapters for an execution engine and shows secondary-adapter substitution + contract tests as the mechanism to deterministically test venue/rail failure modes that a live venue can't reliably produce — the auditable advantage for a regulated engine.
 **Common mistakes:** Confusing driving vs. driven adapters; testing only the happy path (no partial-fill/reject/timeout/disconnect simulation); fakes that don't match real venue behavior (no contract test); depending the core on a concrete venue SDK.
 **Follow-ups:** "Which adverse execution scenarios can't you reliably trigger against a live venue, and how does a fake secondary adapter give you them?" / "How does a contract test stop a too-forgiving fake from giving false confidence?"
+
+---
+
+## 11. Coding Exercises
+
+### Easy — Define `ISettlementRepository` and Substitute an In-Memory Fake
+**Problem:** Define the Secondary Port and a minimal in-memory Adapter, then show a unit test using it directly (no DI container).
+**Solution:**
+```csharp
+public interface ISettlementRepository
+{
+    Task<SettlementInstruction?> GetByIdAsync(SettlementId id);
+    Task SaveAsync(SettlementInstruction instruction);
+}
+
+public class InMemorySettlementRepository : ISettlementRepository
+{
+    private readonly Dictionary<SettlementId, SettlementInstruction> _store = new();
+
+    public Task<SettlementInstruction?> GetByIdAsync(SettlementId id) =>
+        Task.FromResult(_store.TryGetValue(id, out var i) ? i : null);
+
+    public Task SaveAsync(SettlementInstruction instruction)
+    {
+        _store[instruction.Id] = instruction;
+        return Task.CompletedTask;
+    }
+}
+
+// Unit test — no DI container, no ASP.NET Core, no real database.
+[Fact]
+public async Task ProcessSettlement_PersistsInstructionViaPort()
+{
+    var repo = new InMemorySettlementRepository();
+    var useCase = new ProcessSettlementUseCase(repo);
+
+    await useCase.Execute(new ProcessSettlementInputData(/* ... */));
+
+    var saved = await repo.GetByIdAsync(/* id */);
+    Assert.NotNull(saved);
+}
+```
+**Time complexity:** O(1) per repository operation (dictionary lookup/insert).
+**Space complexity:** O(n) for n stored instructions across the test's lifetime.
+**Optimized solution:** No optimization needed at this scale — the point of the fake is simplicity, not performance; if a test suite's in-memory store genuinely grows large enough to matter, that's itself a signal the test is doing too much and should be split.
+
+### Medium — Port Contract Test Base Class for `ISettlementRepository`
+**Problem:** Write one shared contract-test suite that runs identically against `InMemorySettlementRepository` and (conceptually) `EfCoreSettlementRepository`, covering the optimistic-concurrency-conflict scenario.
+**Solution:**
+```csharp
+public abstract class SettlementRepositoryContractTests
+{
+    protected abstract ISettlementRepository CreateRepository();
+
+    [Fact]
+    public async Task ConcurrentSave_OfStaleInstruction_ThrowsConcurrencyConflict()
+    {
+        var repo = CreateRepository();
+        var instruction = SettlementInstructionTestBuilder.Default().Build();
+        await repo.SaveAsync(instruction);
+
+        var copyA = await repo.GetByIdAsync(instruction.Id);
+        var copyB = await repo.GetByIdAsync(instruction.Id);
+
+        copyA!.Release();
+        await repo.SaveAsync(copyA); // succeeds
+
+        copyB!.Release();
+        await Assert.ThrowsAsync<ConcurrencyConflictException>(
+            () => repo.SaveAsync(copyB));
+    }
+}
+
+public class InMemorySettlementRepositoryTests : SettlementRepositoryContractTests
+{
+    protected override ISettlementRepository CreateRepository() =>
+        new InMemorySettlementRepository(); // must be extended to detect stale writes, not just overwrite silently
+}
+```
+**Time complexity:** O(1) per test scenario.
+**Space complexity:** O(1) — a handful of instruction instances per test.
+**Optimized solution:** Parameterize with `[Theory]` across several concurrency scenarios (stale write, concurrent create, concurrent delete) rather than one hardcoded case, widening coverage without duplicating test structure.
+
+### Hard — Enforce the Dependency Rule for Ports via a Fitness Function
+**Problem:** Write an automated test asserting no interface in the `Domain`/`Application` assembly's `Ports` namespace references any type from the `Infrastructure` assembly.
+**Solution:**
+```csharp
+[Fact]
+public void Ports_Should_Not_Depend_On_Infrastructure()
+{
+    var result = Types.InAssembly(typeof(ISettlementRepository).Assembly)
+        .That().AreInterfaces()
+        .And().ResideInNamespace("SettlementEngine.Application.Ports")
+        .Should().NotHaveDependencyOn("SettlementEngine.Infrastructure")
+        .GetResult();
+
+    Assert.True(result.IsSuccessful,
+        string.Join(", ", result.FailingTypeNames ?? Array.Empty<string>()));
+}
+```
+**Time complexity:** O(t) where t is the number of types scanned in the assembly — a one-time, build-time cost.
+**Space complexity:** O(t) for the reflection-based type graph built during the scan.
+**Optimized solution:** Run this fitness function as a mandatory CI gate on every pull request (not merely available locally), and extend it to also assert every Port has at least one non-production (fake/test) Adapter registered somewhere in the test assembly, closing the gap Advanced Q7 (Module 117) identifies.
+
+### Expert — Generic Contract-Test Harness Reusable Across Multiple Ports
+**Problem:** Avoid writing a bespoke contract-test base class per Port by designing one generic, reusable harness.
+**Solution:**
+```csharp
+public abstract class PortContractTests<TPort, TScenario>
+{
+    protected abstract TPort CreateAdapter();
+    protected abstract IEnumerable<TScenario> Scenarios();
+    protected abstract Task RunScenario(TPort adapter, TScenario scenario);
+
+    public static IEnumerable<object[]> ScenarioData(IEnumerable<TScenario> scenarios) =>
+        scenarios.Select(s => new object[] { s });
+
+    [Theory]
+    [MemberData(nameof(ScenarioData), typeof(SettlementRepositoryContractTests))]
+    public async Task Adapter_Satisfies_Every_Scenario(TScenario scenario)
+    {
+        var adapter = CreateAdapter();
+        await RunScenario(adapter, scenario);
+    }
+}
+```
+**Time complexity:** O(s) where s is the number of scenarios registered, each running in O(1)–O(k) depending on the scenario's own work.
+**Space complexity:** O(s) for the scenario list held per test run.
+**Optimized solution:** In practice, a fully generic harness across structurally different Ports (a repository vs. a gateway vs. a publisher) often adds more indirection than it saves — the honest trade-off (flagged in Module 118's own Architecture Decision) is that a handful of purpose-built, per-Port contract-test base classes (Medium exercise's pattern) are usually more readable and maintainable than one maximally generic harness; reserve genericization for genuinely repeated, structurally identical Port shapes.
+
+---
+
+## 12. System Design — A Multi-Channel Payment-Authorization Gateway
+
+**Functional requirements:** Accept payment-authorization requests from multiple channels (web checkout, mobile SDK, a merchant-facing batch settlement file); enforce fraud-scoring and step-up (3-D Secure) rules identically regardless of channel; route each authorization to the correct vendor gateway; persist authorization state and support idempotent retries; publish authorization-outcome events for downstream billing/reconciliation.
+
+**Non-functional requirements:** Sub-second P99 authorization latency for the interactive checkout path; zero duplicate charges under retry; ability to add or swap a payment-gateway vendor without touching authorization business logic; horizontal scalability for peak shopping-event traffic; auditable evidence that every vendor Adapter is contract-tested against the identical behavioral suite.
+
+**Architecture:** `IAuthorizePaymentInputPort` (Primary Port) implemented by `AuthorizePaymentUseCase`; Secondary Ports `IPaymentGatewayClient` (with `PrimaryVendorGatewayAdapter`/`SecondaryVendorGatewayAdapter`/`FakePaymentGatewayClient`, per §4), `IFraudScoringService`, `IAuthorizationRepository`, `IAuthorizationEventPublisher`.
+
+**Components:** Web/mobile REST Controllers and a merchant batch-file processor as Primary Adapters, all converging on `IAuthorizePaymentInputPort`; `AuthorizePaymentUseCase` as the orchestration core; an `Authorization` Aggregate enforcing the idempotency-key and state-transition invariants; an Outbox-backed publisher delivering authorization-outcome events.
+
+**Database selection:** `IAuthorizationRepository`'s production Adapter uses a relational store (SQL Server) for strong transactional consistency on the idempotency-key uniqueness constraint — a duplicate-charge risk under a weaker consistency model is not an acceptable trade for this Port specifically.
+
+**Caching:** None on the authorization decision path itself (correctness-critical); a short-TTL cache is reasonable for read-only, non-critical-path merchant-configuration lookups (e.g., which vendor a given merchant prefers).
+
+**Messaging:** An Outbox-pattern background publisher delivers `PaymentAuthorized`/`PaymentDeclined` events to downstream billing/reconciliation consumers, decoupled from the synchronous authorization request path's own latency budget.
+
+**Scaling:** Horizontal scaling of the web/mobile Primary Adapters behind a standard load balancer (no ordering constraint across independent checkout requests); the merchant batch-file Primary Adapter partitioned by merchant ID to preserve per-merchant processing order where a merchant's own reconciliation logic depends on it.
+
+**Failure handling:** Idempotency-key-based duplicate-authorization prevention (checked before any vendor call, per Coding Exercises' Medium example's pattern); a vendor timeout mapped to a uniform `GatewayUnavailable` result (§4's key lesson) triggering a safe, idempotent retry rather than an unhandled exception; automatic failover to a secondary vendor Adapter if the primary vendor is unavailable, subject to the same contract test.
+
+**Monitoring:** Per-vendor authorization success/decline/timeout rate (a sudden shift signals either fraud-pattern change or vendor-side degradation); Outbox-backlog age for event-publishing health; contract-test CI pass history as continuously-verified evidence every vendor Adapter still satisfies the shared behavioral contract.
+
+**Trade-offs:** Maintaining two full vendor Adapters plus a shared contract suite (§4) costs real, ongoing engineering time against a simpler single-vendor design — justified here by the negotiated-rate and single-vendor-outage-resilience business drivers; a CP-consistent `IAuthorizationRepository` trades some availability for the zero-duplicate-charge guarantee the business considers non-negotiable.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** Model an `Authorization` Aggregate enforcing idempotency-key uniqueness and state-transition rules (`Pending → Approved | Declined | RequiresStepUp`); support adding a new vendor Adapter with zero changes to `AuthorizePaymentUseCase`; ensure thread-safe handling of concurrent authorization attempts sharing the same idempotency key.
+
+**Class diagram:**
+```mermaid
+classDiagram
+    class IAuthorizePaymentInputPort {
+        <<interface>>
+        +Execute(AuthorizationRequest) Task~AuthorizationResult~
+    }
+    class AuthorizePaymentUseCase {
+        -IPaymentGatewayClient gateway
+        -IAuthorizationRepository repository
+        -IFraudScoringService fraudScoring
+        +Execute(AuthorizationRequest) Task~AuthorizationResult~
+    }
+    class Authorization {
+        +AuthorizationId Id
+        +IdempotencyKey Key
+        +AuthorizationStatus Status
+        +ApplyGatewayResult(PaymentAuthorizationResult)
+    }
+    class IPaymentGatewayClient {
+        <<interface>>
+        +AuthorizeAsync(PaymentAuthorizationRequest) Task~PaymentAuthorizationResult~
+    }
+    class PrimaryVendorGatewayAdapter
+    class SecondaryVendorGatewayAdapter
+    class FakePaymentGatewayClient
+    class IAuthorizationRepository {
+        <<interface>>
+        +FindByIdempotencyKeyAsync(IdempotencyKey) Task~Authorization~
+        +SaveAsync(Authorization) Task
+    }
+
+    IAuthorizePaymentInputPort <|.. AuthorizePaymentUseCase
+    AuthorizePaymentUseCase --> Authorization
+    AuthorizePaymentUseCase --> IPaymentGatewayClient
+    AuthorizePaymentUseCase --> IAuthorizationRepository
+    IPaymentGatewayClient <|.. PrimaryVendorGatewayAdapter
+    IPaymentGatewayClient <|.. SecondaryVendorGatewayAdapter
+    IPaymentGatewayClient <|.. FakePaymentGatewayClient
+```
+
+**Sequence diagram:**
+```mermaid
+sequenceDiagram
+    participant PA as Primary Adapter (Checkout Controller)
+    participant UC as AuthorizePaymentUseCase
+    participant REPO as IAuthorizationRepository
+    participant FRAUD as IFraudScoringService
+    participant GW as IPaymentGatewayClient
+
+    PA->>UC: Execute(AuthorizationRequest)
+    UC->>REPO: FindByIdempotencyKeyAsync(key)
+    REPO-->>UC: null (first attempt)
+    UC->>FRAUD: Score(request)
+    FRAUD-->>UC: riskScore
+    UC->>GW: AuthorizeAsync(request)
+    GW-->>UC: PaymentAuthorizationResult
+    UC->>REPO: SaveAsync(Authorization)
+    REPO-->>UC: OK
+    UC-->>PA: AuthorizationResult
+```
+
+**Design patterns used:** Adapter (every `IPaymentGatewayClient` implementation); Strategy (interchangeable vendor Adapters selected at composition-root time); Repository (`IAuthorizationRepository`); Factory (composition-root DI-registration extension methods per environment).
+
+**SOLID mapping:** Single Responsibility (`AuthorizePaymentUseCase` orchestrates only; `Authorization` enforces only its own invariants); Open/Closed (a new vendor Adapter requires no `AuthorizePaymentUseCase` change); Liskov Substitution (every `IPaymentGatewayClient` Adapter must be behaviorally interchangeable, enforced by the contract test — the load-bearing LSP check for this whole pattern); Interface Segregation (`IPaymentGatewayClient`, `IFraudScoringService`, `IAuthorizationRepository` are each narrow, single-capability Ports, not one bundled "payments service" interface, per Expert Q10); Dependency Inversion (the entire Port/Adapter structure).
+
+**Extensibility:** Adding a third vendor, or a shadow/simulation Adapter for load testing, requires only a new class plus one DI registration line — zero changes to `AuthorizePaymentUseCase` or `Authorization`.
+
+**Concurrency/thread safety:** The idempotency-key lookup-then-save sequence in `AuthorizePaymentUseCase.Execute` must be protected against a race between two concurrent calls sharing the same key (e.g., a client's double-click retry) — enforced via a unique database constraint on the idempotency key column at the `IAuthorizationRepository`'s Adapter level (the authoritative guard), with the in-application lookup serving as a fast-path optimization, not the sole safety mechanism.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** Following the second-vendor rollout described in §4, the checkout service began intermittently returning HTTP 500 errors to a small percentage of customers during a promotional traffic spike, with no corresponding increase in vendor-reported decline rates.
+
+**Root cause:** `SecondaryVendorGatewayAdapter`'s HTTP client was registered with the default `HttpClient` lifetime handling via `new HttpClient()` per request (rather than via `IHttpClientFactory`), a known .NET socket-exhaustion anti-pattern — under the traffic spike, the service exhausted available ephemeral ports faster than the OS could recycle them (each `HttpClient` instance holding its own connection pool that was never reused or properly disposed at scale), causing new outbound connections to the vendor to fail with a `SocketException` that propagated up as an unhandled exception rather than the expected, contract-tested `GatewayUnavailable` result.
+
+**Investigation:** On-call engineers initially suspected the vendor's own infrastructure (since the failures were intermittent and traffic-correlated) and spent the first 15 minutes checking the vendor's public status page, which showed no incident. Reviewing application logs revealed the actual exception type (`SocketException: Address already in use` / connection-pool exhaustion signatures), and `netstat`-style port-usage inspection on the affected instances confirmed a large number of connections stuck in `TIME_WAIT`, consistent with the per-request `HttpClient` instantiation anti-pattern.
+
+**Tools:** Application Insights/structured-log exception-type breakdown (surfacing `SocketException` as the actual root exception, not merely a generic 500); `netstat`/OS-level ephemeral-port and `TIME_WAIT` connection inspection; a code review of `SecondaryVendorGatewayAdapter`'s constructor, which was the fastest way to actually locate the specific `new HttpClient()` call once socket exhaustion was suspected.
+
+**Fix:** Replaced the per-request `new HttpClient()` construction with `IHttpClientFactory`-managed, named/typed client registration (`services.AddHttpClient<SecondaryVendorGatewayAdapter>(...)`), which pools and reuses underlying `HttpMessageHandler` connections correctly across requests; also added explicit exception handling inside `SecondaryVendorGatewayAdapter.AuthorizeAsync` to map any transport-level exception (not just an explicit vendor timeout response) into the Port's own `GatewayUnavailable` result, ensuring the Use Case's retry-safety logic engages for *every* class of connectivity failure, not only the ones the vendor's own SDK explicitly signaled.
+
+**Prevention:** Added a static-analysis rule flagging direct `new HttpClient()` instantiation anywhere in the `Infrastructure` assembly outside `IHttpClientFactory` registration; extended the `IPaymentGatewayClient` contract test suite (§4) with a new scenario simulating a raw transport-level exception (not just a vendor-reported timeout), closing the exact gap this incident exposed — a fresh instance of the "unmodeled scenario" risk already established for the trading-engine capstone's fill-correction incident, now surfacing at the transport-exception-handling layer instead.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Choosing how many payment-gateway vendor Adapters to build and maintain, and how rigorously to contract-test them, given real, ongoing engineering cost.
+
+**Option A — Single vendor, no Port abstraction (a direct SDK reference inside the checkout Controller):**
+*Advantages:* Fastest to build initially; no interface/DI ceremony.
+*Disadvantages:* Vendor lock-in; no testability without hitting the real vendor's sandbox environment or hand-rolling ad hoc mocks per test; any future second vendor requires a disruptive refactor under time pressure rather than a planned extension.
+*Cost:* Lowest initial cost; high, back-loaded cost if a second vendor or better testability is ever needed.
+*Complexity:* Lowest.
+*Maintainability:* Degrades as business logic and vendor-specific handling intermix inside the Controller.
+*Performance/Scalability:* No inherent difference; risk is organizational/testability, not runtime.
+
+**Option B — Port/Adapter with a single production vendor Adapter, no dedicated fake, tests hit a vendor sandbox:**
+*Advantages:* Decouples business logic from the vendor SDK; some testability improvement over Option A.
+*Disadvantages:* Tests remain slow and flaky (network-dependent, subject to the vendor's own sandbox rate limits and occasional unavailability); still no second vendor.
+*Cost:* Moderate initial cost; ongoing cost from flaky, network-dependent test runs.
+*Complexity:* Moderate.
+*Maintainability:* Better than Option A but still lacks the deterministic fast-fake benefit.
+*Performance/Scalability:* Test-suite runtime and reliability suffer under CI load if many tests hit the sandbox concurrently.
+
+**Option C — Full Port/Adapter with production Adapter(s), a fake, and a shared contract test suite (this module's recommended approach, as built in §4):**
+*Advantages:* Fast, deterministic unit tests via the fake; genuine multi-vendor support with each Adapter provably behaviorally consistent; new vendors added without touching business logic.
+*Disadvantages:* Highest upfront ceremony; ongoing contract-test-suite maintenance cost as new vendor behaviors (timeouts, step-up flows) are discovered.
+*Cost:* Highest initial engineering investment; lowest long-run cost per additional vendor or new business requirement.
+*Complexity:* Highest initially, but the complexity is concentrated and well-contained (in the Ports and contract tests), not scattered through business logic.
+*Maintainability:* Best, long-run — proportional to how disciplined the contract-test-suite-maintenance process (mirroring Module 118's mandatory-update process) actually is.
+
+**Recommendation:** **Option C**, exactly as built in §4 — justified here because the business already had a concrete, near-term second-vendor requirement (not a speculative one, avoiding Expert Q9's over-abstraction trap) and correctness-critical stakes (duplicate-charge risk) that make fast, deterministic, fake-based testing worth its ongoing cost. Option A remains defensible only for a genuinely single-vendor, low-stakes, unlikely-to-change integration (Expert Q9's counter-example); Option B is rarely the right long-term resting point — it pays much of Option C's ceremony cost without capturing its most valuable benefit (fast, deterministic tests).
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** The ability to add or swap a payment-gateway vendor without touching authorization business logic is a direct, measurable lever on negotiated processing rates and vendor-outage resilience — the §4 story's six-engineer-week investment paid for itself the first time it caught a duplicate-charge-risk bug before launch, a class of incident whose real-world cost (customer trust, chargeback/dispute handling, potential regulatory scrutiny) dwarfs the up-front engineering cost many times over.
+
+**Engineering trade-offs:** The central, recurring trade-off across this module is ceremony cost (Ports, Adapters, contract tests) versus the two benefits that justify it (testability, genuine multi-Adapter need) — a Principal Engineer's job is keeping that trade-off an explicit, case-by-case decision (Expert Q9's calibration) rather than either a blanket "always abstract" or a blanket "never abstract" default.
+
+**Technical leadership:** Establishing contract testing as a genuinely enforced practice — not merely a nice-to-have some Adapters happen to have — requires the same kind of standing, CI-gated discipline this course has established repeatedly; a Principal Engineer champions this as a mandatory review-checklist item for any new Secondary Port, not an optional afterthought.
+
+**Cross-team communication:** Port interfaces are a genuine, durable communication artifact between teams — a team building a new Primary Adapter (a mobile SDK integration) needs only the Port's contract, not knowledge of any Secondary Adapter's internals; a Principal Engineer treats a stable, well-documented Port signature as the actual API contract between teams, worth the same versioning discipline as an external API.
+
+**Architecture governance:** The decision to build dual vendor Adapters (§4/§15) should be recorded as an explicit ADR with its stated business justification (negotiated rate, outage resilience) — so a future engineer questioning "why do we maintain two full payment-gateway integrations" finds a documented rationale, not an archaeology exercise through git blame.
+
+**Cost optimization:** Weigh contract-test-suite maintenance cost against its demonstrated value using concrete incidents it has caught (the ambiguous-timeout bug in §4, the transport-exception gap in §14) as the evidence base for continued investment, rather than either an unexamined assumption the practice is "obviously worth it" or a premature decision to cut it as pure overhead.
+
+**Risk analysis:** The single highest-value risk-management artifact this module establishes is the contract test's coverage of *ambiguous failure modes* (timeouts, partial responses) specifically — these are exactly the scenarios most likely to cause silent, hard-to-detect correctness bugs (duplicate charges, lost state) rather than loud, immediately-visible failures, making them the highest-priority scenarios to deliberately test for.
+
+**Long-term maintainability:** The concrete, trackable payoff of this architecture is how many new vendor integrations, new channels, or new regulatory-reporting requirements have been added with zero changes to `AuthorizePaymentUseCase` itself — a Principal Engineer should track this number explicitly as ongoing evidence the architectural investment continues earning its keep, rather than assuming its value indefinitely.
+
+---
+
+## 18. Revision
+
+**Key Takeaways:**
+- A Port is an interface expressed in the core's own vocabulary; an Adapter implements it. A Primary Port is implemented by the core and called into; a Secondary Port is defined by the core and called out through.
+- Substitution in C# is nothing more than swapping which concrete type is registered against an interface — at the DI-container level in production, or via direct construction in a unit test.
+- The Dependency Rule (core never references outer-ring/Adapter types) is compile-time enforced via the project-reference graph; behavioral consistency between multiple Adapters satisfying the same Port is not — that requires a contract test.
+- An unvalidated fake is a false-confidence risk, not an argument against fakes; the fix is a shared contract test run against every Adapter, not abandoning test doubles.
+- Authentication/authorization at the transport level belongs at Primary Adapters; object-level, business-rule authorization belongs in the core.
+- Port granularity should track genuine, cohesive capability boundaries — neither one bundled "service" interface nor maximal, needless fragmentation.
+
+**Interview Cheatsheet:**
+- Primary = driving = calls in = implemented by the core. Secondary = driven = called out to = implemented by an external Adapter.
+- "Hexagon" has no architectural meaning — it's just a shape with enough sides to draw several Ports without crowding.
+- Cockburn's own primary motivation: testability via substitution, not database-swapping (a secondary, less-frequently-realized benefit).
+- Fake ≠ stub ≠ mock — a Cockburn-style test Adapter is specifically a fake (a real, working, simplified implementation).
+- "Declared ≠ actual": an interface signature guarantees structural conformance only; a contract test is what verifies behavioral conformance.
+
+**Things Interviewers Love:**
+- Precisely distinguishing Primary vs. Secondary at the *Port* level (who implements it), not just the Adapter level.
+- Naming the contract-test technique unprompted when discussing multiple Adapters for one Port.
+- Concrete C# code (interface, two Adapters, DI registration difference) rather than abstract description.
+- Honestly naming the ceremony's real cost (contract-test maintenance) rather than presenting the pattern as free.
+
+**Things Interviewers Hate:**
+- "Hexagonal Architecture is just about swapping your database" as a complete description of the pattern's value.
+- Treating every interface in a codebase as automatically "a Port."
+- Claiming a passing test suite using a fake proves the real Adapter behaves identically, with no contract test to back that claim.
+- Environment-branching logic (`if (isTest)`) inside the application core instead of at the composition root.
+
+**Common Traps:**
+- Confusing "the core is unaware which Adapter is plugged in" with "any Port can have only one Adapter" — the symmetry principle enables multiplicity, it doesn't require it (Basic Q10).
+- Assuming C#'s compiler-enforced interface conformance is itself proof of correct, consistent Adapter behavior across implementations (Expert Q4, Module 117).
+- Over-abstracting a Port for a single, low-stakes, unlikely-to-change integration where the ceremony cost exceeds any realistic benefit (Expert Q9).
+- Forgetting that a Port contract test must be an active, CI-gated, continuously-run check — not merely a file that exists in the repository (Advanced Q2, Module 117).
 
 ---
 

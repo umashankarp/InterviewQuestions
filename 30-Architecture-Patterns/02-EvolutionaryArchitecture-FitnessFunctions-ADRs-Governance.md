@@ -1,12 +1,378 @@
 # Module 106 — Architecture Patterns: Evolutionary Architecture — Fitness Functions, Architecture Decision Records & Governance
 
 > Domain: Architecture Patterns | Level: Beginner → Expert | Prerequisite: [[01-ArchitecturalStyles-Monolith-ModularMonolith-SOA-Microservices-Serverless]] (this module's fitness functions provide the empirical verification that module's "declared ≠ actual coupling" finding called for), [[../25-DevOps/04-DevSecOps-PolicyAsCode-PlatformEngineering]] (policy-as-code mechanics this module's fitness functions directly reuse for architectural rules specifically)
->
-> **Note on format:** Per the standing user preference (see `CLAUDE.md`), this module covers only the 40 most-frequently-asked interview questions (10 per level), without the full 15-section deep-dive template.
 
 ---
 
-## Interview Questions
+## 1. Fundamentals
+
+### 1.1 What is evolutionary architecture?
+
+Evolutionary architecture is the discipline of treating a system's architecture as a living structure that changes incrementally, continuously, and *verifiably* — instead of a fixed blueprint decided once, up front, and never objectively re-checked. The word doing the real work is "verifiably": incremental change without verification is just drift. Evolutionary architecture pairs the incremental-change philosophy with **fitness functions** — objective, automatable tests of specific architectural characteristics — so that as the system changes, the organization has continuous, empirical evidence that the properties it cares about (low coupling, a specific latency budget, no cross-service database access, PCI segmentation) still hold, rather than trusting that they still hold because nobody's complained recently.
+
+Three forces make this necessary in a real organization:
+
+- **Requirements are never fully known up front.** A team building a settlement platform in 2023 could not have fully anticipated 2026's regulatory reporting requirements. An architecture that assumed perfect foresight would already be wrong.
+- **Many people touch the same system.** A payments platform with 40 engineers across 6 teams will accumulate boundary violations gradually, one seemingly-reasonable shortcut at a time, unless something *other than everyone's continued good judgment* is watching.
+- **Architecture erodes silently, not loudly.** Nobody wakes up one morning and decides to build a distributed monolith. It happens one direct database call, one "just this once" synchronous chain, one bypassed boundary at a time — each individually defensible, collectively catastrophic.
+
+### 1.2 Why fitness functions exist
+
+A **fitness function** (the term borrowed deliberately from evolutionary biology, popularized for software architecture by Ford, Parsons, and Kua in *Building Evolutionary Architectures*) is any objective, automatable, repeatable mechanism that measures whether an architectural characteristic currently holds. The definition has three load-bearing words:
+
+- **Objective** — the answer isn't a matter of opinion. "This module imports from that module's internal namespace" is either true or false; "this code feels well-organized" is not a fitness function.
+- **Automatable** — a human doesn't have to remember to check it. It runs on every commit, every deploy, or every scheduled interval without anyone needing to remember.
+- **Repeatable** — the same input produces the same result every time, so a pass today means the same thing as a pass tomorrow.
+
+Without fitness functions, "architecture" is a set of intentions living in design docs, Slack threads, and senior engineers' heads. With them, architecture becomes a set of continuously-tested, currently-true claims about the system — the same shift unit tests made for correctness two decades ago, now applied to structure.
+
+### 1.3 What is an Architecture Decision Record (ADR)?
+
+An ADR is a short, immutable, dated document capturing one specific architectural decision: the context that forced the decision, the options seriously considered, the decision made, and its consequences (including the ones the team didn't love). ADRs answer a question code and diagrams structurally cannot answer on their own: *why* is it this way, and what did we deliberately choose not to do?
+
+### 1.4 What is architecture governance?
+
+Governance is the set of organizational mechanisms — an Architecture Review Board, fitness-function suites, ADR repositories, golden-path templates — that keep an organization's many independently-moving teams from drifting into incoherent, unmanaged architectural risk. Good governance is mostly structural (defaults, automated gates) rather than procedural (approval meetings); it scales because it doesn't require a human to personally review every change.
+
+### 1.5 When to apply this, and when not to
+
+Evolutionary architecture, fitness functions, and formal ADRs earn their cost when: multiple teams share a codebase or a set of interacting services; the system has money-critical, regulated, or otherwise high-consequence invariants; the team has been burned before by undocumented, re-litigated, or silently-reversed decisions; or the organization is large enough that "ask Priya" is not a scalable way to recover architectural intent. They are overkill — pure process tax — for a two-person team building a prototype with no regulatory exposure and a short expected lifetime; Advanced Q9 in §10 covers this calibration in more depth.
+
+### 1.6 How it fits together
+
+ADRs record *intent*. Fitness functions verify *reality against that intent, continuously*. Governance is the organizational scaffolding making both practices actually happen, at the right level of ceremony, without becoming a bottleneck. None of the three works well without the other two: an ADR with no fitness function is a wish; a fitness function with no ADR is an unexplained, unaccountable rule; governance with neither is a meeting.
+
+---
+
+## 2. Deep Dive
+
+### 2.1 How a fitness function is actually implemented and wired into CI
+
+Mechanically, a fitness function is ordinary test code that asserts something about the *structure* of the system rather than its runtime behavior. In .NET, the two dominant libraries are **NetArchTest.Rules** and **ArchUnitNET** (a .NET port of Java's ArchUnit). Both work the same way: load the compiled assemblies via reflection (`System.Reflection` / Mono.Cecil under the hood), build an in-memory model of types, namespaces, and their dependencies, then let you write fluent assertions against that model.
+
+```csharp
+// NetArchTest.Rules — enforced as an ordinary xUnit test, runs in the same
+// CI step as every other test, so a violation fails the build exactly
+// like a broken unit test would.
+[Fact]
+public void SettlementDomain_Should_Not_DependOn_Infrastructure()
+{
+    var result = Types.InAssembly(typeof(SettlementAggregate).Assembly)
+        .That()
+        .ResideInNamespace("Settlement.Domain")
+        .ShouldNot()
+        .HaveDependencyOnAny("Settlement.Infrastructure", "Npgsql", "Dapper")
+        .GetResult();
+
+    Assert.True(result.IsSuccessful,
+        "Domain layer must not depend on infrastructure: " +
+        string.Join(", ", result.FailingTypeNames ?? Array.Empty<string>()));
+}
+```
+
+Because it's just a test, it's wired into CI the same way any test is: `dotnet test` runs it as part of the pipeline's test stage, and a failure returns a non-zero exit code, which the pipeline (GitHub Actions, Azure DevOps) treats as a failed build, blocking the merge/deploy. No bespoke tooling is required — the fitness function rides on infrastructure the team already has.
+
+### 2.2 Dependency-graph extraction mechanics
+
+Under the hood, both NetArchTest and ArchUnitNET reflect over the compiled IL, not the source text. For each type, they enumerate: base types/interfaces, field and property types, method parameter/return types, and types referenced in method bodies (via IL instruction scanning for `call`/`newobj`/`ldtoken` operands). This produces a directed graph where nodes are types (or namespaces, when rolled up) and edges are "references." This matters practically: reflection-based analysis catches dependencies source-text-based `grep` approaches miss (e.g., a dependency introduced only through generic type parameters or attribute usage), but it requires the assembly to actually build — a fitness function of this kind cannot run against code that doesn't compile, unlike a linter.
+
+For larger-scale, cross-repository analysis (e.g., "does any of our 40 microservice repos import a shared internal NuGet package's `Internal` namespace"), organizations typically extract the graph once per build into a serialized form (a simple adjacency-list JSON, or a `.dot` file for Graphviz) and run graph algorithms against that serialized representation rather than re-reflecting on every query — this is the same incremental/cached-analysis strategy covered under §7 Performance Engineering.
+
+### 2.3 Cycle detection algorithm mechanics
+
+"No cyclic dependencies between modules" is implemented with a straightforward depth-first-search-based cycle detection over the dependency graph — the same algorithm used for topological sort validity checking:
+
+```csharp
+public static class CycleDetector
+{
+    public static IReadOnlyList<string>? FindCycle(
+        IReadOnlyDictionary<string, IReadOnlySet<string>> graph)
+    {
+        var visiting = new HashSet<string>(); // on current DFS stack (gray)
+        var visited  = new HashSet<string>(); // fully processed (black)
+        var path     = new List<string>();
+
+        foreach (var node in graph.Keys)
+        {
+            if (!visited.Contains(node) && Dfs(node)) return path;
+        }
+        return null;
+
+        bool Dfs(string node)
+        {
+            visiting.Add(node);
+            path.Add(node);
+
+            foreach (var dep in graph.TryGetValue(node, out var deps) ? deps : [])
+            {
+                if (visiting.Contains(dep)) { path.Add(dep); return true; } // back-edge = cycle
+                if (!visited.Contains(dep) && Dfs(dep)) return true;
+            }
+
+            visiting.Remove(node);
+            visited.Add(node);
+            path.RemoveAt(path.Count - 1);
+            return false;
+        }
+    }
+}
+```
+
+This runs in O(V + E) — linear in the size of the module graph — which is why even a graph of several thousand modules analyzes in milliseconds once extracted; the extraction step (§2.2), not the cycle detection itself, dominates cost.
+
+### 2.4 CI-time vs. production-time fitness functions, mechanically
+
+A CI-time fitness function operates on **static artifacts**: source code, compiled assemblies, infrastructure-as-code templates (Terraform/CloudFormation), or a build's dependency manifest. It runs once per pull request, has a bounded, predictable runtime, and blocks a merge.
+
+A production-time fitness function operates on **live telemetry**: it queries a metrics/tracing backend (Prometheus, CloudWatch, Application Insights) or synthesizes traffic against the running system, and it runs continuously or on a schedule (every 5 minutes, nightly), typically implemented as an alerting rule rather than a pass/fail test gate. Example: a production fitness function measuring actual cross-service call volume between the `payments` and `risk` services over a rolling 24-hour window, alerting via PagerDuty/OpsGenie if it crosses a threshold implying tighter coupling than the ADR-approved boundary allows — something no CI-time static check could ever observe, because the violation is a *runtime interaction pattern*, not a structural code fact.
+
+### 2.5 ADR tooling and format mechanics
+
+The dominant lightweight convention is Michael Nygard's original template, operationalized via **adr-tools** (a small shell-script CLI: `adr new "Use event sourcing for the ledger"` scaffolds a numbered Markdown file `0007-use-event-sourcing-for-the-ledger.md` from a template, and `adr-init`/`adr-link` manage the sequence and supersession links). The file itself is plain Markdown, checked into the repo (usually `docs/adr/`), so it's versioned, diffable, and reviewed via the same pull-request process as code:
+
+```markdown
+# 7. Use event sourcing for the ledger
+
+Date: 2026-03-14
+Status: Accepted
+
+## Context
+The settlement ledger requires a complete, immutable audit trail...
+
+## Decision
+We will model the ledger as an event-sourced aggregate...
+
+## Consequences
+Positive: full audit trail, natural point-in-time reconstruction.
+Negative: read-model projection adds operational complexity...
+```
+
+Superseding is a link, not an edit: `0007-use-event-sourcing-for-the-ledger.md`'s status line changes to `Superseded by 0019`, and `0019-...md` states `Status: Accepted, supersedes 0007` — both files remain in the repo forever, preserving the chain (§3.2 diagrams this).
+
+At larger scale, organizations expose the ADR repository through a **developer portal** — Backstage (Spotify's open-source platform) is the common choice — indexing ADRs across every repo into one searchable catalog with full-text search and a golden-path template for `adr new` wired into the portal's scaffolding.
+
+### 2.6 Policy-as-code engines and their relationship to fitness functions
+
+**OPA (Open Policy Agent)** and its CLI companion **Conftest** generalize the fitness-function idea to any structured artifact, not just compiled code: Kubernetes manifests, Terraform plans, Dockerfiles, JSON API responses. Policies are written in **Rego**, a declarative query language, and evaluated against the artifact:
+
+```rego
+package main
+
+deny[msg] {
+    input.kind == "Deployment"
+    not input.spec.template.spec.containers[_].resources.limits
+    msg := "Deployment must set resource limits"
+}
+```
+
+Mechanically, OPA/Conftest is the identical pattern as NetArchTest — parse an artifact into a structured model, evaluate declarative rules against it, fail the pipeline on violation — just operating one layer down the stack (infrastructure/config rather than compiled code). This is why an organization that has already invested in policy-as-code for infrastructure has most of the CI-integration, reporting, and violation-tracking plumbing needed to add architectural fitness functions as simply another rule category (§10 Expert Q8 covers this synthesis with SAST/DAST directly).
+
+### 2.7 Hidden costs
+
+Fitness functions are not free. Reflection-based analysis over a large monorepo (thousands of types) can add real minutes to a CI run if run naively on every commit without caching (§7.6 covers the mitigation). ADR discipline has an easy-to-underestimate ongoing cost: a repository nobody curates becomes exactly as useless as no repository at all, just with more Markdown files. And every fitness function is itself an artifact that can silently stop enforcing — the recursive "verify the verifier" risk this module's Expert-tier questions (§10) return to repeatedly, and which §14's incident is built around.
+
+---
+
+## 3. Visual Architecture
+
+### 3.1 Fitness-function CI gate pipeline
+
+```mermaid
+flowchart TD
+    A[Developer opens PR] --> B[CI pipeline triggers]
+    B --> C[Build: compile assemblies]
+    C --> D{Build succeeded?}
+    D -- No --> Z1[Fail fast — compile error]
+    D -- Yes --> E[Unit + integration tests]
+    E --> F[Architecture fitness-function suite]
+    F --> F1[NetArchTest: no cross-layer deps]
+    F --> F2[Cycle detector: no cyclic modules]
+    F --> F3[OPA/Conftest: infra policy checks]
+    F --> F4[Data-ownership check: no cross-service DB access]
+    F1 & F2 & F3 & F4 --> G{All fitness functions pass?}
+    G -- No --> Z2[Fail build — annotate PR with violated rule + linked ADR]
+    G -- Yes --> H[SAST / dependency scan]
+    H --> I[Merge allowed]
+    I --> J[Deploy]
+    J --> K[Production fitness functions — continuous]
+    K --> K1[Deployment-coordination-frequency metric]
+    K --> K2[Cross-service call-volume monitor]
+    K1 & K2 --> L{Threshold breached?}
+    L -- Yes --> M[Alert: architecture-drift review triggered]
+    L -- No --> N[Healthy — next window]
+```
+
+### 3.2 ADR lifecycle and superseding chain
+
+```mermaid
+flowchart LR
+    subgraph "ADR 0007 — Use event sourcing for ledger"
+        A1[Status: Proposed] --> A2[Status: Accepted]
+        A2 --> A3[Status: Superseded by 0019]
+    end
+    subgraph "ADR 0012 — Add read-model projection"
+        B1[Status: Proposed] --> B2[Status: Accepted]
+        B2 -.references.-> A2
+    end
+    subgraph "ADR 0019 — Migrate ledger to CQRS with snapshotting"
+        C1[Status: Proposed] --> C2[Status: Accepted]
+        C2 -.supersedes.-> A3
+        C2 -.references.-> B2
+    end
+    A3 -. searchable in ADR repo forever .-> D[Backstage ADR catalog]
+    B2 -.-> D
+    C2 -.-> D
+```
+
+Both diagrams reinforce the same point: the CI gate (3.1) is where an ADR's *decision* (3.2) becomes an actually-enforced *constraint* — a fitness function with no ADR justifying it is an orphaned rule (§10 Expert Q6); an ADR with no corresponding fitness function is an unverified wish (§10 Advanced Q5).
+
+---
+
+## 4. Production Example
+
+**Problem.** A mid-size FinTech ("Meridian Settlement" — a composite, representative scenario) ran a 14-service settlement platform: trade capture, netting, ledger, reconciliation, regulatory reporting, and notification services, each independently deployable in principle. Eighteen months in, the platform lead noticed something odd during a routine capacity-planning review: despite having 14 "independently deployable" services, the deployment pipeline dashboard showed that `ledger-service` and `netting-service` had been deployed together — same commit window, same release ticket — in 34 of the last 40 releases (85%). Nobody had *decided* this; it had simply become normal.
+
+**Investigation.** A senior engineer pulled the actual dependency graph using ArchUnitNET against both services' compiled assemblies and cross-referenced it with the API gateway's request logs. Two findings: (1) `netting-service` was calling `ledger-service`'s internal `/internal/balance-snapshot` endpoint synchronously, on the hot path, for every netting run — an endpoint never intended for cross-service use, added eight months earlier as a "temporary" fix for a reconciliation timing bug and never removed; (2) `netting-service`'s database migrations included three tables that were, on inspection, actually owned and exclusively written by `ledger-service` — a shared schema that had crept in when the two services split out of a single original monolith and nobody had ever finished separating the data.
+
+**Root cause.** No fitness function existed to catch either problem, and no ADR had ever recorded a boundary decision between these two services at all — the split had happened organically during an earlier "modularize the monolith" initiative, verbally agreed in a design meeting, never written down, never enforced. The "temporary" internal endpoint call had no expiry, no tracking ticket, and no automated check that would ever flag it. The two services were, empirically, a distributed monolith wearing separate deployment pipelines as a costume.
+
+**Fix.** Three changes, sequenced deliberately per the incremental-introduction pattern (§10 Intermediate Q9): (1) An ADR (`0031-ledger-netting-service-boundary.md`) was authored, explicitly stating the intended boundary — `netting-service` may only read balance data via `ledger-service`'s published, versioned `/api/v1/balances` contract, never internal endpoints, and owns none of `ledger-service`'s tables. (2) Two fitness functions were added, initially in **warn-only** mode against the existing violations: a NetArchTest check flagging any HTTP client call to a path containing `/internal/`, and a data-ownership check (a script diffing each service's EF Core migration history against a canonical `service → owned-tables` manifest maintained alongside the ADR). (3) Over six weeks, the temporary endpoint call was replaced with the public contract, and the three misplaced tables were migrated to `ledger-service` behind a dual-write/backfill/cutover sequence. Only then were both fitness functions flipped from warn to build-failing.
+
+**Trade-offs.** Warn-first cost six weeks of continued, known violation rather than an immediate hard block — deliberately accepted, because a hard block on day one would have frozen both teams' ability to ship anything until the (nontrivial) data migration finished, which is precisely the "block legitimate work indefinitely" failure mode the incremental-introduction pattern exists to avoid. The cost of the six-week delay was a known, bounded, and communicated risk; the cost of an immediate freeze would have been unbounded and adversarial.
+
+**Lessons learned.** The 85% co-deployment metric was the empirical signal that caught this — not a code review, not a manual architecture audit, but a number on a dashboard nobody was even specifically watching for coupling. This became the seed for the org's production-time deployment-coordination-frequency fitness function (§2.4, §3.1) rolled out platform-wide afterward, with an alerting threshold set at 40% co-deployment rate over a rolling 90-day window — chosen deliberately below the 85% observed here, to catch the next instance of this pattern while it's still cheap to unwind.
+
+---
+
+## 5. Best Practices
+
+- **Link every fitness function to the ADR that justifies it.** An unexplained, unlinked rule is indistinguishable from an accidental one and gets silently deleted the first time it's inconvenient.
+- **Start every new fitness function in warn-only mode against the existing codebase, then gate only new violations, then remediate the backlog, then go fully enforced.** This is the concrete four-step sequence §4's fix followed, and it's the difference between adoption and rejection.
+- **Prefer the smallest number of automated, high-consequence checks over an exhaustive suite of low-value ones.** A fitness-function suite that takes 25 minutes and flags 40 trivial style violations trains engineers to ignore it; a 3-minute suite that only fails for genuinely significant boundary violations gets respected.
+- **Treat fitness-function retirement as symmetrically deliberate as creation** — require it to go through the same ADR-linked review, never a silent deletion when a check becomes inconvenient.
+- **Scope Architecture Review Board involvement to genuinely cross-team, high-consequence, hard-to-reverse decisions only** — everything else should be decidable by the owning team within already-established fitness-function constraints, with no escalation required.
+- **Keep ADRs immutable; supersede, never edit.** The historical record of *why the organization changed its mind* is often more valuable than the current decision itself.
+- **Version and store ADRs next to the code they govern** (a `docs/adr/` folder in the relevant repo, or a monorepo-wide `docs/adr/`), not in a wiki that drifts out of sync with what actually shipped.
+- **Run CI-time and production-time fitness functions as complementary layers, not substitutes** — CI catches code-introduced violations before merge; production catches configuration/infrastructure-introduced drift CI never sees (§2.4).
+- **Plant a liveness canary for your most critical fitness functions** — a scheduled, deliberately-violating test proving the check still actually fires (§10 Expert Q4, §11 Expert exercise, §14).
+
+---
+
+## 6. Anti-patterns
+
+- **Governance theater** — a large ADR repository and comprehensive fitness-function suite that don't correlate with any measured reduction in architectural-debt incidents. Activity without outcome; §10 Expert Q7 names this explicitly and §17 covers how a Principal Engineer detects it.
+- **The orphaned fitness function** — a check with no linked ADR, whose original justification nobody currently at the company remembers, that blocks legitimate work for reasons nobody can articulate. Fix: require the ADR link (§5); if none can be found or reconstructed, retire the check through a reviewed process rather than leaving it as an unexamined obstacle.
+- **ADR-as-documentation-only, no enforcement** — a beautifully written ADR describing a boundary that the codebase silently violates by month three, because nothing ever checks conformance. §10 Advanced Q5 names this the "declared ≠ actual" gap recurring in ADR form.
+- **Big-bang fitness-function rollout** — introducing a comprehensive, fully-enforced suite against a legacy codebase on day one, freezing all work until an infeasible mass remediation completes. Fix: the incremental warn → gate-new → remediate → enforce sequence (§5, §4).
+- **Centralized Architecture Review Board bottleneck** — requiring board sign-off for every architectural decision regardless of significance, recreating the exact gatekeeping-drives-bypass dynamic seen with over-broad approval gates elsewhere in this course. Fix: scope the board narrowly (§5).
+- **Editing an ADR in place instead of superseding it** — silently rewrites history, destroying the record of what was originally decided, when, and why it changed. Always supersede (§2.5, §5).
+- **Treating fitness functions as a complete substitute for human architectural judgment** — a comprehensive suite still cannot catch a genuinely novel risk nobody thought to encode as a rule. §10 Expert Q3 covers this limitation directly.
+- **Silently disabling a failing fitness function to unblock a merge** — the single most damaging anti-pattern in this list, because it doesn't just skip one check, it establishes that the check's enforcement is optional whenever inconvenient, which is exactly how the §14 incident happened.
+- **CI-only fitness functions with no production counterpart** — misses architectural drift introduced by infrastructure or configuration changes that never went through a code review at all (§2.4).
+
+---
+
+## 7. Performance Engineering
+
+### 7.1 CPU
+
+Reflection-based dependency analysis (NetArchTest/ArchUnitNET) is CPU-bound on assembly loading and IL scanning. For a mid-size assembly (a few hundred types), a single fitness-function assertion typically completes in low tens of milliseconds; the dominant cost is loading and reflecting over the assembly once, which most libraries cache per test-run, not per-assertion — write fitness-function test classes so they share a single `Types.InAssembly(...)` load across all assertions in the class (a static/shared fixture) rather than re-loading per test method, which is a common, easily-fixed 5-10x slowdown in naive suites.
+
+### 7.2 Memory
+
+The in-memory dependency graph for a large monorepo (tens of thousands of types) can reach the low hundreds of MB when fully materialized with reflection metadata. This is rarely the bottleneck in practice — CI runners typically have several GB available — but it matters when running fitness-function analysis inside the same process as other memory-hungry build steps (e.g., a Roslyn source generator pass); isolate the fitness-function test run into its own CI job/container if memory contention causes flaky OOM failures.
+
+### 7.3 Latency (of the CI gate itself)
+
+The number that actually matters to engineers is wall-clock PR-to-feedback latency. A fitness-function suite adding 3-5 minutes to a CI pipeline that otherwise completes in 8 minutes is a real, resented cost; the goal is to keep the architecture-check stage under roughly 10-15% of total pipeline time. Meridian Settlement (§4) measured their full ArchUnitNET + cycle-detection + OPA suite at 90 seconds against a 14-service, ~600-type-per-service codebase after the caching optimization in §7.6 — versus 6+ minutes before it, because the naive version re-reflected over every service's assembly on every single assertion.
+
+### 7.4 Throughput
+
+For organization-wide fitness functions run against every PR across dozens of repositories, the aggregate load on shared infrastructure (a policy-as-code service like OPA running as a sidecar, or a centralized architecture-linting service) needs its own capacity planning — treat it as a production service with its own SLOs, not a free CI utility, once you're past roughly 50-100 concurrent PR checks per hour organization-wide.
+
+### 7.5 Scalability
+
+Dependency-graph extraction is the part that scales worst — O(V+E) analysis is cheap, but *extraction* (§2.2) scales with codebase size and, for cross-repository checks, with the number of repositories analyzed. The mitigation that scales is incremental: extract each repository's graph once per build and cache/publish it (as a build artifact or to a shared graph store), so an organization-wide check ("does anything import this deprecated internal package") queries N cached graphs rather than re-reflecting over N codebases from scratch.
+
+### 7.6 Benchmarking
+
+Before optimizing, measure: instrument the fitness-function CI stage with its own timing breakdown (assembly load time vs. assertion-evaluation time vs. report-generation time) — most naive implementations lose the majority of their time to redundant assembly loading (§7.1), not to the actual graph algorithms, which is why benchmarking before optimizing prevents wasted effort tuning the cycle-detection algorithm (already O(V+E), already fast) when the real cost is elsewhere.
+
+### 7.7 Caching / incremental analysis
+
+The highest-leverage optimization is **incremental analysis**: only re-run fitness functions against assemblies/modules that actually changed in a given PR, using the build system's own change-detection (MSBuild incremental build output, or a content-hash-keyed cache) to skip unchanged modules entirely. Combined with sharing a single loaded `Types.InAssembly` fixture per test class (§7.1), this is what took Meridian's suite from 6 minutes to 90 seconds — the two together, not either alone.
+
+---
+
+## 8. Security
+
+### 8.1 Threats
+
+- **Silent bypass/disablement of the fitness-function CI gate** — the single largest security-relevant threat this module addresses: if the gate can be skipped (a `[Skip]` attribute quietly added, a required-check unchecked in branch-protection settings, a pipeline migration that drops the stage entirely — exactly §14's incident), every security/compliance boundary the gate was enforcing becomes unenforced without anyone deciding that on purpose.
+- **A fitness function correctly encoding the wrong boundary** — e.g., an information-barrier check that only scans direct references and misses a violation introduced via reflection, dependency injection, or a dynamically-loaded plugin.
+- **ADR repository tampering** — if ADRs are the audit trail for *why* a security-relevant boundary decision was made, write access to that repository is itself a control; an attacker (or a careless insider) editing history undermines the entire audit value described in §10's FinTech panel questions.
+- **Policy-as-code engine compromise** — if OPA/Conftest policies are fetched from a mutable, un-pinned source at CI time, an attacker who compromises that source can silently weaken every policy-as-code-enforced boundary org-wide in one move.
+
+### 8.2 Mitigations
+
+- Require the fitness-function CI stage as a **branch-protection required status check** at the platform level (GitHub/Azure DevOps repository settings), not merely "present in the pipeline YAML" — a required check cannot be silently removed by an individual PR's own pipeline edit, closing the exact gap §14's incident exploited.
+- Pin policy-as-code rule bundles to a specific, signed version/commit hash rather than "latest," and require a reviewed PR to bump that pin — the same supply-chain discipline applied to any other dependency.
+- Restrict ADR repository write access via the same code-owners/branch-protection mechanism as production code, with signed commits where the organization's compliance posture requires attributable authorship (common in SOX-regulated environments).
+- Run periodic **liveness canaries** (§10 Expert Q4) — a scheduled job that deliberately commits a known-violating test fixture on a branch and asserts the fitness-function suite correctly rejects it, closing the "declared enforced ≠ actually still enforced" gap structurally rather than trusting it.
+
+### 8.3 OWASP mapping
+
+While OWASP Top 10 targets application vulnerabilities rather than architecture governance directly, two categories map cleanly: **A05:2021 Security Misconfiguration** covers a disabled or misconfigured fitness-function/policy gate (a security control silently turned off); **A08:2021 Software and Data Integrity Failures** covers an un-pinned, tamperable policy-as-code source or an ADR repository without integrity controls — both are CI/CD and build-pipeline integrity failures, the same category as an unsigned dependency.
+
+### 8.4 AuthN/AuthZ specific to this domain
+
+Fitness functions are a *mechanism* for enforcing authZ-relevant architectural boundaries (e.g., "no service outside the payments boundary may call the internal token-issuance endpoint") but are not themselves an authN/authZ system — they verify that code *structurally* respects a boundary, not that a specific runtime request was properly authenticated/authorized. Both layers are needed: structural enforcement (fitness function) plus runtime enforcement (actual authZ checks in the service) — a fitness function passing does not mean the boundary can't still be crossed by a runtime authorization bug.
+
+### 8.5 Secrets
+
+Fitness-function CI jobs occasionally need credentials (to query a metrics backend for a production-time check, or to pull a private policy bundle) — these should use the organization's standard secrets-management path (a CI secrets store with short-lived, scoped tokens — GitHub Actions OIDC-to-cloud-role federation, or Azure DevOps service connections), never a static, long-lived credential embedded in pipeline YAML, which is exactly the kind of static secret architecture-governance tooling itself should be flagging elsewhere in the codebase.
+
+### 8.6 Encryption
+
+ADR repositories and fitness-function violation reports occasionally reference sensitive architectural detail (an unpatched boundary weakness, a known coupling risk in a money-critical path) — treat repository-at-rest encryption and access logging for these repositories with the same seriousness as source code generally, and be deliberate about whether a *specific* ADR describing an active, unremediated architectural weakness should be broadly readable org-wide versus restricted until the remediation lands.
+
+---
+
+## 9. Scalability
+
+### 9.1 Horizontal scaling
+
+Fitness-function *execution* scales horizontally trivially — each PR's check runs in its own CI job/container, so adding more concurrent PRs just means more parallel CI runners, the same as any other test stage. The harder scaling problem is organizational, not computational: horizontally scaling the *practice* across many teams means decentralizing authorship (§10 Advanced Q2) so no central team becomes a bottleneck reviewing every fitness function or ADR.
+
+### 9.2 Vertical scaling
+
+Rarely relevant — a single fitness-function CI job is not typically CPU/memory-bound enough to need a larger runner, except for very large monorepos (§7.2), where a memory-optimized runner for the architecture-check stage specifically can resolve OOM flakiness cheaply.
+
+### 9.3 Caching
+
+Covered in depth in §7.7 — incremental, change-scoped analysis plus shared assembly-load fixtures is the caching strategy that matters most for this domain.
+
+### 9.4 Replication / partitioning
+
+At organization scale, a **federated fitness-function model** is the practical answer: a small set of organization-wide, mandatory fitness functions (money-type safety, PCI segmentation, information barriers — the FinTech-panel invariants in §10) are centrally defined and distributed as a shared NuGet package or shared OPA policy bundle that every service repository pulls in; each team then adds its own additional, team-specific fitness functions on top, owned and maintained locally. This partitions ownership the same way a well-designed microservices boundary partitions data ownership — a shared, minimal core, plus team-owned extensions — rather than either a single monolithic rule set nobody can safely change, or complete anarchy with zero shared baseline.
+
+The ADR repository scales the same way: a **federated-but-indexed** model, where each repository/team owns and writes its own ADRs, but a org-wide portal (Backstage, §2.5) indexes all of them into one searchable catalog, avoiding both a single team becoming an ADR-approval bottleneck and the fragmentation of nobody being able to find a related decision made in another team's repo.
+
+### 9.5 Load balancing
+
+If an organization runs a centralized policy-evaluation service (OPA-as-a-service, evaluated by many CI pipelines concurrently) rather than embedding the policy engine directly in each pipeline, that service needs conventional load balancing and its own capacity plan (§7.4) — the more common and simpler alternative is embedding OPA/NetArchTest directly in each pipeline (no shared service, no load-balancing concern at all), which is preferable unless a genuine need for centrally-updated, always-current policy justifies the added operational surface.
+
+### 9.6 High availability / disaster recovery
+
+The ADR repository and fitness-function definitions should have the same HA/DR posture as source code generally — they typically *are* source code, living in the same Git repositories, inheriting Git's own replication and the organization's existing backup/DR posture for its source-control platform. No bespoke DR plan is usually needed; the risk to actively manage is a bespoke, centralized policy-evaluation *service* (§9.5) becoming a single point of failure that blocks every CI pipeline org-wide if it goes down — mitigate by failing open with an alert (allow the merge, page the platform team) rather than failing closed and halting all engineering org-wide on one service's outage, unless the specific policy is money/compliance-critical enough that failing closed is the deliberately correct choice (a Principal-level trade-off call, covered in §15).
+
+### 9.7 CAP theorem
+
+CAP theorem doesn't apply directly here — there's no distributed data store making a consistency/availability trade-off under partition. The genuinely analogous tension is **governance consistency vs. team autonomy**: a fully centralized, always-consistent governance model (one Architecture Review Board approves everything, one team owns every fitness function) guarantees organization-wide consistency but sacrifices team velocity/autonomy at scale; a fully decentralized model (every team defines its own rules independently) maximizes autonomy but sacrifices organization-wide consistency, risking exactly the drift governance exists to prevent. The federated model (§9.4) is this domain's answer to that trade-off — a small, centrally-consistent core plus team-autonomous extensions — the structural equivalent of choosing a tunable consistency level rather than a hard CP/AP choice.
+
+---
+
+## 10. Interview Questions
 
 ### Basic (10)
 
@@ -269,5 +635,498 @@
 **Why correct:** Uses ADRs as auditable, quality-attribute-weighted decision records tied to change control, and adds money-specific governance (reversibility, blast radius/resilience as first-class, evidence trail).
 **Common mistakes:** Undocumented architecture changes; ADRs that only weigh performance; irreversible big-bang changes; no change-control/audit trail for a regulated platform.
 **Follow-ups:** "Which quality attributes rank differently for a settlement platform vs. a typical product?" / "What does the ADR + fitness-function trail give you during a post-incident regulatory review?"
+
+---
+
+## 11. Coding Exercises
+
+### Easy — naming/namespace convention fitness function
+
+**Problem.** Write a C# fitness function (using NetArchTest.Rules) enforcing that every class in the `Settlement.Domain.Events` namespace has a name ending in `Event`, so domain events remain consistently identifiable across the codebase.
+
+**Solution.**
+
+```csharp
+[Fact]
+public void DomainEvents_Should_Follow_Naming_Convention()
+{
+    var result = Types.InAssembly(typeof(TradeSettledEvent).Assembly)
+        .That()
+        .ResideInNamespace("Settlement.Domain.Events")
+        .Should()
+        .HaveNameEndingWith("Event")
+        .GetResult();
+
+    Assert.True(result.IsSuccessful,
+        "Types violating naming convention: " +
+        string.Join(", ", result.FailingTypeNames ?? Array.Empty<string>()));
+}
+```
+
+**Time complexity:** O(n) where n = number of types in the assembly (single reflection pass, one string-suffix check per type).
+**Space complexity:** O(n) to hold the reflected type list and the failing-type report.
+**Optimized solution:** No meaningful optimization needed at this scale — n is bounded by the assembly's type count (typically hundreds, not millions). The one real optimization is sharing the `Types.InAssembly(...)` load across every naming-convention assertion in the test class (a static fixture), avoiding redundant reflection passes when multiple naming rules check the same assembly (§7.1).
+
+### Medium — cyclic-dependency detector over a module graph
+
+**Problem.** Given a module dependency graph (module name → set of modules it depends on), detect whether any cycle exists and, if so, return one concrete cycle path for the error message.
+
+**Solution.** (See §2.3 for the full annotated version; reproduced here as the exercise's target solution.)
+
+```csharp
+public static class CycleDetector
+{
+    public static IReadOnlyList<string>? FindCycle(
+        IReadOnlyDictionary<string, IReadOnlySet<string>> graph)
+    {
+        var visiting = new HashSet<string>();
+        var visited = new HashSet<string>();
+        var path = new List<string>();
+
+        foreach (var node in graph.Keys)
+            if (!visited.Contains(node) && Dfs(node)) return path;
+        return null;
+
+        bool Dfs(string node)
+        {
+            visiting.Add(node);
+            path.Add(node);
+            foreach (var dep in graph.TryGetValue(node, out var deps) ? deps : [])
+            {
+                if (visiting.Contains(dep)) { path.Add(dep); return true; }
+                if (!visited.Contains(dep) && Dfs(dep)) return true;
+            }
+            visiting.Remove(node);
+            visited.Add(node);
+            path.RemoveAt(path.Count - 1);
+            return false;
+        }
+    }
+}
+```
+
+**Time complexity:** O(V + E) — standard DFS cycle detection, each node and edge visited once.
+**Space complexity:** O(V) for the visiting/visited sets and the recursion stack (worst case O(V) deep for a fully linear chain).
+**Optimized solution:** For a graph re-checked on every CI run where only a small subset of modules changed since the last run, an incremental variant only re-runs DFS from the changed nodes' component (using a cached "already known acyclic" mark from the prior run for unchanged subgraphs), turning repeated full-graph re-analysis into work proportional to the *change*, not the whole graph — the graph-analysis analogue of §7.7's incremental-analysis strategy.
+
+### Hard — deployment-coordination-frequency fitness function
+
+**Problem.** Using git/CI deploy history (a list of `(serviceName, releaseId, timestampUtc)` deploy events), compute, for every pair of services, the percentage of one service's deploys that occurred within the same release window (e.g., ±2 hours) as the other service's deploy, and alert if any pair exceeds a configurable threshold — this is the metric that caught the §4 incident.
+
+**Solution.**
+
+```csharp
+public record DeployEvent(string ServiceName, string ReleaseId, DateTimeOffset Timestamp);
+
+public static class CoordinationAnalyzer
+{
+    public static IEnumerable<(string A, string B, double CoDeployRate)> ComputeCoordination(
+        IReadOnlyList<DeployEvent> deploys, TimeSpan window)
+    {
+        var byService = deploys.GroupBy(d => d.ServiceName)
+                                .ToDictionary(g => g.Key, g => g.OrderBy(d => d.Timestamp).ToList());
+
+        var services = byService.Keys.ToList();
+        for (int i = 0; i < services.Count; i++)
+        for (int j = i + 1; j < services.Count; j++)
+        {
+            var a = byService[services[i]];
+            var b = byService[services[j]];
+            if (a.Count == 0) continue;
+
+            int coDeployed = a.Count(da =>
+                b.Any(db => Math.Abs((da.Timestamp - db.Timestamp).Ticks) <= window.Ticks));
+
+            yield return (services[i], services[j], (double)coDeployed / a.Count);
+        }
+    }
+}
+
+[Fact]
+public void No_ServicePair_Should_Exceed_CoDeployThreshold()
+{
+    var deploys = DeployHistoryLoader.LoadLast90Days();
+    var violations = CoordinationAnalyzer.ComputeCoordination(deploys, TimeSpan.FromHours(2))
+        .Where(r => r.CoDeployRate > 0.40)
+        .ToList();
+
+    Assert.True(violations.Count == 0,
+        "Deployment coordination exceeds 40% for: " +
+        string.Join(", ", violations.Select(v => $"{v.A}+{v.B}={v.CoDeployRate:P0}")));
+}
+```
+
+**Time complexity:** O(S² · D log D) where S = number of services and D = average deploys per service (sorting each service's deploys, then a nested comparison per pair) — the naive `Any` inner scan is O(D²) per pair; acceptable at typical scale (tens of services, hundreds of deploys per 90-day window) but worth tightening for larger organizations.
+
+**Space complexity:** O(N) where N = total deploy events, held in the grouped dictionary.
+
+**Optimized solution:** Replace the O(D²) nested `Any` scan with a merge-style two-pointer sweep over each pair's sorted deploy timestamps (both lists are already sorted), reducing the per-pair cost to O(D) and the overall complexity to O(S² · D) — and, at true organization scale (hundreds of services), avoid the full O(S²) pairwise comparison entirely by only computing coordination for service pairs with a *direct* dependency-graph edge (from §2.2/§2.3's graph), since unrelated services co-deploying by coincidence isn't the architecturally meaningful signal.
+
+### Expert — fitness-function liveness canary
+
+**Problem.** Design and implement a scheduled "canary" job proving the fitness-function CI gate is still actually wired and firing — directly closing the gap that caused the §14 incident, where the gate had silently stopped running for months with nobody noticing.
+
+**Solution.** The canary works by deliberately committing a known-violating change to a dedicated, isolated branch/module on a schedule, then asserting the CI pipeline correctly rejected it — if the pipeline instead reports success (or never runs at all), the canary itself alerts, because a passing build on deliberately-bad code is the signature of a broken or bypassed gate.
+
+```csharp
+// CanaryFixture.cs — lives in a dedicated, isolated test project
+// (`ArchitectureCanary`) that intentionally violates a real rule.
+namespace ArchitectureCanary;
+
+// Deliberately violates "Domain must not depend on Infrastructure" —
+// this type's mere existence should fail CI every single canary run.
+public class KnownViolatingCanaryType
+{
+    private readonly Npgsql.NpgsqlConnection _conn; // Domain -> Infrastructure violation, on purpose
+}
+```
+
+```yaml
+# .github/workflows/architecture-canary.yml
+name: Architecture Fitness-Function Canary
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # weekly, Monday 06:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  verify-gate-still-fires:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run fitness-function suite against known-violating canary project
+        id: run_suite
+        continue-on-error: true
+        run: dotnet test ArchitectureCanary.Tests --filter FullyQualifiedName~ArchitectureFitnessFunctions
+
+      - name: Assert the suite FAILED (canary type must be rejected)
+        run: |
+          if [ "${{ steps.run_suite.outcome }}" = "success" ]; then
+            echo "::error::CANARY FAILURE — fitness-function suite passed against a known-violating fixture. The gate is silently broken or bypassed."
+            exit 1
+          fi
+          echo "Canary healthy — gate correctly rejected the known violation."
+
+      - name: Page on-call if canary itself is broken
+        if: failure()
+        run: ./scripts/page-oncall.sh "Architecture fitness-function gate liveness canary failed"
+```
+
+**Time complexity:** O(1) additional relative to the normal fitness-function suite's own complexity (§7) — the canary just runs the existing suite against one more, small, fixed project.
+
+**Space complexity:** O(1) — a single small fixture project, independent of main codebase size.
+
+**Optimized solution:** Rather than a separate weekly scheduled job, fold a canary assertion into *every* PR's own fitness-function stage (a meta-test: "run the suite against the canary fixture as part of this same PR's CI, and assert it fails") — this catches a broken gate within minutes of the breaking change (e.g., the pipeline-migration incident in §14) rather than up to a week later, at the cost of a few extra seconds on every single PR; the right choice depends on how costly an undetected week of silent gate failure is for the specific system (for a money-critical platform, the per-PR canary is worth the marginal cost every time).
+
+---
+
+## 12. System Design
+
+### Requirements
+
+**Functional requirements**
+- Host an organization-wide, searchable **ADR repository** aggregating ADRs authored across many independent team repositories, with full-text search, filtering by status (Proposed/Accepted/Superseded/Deprecated), and supersession-chain navigation.
+- Provide a **fitness-function registry** distinguishing organization-mandatory rules (money-type safety, PCI segmentation, information barriers) from team-owned rules, distributed as a shared, versioned policy bundle every service repository's CI pulls in.
+- Support an **Architecture Review Board (ARB) workflow**: a lightweight intake form for decisions meeting an explicit significance threshold, routing to reviewers, recording the outcome as a linked ADR.
+- Emit a **violation feed**: every fitness-function failure (CI-time and production-time) across every repository, aggregated into one dashboard, queryable by team, service, and rule.
+- Support a **liveness-canary status board** showing, per repository, when its fitness-function gate last successfully ran and last successfully caught a canary violation (§11 Expert exercise, §14).
+
+**Non-functional requirements**
+- Availability: the ADR portal and violation dashboard should target 99.9% (roughly 8.7 hours/year downtime budget) — high but not five-nines, since it's a developer-productivity tool, not a customer-facing money-moving path; a brief portal outage degrades visibility, it does not stop CI gates from still enforcing locally (§9.6's fail-open reasoning).
+- The **policy-bundle distribution** path (organization-mandatory fitness functions pulled by every CI pipeline) has a *higher* availability bar in practice — target 99.95% — because a bundle-fetch failure could block every PR org-wide if pipelines fail closed on fetch error (mitigated per §9.6 — fail open with an alert for non-critical rule categories, fail closed only for the money/PCI/information-barrier tier).
+- Scale target: 400 services across 60 teams, ~2,000 PRs/day organization-wide, ~15,000 ADRs accumulated over 5 years at current authorship rate (~8/team/year).
+- Search latency: sub-500ms for ADR full-text search at the 95th percentile, for a genuinely useful developer experience.
+- Auditability: every ADR and every fitness-function-rule change must be attributable (author, timestamp, approving reviewer) and immutable once accepted — a direct SOX/audit requirement per §10's FinTech panel questions.
+
+### Back-of-the-envelope estimation
+
+- 2,000 PRs/day × 1 fitness-function-suite run each ≈ 2,000 suite executions/day ≈ 23/second at peak assuming an 8-hour concentrated workday window (2,000 / 28,800s) — trivial for CI infrastructure; the real load concentration is the **policy-bundle-fetch** step, which every one of those 2,000 runs performs: 2,000 fetches/day against a shared bundle store, ≈ 0.023 req/s average, but bursty around standard commit hours — even at a 50x peak-to-average burst factor, ~1.2 req/s peak is a trivially small load for a CDN-fronted static bundle.
+- ADR repository: 15,000 ADRs × ~3KB average Markdown size ≈ 45MB of raw content after 5 years — small enough that full-text indexing (e.g., via a search engine like Elasticsearch/OpenSearch, or even Postgres full-text search) is comfortably within a single small cluster's capacity; this is a **read-heavy, small-corpus search problem**, not a big-data problem.
+- Violation feed: assume 5% of the 2,000 daily suite runs produce at least one violation (mix of warn-only and enforced rules across 400 services in varying maturity) ≈ 100 violation events/day ≈ negligible ingest volume for a metrics/logging pipeline already sized for the organization's general observability needs.
+- **What the numbers tell you:** this is fundamentally a **small-scale, read-heavy metadata and search problem**, not a throughput problem — 23 suite-executions/second and 45MB of ADR content are trivial for any competent CDN/search/database choice. The actual hard problem is **not performance at this scale; it's correctness of attribution/immutability (audit requirement) and organizational adoption** (getting 60 teams to actually author ADRs and wire in the mandatory policy bundle) — the design should optimize for auditability, searchability, and low-friction adoption, not for exotic scaling techniques this load doesn't remotely require.
+
+### Components
+
+- **ADR Portal (Backstage plugin)** — the developer-facing UI: search, browse by team/status, supersession-chain visualization (§3.2), and a scaffolded `adr new` golden-path action wired into the same portal used for service creation generally.
+- **ADR Storage** — ADRs remain Markdown files in each owning repository (`docs/adr/`), never centrally owned — the portal *indexes*, it does not *own*, preserving each team's autonomy and Git's own versioning/audit trail (§9.6) rather than inventing a bespoke store.
+- **Indexing Service** — a scheduled job (or, better, a webhook-triggered one on push to `docs/adr/**`) that parses each repository's ADR Markdown, extracts front-matter (status, date, supersedes-link), and writes to the search index.
+- **Search Index** — Postgres full-text search (`tsvector`/`tsquery`) is the pragmatic choice at this corpus size (45MB, 15,000 documents) — a dedicated Elasticsearch cluster would be defensible but is over-engineering for a corpus this small; reuse the org's existing Postgres operational expertise rather than adding a new stateful system to run, mirroring this course's "boring, well-understood database beats a shinier option when the load doesn't demand it" principle.
+- **Fitness-Function Registry & Policy Bundle Store** — the organization-mandatory rule set (Rego policies + a versioned NetArchTest rule package), published to a package feed (NuGet/npm-equivalent internal feed) and an OPA bundle CDN endpoint; every repository's CI pulls a pinned version (§8.2's supply-chain pinning requirement).
+- **Violation Feed Ingest** — CI pipelines emit a structured event (repo, rule ID, ADR link, pass/fail, timestamp) to the org's existing metrics/logging pipeline (already sized for this negligible volume per the estimation above) — no bespoke ingest system needed.
+- **Violation Dashboard** — a thin query layer over the existing metrics store, plus the canary-liveness board (§11 Expert exercise) surfaced prominently, since an unmonitored liveness gap is this domain's single most damaging failure mode (§14).
+- **ARB Intake & Workflow** — a lightweight form (again, a Backstage plugin or even a structured GitHub issue template) routing significant-decision proposals to reviewers, whose accepted outcome is required to produce a linked ADR — the workflow's *output* is always an ADR, never a decision that only lives in a meeting note.
+
+### Database selection
+
+Postgres for both the ADR search index and the ARB workflow state — chosen deliberately over a NoSQL option for the same reasons this course has repeatedly favored a boring, ACID, well-tooled relational database when the workload doesn't specifically demand something else: the data is inherently relational (ADRs reference/supersede other ADRs; ARB decisions reference ADRs; violations reference rules and repos), transactional consistency matters for the audit trail (an ADR's status transition must be atomic and never lost), and every engineer at the org already knows how to operate, back up, and query Postgres — versus introducing a new, less-familiar stateful system whose main selling point (extreme write scale) this workload's back-of-the-envelope numbers show is never actually needed.
+
+### Caching
+
+The policy-bundle CDN (§components) is itself a cache — bundles change infrequently (weekly at most) and are fetched thousands of times/day, a textbook CDN-cacheable artifact with a short TTL plus cache-busting on version bump. ADR search results are not heavily cached given the low query volume and the value of always-fresh results for an audit-sensitive system — freshness is worth more than the marginal latency saved by caching a search corpus this small.
+
+### Messaging
+
+CI-emitted violation events flow through the organization's existing event bus/logging pipeline (Kafka, if already the org's standard, per this course's general EDA guidance) rather than a bespoke system — reusing existing messaging infrastructure is the right call precisely because this workload's volume (§estimation) gives no justification for anything purpose-built.
+
+### Scaling
+
+Given the estimation above, none of these components need non-trivial horizontal scaling to handle current load — the design should instead prioritize **read availability and low query latency** for the ADR search (§9.1's horizontal-scaling-is-easy point) and, most importantly per this section's own conclusion, **organizational scaling** — the federated ownership model (§9.4) that lets 60 teams contribute without funneling through one central bottleneck team.
+
+### Failure handling
+
+- **Policy-bundle fetch fails at CI time:** fail open with a loud warning annotation on the PR for team-owned/non-critical rule tiers; fail closed (block the merge) for the money/PCI/information-barrier mandatory tier (§9.6) — the asymmetry is a deliberate Principal-level trade-off, not an oversight.
+- **ADR indexing service is down:** ADRs remain fully valid and enforceable in their owning repositories (they're just Markdown files under version control) — only *searchability* degrades, never the underlying governance mechanism itself, an important resilience property of choosing to index rather than centrally own the data.
+- **ARB workflow tool is unavailable:** the fallback is the same lightweight process minus the tool — a reviewed PR against a shared "pending ADRs" repository — because the workflow's *output* (a linked, accepted ADR) is what matters, not the specific tool producing it.
+
+### Monitoring
+
+Track, org-wide: fitness-function violation rate trend per repository (declining = effective, per §10 Advanced Q10's outcome-based measurement), canary-liveness freshness (any repository whose canary hasn't successfully fired in >7 days pages the platform team), ADR authorship rate per team (a proxy for adoption, not a target to game), and policy-bundle-fetch success rate/latency (an SLO-backed metric per the availability targets above).
+
+### Trade-offs
+
+Federated ADR storage (each team's own repo) over centralized storage trades a small amount of query/indexing complexity (§Indexing Service must crawl many repos) for dramatically better team autonomy and no single-repository bottleneck — judged worth it given this design's own conclusion that organizational adoption, not technical scale, is the hard problem. Postgres over a dedicated search engine trades some search-feature sophistication (no built-in relevance tuning UI, fewer advanced full-text features) for operational simplicity at a corpus size where that sophistication has no real payoff.
+
+---
+
+## 13. Low-Level Design
+
+### Class diagram — pluggable fitness-function rule pipeline
+
+```mermaid
+classDiagram
+    class IFitnessFunctionRule {
+        <<interface>>
+        +string RuleId
+        +string AdrReference
+        +RuleSeverity Severity
+        +RuleResult Evaluate(ArchitectureModel model)
+    }
+    class NoCyclicDependencyRule {
+        +Evaluate(model) RuleResult
+    }
+    class NoCrossLayerDependencyRule {
+        -string SourceLayer
+        -string[] ForbiddenLayers
+        +Evaluate(model) RuleResult
+    }
+    class DataOwnershipRule {
+        -Dictionary~string,string[]~ OwnershipManifest
+        +Evaluate(model) RuleResult
+    }
+    class DeploymentCoordinationRule {
+        -double ThresholdPct
+        +Evaluate(model) RuleResult
+    }
+    class RuleResult {
+        +bool Passed
+        +string[] Violations
+        +string RuleId
+    }
+    class FitnessFunctionPipeline {
+        -List~IFitnessFunctionRule~ _rules
+        +AddRule(IFitnessFunctionRule) FitnessFunctionPipeline
+        +Run(ArchitectureModel model) PipelineReport
+    }
+    class PipelineReport {
+        +List~RuleResult~ Results
+        +bool AllPassed
+        +GenerateAnnotations() string[]
+    }
+    class ArchitectureModel {
+        +List~ModuleNode~ Modules
+        +List~DependencyEdge~ Edges
+    }
+
+    IFitnessFunctionRule <|.. NoCyclicDependencyRule
+    IFitnessFunctionRule <|.. NoCrossLayerDependencyRule
+    IFitnessFunctionRule <|.. DataOwnershipRule
+    IFitnessFunctionRule <|.. DeploymentCoordinationRule
+    FitnessFunctionPipeline o-- IFitnessFunctionRule
+    FitnessFunctionPipeline --> ArchitectureModel
+    FitnessFunctionPipeline --> PipelineReport
+    PipelineReport o-- RuleResult
+```
+
+### Sequence diagram — CI gate execution
+
+```mermaid
+sequenceDiagram
+    participant Dev as Developer PR
+    participant CI as CI Pipeline
+    participant Extract as Model Extractor
+    participant Pipe as FitnessFunctionPipeline
+    participant Rule as IFitnessFunctionRule (each)
+    participant Report as PipelineReport
+    participant GH as Branch Protection
+
+    Dev->>CI: push commit
+    CI->>Extract: build assemblies, extract ArchitectureModel
+    Extract-->>CI: ArchitectureModel
+    CI->>Pipe: Run(model)
+    loop for each registered rule
+        Pipe->>Rule: Evaluate(model)
+        Rule-->>Pipe: RuleResult
+    end
+    Pipe->>Report: aggregate results
+    Report-->>CI: PipelineReport (AllPassed?)
+    alt AllPassed == true
+        CI->>GH: report success status
+        GH-->>Dev: merge allowed
+    else AllPassed == false
+        CI->>GH: report failure status + annotations (rule + ADR link)
+        GH-->>Dev: merge blocked, violations shown inline
+    end
+```
+
+### Design patterns used
+
+- **Strategy** — `IFitnessFunctionRule` is the strategy interface; each concrete rule (`NoCyclicDependencyRule`, `DataOwnershipRule`, etc.) is an interchangeable strategy the pipeline runs without knowing its internals, letting teams add new rules without modifying the pipeline itself (directly satisfies Open/Closed below).
+- **Chain of Responsibility (as a pipeline, not short-circuiting)** — `FitnessFunctionPipeline` runs every registered rule regardless of earlier failures (deliberately *not* short-circuiting on first failure) so a single CI run reports *every* violation at once rather than forcing a developer through a frustrating fix-one-rerun-find-the-next cycle — a deliberate deviation from classic Chain of Responsibility's short-circuit behavior, chosen for developer-experience reasons.
+- **Builder** (`AddRule(...)` returning `FitnessFunctionPipeline` for fluent chaining) — lets a pipeline's rule set be assembled declaratively and readably in pipeline-configuration code.
+- **Observer** (implicit, for production-time fitness functions) — a production-time rule subscribes to a metrics/telemetry stream and evaluates continuously rather than once per CI run, structurally an Observer over the telemetry backend.
+- **Memento** (for ADRs) — an ADR's supersession chain is structurally a Memento pattern applied to decisions: each ADR is an immutable snapshot of a decision-state, and the "current" decision is found by walking the chain to its most recent, non-superseded snapshot — never mutating a prior snapshot in place.
+
+### SOLID mapping
+
+- **S — Single Responsibility:** each `IFitnessFunctionRule` implementation checks exactly one architectural characteristic; `FitnessFunctionPipeline` only orchestrates execution and aggregation, never rule logic itself.
+- **O — Open/Closed:** new rules are added by implementing `IFitnessFunctionRule` and registering an instance — the pipeline's own code never needs modification to support a new rule (directly the Strategy pattern's payoff).
+- **L — Liskov Substitution:** any `IFitnessFunctionRule` implementation must be safely substitutable in the pipeline — evaluating on the same `ArchitectureModel` input and returning a well-formed `RuleResult`, with no rule allowed to throw for a merely-failing (as opposed to malformed) input, preserving the pipeline's ability to run all rules unconditionally.
+- **I — Interface Segregation:** `IFitnessFunctionRule` stays minimal (one `Evaluate` method plus identifying metadata) rather than forcing every rule to implement unrelated concerns (e.g., report-formatting), which live instead in `PipelineReport`.
+- **D — Dependency Inversion:** `FitnessFunctionPipeline` depends on the `IFitnessFunctionRule` abstraction, never on concrete rule types — new rule packages (e.g., a FinTech-specific PCI-segmentation rule package) can be plugged in from an entirely separate assembly with zero pipeline changes.
+
+### Extensibility
+
+New rule categories (production-time telemetry-based rules, OPA/Rego-backed infrastructure rules) plug in by implementing `IFitnessFunctionRule` against an appropriately extended `ArchitectureModel` (or a parallel `TelemetryModel` for production-time rules) — the pipeline shape doesn't need to change; only `ArchitectureModel`'s extraction step needs a new data source. A federated organization (§9.4) ships its mandatory rule set as a NuGet package implementing several `IFitnessFunctionRule`s that every team's pipeline registers alongside its own team-specific rules.
+
+### Concurrency / thread safety
+
+Rule evaluation is embarrassingly parallel — each `IFitnessFunctionRule.Evaluate` call is a pure function over an immutable `ArchitectureModel` snapshot with no shared mutable state between rules, so `FitnessFunctionPipeline.Run` can safely evaluate all registered rules concurrently via `Task.WhenAll`/`Parallel.ForEach` rather than sequentially, meaningfully reducing wall-clock time for a large rule set (§7.3's latency concern) as long as each individual rule implementation itself avoids shared mutable state (e.g., no rule should cache results in a static, non-thread-safe field) — a constraint worth stating explicitly in the `IFitnessFunctionRule` contract's documentation, since a naive implementer might otherwise introduce a subtle race by memoizing into a static dictionary.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** A coupling violation between two payment-adjacent services went undetected for four months, discovered only when a security review — unrelated to architecture governance — happened to notice `notification-service` directly querying `payments-service`'s database.
+
+**Root cause.** Three months earlier, the platform team migrated CI from Jenkins to GitHub Actions. The Jenkins pipeline had run the architecture fitness-function suite as a required, blocking stage; the GitHub Actions migration was executed by a different team under time pressure, and the migration script that converted `Jenkinsfile` stages into GitHub Actions workflow YAML successfully converted the build, test, and deploy stages — but the architecture fitness-function stage referenced a Jenkins shared-library step (`archFitnessCheck()`) with no direct GitHub Actions equivalent, and the migration silently dropped it rather than failing the conversion. No fitness-function stage appeared in the new pipeline at all; no error was raised anywhere, because "stage doesn't exist" is not a failure state — it's simply absence.
+
+**Investigation.** Once the direct database query was found, the on-call architecture-governance owner checked whether the existing `NoCrossServiceDataAccessRule` fitness function should have caught it — it should have, and testing it locally against the current `notification-service` codebase confirmed it correctly failed. So the check itself worked; the question became *why hadn't CI been running it*. Reviewing GitHub Actions workflow history for `notification-service` showed the architecture-check job simply wasn't present in any run going back to the Jenkins migration three months prior — confirmed by diffing the old `Jenkinsfile` against the new `.github/workflows/ci.yml` and finding the missing stage.
+
+**Tools used:** GitHub Actions workflow run history (to establish the job's absence and its start date), `git log` on the workflow YAML and the old Jenkinsfile (to find the migration commit), and local execution of the existing NetArchTest rule against the current codebase (to confirm the rule itself was still correct and would have caught the violation).
+
+**Fix.** Three parts: (1) immediate — restore the missing stage in `notification-service`'s (and an audit found four other services') GitHub Actions workflow, verified failing against the live violation; (2) remediate the actual violation — `notification-service`'s direct database access was replaced with a call to `payments-service`'s published event stream (it only needed *notification* of a payment event, not direct data access — the coupling was avoidable in the first place); (3) structural — the liveness-canary pattern (§11 Expert exercise, §10 Expert Q4) was rolled out organization-wide specifically *because of* this incident, so that a missing/bypassed gate would page someone within a week instead of remaining silently absent for months.
+
+**Prevention.** Required-status-check branch protection (§8.2) was retroactively enabled for the architecture-fitness-function job specifically, so that even if a future pipeline migration dropped the stage again, GitHub itself would block merges on the missing required check rather than silently allowing them through an absent stage — moving the safety property from "the pipeline YAML happens to include this stage" (fragile, silently droppable) to "GitHub will not allow a merge without a status report from this named check" (structural, survives a YAML rewrite).
+
+---
+
+## 15. Architecture Decision
+
+**Scenario:** A 60-team, 400-service FinTech organization must choose its architecture-governance model as it scales past the point where informal, tribal-knowledge coordination is working.
+
+**Option A — Centralized Architecture Review Board approves all significant changes.**
+- Advantages: strong, consistent judgment applied uniformly; simplest mental model ("when in doubt, ask the board"); easiest to reason about for audit/compliance purposes (one clear approval authority).
+- Disadvantages: becomes a bottleneck almost immediately past a modest team count — the exact dynamic named in §10 Intermediate Q10; board members become a single point of institutional-knowledge failure; slow decision turnaround discourages teams from even proposing improvements.
+- Cost: moderate (a handful of senior engineers' time, but an increasing fraction of it as the org grows).
+- Complexity: low to build, high to operate at scale.
+- Maintainability: degrades as organization size grows — this option's cost scales worse than linearly with team count.
+- Scalability: poor — this is the option's defining weakness.
+- Operational overhead: grows unboundedly with organization size.
+
+**Option B — Fully decentralized fitness-function-as-code, no central board at all.**
+- Advantages: maximum team autonomy and velocity; no bottleneck; each team owns its own architectural quality bar.
+- Disadvantages: no mechanism preventing organization-wide inconsistency on genuinely cross-cutting, high-consequence concerns (PCI segmentation, information barriers) — exactly the invariants §10's FinTech panel questions identify as needing central, non-negotiable enforcement; a genuinely cross-team architectural risk (like §4's incident) has no forum for review before it happens, only after.
+- Cost: lowest ongoing cost, but carries hidden tail-risk cost from unreviewed, cross-cutting mistakes.
+- Complexity: low to build; each team's fitness-function suite is simple and independently owned.
+- Maintainability: good within a team; poor for organization-wide consistency, which nobody is responsible for.
+- Scalability: excellent from a bottleneck-avoidance perspective; poor from a "who catches the next PCI-segmentation violation before it ships" perspective.
+- Operational overhead: lowest, but with genuine, non-trivial residual risk.
+
+**Option C — Hybrid: federated fitness functions (§9.4) with a narrow-mandate ARB reserved for genuinely cross-team, high-consequence decisions.**
+- Advantages: combines Option A's strength (central, consistent enforcement of the invariants that genuinely need it — money-type safety, PCI segmentation, information barriers) with Option B's strength (team autonomy for everything else); the ARB's narrow scope means it never becomes the bottleneck Option A degrades into; matches this module's own repeatedly-derived governance principle (§10 Intermediate Q10, Advanced Q2).
+- Disadvantages: more upfront design work to correctly draw the line between "mandatory, centrally-owned" and "team-owned" rules; requires ongoing discipline to keep the mandatory tier genuinely minimal (scope creep back toward Option A is a real, observed failure mode if not actively resisted).
+- Cost: moderate upfront (defining the split, building the federated bundle-distribution mechanism, §12), low ongoing.
+- Complexity: moderate — more moving parts than either pure option, but each part is individually simple.
+- Maintainability: good, provided the mandatory-tier scope is actively kept minimal (an explicit, periodic re-review is worth scheduling, mirroring §9.4's own reasoning).
+- Scalability: good — this is the option that actually scales to 60 teams without either a bottleneck or an unmanaged cross-cutting risk.
+- Operational overhead: moderate and, importantly, roughly constant as the organization grows, unlike Option A's unbounded growth.
+
+**Recommendation: Option C.** For a 400-service, 60-team, money-critical FinTech organization, Option A's bottleneck risk is not hypothetical — it is the single most consistently observed failure mode of centralized architecture governance at this scale, and Option B's gap on genuinely cross-cutting, regulatorily-consequential invariants is not an acceptable risk to simply accept given what's at stake (PCI, information barriers, money-type correctness). The hybrid is more design work upfront, but that cost is paid once, while both alternatives' failure modes compound continuously as the organization keeps growing — the federated model (§9.4) is, in effect, this section's justification for why §12's system design was built the way it was.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact.** Architecture governance failures rarely show up as a line item — they show up as a slow, compounding tax: features that take longer to ship because coupling makes every change riskier, incidents whose root cause is a boundary nobody remembers agreeing to, and, in a regulated business specifically, control failures that turn into examination findings or fines. A Principal Engineer frames fitness functions and ADRs not as "architecture hygiene" but as a direct lever on delivery velocity and regulatory risk — the same lever performance engineering or reliability engineering pulls, just applied to structure instead of runtime behavior.
+
+**Engineering trade-offs.** Every fitness function and every ADR-mandatory boundary is a deliberate trade of some team velocity for some organizational guarantee. A Principal Engineer's job is calibrating that trade honestly per §1.5's criteria — not defaulting to "more governance is always safer" (it isn't; §6's governance-theater anti-pattern and Option A's bottleneck are real costs) nor to "move fast, worry about architecture later" (§4's incident is what "later" actually costs). The skill is in the federated model's line-drawing (§9.4, §15): knowing which few invariants genuinely warrant centralized, non-negotiable enforcement, and defaulting everything else to team autonomy.
+
+**Technical leadership.** Introducing this practice into an organization that doesn't have it requires the evidence-based, incremental approach §10's Expert-tier questions describe repeatedly — a contained pilot with measured, communicated outcomes, not a mandate. A Principal Engineer earns the organizational trust to make mandatory-tier rules stick by demonstrating, with real numbers (the §4 incident's 85%-then-40%-threshold story is exactly this kind of evidence), that the practice catches real problems before they become expensive.
+
+**Cross-team communication.** The ADR is this domain's primary cross-team communication artifact — a Principal Engineer treats a well-written ADR as equivalent in importance to a well-written design doc or a well-run architecture review meeting, because it's the artifact that lets a decision made by one team be understood, trusted, and built upon by every other team without a synchronous meeting. Poorly-written or absent ADRs are a communication failure with compounding cost, not a paperwork gap.
+
+**Architecture governance.** A Principal Engineer is often the person setting the mandatory-vs-team-owned line (§9.4, §15) and is personally accountable for keeping that line narrow — the single most common way centralized governance degrades into Option A's bottleneck is scope creep in exactly this decision, one "just this one more mandatory rule" at a time, each individually reasonable.
+
+**Cost optimization.** The real cost center in this domain isn't compute (§7's numbers show this is cheap) — it's engineering time spent on process that doesn't produce measured outcomes (§6's governance theater) and engineering time lost to incidents that better governance would have prevented (§4, §14). A Principal Engineer optimizes for the second cost by accepting a bounded amount of the first, and continuously measures (§10 Advanced Q10's outcome metrics) to confirm that trade is actually paying off, not just assumed to be.
+
+**Risk analysis.** In a money-critical, regulated context, the risk calculus is explicitly asymmetric: the cost of over-governing a low-consequence decision is wasted time; the cost of under-governing a genuinely high-consequence one (a PCI boundary, an information barrier, a settlement-ledger consistency invariant) is a regulatory incident, a financial loss, or both. A Principal Engineer's judgment is precisely in correctly classifying which bucket a given decision falls into — not applying uniform rigor to everything, and not applying uniform laxity either.
+
+**Long-term maintainability.** Fitness functions and ADRs are themselves systems that require maintenance, ownership, and periodic health review (§Expert Q1 in §10) — a Principal Engineer plans for that ongoing cost explicitly (an owner, a review cadence, a liveness-canary requirement for anything genuinely critical) rather than treating the initial rollout as a one-time project with no further attention needed, which is precisely how the §14 incident's silent, months-long gap became possible in the first place.
+
+---
+
+## 18. Revision
+
+### Key Takeaways
+
+- Evolutionary architecture = incremental change **plus continuous, objective verification** (fitness functions) — incremental change alone is just drift.
+- ADRs record *why*; fitness functions verify *whether that "why" still structurally holds*; governance is the organizational scaffolding making both actually happen at the right level of ceremony.
+- ADRs are immutable — supersede, never edit.
+- Fitness functions come in two flavors with different mechanics: CI-time (static artifacts, blocking, pre-merge) and production-time (live telemetry, continuous, typically alerting rather than blocking).
+- Introduce fitness functions to an existing codebase incrementally: warn-only → gate-new-only → remediate backlog → full enforcement.
+- The single most damaging recurring failure mode in this domain is a fitness-function gate that silently stops running or gets silently bypassed — mitigate structurally with required-status-check branch protection plus a liveness canary, never trust "it's in the pipeline YAML" alone.
+- Scale governance across a large organization with a **federated model**: a small, centrally-mandatory rule tier (money/PCI/information-barrier invariants) plus team-owned extensions — not full centralization (bottleneck) and not full decentralization (no cross-cutting enforcement).
+- In FinTech specifically, architectural boundaries are *controls* — encode them as build-failing fitness functions plus linked ADRs so the enforcement is continuously verified and auditable, not merely hoped-for.
+
+### Interview Cheatsheet
+
+| Concept | One-line answer |
+|---|---|
+| Fitness function | Objective, automatable, repeatable test of an architectural characteristic |
+| ADR | Immutable record of a decision's context, options, choice, and consequences |
+| Atomic vs holistic fitness function | Tests one characteristic vs. tests interaction between several |
+| CI-time vs production-time | Static artifact, pre-merge, blocking vs. live telemetry, continuous, alerting |
+| ADR supersession | New ADR links to and replaces the old one; original is never edited |
+| Federated governance model | Small mandatory core (central) + team-owned extensions (decentralized) |
+| Liveness canary | Deliberately-violating fixture proving the gate still actually fires |
+| Governance theater | Governance activity with no measured correlation to outcomes |
+
+### Things Interviewers Love
+
+- Naming a concrete tool (NetArchTest, ArchUnitNET, OPA/Conftest, adr-tools, Backstage) instead of speaking only in abstractions.
+- Recognizing that a fitness function is itself a verification mechanism that can silently fail — and proposing a liveness canary unprompted.
+- Distinguishing CI-time from production-time fitness functions with a concrete example of a violation only the latter would catch.
+- Proposing an incremental (not big-bang) rollout strategy for a legacy codebase.
+- Connecting ADR immutability to the specific value of preserving *rejected* options and reasoning, not just the final decision.
+
+### Things Interviewers Hate
+
+- "It depends" with no concrete criteria attached.
+- Treating an ADR as a form of general documentation rather than a point-in-time decision record.
+- Assuming a comprehensive fitness-function suite eliminates the need for any human architectural judgment.
+- Proposing centralized Architecture Review Board approval for every decision without acknowledging the bottleneck risk.
+- Silently disabling a failing check as an acceptable way to unblock a merge, without flagging why that's dangerous.
+
+### Common Traps
+
+- Confusing an ADR with a design doc.
+- Assuming fitness functions must be 100% automated (some legitimately remain manual/periodic, though automation is preferred wherever feasible).
+- Editing an ADR in place instead of superseding it.
+- Believing a passing fitness-function suite today guarantees it's still passing (i.e., still running) next quarter, without a liveness mechanism.
+- Treating governance formality as unconditionally good regardless of team size/context (§1.5, §10 Advanced Q9).
+
+### Revision Notes
+
+Re-derive, don't memorize: the incremental-introduction sequence (warn → gate-new → remediate → enforce), the federated-governance line (mandatory core vs. team-owned), and the "verify the verifier" recursive theme (liveness canaries) — these three ideas cover roughly 80% of this module's Advanced/Expert question surface (§10) and recur across §4, §12, §14, and §17. If short on review time, prioritize §4 (Production Example) and §14 (Production Debugging) — both are concrete, narrated incidents that make the abstract governance principles memorable and interview-ready.
 
 ---

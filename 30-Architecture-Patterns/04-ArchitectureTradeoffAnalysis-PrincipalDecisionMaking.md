@@ -2,11 +2,182 @@
 
 > Domain: Architecture Patterns | Level: Beginner → Expert | Prerequisite: [[01-ArchitecturalStyles-Monolith-ModularMonolith-SOA-Microservices-Serverless]] (the styles this module's trade-off framework chooses between), [[02-EvolutionaryArchitecture-FitnessFunctions-ADRs-Governance]] (the verification infrastructure a trade-off decision depends on to remain empirically grounded after being made), [[03-MigrationPatterns-BranchByAbstraction-ParallelRun-AntiCorruptionLayer-DataMigration]] (the safe-transition discipline that makes a trade-off decision's recommended architecture actually reachable from the current one)
 >
-> **Note on format:** Per the standing user preference (see `CLAUDE.md`), this module covers only the 40 most-frequently-asked interview questions (10 per level), without the full 15-section deep-dive template.
+> **Note on format:** Upgraded from the leaner 40-Q&A-only format to the current standing full template (§1–§15/§17, §16/§18 handling per the 2026-07-18 template-reversion decision in `CLAUDE.md`). The original 40 Q&A (§10) are preserved verbatim below; §1–9, §11–15, §17, §18 are new.
 
 ---
 
-## Interview Questions
+## 1. Fundamentals
+
+**What:** Architecture trade-off analysis is the structured, explicit practice of comparing candidate architectural decisions against multiple, often-competing quality attributes — performance, availability, consistency, cost, maintainability, security, time-to-market — to reach a justified, documented choice, rather than defaulting to a familiar option or optimizing one attribute while silently ignoring its cost to the others.
+
+**Why:** No architecture is "best" in the abstract — every quality-attribute improvement generally costs something elsewhere (strong consistency costs availability under partition; microservices' independent deployability costs operational complexity and cross-service consistency). A Principal Engineer's distinguishing responsibility, beyond an individual contributor's, is not just picking a good answer but ensuring the *decision-making process itself* — explicit quality attributes, honest comparison, a durable record — is sound, so the decision is defensible, auditable, and correctly revisitable later.
+
+**When:** Applied any time a genuinely significant, non-obvious, or hard-to-reverse architectural choice is being made — a foundational data-store selection, a monolith-vs-microservices decision, a build-vs-buy call for a core capability. Lightweight, informal application of the same principles suffices for smaller, easily-reversible decisions; the rigor should scale with the decision's actual consequence and reversibility, not be applied uniformly to everything.
+
+**How (30,000-ft view):**
+```
+1. Gather explicit business drivers & quality-attribute priorities (from real stakeholders)
+2. Present candidate architectures against those priorities (ATAM: sensitivity points, trade-off points)
+3. Price migration cost/risk to each candidate as a first-class input, not an afterthought
+4. Calibrate analysis rigor to the decision's actual reversibility
+5. Decide, and record the decision + rejected alternatives + falsifiable predictions in an ADR
+6. Verify the predictions later — close the loop, don't assume the analysis was correct just because it was rigorous
+```
+
+---
+
+## 2. Deep Dive
+
+### 2.1 ATAM in practice — sensitivity points vs. trade-off points
+A **sensitivity point** is a design parameter where a small change produces an outsized effect on one quality attribute (a cache TTL's effect on read latency). A **trade-off point** is where improving one attribute measurably worsens another (increasing that same TTL improves latency but worsens staleness). The distinction matters operationally: a sensitivity point alone tells you where to tune carefully; a trade-off point tells you where *no* tuning eliminates the tension — only an explicit, stated priority between the two competing attributes resolves it. Conflating them leads teams to endlessly "optimize" a trade-off point as if more tuning could make the tension disappear.
+
+### 2.2 The decision matrix — a debate-enabling tool, not an objective verdict
+A weighted-scoring matrix (candidates × quality attributes, each cell scored, each attribute weighted, totals computed) has real value: it makes otherwise-implicit reasoning inspectable and forces every participant to state, not merely feel, their assessment. Its risk is equally real: a matrix's apparent numerical precision can launder subjective judgment into a false objectivity, especially when weights are set (consciously or not) *after* the preferred answer is already known. The professional discipline is setting weights from the stated business drivers alone, before any candidate's scores are computed, and treating convergence from an independently-weighted second pass as a genuine confidence signal.
+
+### 2.3 Reversibility as the master variable governing analysis effort
+Not every decision deserves the same rigor. The single variable that should calibrate how much upfront analysis, how many stakeholders, and whether Architecture Review Board involvement a decision warrants is its **reversibility** — how cheaply and reliably it can be undone if wrong. A caching strategy is reversible in an afternoon; a foundational data-store choice historically was not — though this domain's own migration patterns (Branch by Abstraction, CDC, dual-write reconciliation) meaningfully reduce, without eliminating, that irreversibility, which is itself a fact that belongs inside the trade-off analysis, not outside it.
+
+### 2.4 Cost as a first-class, frequently under-weighted quality attribute
+Cost — infrastructure spend, ongoing operational/on-call burden, and engineering time — is a genuine quality attribute that directly trades off against others, yet it's routinely under-weighted because it's less technically interesting than latency or scalability and its *true*, fully-loaded value (including ongoing operational burden, not just an infrastructure line item) is often invisible at decision time. An architecture that looks cheaper on a cloud bill can be dramatically more expensive once the number of services to monitor, failure modes to diagnose, and on-call pages it generates is honestly counted.
+
+### 2.5 Opportunity cost — the comparison against the road not taken
+A technically sound, well-justified architecture investment can still be the wrong decision if the same engineering capacity would have produced more total business value applied elsewhere. Evaluating a proposed architecture only against "is this a good idea in isolation" — rather than against its most plausible alternative use of the same team's time — is a systematic blind spot in otherwise-rigorous trade-off analyses.
+
+### 2.6 The recursive risk — verifying the trade-off analysis's own predictions
+A trade-off analysis makes explicit, falsifiable predictions ("this supports 10x current scale," "this migration cuts incident rate by X%"). Treating the analysis process itself — a filled-in decision matrix, a well-facilitated ATAM session, a recorded ADR — as sufficient proof the decision was correct is the same "declared ≠ actual" failure this course has traced through every other domain, now occurring at the level of the decision-making method itself: only checking the actual, post-implementation metrics against the original predictions closes the loop.
+
+---
+
+## 3. Visual Architecture
+
+```mermaid
+flowchart TD
+    A[Gather explicit business drivers<br/>& quality-attribute priorities] --> B[Candidate architectures]
+    B --> C{ATAM: identify sensitivity points<br/>and trade-off points per candidate}
+    C --> D[Decision matrix:<br/>weights set BEFORE scores]
+    D --> E{Migration cost/risk<br/>priced as first-class input}
+    E --> F{Reversibility assessment:<br/>how much rigor does this warrant?}
+    F -->|Low reversibility, high consequence| G[Architecture Review Board]
+    F -->|High reversibility, contained scope| H[Team-level decision, lightweight ADR]
+    G --> I[Decision + rejected alternatives<br/>+ falsifiable predictions -> ADR]
+    H --> I
+    I --> J[Post-implementation:<br/>verify predictions actually held]
+    J -->|Context materially changed| A
+```
+
+```mermaid
+quadrantChart
+    title Reversibility vs. Consequence — where analysis rigor should concentrate
+    x-axis Low Consequence --> High Consequence
+    y-axis Cheap to Reverse --> Expensive to Reverse
+    quadrant-1 Board review, full ATAM
+    quadrant-2 Lightweight team ADR suffices
+    quadrant-3 Team-level, minimal ceremony
+    quadrant-4 Prototype fast, decide later
+    Core ledger data store: [0.9, 0.85]
+    Internal caching strategy: [0.2, 0.15]
+    Service boundary extraction: [0.75, 0.7]
+    Logging library choice: [0.1, 0.1]
+```
+
+```mermaid
+sequenceDiagram
+    participant Stakeholders
+    participant PE as Principal Engineer
+    participant Team
+    participant Board as Architecture Review Board
+    participant ADR as ADR Repository
+
+    Stakeholders->>PE: State business drivers (informally, often conflicting)
+    PE->>Stakeholders: Make priorities explicit & written
+    PE->>Team: Run ATAM-style comparison (sensitivity/trade-off points)
+    Team->>PE: Candidate scores + identified risks
+    PE->>PE: Assess reversibility
+    alt High consequence / low reversibility
+        PE->>Board: Present analysis for review
+        Board-->>PE: Approve / request more evidence
+    end
+    PE->>ADR: Record decision, rejected alternatives, predictions
+    Note over ADR: Later: verify predictions against real metrics
+```
+
+---
+
+## 4. Production Example
+
+**Problem:** A global custodian bank's Principal Engineering group needed to decide whether to build a new real-time trade-matching engine in-house or adopt a third-party matching platform, for a new fixed-income trading desk. Two prior, unstructured attempts at this exact decision (in different desks, years apart) had each resulted in expensive, partially-reversed choices — one desk built in-house and later had to migrate to a vendor platform after underestimating regulatory-reporting complexity; another bought a vendor platform and later found its latency profile unacceptable for a subsequently-added high-frequency strategy. Leadership explicitly asked for a rigorous, documented trade-off analysis this time, specifically to avoid a third expensive reversal.
+
+**Architecture:** The Principal Engineer leading the analysis ran a lightweight ATAM session with representatives from trading, compliance, platform engineering, and finance. Explicit quality attributes were gathered and, critically, *ranked* by the stakeholders themselves rather than assumed: regulatory auditability and deterministic matching correctness were stated as non-negotiable constraints (any candidate failing them was disqualified outright, not merely scored lower); sub-millisecond p99 matching latency was rated "important but not currently binding" since the desk's initial strategy mix didn't yet require HFT-grade latency; time-to-market and total cost of ownership were rated as genuinely competing, roughly equal priorities.
+
+**Implementation:** Three candidates were evaluated: build in-house, buy a named vendor platform, and a hybrid (buy the matching core, build a thin in-house compliance/reporting layer around it). The vendor-only option was disqualified outright at the correctness/auditability gate — its audit-log format could not, without custom (chargeable, roadmap-dependent) vendor work, satisfy the specific regulatory reconstruction requirement the compliance stakeholder stated as non-negotiable. The build-in-house and hybrid options both passed the hard gate, so were compared on the matrix: time-to-market favored the hybrid decisively (nine months vs. an estimated twenty-two for full in-house); total cost of ownership favored in-house over a five-year horizon once vendor licensing was fully modeled, but the hybrid's TCO disadvantage was judged acceptable given the time-to-market gap. Migration cost/risk was explicitly priced for the hybrid option specifically because the vendor's contract terms and this bank's own extraction/exit rights were reviewed *before* the decision, not after — the group explicitly modeled what an anti-corruption-layer-based exit from this specific vendor would cost if the vendor relationship later soured, per this domain's own migration-pattern discipline.
+
+**Trade-offs:** The hybrid option was chosen and documented in an ADR listing all three candidates, the disqualification reason for the vendor-only option, the explicit quality-attribute weights (reviewed and signed off by all four stakeholder groups before any candidate was scored, specifically to avoid the reverse-engineered-matrix risk), and two falsifiable predictions: "hybrid TCO will be within 15% of the modeled five-year estimate" and "the anti-corruption-layer exit path will genuinely allow vendor replacement within six months if needed."
+
+**Lessons learned:** Eighteen months later, a scheduled ADR review (triggered by the desk's addition of the HFT strategy the second historical failure had been caused by) found the vendor's core matching latency, which had not been a binding constraint at decision time, was now a real gap — exactly the kind of context change the original analysis had explicitly anticipated and pre-registered a re-evaluation trigger for, rather than the earlier desks' undocumented, ad hoc "we didn't think of that" surprise. Because the hybrid's anti-corruption layer had been built and tested (not just planned) as part of the original decision, the desk was able to evaluate a matching-core swap as a bounded, already-scoped migration rather than a fresh crisis — the direct payoff of pricing migration cost/risk into the original decision rather than treating it as a later afterthought.
+
+---
+
+## 5. Best Practices
+- Gather and write down explicit, stakeholder-sourced quality-attribute priorities before comparing any candidates — never assume shared, unstated priorities.
+- Treat a hard regulatory/correctness constraint as a disqualifying gate applied before scoring, not one more weighted attribute a strong showing elsewhere can outweigh.
+- Set decision-matrix weights from stated business drivers alone, before any candidate is scored, to avoid laundering a predetermined conclusion into an apparently objective number.
+- Price migration cost/risk (using this domain's own migration-decision axes: scope, data involvement, reversibility, organizational span) as a first-class input to the comparison, not a deferred implementation detail.
+- Calibrate analysis rigor (Board review vs. lightweight team ADR) to the decision's actual reversibility and consequence, not uniformly.
+- Record rejected alternatives and *why* they lost, and record explicit, falsifiable predictions with a scheduled or automated trigger to check them later.
+
+## 6. Anti-patterns
+- Comparing candidates by general reputation/popularity instead of each candidate's actual characteristics against this specific system's stated priorities.
+- Building a decision matrix after the preferred answer is already known, then reverse-engineering weights and scores to justify it.
+- Treating migration cost/risk as "an implementation detail to figure out later" once the "better" steady-state architecture is chosen.
+- Applying uniform, heavyweight analysis rigor to every decision regardless of its actual reversibility — over-analyzing trivial decisions, under-analyzing consequential ones.
+- Standardizing a fixed, universal quality-attribute weighting template across every future decision, systematically biasing every decision toward whatever the template happened to weight highly.
+- Treating a rigorously-conducted analysis as itself proof the resulting decision was correct, without ever checking its predictions against what actually happened.
+
+---
+
+## 7. Performance Engineering
+
+**CPU/Memory:** Not directly applicable to the analysis process itself; the relevant performance concern is ensuring each candidate's *actual* performance characteristics (not vendor marketing numbers or informal impressions) are benchmarked against the system's real, expected workload before being scored.
+
+**Latency:** Where latency is a stated quality attribute (as in the §4 example), demand a concrete, current benchmark under representative load from each candidate rather than accepting a specification-sheet number — the same "verify, don't assume" discipline applied to the analysis's own inputs.
+
+**Throughput:** Back-of-the-envelope capacity estimation belongs inside the analysis itself for any candidate whose scalability is a stated priority — an architecture that "should scale" without an actual capacity calculation is an unverified claim, not a finding.
+
+**Scalability:** A trade-off analysis's own process must itself scale with organizational size — a lightweight, informal version at small scale, more rigorous ATAM facilitation and a searchable ADR repository at large scale, with the underlying principles (explicit priorities, honest comparison) constant across both.
+
+**Benchmarking:** Where genuinely comparable, run a proof-of-concept or bake-off under representative load for the highest-uncertainty candidates rather than relying purely on paper analysis — particularly valuable exactly where quantitative historical data is scarce (a genuinely novel system).
+
+**Caching:** Not directly applicable to the analysis process; where caching strategy is itself the subject of the trade-off (e.g., cache-aside vs. write-through), evaluate each against the system's actual read/write ratio and staleness tolerance, not a generic preference.
+
+---
+
+## 8. Security
+
+**Threats:** The most consequential threat to a trade-off analysis's own integrity is not external — it's an unstated, unexamined bias (resume-driven development, organizational politics, a HiPPO decision) silently determining the outcome while the analysis's structure creates an appearance of objectivity that makes that bias harder, not easier, to detect.
+
+**Mitigations:** Require every quality-attribute score and every identified trade-off/sensitivity point to be explicitly stated and defended with concrete reasoning, not merely asserted; deliberately invite dissenting views before the group converges; record disagreement, not just the final decision, in the ADR — structural countermeasures that make an unexamined HiPPO or fashion-driven decision visibly indefensible.
+
+**Because this module's subject is a decision-making process, not a running system**, the OWASP/AuthN-AuthZ/Secrets/Encryption categories don't apply in their usual technical sense; the closest analogue is treating security itself as a first-class, explicitly-named quality attribute in every trade-off analysis rather than assumed handled by a separate, disconnected security-review process — because a missing security control typically produces zero functional symptom, it is uniquely at risk of being silently omitted from an analysis that only scores what's visibly, functionally different between candidates.
+
+**Governance security:** Access to modify or approve an ADR, and visibility into the full decision-history repository, should itself be access-controlled and audited — an ADR repository anyone can silently edit after the fact undermines the entire "durable, honest record" value this discipline depends on.
+
+---
+
+## 9. Scalability
+
+**Horizontal scaling (of the practice itself):** As an organization grows from one team to hundreds of engineers across many teams, the trade-off-analysis *structure* should scale (more facilitation rigor for genuinely significant cross-team decisions, a searchable organization-wide ADR repository, Board review scoped to high-consequence decisions), while the underlying *principles* remain identical at every scale.
+
+**Vertical scaling:** For a single, large, highly consequential decision, scaling up rigor means more stakeholders explicitly consulted, more candidates seriously evaluated, and a formal ATAM facilitation rather than an informal team discussion — not a fundamentally different method.
+
+**High Availability / Disaster Recovery (as quality attributes under evaluation):** When comparing candidate architectures, HA/DR posture should be evaluated with the same rigor as any other quality attribute — an explicit RTO/RPO target stated by stakeholders, each candidate's actual (not assumed) ability to meet it, and the cost of closing any gap priced into the comparison.
+
+**Replication/Partitioning (as quality attributes under evaluation):** Where partitioning strategy is itself part of the decision, evaluate each candidate's partitioning approach against the system's actual access patterns and hot-key risk, not a generic "it partitions" checkbox.
+
+**CAP theorem (as a quality-attribute framing device):** CAP is frequently the concrete vocabulary stakeholders need to understand *why* consistency and availability genuinely trade off rather than one simply being "better" — using it to translate an abstract disagreement ("we want it fast and we want it always right") into an explicit, resolvable priority statement is one of the most practically useful applications of this module's "make the trade-off explicit" principle.
+
+---
+
+## 10. Interview Questions
 
 ### Basic (10)
 
@@ -269,5 +440,321 @@
 **Why correct:** Treats build-vs-buy as a weighted trade-off (differentiator vs. commodity, inherited compliance, control/lock-in/concentration, resilience, TCO) with an ADR and exit plan, appropriate to a regulated firm.
 **Common mistakes:** Deciding on upfront cost/speed alone; ignoring inherited-compliance value of a certified vendor; buying with no exit/ACL and unmanaged concentration risk; building a commodity capability you can't maintain to the compliance bar.
 **Follow-ups:** "When does 'inherited PCI compliance' tip you toward buy?" / "How do you avoid a bought processor becoming an unmanaged single point of failure?"
+
+---
+
+## 11. Coding Exercises
+
+### Easy — Decision-matrix scorer with pre-committed weights
+**Problem:** Compute a weighted decision-matrix score across candidates, structurally preventing weights from being edited after scores are entered (guarding against the reverse-engineered-matrix risk).
+**Solution:**
+```csharp
+public class DecisionMatrix
+{
+    private readonly IReadOnlyDictionary<string, double> _weights; // committed BEFORE scoring
+    private bool _weightsLocked;
+    private readonly Dictionary<string, Dictionary<string, double>> _scores = new(); // candidate -> attribute -> score
+
+    public DecisionMatrix(IReadOnlyDictionary<string, double> weights)
+    {
+        if (Math.Abs(weights.Values.Sum() - 1.0) > 0.001)
+            throw new ArgumentException("Weights must sum to 1.0");
+        _weights = weights;
+        _weightsLocked = true; // no setter exists after construction — weights are immutable from here on
+    }
+
+    public void ScoreCandidate(string candidate, string attribute, double score)
+    {
+        if (!_weights.ContainsKey(attribute))
+            throw new ArgumentException($"Attribute '{attribute}' was not part of the pre-committed weight set");
+        _scores.TryAdd(candidate, new Dictionary<string, double>());
+        _scores[candidate][attribute] = score;
+    }
+
+    public double GetWeightedTotal(string candidate) =>
+        _weights.Sum(w => w.Value * _scores[candidate].GetValueOrDefault(w.Key, 0));
+}
+```
+**Time complexity:** O(a) per total, for a attributes.
+**Space complexity:** O(c·a) for c candidates.
+**Optimized solution:** Persist a hash of the weight set at construction time and re-verify it against the stored value at scoring time, so even an out-of-band database edit to the weights after the fact is detectable, not just structurally inconvenient.
+
+### Medium — Reversibility-based rigor router
+**Problem:** Given a decision's estimated reversibility and consequence, route it to the correct review path.
+**Solution:**
+```csharp
+public enum ReviewPath { TeamLightweightAdr, FacilitatedAtam, BoardReview }
+
+public class RigorRouter
+{
+    public ReviewPath Route(DecisionProfile d)
+    {
+        // consequence and reversibility are independent axes — both matter, neither alone is sufficient
+        if (d.ConsequenceScore >= 0.7 && d.ReversibilityCost >= 0.7)
+            return ReviewPath.BoardReview;
+        if (d.ConsequenceScore >= 0.4 || d.ReversibilityCost >= 0.4)
+            return ReviewPath.FacilitatedAtam;
+        return ReviewPath.TeamLightweightAdr;
+    }
+}
+
+public record DecisionProfile(double ConsequenceScore, double ReversibilityCost, bool CrossTeamScope);
+```
+**Time complexity:** O(1).
+**Space complexity:** O(1).
+**Optimized solution:** Add `CrossTeamScope` as an independent escalation trigger regardless of consequence/reversibility scores, since a locally-low-consequence decision can still impose real, unconsidered costs on other teams if made without their visibility.
+
+### Hard — ADR repository with prediction-verification tracking
+**Problem:** Model an ADR store that tracks each decision's falsifiable predictions and their later verification outcome, closing the recursive-verification loop from §2.6.
+**Solution:**
+```csharp
+public class Adr
+{
+    public Guid Id { get; init; }
+    public string Decision { get; init; }
+    public List<string> RejectedAlternatives { get; init; } = new();
+    public List<Prediction> Predictions { get; init; } = new();
+    public DateTime DecidedAt { get; init; }
+}
+
+public record Prediction(string Statement, DateTime CheckBy, PredictionOutcome? Outcome = null);
+public enum PredictionOutcome { Confirmed, Missed, PartiallyConfirmed }
+
+public class AdrRepository
+{
+    private readonly List<Adr> _adrs = new();
+
+    public void Record(Adr adr) => _adrs.Add(adr);
+
+    public IEnumerable<Adr> GetOverduePredictionChecks(DateTime now) =>
+        _adrs.Where(a => a.Predictions.Any(p => p.Outcome is null && p.CheckBy <= now));
+
+    public double GetPredictionAccuracyRate() =>
+        _adrs.SelectMany(a => a.Predictions)
+             .Where(p => p.Outcome is not null)
+             .Count(p => p.Outcome == PredictionOutcome.Confirmed) /
+        (double)Math.Max(1, _adrs.SelectMany(a => a.Predictions).Count(p => p.Outcome is not null));
+}
+```
+**Time complexity:** O(n) for n ADRs/predictions per query.
+**Space complexity:** O(n).
+**Optimized solution:** Wire `GetOverduePredictionChecks` into a scheduled job that opens a tracked review task automatically — the concrete, structural (not diligence-dependent) mechanism this module's Advanced Q8/Q9 recommends, converting an easily-forgotten manual habit into an automated one.
+
+### Expert — Cross-region trade-off analysis with dependency-aware sequencing
+**Problem:** Sequence a multi-region rollout of an architecture decision so no region depending on another's not-yet-migrated data is ever cut over first.
+**Solution:**
+```csharp
+public class RegionSequencer
+{
+    public List<string> Sequence(Dictionary<string, HashSet<string>> dependsOn) // region -> regions it depends on
+    {
+        var result = new List<string>();
+        var visited = new HashSet<string>();
+        var visiting = new HashSet<string>();
+
+        void Visit(string region)
+        {
+            if (visited.Contains(region)) return;
+            if (!visiting.Add(region))
+                throw new InvalidOperationException($"Circular cross-region dependency detected at '{region}' — cannot safely sequence");
+
+            foreach (var dep in dependsOn.GetValueOrDefault(region, new HashSet<string>()))
+                Visit(dep);
+
+            visiting.Remove(region);
+            visited.Add(region);
+            result.Add(region); // a region is only added once every dependency it needs is already sequenced
+        }
+
+        foreach (var region in dependsOn.Keys)
+            Visit(region);
+
+        return result; // topological order: safe cutover sequence
+    }
+}
+```
+**Time complexity:** O(V + E) for V regions and E dependency edges (standard topological sort).
+**Space complexity:** O(V + E).
+**Optimized solution:** Surface a detected circular dependency as a blocking finding in the trade-off analysis itself — a genuine circular cross-region dependency means no safe sequential cutover order exists at all, which is a decision-relevant fact (favoring a fully region-independent redesign, or a synchronized big-bang for just the circularly-dependent subset) rather than merely an implementation bug to route around silently.
+
+---
+
+## 12. System Design
+
+**Requirements**
+
+*Functional:*
+- Capture explicit, stakeholder-sourced quality-attribute priorities and weights, committed before candidate scoring begins.
+- Support a hard-constraint disqualification gate (regulatory/correctness) applied before, not blended into, weighted scoring.
+- Record every decision as a durable, searchable ADR including rejected alternatives, dissent, and falsifiable predictions.
+- Route each decision to a review-rigor tier (lightweight team ADR / facilitated ATAM / Architecture Review Board) based on its reversibility and consequence.
+- Automatically surface ADRs whose predictions are due for post-implementation verification.
+
+*Non-functional:*
+- ADR repository is append-only/versioned (an amendment is a new, linked entry, never a silent edit — preserving the historical decision context).
+- Decision-matrix weights are immutable once committed for a given analysis; any change requires a new, explicit analysis pass, not an in-place edit.
+- The whole system scales from a single team's lightweight usage to an organization-wide, cross-team searchable repository without changing its underlying principles.
+
+**Architecture:** Stakeholder-input capture (structured driver/priority form) → hard-constraint gate → ATAM-style comparison engine (sensitivity/trade-off point capture) → decision-matrix scorer (immutable weights) → rigor router (reversibility/consequence-based) → ADR repository (versioned, searchable, prediction-tracked) → scheduled prediction-verification job feeding back into a "revisit triggered" queue.
+
+**Components:** `PriorityCapture`, `HardConstraintGate`, `AtamComparisonEngine`, `DecisionMatrix`, `RigorRouter`, `AdrRepository`, `PredictionVerificationScheduler`, `DriftMonitor` (ties specific ADRs to live metrics — e.g., deployment-coordination frequency, cost — whose threshold breach auto-flags a revisit).
+
+**Database selection:** A relational store for the ADR repository (strong consistency and referential integrity matter for an audit-relevant, cross-referenced historical record — directly this domain's own "prefer boring ACID stores for correctness-critical, low-throughput data" finding); a search index (e.g., full-text) layered on top for organization-wide discoverability, not as the source of truth.
+
+**Caching:** Not a primary concern; a read-through cache over frequently-accessed, rarely-changing ADRs is a reasonable, low-risk optimization for a large organization-wide repository.
+
+**Messaging:** `DriftMonitor` threshold breaches published as events, consumed by the `PredictionVerificationScheduler` to open a tracked review task — the structural, not diligence-dependent, mechanism this module's own Advanced Q8 specifies.
+
+**Scaling:** The process/method (not the weights or scores) is what standardizes across teams; the repository itself scales horizontally as a standard searchable document store scales.
+
+**Failure handling:** A `HardConstraintGate` failure disqualifies a candidate outright and is recorded with its specific reason in the resulting ADR, never silently dropped from consideration; a `DriftMonitor` signal that isn't acted on within a defined SLA escalates rather than silently expiring.
+
+**Monitoring:** Prediction-accuracy rate over time (the organization's calibration signal); rate of ADRs never revisited despite a drift signal; time from drift-signal to completed re-analysis (the "is the decide-verify-transition-re-decide loop actually closing" metric this domain's own capstone questions establish).
+
+**Trade-offs:** This design deliberately adds process overhead (structured capture, immutable weights, scheduled verification) in exchange for making the organization's decision quality — not just its decision *volume* — measurable over time, directly targeting the "artifacts accumulated vs. genuine practice" distinction this module's own Expert-tier Q&A raises.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** Weights are immutable once committed; hard constraints gate before scoring; every decision produces a durable, versioned ADR with falsifiable predictions; rigor scales with reversibility/consequence.
+
+**Class diagram:**
+```mermaid
+classDiagram
+    class IQualityAttribute {
+        <<interface>>
+        +string Name
+        +double Weight
+    }
+    class HardConstraintGate {
+        +Evaluate(candidate) GateResult
+    }
+    class DecisionMatrix {
+        +ScoreCandidate(candidate, attribute, score) void
+        +GetWeightedTotal(candidate) double
+    }
+    class RigorRouter {
+        +Route(profile) ReviewPath
+    }
+    class Adr {
+        +Decision string
+        +RejectedAlternatives List~string~
+        +Predictions List~Prediction~
+    }
+    class AdrRepository {
+        +Record(adr) void
+        +GetOverduePredictionChecks(now) IEnumerable~Adr~
+    }
+    class DriftMonitor {
+        +CheckThresholds(adrId) DriftResult
+    }
+
+    HardConstraintGate --> DecisionMatrix : disqualified candidates excluded
+    DecisionMatrix --> RigorRouter
+    RigorRouter --> Adr : produces
+    Adr --> AdrRepository
+    DriftMonitor --> AdrRepository : flags revisit
+```
+
+**Sequence diagram:** the §3 flowchart and sequence diagram together cover the full lifecycle (gather → gate → compare → route → record → verify → re-trigger).
+
+**Design patterns used:** Chain of Responsibility (`HardConstraintGate` → `DecisionMatrix` → `RigorRouter`, each stage able to short-circuit or redirect the flow); Memento (an `Adr` captures a full, immutable snapshot of the decision context, enabling later comparison against "what actually happened" without mutating the original record); Observer (`DriftMonitor` reacting to live metric changes and notifying the `AdrRepository`'s revisit queue); Builder (constructing a `DecisionMatrix` with a validated, summed-to-1.0 weight set before any scoring is permitted).
+
+**SOLID mapping:** Single Responsibility (gate, matrix, router, repository, and monitor are each independently testable and independently reasoned-about); Open/Closed (a new quality attribute or a new rigor tier extends the system without modifying `HardConstraintGate` or `DecisionMatrix` internals); Liskov (any `IQualityAttribute` implementation must genuinely honor the immutable-weight contract — a mutable subtype would silently undermine the entire "weights committed before scoring" guarantee); Interface Segregation (capturing priorities, scoring, routing, and recording are distinct interfaces); Dependency Inversion (`RigorRouter` depends on an abstract `DecisionProfile`, not on any specific candidate's concrete implementation).
+
+**Extensibility:** A new quality attribute plugs in via `IQualityAttribute` without touching existing scoring logic; a new rigor tier (e.g., a "regulatory pre-clearance" step for a specific jurisdiction) extends `RigorRouter`'s routing table without changing its interface.
+
+**Concurrency/thread safety:** `DecisionMatrix` weight immutability is the primary concurrency-relevant guarantee — once constructed, concurrent scoring calls from multiple stakeholders can safely proceed without a race on the weights themselves; `AdrRepository.Record` should be append-only and safe under concurrent writers (multiple teams recording decisions simultaneously), with no in-place mutation of a previously-recorded ADR ever permitted — an amendment is always a new, linked record.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** A capital-markets technology group discovered, during an internal audit two years after a major "build vs. buy" trade-off analysis for a risk-calculation engine, that the ADR recording the decision claimed unanimous stakeholder agreement — but three of the five original meeting participants, when interviewed for the audit, recalled genuine, unresolved disagreement about the chosen vendor's long-term cost model, disagreement that was never mentioned in the ADR at all.
+
+**Root cause:** The ADR had been written up after the decision meeting by a single engineer who had (in good faith) summarized the outcome rather than the actual, full discussion — the meeting's real dissent, including a specific, still-unresolved concern about the vendor's usage-based pricing escalating faster than projected at scale, was informally raised but never captured in writing, because the meeting's structure had no explicit step requiring dissent to be recorded before the ADR was finalized. The decision-matrix scores themselves, when the audit reconstructed them from old email threads, showed the "cost" attribute's weight had been set noticeably lower in the final ADR than in an earlier planning email — a change made after an initial round of candidate scoring had already shown the vendor option scoring poorly on cost, exactly the reverse-engineered-matrix pattern this module warns against, though the original engineer had not consciously intended it that way.
+
+**Investigation:** The audit compared the ADR's final, recorded weights against the earlier planning email's weights, finding the discrepancy; interviews with the original participants surfaced the unrecorded dissent; the vendor's actual, current usage-based costs — now, two years later, measurably tracking toward the dissenting stakeholder's original, unrecorded concern — provided concrete, after-the-fact evidence the dissent had been substantively right, not merely a vague reservation.
+
+**Tools:** Email/calendar-thread archaeology (the only surviving record of the original weight-setting discussion, since no structured capture tool had been used); the vendor's actual, current invoice history compared against the original TCO projection; a structured post-mortem interview with the original meeting's participants.
+
+**Fix:** The organization adopted a structured ADR template requiring an explicit "dissenting views" section that must be populated or explicitly marked "none recorded" before an ADR could be finalized — removing the possibility of dissent being silently, informally dropped during write-up. Weight-setting was moved into the `DecisionMatrix`-style immutable-commit workflow (§11's Easy exercise, adopted directly from this incident), structurally preventing a weight from being edited after any candidate had already been scored against it.
+
+**Prevention:** (1) Structural, not memory-dependent, dissent capture — a required field, not an optional afterthought a single write-up author might omit in good faith. (2) Immutable, pre-committed weights enforced by tooling, not by trusting an author's diligence not to adjust them after seeing early results. (3) A standing practice, adopted org-wide after this incident: any significant build-vs-buy or architecture decision's ADR is spot-audited against surviving raw meeting artifacts (recordings, chat logs) within the first quarter after recording, specifically to catch this exact "the record doesn't match what actually happened" gap while it's still cheap to correct, rather than two years later during an unrelated audit.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** How rigorously should an organization formalize its architecture trade-off-analysis *process itself* — informal team discussion, a lightweight documented ATAM-lite + ADR practice, or a fully tooled decision-matrix-and-repository platform (§12)?
+
+**Option A — Informal team discussion, undocumented:**
+*Advantages:* Zero process overhead; fastest for genuinely low-consequence, easily-reversible decisions.
+*Disadvantages:* No durable record — the exact failure demonstrated in §14 (dissent and reasoning lost, later re-litigated or worse, silently repeated); no mechanism to verify predictions later; highly vulnerable to HiPPO/fashion-driven bias with no structural countermeasure.
+*Cost:* Lowest upfront; highest hidden long-term cost (repeated re-litigation, undetected biased decisions).
+*Risk:* High for anything genuinely consequential; acceptable only for low-reversibility-cost decisions.
+
+**Option B — Lightweight, documented ATAM-lite + ADR practice (no dedicated tooling):**
+*Advantages:* Captures the core discipline (explicit priorities, structured comparison, a written record with rejected alternatives and predictions) at low tooling cost; scales down naturally for smaller decisions.
+*Disadvantages:* Relies on individual diligence to actually follow the template correctly (§14's root cause — a diligent-in-good-faith author still dropped the dissent); no automated prediction-verification trigger or drift monitoring.
+*Cost:* Low-to-moderate — mostly process discipline and a shared document template/wiki.
+*Risk:* Moderate — the discipline can silently degrade under time pressure or team turnover without a structural enforcement mechanism.
+
+**Option C — Fully tooled platform (§12's system design: immutable weights, structured dissent capture, automated drift monitoring and prediction-verification scheduling):**
+*Advantages:* Converts every one of Option B's diligence-dependent steps into a structural, enforced one — directly closing the gap §14's incident demonstrates; makes organization-wide decision quality measurable over time (prediction-accuracy rate, time-to-revisit).
+*Disadvantages:* Real build/maintenance cost for the tooling itself; risk of the tooling becoming its own bureaucratic overhead if applied uniformly to low-consequence decisions without the reversibility-based rigor routing (§2.3) that keeps it proportionate.
+*Cost:* Highest upfront (tooling build and adoption) but lowest long-term hidden cost, per Option A/B's demonstrated failure modes.
+*Risk:* Low for decision-quality risk; moderate for adoption/change-management risk if rolled out without the rigor-routing discipline keeping it proportionate to each decision's actual consequence.
+
+**Recommendation: Option C, but rigor-routed (§2.3) so its structural discipline (immutable weights, mandatory dissent capture, automated prediction verification) applies fully only to Board-tier and facilitated-ATAM-tier decisions, while Option B's lighter documentation practice — still structured, still template-driven, but without the full platform — remains appropriate for team-lightweight-tier decisions.** The generalizable principle: the specific failure §14 demonstrates (good-faith diligence quietly failing under time pressure) is exactly the class of failure this course has repeatedly shown a structural mechanism outperforms a purely diligence-dependent one for — but structure has real cost, so it should concentrate where the decision's actual consequence justifies it, not apply uniformly to every decision an organization makes.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** The §4 custodian-bank example and the §14 incident together make the same point from opposite directions: a rigorous trade-off analysis, properly documented, converts an expensive future surprise (a vendor's latency profile turning out wrong, a cost model's real trajectory diverging from projection) into a bounded, already-scoped re-evaluation — while an undocumented or silently-compromised one converts the same eventual surprise into a much more expensive, trust-damaging crisis discovered by audit rather than by design.
+
+**Engineering trade-offs:** The core trade this module's method makes explicit — analysis rigor and documentation overhead against decision quality and long-term auditability — should never be applied uniformly; a Principal Engineer's actual skill here is judging, per decision, where on that curve a specific choice genuinely belongs, using reversibility and consequence (§2.3) as the calibrating variables rather than personal preference or how interesting the decision happens to be.
+
+**Technical leadership:** §14's incident is a leadership lesson as much as a process one: dissent that is real, substantive, and later vindicated by events was lost not through bad faith but through an unstructured process that gave good-faith diligence no reliable mechanism to succeed — a Principal Engineer's job includes building processes that don't depend on everyone remembering to be careful every time.
+
+**Cross-team communication:** A trade-off analysis spanning multiple stakeholder groups (as in §4) only produces a genuinely shared, durable understanding if the ADR captures *disagreement*, not just consensus — a record showing only unanimous agreement where real, substantive disagreement existed is itself a form of information loss that costs the organization exactly when that dissent would have been most valuable to revisit.
+
+**Architecture governance:** The Architecture Review Board's correct scope is genuinely significant, hard-to-reverse, cross-team-consequential decisions (§2.3) — requiring it universally recreates an unnecessary bottleneck; never requiring it for genuinely qualifying decisions recreates the disconnected-governance risk of a locally-optimal decision imposing unconsidered organization-wide cost.
+
+**Cost optimization:** Cost (§2.4) is systematically under-weighted in practice not because engineers don't understand it matters, but because its full, honestly-loaded value (ongoing operational burden, not just an infrastructure line item) is genuinely harder to estimate accurately than a latency number — a Principal Engineer should insist cost estimates in any significant trade-off analysis explicitly account for operational burden, not just infrastructure spend.
+
+**Risk analysis:** The single highest-leverage structural investment this module identifies is prediction verification (§2.6, §11's Hard exercise) — not because any individual analysis is likely wrong, but because an organization's *calibration* — its ability to actually get better at this over time — depends entirely on closing the loop between what was predicted and what actually happened, which no amount of individually-rigorous analyses achieves on its own without this explicit feedback mechanism.
+
+**Long-term maintainability:** An ADR repository's value compounds over years specifically because it lets a future engineer facing renewed pressure to reconsider a settled decision consult *why* it was made and what was rejected, rather than re-litigating from scratch — but only if the repository's records are genuinely trustworthy, which §14 demonstrates is not automatic even with good intentions, requiring the structural safeguards (immutable weights, mandatory dissent capture) this module's Architecture Decision section (§15) recommends.
+
+---
+
+## 18. Revision
+
+**Key Takeaways:**
+- No architecture is universally "best" — every quality-attribute improvement generally costs something elsewhere; trade-off analysis makes that cost explicit rather than hidden.
+- A hard regulatory/correctness constraint should disqualify a candidate outright before scoring, never be blended into a weighted average a strong showing elsewhere can outweigh.
+- Decision-matrix weights must be committed before scoring to avoid laundering a predetermined conclusion into an apparently objective number — §14's incident is exactly what happens when this isn't enforced structurally.
+- Migration cost/risk belongs inside the original trade-off analysis as a first-class input, not deferred to "figure out later" once a destination architecture is chosen.
+- Reversibility and consequence, not personal preference, should calibrate how much analysis rigor and what review tier a given decision warrants.
+- A trade-off analysis's own predictions are themselves falsifiable claims requiring later, actual verification — a rigorous process does not, by itself, guarantee a correct outcome.
+
+**Interview Cheatsheet:**
+| Concept | One-line definition | Common follow-up |
+|---|---|---|
+| Quality attribute | A measurable non-functional property (latency, availability, cost, security) | "Name one in direct tension with another." |
+| Sensitivity point | Where a small parameter change has outsized quality-attribute effect | "Distinguish from a trade-off point." |
+| Trade-off point | Where improving one attribute measurably worsens another | "Give a concrete example." |
+| Decision matrix | Weighted scoring table across candidates × attributes | "How do you prevent it laundering a predetermined answer?" |
+| Reversibility | How cheaply/reliably a decision can be undone | "Why does it calibrate analysis rigor?" |
+| ADR | Durable record of decision, rejected alternatives, and reasoning | "Why record what was rejected, not just what was chosen?" |
+
+**Things Interviewers Love:** naming a concrete quality-attribute tension rather than a generic "trade-offs exist" statement; explicitly pricing migration cost into the original decision; calibrating rigor to reversibility instead of applying uniform process everywhere; describing a concrete mechanism for verifying a past decision's predictions.
+
+**Things Interviewers Hate:** claiming one architecture is universally "best"; presenting a decision matrix's score as an objective, unquestionable verdict; describing an ADR as bureaucratic overhead with no concrete value; no answer for what happens if stakeholders genuinely, legitimately disagree.
+
+**Common Traps:** treating a rigorous process as proof of a correct outcome (it reduces risk and enables correction — it doesn't guarantee correctness); assuming quality-attribute weights can be standardized once across every future decision; assuming genuine expert disagreement under a sound process signals the process is flawed rather than a normal consequence of estimating under real uncertainty; forgetting that a missing security control produces zero functional symptom and is therefore uniquely easy to silently omit from an analysis.
 
 ---

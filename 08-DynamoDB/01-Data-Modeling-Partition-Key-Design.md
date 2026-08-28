@@ -74,6 +74,50 @@ graph TB
 
 ---
 
+## 7. Performance Engineering
+
+### 7.1 Hot-Partition Throttling — the Mechanism Behind the Number
+Each DynamoDB partition has a hard per-partition ceiling — historically documented as roughly **3,000 RCU or 1,000 WCU per partition** (the exact figures are an implementation detail AWS doesn't contractually guarantee, but the *existence* of a per-partition ceiling, independent of table-level provisioned/on-demand capacity, is the load-bearing fact). A table provisioned for 40,000 WCU spread evenly across 40 partitions gives each partition ~1,000 WCU of headroom — but if a partition key concentrates 30% of traffic onto one partition (the `Status = "Pending"` incident), that single partition needs ~12,000 WCU worth of throughput and throttles at ~1,000, regardless of the other 39 partitions sitting nearly idle. This is why `ProvisionedThroughputExceededException` can fire while CloudWatch's table-level `ConsumedWriteCapacityUnits` graph looks comfortably under the provisioned ceiling — the aggregate metric averages away the exact signal that matters.
+
+### 7.2 RCU/WCU Cost Modeling — the Arithmetic a Principal Engineer Should Reach For
+One RCU = one strongly consistent read of up to 4 KB (or two eventually-consistent reads of up to 4 KB, since eventual consistency is priced at half). One WCU = one write of up to 1 KB. A 10 KB item therefore costs `ceil(10/4) = 3` RCU per strongly-consistent read, 1.5 (rounded up to 2 reads' worth, i.e. still costed per-4KB-chunk halved) for eventually consistent, and `ceil(10/1) = 10` WCU per write. This item-size sensitivity is a direct, quantifiable reason single-table design's "denormalize related data onto one item" instinct has a ceiling: an item bloated with every conceivable related attribute costs proportionally more per read/write than a lean item plus a targeted GSI projection — the same "don't over-embed" tension recurring from MongoDB, expressed here as a directly billed number instead of a query-time cost.
+
+### 7.3 GSI Propagation Lag Under Write Bursts
+A GSI's asynchronous propagation (§2.4) is normally sub-second, but under a sustained high-write burst on the base table, GSI propagation can measurably widen — because the GSI itself has its **own** independent partition structure and its **own** per-partition WCU ceiling, and a write-heavy burst that's evenly distributed on the base table's key can still be skewed on the GSI's differently-shaped key (the `StatusIndex` GSI concentrating on `Status = "Pending"` is exactly this: the base table's `CustomerId`-keyed writes are well-distributed, but every one of them also writes into the GSI's narrow `Pending` partition, which then becomes the GSI's own hot-partition bottleneck and throttles GSI propagation specifically, not the base table). The operational consequence: a reporting dashboard querying the GSI can lag the base table by seconds to (in a sustained burst) tens of seconds — a real number to give a stakeholder asking "how stale can the pending-orders dashboard be," not "eventually consistent" as an unquantified hand-wave.
+
+### 7.4 Benchmarking Discipline
+Load-test partition-key design decisions at **realistic production key cardinality and skew**, not uniform synthetic keys — a benchmark generating `CustomerId` values from a uniform random distribution will never surface the skew a real customer population (a handful of large institutional accounts alongside many small retail accounts) actually produces. Capture per-partition-proxy metrics (CloudWatch `ConsumedWriteCapacityUnits` filtered/dimensioned where possible, or an application-level histogram of writes-per-key) during the load test, not just aggregate throughput, since aggregate throughput is precisely the metric that hid the incident in production.
+
+## 8. Security
+
+### 8.1 IAM Fine-Grained Access via Leading-Key Conditions
+DynamoDB's IAM integration supports `dynamodb:LeadingKeys` policy conditions — scoping a given IAM principal's access to items whose partition key begins with (or equals) a specific value or `${aws:userid}`-style substitution. In a single-table, multi-tenant design (`PK: TENANT#123#...`), this becomes a **database-native, code-path-independent authorization boundary**: even if application code has a bug granting a request broader access than intended, the IAM policy attached to the credentials used for that request still physically cannot read or write another tenant's partition-key range. This is the DynamoDB-native analog of PostgreSQL Row-Level Security — defense-in-depth that doesn't rely on every code path correctly filtering by tenant.
+
+### 8.2 Encryption at Rest and in Transit
+DynamoDB encrypts every table at rest by default (AWS-owned key, or optionally a customer-managed KMS key for organizations needing key-rotation/audit control over the encryption key itself — a meaningful distinction for SOX/PCI-DSS environments where "who can access the encryption key, and is that access logged" is itself an audit question). All API traffic is TLS-encrypted in transit. Neither of these is a design decision most schema work touches directly, but the **customer-managed-KMS-key** choice has real operational cost (key rotation policy, cross-account access grants for any Lambda/consumer needing decrypt access) that should be made deliberately for regulated financial data, not left at the default.
+
+### 8.3 VPC Endpoints — Keeping Traffic Off the Public Internet
+A **VPC Gateway Endpoint** for DynamoDB routes traffic from resources inside a VPC (Lambda functions, EC2/ECS workloads) to DynamoDB without traversing the public internet or requiring a NAT gateway — both a security posture improvement (traffic never leaves AWS's private network) and, incidentally, a cost optimization (NAT gateway per-GB data-processing charges are avoided). For a payments or ledger workload where the data-residency and network-exposure story matters to a security review, "does application traffic to the ledger table stay entirely within the VPC" is a standing architecture-review question, not an afterthought.
+
+### 8.4 Least-Privilege Table-Level and Action-Level Policies
+Beyond leading-key conditions, standard least-privilege discipline applies: a read-only reporting Lambda should hold `dynamodb:Query`/`GetItem` but not `PutItem`/`DeleteItem`/`UpdateItem`; a stream-processing consumer should hold `dynamodb:DescribeStream`/`GetRecords` scoped to the specific stream ARN, not table-wide access. This is the same least-privilege IAM discipline as every other AWS service, but worth stating explicitly because DynamoDB's single-table design pattern (§2.3) creates a natural temptation to grant one broad, table-wide policy to every consumer "since they're all touching the same table anyway" — precisely the temptation that should be resisted in favor of per-consumer, action-scoped policies.
+
+## 9. Scalability
+
+### 9.1 Adaptive Capacity as a Mitigation, Not a Design Substitute
+Adaptive capacity (§2.5) automatically shifts a fraction of a table's throughput toward partitions experiencing disproportionate traffic, reacting within minutes — genuinely useful for organic, moderate skew, but it has limits: it cannot manufacture capacity that doesn't exist in the table's overall provisioned ceiling, and it reacts with a lag, so a sudden, severe spike (a single key receiving 10x its normal traffic within seconds) can still throttle before adaptive capacity redistributes. The correct mental model, reinforced from §2.5: adaptive capacity narrows the blast radius of an imperfect key design, it does not make partition-key cardinality analysis (§7.1, the Production Example) optional.
+
+### 9.2 On-Demand as a Scalability Safety Valve for New/Volatile Access Patterns
+On-demand capacity mode removes the provisioned-throughput ceiling as a scaling concern entirely (billed per-request, scaling near-instantaneously to observed traffic) — a genuinely different scalability posture than provisioned-with-auto-scaling, which still has a reaction lag. For a new single-table schema whose real-world traffic distribution across partition keys isn't yet validated in production (exactly the situation the incident's table was in before the hot-partition problem surfaced), on-demand capacity removes throttling risk from key-design mistakes during the validation period, at a per-request cost premium — a deliberate, temporary trade favoring safety over cost efficiency until the access-pattern and cardinality assumptions are confirmed against real traffic. Module 28 (§2.3, §9) develops the full provisioned-vs-on-demand decision framework.
+
+### 9.3 Global Tables and Partition-Key Design's Cross-Region Consequence
+Global Tables (multi-region, active-active replication) inherit the base table's partition-key design — a hot-partition problem in a single-region table becomes a hot-partition problem replicated identically in every region a Global Table spans, since the underlying partitioning mechanism is unchanged by adding regions. This means partition-key cardinality analysis isn't just a single-region concern to revisit later when going multi-region — a key design flaw discovered only after a single-region table is promoted to a Global Table now requires the full new-table-plus-backfill migration (§Advanced Q3) executed across every region simultaneously, materially raising the cost of the same mistake.
+
+### 9.4 DAX as a Read-Scaling Layer, Scoped to This Module's Key-Design Lens
+DAX (fully covered in Module 28 §2.4, §9) caches eventually-consistent reads in front of a table — relevant here because a **well-designed** partition key (high cardinality, evenly distributed) is also a prerequisite for DAX getting a good cache-hit rate on genuinely hot, repeated key lookups; a poorly-designed key that causes application code to compensate with broad `Scan`-based queries (§2.2, §6) gets no benefit from DAX at all, since DAX accelerates key-based `GetItem`/`Query` reads, not `Scan`. Read-scaling investments like DAX only pay off once the underlying key design already supports efficient, targeted access patterns.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -149,6 +193,48 @@ graph TB
  **Why correct:** Diagnoses the single-key write hotspot and prescribes key-suffix write-sharding + a materialized atomic balance, with the read-side scatter-gather trade-off and shard-count tuning.
  **Common mistakes:** One partition key for a hot account (throttling); sharding writes but then scanning all shards on every balance read; no materialized balance so reads get expensive.
  **Follow-ups:** "How do you pick the shard count?" / "How do you compute the balance without scanning all shards every time?" / "How does a materialized balance stay consistent with sharded entries?"
+
+4. **Q: A regulator asks you to reconstruct the exact state of every account "as of" any point in the last seven years for an audit. Your single-table schema currently only stores current balances. How do you design for this without bolting on a separate audit system after the fact?**
+ **A:** Store balances as **derived, not primary** — the primary-source-of-truth is an **append-only ledger of immutable entries** (`PK: ACCOUNT#<id>, SK: ENTRY#<ISO8601-timestamp>#<entryId>`), each entry a delta plus metadata (who, what, why, correlation ID), never mutated or deleted once written; the current balance is a **materialized projection** (`SK: METADATA`) updated transactionally (`TransactWriteItems`) alongside each new entry so it never drifts from the ledger. "As of" reconstruction for any past timestamp becomes `Query(PK = ACCOUNT#<id>, SK <= ENTRY#<asOfTimestamp>)` summed — a range query the sort-key design directly supports, with no separate audit subsystem needed because the audit trail *is* the primary data model, not a bolt-on. Retention/cost for 7 years of entries is managed via time-partitioned sort-key prefixes enabling cheap archival export to S3 for entries past an active window, without breaking the "still queryable if needed" requirement. The Principal framing: build the immutable, timestamp-ordered ledger as the source of truth from day one — regulatory reconstructability is a schema-design decision made *before* the first write, not a feature retrofitted onto a mutable-current-state table after an auditor asks for it.
+ **Why correct:** Treats the ledger as the immutable primary source of truth with balance as a transactionally-maintained projection, and uses the sort key's natural ordering for point-in-time reconstruction.
+ **Common mistakes:** Storing only current balance and trying to reconstruct history from application logs after the fact; mutating ledger entries instead of appending; no transactional link between ledger entry and balance projection.
+ **Follow-ups:** "Why must the balance update be transactional with the ledger write?" / "How do you keep 7 years of entries queryable without the table growing unmanageably?" / "What happens if a correction is needed — do you ever edit a past entry?"
+
+5. **Q: A multi-tenant SaaS trading platform puts every tenant's positions in one single-table-designed table (`PK: TENANT#<id>#POSITION#<symbol>`). One large institutional tenant generates 200x the write volume of a typical tenant. Diagnose the risk and design around it, considering both performance and security isolation.**
+ **A:** Two distinct risks compound here. **Performance**: the large tenant's high write volume, even spread across many `symbol`-suffixed partition keys, can still dominate the table's adaptive-capacity redistribution budget, degrading other tenants' throughput during the large tenant's peak (a noisy-neighbor problem — DynamoDB's per-table throughput/adaptive-capacity is shared across all tenants co-located in one table). **Security/isolation**: a single shared table, even with correct `LeadingKeys` IAM conditions (§8.1) scoping each tenant's access to their own `TENANT#<id>#...` prefix, still means a large tenant's traffic pattern can operationally impact a small tenant's *availability* (throttling), which for some regulatory/contractual tenancy tiers (a large institutional client with an SLA) is an unacceptable blast-radius coupling regardless of data-access isolation being correctly enforced. Design: **tier-based table isolation** — small/standard tenants share a well-distributed single table (the noisy-neighbor risk among them is bounded by their comparable size); institutional/high-volume tenants above a defined threshold get their **own dedicated table** (still single-table-designed internally for their own entity types), isolating both their throughput profile and their blast radius from the shared pool entirely. The Principal framing: `LeadingKeys` solves *data* isolation; it does not solve *throughput/availability* isolation — a genuinely large-outlier tenant needs physical table separation, not just a partition-key prefix, once its scale materially threatens co-tenants' SLA.
+ **Why correct:** Separates data-access isolation (solved by `LeadingKeys`) from throughput/availability isolation (not solved by it), and prescribes tier-based dedicated-table isolation for outlier tenants.
+ **Common mistakes:** Assuming `LeadingKeys` IAM conditions alone provide full tenant isolation; not recognizing shared-table throughput as a noisy-neighbor vector; sizing capacity for the "average" tenant and being surprised by an outlier.
+ **Follow-ups:** "What threshold would trigger moving a tenant to a dedicated table?" / "Does adaptive capacity make shared-table noisy-neighbor risk acceptable?" / "How do you migrate one tenant out of a shared table without downtime?"
+
+6. **Q: An options-trading platform needs to query "all open orders for account X within the last 4 hours" as a hot, latency-critical path, and separately "all orders for account X in Q3" as a colder, less latency-sensitive compliance query. Design the partition/sort key structure and explain why one schema shouldn't try to serve both optimally.**
+ **A:** Both queries share `AccountId` as the natural grouping, so `PK: ACCOUNT#<id>` with `SK: ORDER#<ISO8601-timestamp>#<orderId>` supports both via range queries on the sort key (`SK between 'ORDER#<4hAgo>' and 'ORDER#<now>'` for the hot path; `SK between 'ORDER#2024-07-01' and 'ORDER#2024-09-30'` for the quarterly compliance query) — structurally, one key design *can* serve both, because both are sort-key range queries within the same partition. The real tension is **item lifecycle and hot-partition risk under a high-frequency trading account**: an actively-trading account can generate thousands of orders per day, meaning `PK: ACCOUNT#<id>` alone concentrates that account's entire order history growth onto one ever-growing partition — fine for the recent-orders hot path (naturally bounded, recent data is a small slice) but a partition-size/throughput risk for the compliance query scanning a full quarter of a hyperactive account's history. Mitigation: time-bucket the partition key itself for accounts crossing an activity threshold (`PK: ACCOUNT#<id>#2024-Q3`), trading a slightly more complex query (the compliance query now issues one `Query` per relevant quarter-bucket instead of one range query) for bounded partition size and throughput isolation between the hot recent-orders path and the cold historical-compliance path. The Principal framing: a single partition key *can* algebraically serve two access patterns via sort-key ranges, but "can" isn't "should" once one of those patterns risks unbounded partition growth for a subset of high-activity keys — time-bucketing the partition key trades query simplicity for the throughput isolation a naive single-partition design can't provide at the tail.
+ **Why correct:** Recognizes both queries can share a sort-key-range design in principle, but correctly identifies unbounded partition growth for high-activity accounts as the real constraint requiring time-bucketed partition keys.
+ **Common mistakes:** Assuming one partition-key design trivially serves both hot and cold access patterns with no downside; not considering partition-size growth for outlier high-frequency accounts; time-bucketing every account uniformly instead of only high-activity ones.
+ **Follow-ups:** "How do you decide the time-bucket granularity?" / "What happens to the hot-path query if it now needs to check two buckets near a boundary?" / "How would you detect which accounts need bucketing before it becomes a problem?"
+
+7. **Q: You're migrating a legacy double-entry-bookkeeping ledger from SQL Server to DynamoDB. Every financial transaction must post as exactly two balanced entries (a debit and a credit) atomically, or neither. Design the schema and write path.**
+ **A:** Model each ledger entry as its own item (`PK: ACCOUNT#<id>, SK: ENTRY#<timestamp>#<entryId>`) carrying `Amount`, `Direction` (`DEBIT`/`CREDIT`), and a shared `TransactionId` linking the paired entries. The write path uses `TransactWriteItems` with **both** entries (debit on account A, credit on account B) as `Put` operations in the **same transaction**, each with a `ConditionExpression: attribute_not_exists(PK)` keyed by `TransactionId`-derived sort key for idempotency (§Expert Q1) — guaranteeing both entries commit or neither does, satisfying the double-entry invariant atomically even though the two entries live under different partition keys (accounts A and B), which `TransactWriteItems` supports since it's not restricted to a single partition. Each account's running balance is a separately-maintained, transactionally-updated projection (`SK: METADATA`, `SET Balance = Balance + :delta` in the same transaction) so balance reads stay O(1) rather than requiring a sum over all entries on every read. Reconciliation (verifying the ledger's global debit/credit sum nets to zero) runs as a periodic batch process (via DynamoDB Streams feeding an aggregation pipeline, §Advanced Q6) rather than as a synchronous check on every write, since a global invariant across arbitrarily many accounts cannot be enforced by a single item-scoped conditional write. The Principal framing: `TransactWriteItems`' cross-partition atomicity is exactly what makes double-entry bookkeeping representable in DynamoDB at all — the debit and credit legs living on different accounts (different partition keys) would otherwise have no atomic guarantee linking them, and losing that atomicity for a ledger is a correctness failure, not a performance one.
+ **Why correct:** Uses `TransactWriteItems`' cross-partition atomicity for the debit/credit pair, keeps balance as a transactionally-updated projection, and correctly scopes global-invariant reconciliation to an asynchronous batch process rather than a per-write check.
+ **Common mistakes:** Writing debit and credit as two separate, non-transactional `PutItem` calls (risking one succeeding without the other); trying to enforce the global zero-sum invariant synchronously on every write; recomputing balance by summing all entries on every read instead of maintaining a projection.
+ **Follow-ups:** "Why can't you enforce the global zero-sum invariant with a conditional write?" / "What happens if the transaction partially fails — is DynamoDB really all-or-nothing here?" / "How would you detect a reconciliation break, and what would you do about it?"
+
+8. **Q: A GDPR/CCPA "right to erasure" request comes in for a customer whose data is scattered across a single-table design as `PK: CUSTOMER#<id>` (profile), `PK: ORDER#<id>` (orders referencing the customer), and a GSI keyed by customer email. Design the erasure process.**
+ **A:** Single-table design's co-location benefit (§2.3) becomes an erasure *complication*, not a simplification, once data about one logical subject is deliberately spread across multiple item types and a GSI for query-efficiency reasons. Process: (1) `Query(PK = CUSTOMER#<id>)` retrieves every item directly under that partition key — the profile and any customer-scoped orders modeled as `SK: ORDER#...` under the same PK — for direct deletion via `TransactWriteItems` (batched, since a single transaction caps at 100 items). (2) Items that reference the customer but live under a **different** partition key (an order modeled as `PK: ORDER#<id>` for independent order-level access, per Advanced Q2's alternative) must be found via the customer-scoped GSI or an application-maintained reverse-index item, then individually redacted/deleted — this is exactly why the schema design decision in Advanced Q2 (embed vs. separate-partition for order items) has a *downstream* GDPR-erasure cost that should be weighed at design time, not discovered at erasure time. (3) For data that must be **retained** for regulatory reasons (financial transaction records, typically exempt from erasure under retention-law carve-outs) — redact PII fields (name, email) in place via `UpdateItem` rather than deleting the item, preserving the immutable ledger entry's financial integrity while satisfying the erasure request's actual legal scope. (4) The GSI projecting customer email must be included in the redaction pass, since a stale GSI entry retaining PII after the base item is redacted is itself a compliance gap. The Principal framing: GDPR erasure is a schema-design-time consideration, not a query you write reactively — single-table design's "spread related data by access-pattern convenience" philosophy needs an explicit "can every item touching this subject be enumerated and reached" check built into the original access-pattern inventory (§Advanced Q10), because discovering at erasure time that a subject's data isn't fully enumerable is a compliance failure with regulatory consequences.
+ **Why correct:** Distinguishes deletable items (direct PK query) from cross-referenced items (requiring GSI/reverse-index lookup), correctly handles regulatory-retention-exempt records via redaction rather than deletion, and ties the finding back to upfront access-pattern design.
+ **Common mistakes:** Assuming `Query(PK=CUSTOMER#<id>)` alone finds every item about the customer; deleting financial records that are legally required to be retained instead of redacting PII fields; forgetting the GSI itself retains PII after base-item redaction.
+ **Follow-ups:** "How would you design the schema differently upfront to make erasure requests cheaper?" / "What do you do about backups/point-in-time-recovery snapshots that still contain the erased data?" / "How do you prove to an auditor that erasure was complete?"
+
+9. **Q: Nightly reconciliation compares your DynamoDB-based settlement table against an external clearing house's settlement file. Design the reconciliation process and the break-classification logic, considering DynamoDB-specific constraints (no native joins, eventual GSI consistency).**
+ **A:** Export the night's settlement items via a `Query` per counterparty/settlement-date partition (or, for a full-table comparison, a `Scan` — explicitly justified here as the rare, legitimate batch use case §6 flags, run during an off-peak maintenance window with dedicated capacity, not against production-serving capacity) and load both DynamoDB's view and the clearing house's file into a comparison engine (commonly an external, join-capable store — Athena over an S3 export, or a relational staging table — since DynamoDB itself cannot natively join two datasets). Classify breaks in three tiers, mirroring the recurring reconciliation pattern: (1) **auto-resolvable** — a timing difference where DynamoDB shows `PENDING` and the clearing file shows `SETTLED` for an item within the expected settlement-lag window, resolved by an automated status-update job; (2) **investigate** — amount or counterparty mismatches beyond a tolerance threshold, routed to an operations queue; (3) **manual** — anything not cleanly classified within the automated rules, requiring human review. A DynamoDB-specific wrinkle: if the reconciliation reads from a **GSI** rather than the base table (common, since the GSI is often keyed by settlement-date for this exact batch access pattern), the GSI's eventual consistency (§2.4) means a very-recently-updated base-table item might not yet be reflected in the GSI read — mitigated by running reconciliation with a deliberate time buffer (excluding the last few minutes of same-day activity from the comparison window) rather than assuming the GSI is instantaneously current. The Principal framing: reconciliation is required **regardless of** DynamoDB's own internal consistency guarantees, because the discrepancy source being checked for is external (the clearing house's independent record), not an internal replication-lag question — but the *implementation* of the reconciliation job still has to correctly account for DynamoDB-specific staleness (GSI propagation) to avoid manufacturing false breaks from its own read path rather than genuine settlement discrepancies.
+ **Why correct:** Correctly scopes the rare, justified `Scan` use case, proposes an external join-capable engine for comparison since DynamoDB can't join natively, classifies breaks into the standard three tiers, and flags the GSI-eventual-consistency false-break risk specific to DynamoDB.
+ **Common mistakes:** Trying to join two datasets within DynamoDB itself; treating every mismatch as requiring manual investigation instead of classifying auto-resolvable timing differences; reading from a GSI without accounting for propagation lag and generating false breaks close to the comparison cutoff.
+ **Follow-ups:** "Why not just always read from the base table to avoid the GSI-consistency issue?" / "How do you size the reconciliation time buffer?" / "What's the audit trail for an auto-resolved break?"
+
+10. **Q: As a Principal Engineer chairing an architecture review, a team proposes DynamoDB for a new core-banking ledger service specifically because "it scales infinitely and we won't have to worry about it." Evaluate this reasoning and describe what you'd actually want to see in the proposal.**
+ **A:** Push back on the framing immediately: this module's entire arc (the hot-partition incident, adaptive capacity as mitigation-not-substitute, §7.1's per-partition ceiling) directly refutes "scales infinitely, won't have to worry about it" — DynamoDB scales predictably **only when the partition-key design correctly anticipates the actual production access-pattern distribution**, which is a design discipline the team has to invest in, not a property that comes free with the engine choice. What I'd want to see in the proposal, as the actual bar for approval: (1) a documented access-pattern enumeration (§Advanced Q10) covering every query the ledger service needs, done *before* any key is chosen; (2) an explicit cardinality/skew analysis for the proposed partition key against realistic (not uniform-synthetic) production traffic projections, including known outlier accounts (§Expert Q5's institutional-tenant problem); (3) a stated idempotency and transactional-write strategy for the double-entry write path (§Expert Q7), since correctness under concurrent/retried writes is the actual hard problem for a ledger, not raw throughput; (4) a reconciliation design (§Expert Q9) proving the ledger's internal state can be verified against external truth, because "it's in DynamoDB so it's correct" is never a sufficient claim for money-movement systems; (5) an explicit answer to "what happens when we need a query pattern we didn't anticipate" (§Advanced Q5), given DynamoDB's comparatively high cost of schema evolution versus a relational alternative. If those five things are present and well-reasoned, DynamoDB may well be the right choice — the point of the review isn't to reject DynamoDB, it's to reject "scales infinitely, won't have to worry about it" as a justification, since that specific reasoning is the exact failure mode this entire module is about.
+ **Why correct:** Directly refutes the "infinite scaling, no design effort needed" framing using the module's own hot-partition/adaptive-capacity findings, and replaces it with a concrete, five-point bar a proposal must clear — access patterns, cardinality analysis, idempotency/transactional strategy, reconciliation, and schema-evolution cost — before approval.
+ **Common mistakes:** Either rubber-stamping DynamoDB because "AWS says it scales" or reflexively rejecting it in favor of a relational default without engaging with what the workload actually needs; not asking for the access-pattern enumeration as a concrete, reviewable artifact.
+ **Follow-ups:** "What would change your recommendation toward a relational database instead?" / "How do you hold a team accountable to the access-pattern enumeration after launch, when new features inevitably add new query needs?" / "What's your rollback plan if the DynamoDB schema proves wrong in production?"
 
 ---
 
@@ -230,9 +316,169 @@ await dynamoDbClient.TransactWriteItemsAsync(new TransactWriteItemsRequest
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-An e-commerce platform (/Advanced Q2) uses single-table design for its customer/order/line-item domain (co-queried entities), a GSI for the less latency-critical status-based reporting access pattern, and DynamoDB Streams for a native Outbox-pattern implementation with `TransactWriteItems` reserved specifically for genuinely necessary cross-item atomicity. The signature production incident — a low-cardinality `Status` partition key causing severe hot-partition throttling despite adequate aggregate provisioned capacity — is this module's central lesson: DynamoDB's scalability guarantee is conditional on correct partition-key design, not automatic; a poorly-chosen key can scale worse than a well-indexed relational table despite DynamoDB's "infinitely scalable" reputation. Principal-level guidance: require an explicit, documented access-pattern enumeration as the mandatory starting artifact for any new DynamoDB schema, before any key structure is chosen — the single highest-leverage practice preventing this module's entire class of design mistakes.
+### Scenario: A Multi-Tenant Payment Ledger & Account-Balance Service
+
+**Requirements**
+
+*Functional:* record every account debit/credit as an immutable ledger entry; maintain a real-time queryable current balance per account; support "all entries for account X in date range Y"; support multi-tenant isolation (each tenant is a bank/fintech client, each with many end-customer accounts); support double-entry atomicity (§Expert Q7); support point-in-time balance reconstruction for audit (§Expert Q4).
+
+*Non-functional:* single-digit-millisecond p99 read latency on balance lookups; no data loss (durability); strict tenant isolation (data-access and, for large tenants, throughput); predictable cost at scale (hundreds of tenants, tens of millions of accounts); auditable — every write traceable to a caller and correlation ID; regulatory retention of 7+ years.
+
+**Back-of-the-envelope:** 200 tenants, average 50,000 accounts/tenant = 10M accounts. Assume 5 ledger entries/account/day average (with a 200:1 skew for the largest institutional tenant, §Expert Q5) → 50M entries/day ≈ 580 writes/sec average, with observed peaks (month-end settlement) of 10x average ≈ 5,800 writes/sec. At ~1KB/entry this is a write-heavy, moderate-throughput workload — well within DynamoDB's single-partition ceiling *if* spread across a sufficiently high-cardinality key, but the 200:1 tenant skew and month-end burst are exactly the two risk factors (§Expert Q5, §9.2) this design must explicitly account for, not the raw throughput number, which alone is unremarkable.
+
+**Architecture**
+
+```mermaid
+graph TB
+    API[Ledger API<br/>ECS/Lambda] -->|TransactWriteItems| Ledger[(DynamoDB: Ledger Table<br/>single-table design)]
+    Ledger -->|DynamoDB Streams| Recon[Reconciliation Pipeline<br/>Lambda -> S3/Athena]
+    Ledger -->|DynamoDB Streams| Outbox[Outbox Consumer<br/>Lambda] -->|publish| Bus[EventBridge/SNS]
+    Ledger -.GSI: TenantDate.-> Reporting[Compliance Reporting<br/>batch/BI]
+    API -->|read balance| DAX[DAX cluster]
+    DAX -->|cache miss| Ledger
+    Ledger --> Backup[Point-in-Time Recovery<br/>+ S3 export for 7yr retention]
+```
+
+**Components:** the **Ledger API** is the only write path, enforcing idempotency and the debit/credit pairing (§Expert Q7); the **Ledger table** is single-table-designed (`PK: ACCOUNT#<id>`, `SK: ENTRY#<ts>#<id>` for entries, `SK: METADATA` for the balance projection); a **TenantDate GSI** (`PK: TENANT#<id>#<date>`) supports the tenant-scoped compliance-reporting access pattern without burdening the account-scoped hot path; **DynamoDB Streams** feeds both the reconciliation pipeline (§Expert Q9) and an Outbox-pattern event publisher (§Advanced Q6); **DAX** accelerates the read-heavy balance-lookup path, with strongly-consistent reads bypassing it for the read-after-write cases; **Point-in-Time Recovery + S3 export** satisfies the 7-year retention requirement without keeping cold historical data in the hot table indefinitely.
+
+**Database selection rationale:** DynamoDB is chosen over a relational alternative specifically because the access patterns are fully known upfront and stable (account-scoped entry writes/reads, tenant-scoped reporting), the predictable-latency guarantee matters for a customer-facing balance-check API, and the double-entry atomicity requirement is satisfiable via `TransactWriteItems` without needing arbitrary cross-entity joins — per §Advanced Q7's decision framework. A relational database remains the better choice if the reporting/compliance query needs were genuinely ad-hoc and evolving rather than the few well-defined patterns above.
+
+**Caching:** DAX in front of balance reads only (§9.4) — ledger-entry history reads are comparatively rare (audit/dispute-driven) and don't justify caching investment.
+
+**Messaging:** DynamoDB Streams → Lambda → EventBridge is the outbox mechanism (§Advanced Q6), decoupling downstream consumers (notification service, fraud-monitoring service) from the ledger write path.
+
+**Scaling:** provisioned capacity with auto-scaling for the well-forecasted baseline, with a scheduled capacity increase ahead of known month-end settlement bursts (§9.2, Module 28 §Advanced Q3); large-outlier tenants isolated to dedicated tables (§Expert Q5) once they cross a defined throughput threshold.
+
+**Failure handling:** conditional writes + idempotency keys (§Expert Q1) make retries safe; `TransactWriteItems` guarantees debit/credit atomicity; DLQ on the Streams-consuming Lambda for outbox-publish failures, with alerting on DLQ depth.
+
+**Monitoring:** per-partition-proxy write-skew (§7.1), `ThrottledRequests`, GSI propagation lag (§7.3) alerted specifically for the reporting GSI, DAX cache-hit rate, and reconciliation-break count/classification (§Expert Q9) as a business-correctness metric, not just an infrastructure one.
+
+**Trade-offs:** single-table design gains query efficiency for co-located entities at the cost of schema complexity and the erasure-request complication (§Expert Q8); DynamoDB's predictable latency is gained at the cost of upfront access-pattern rigidity relative to a relational alternative.
+
+## 13. Low-Level Design
+
+**Class diagram**
+
+```mermaid
+classDiagram
+    class LedgerService {
+        -ILedgerRepository repository
+        -IIdempotencyStore idempotencyStore
+        +PostTransactionAsync(PostTransactionCommand) Task~TransactionResult~
+        +GetBalanceAsync(accountId) Task~Balance~
+        +GetEntriesAsync(accountId, dateRange) Task~IEnumerable~LedgerEntry~~
+    }
+    class ILedgerRepository {
+        <<interface>>
+        +TransactWriteAsync(LedgerEntry debit, LedgerEntry credit) Task
+        +QueryEntriesAsync(accountId, SortKeyRange) Task~IEnumerable~LedgerEntry~~
+        +GetBalanceAsync(accountId, ConsistencyLevel) Task~Balance~
+    }
+    class DynamoDbLedgerRepository {
+        -IAmazonDynamoDB client
+        +TransactWriteAsync(...)
+        +QueryEntriesAsync(...)
+        +GetBalanceAsync(...)
+    }
+    class LedgerEntry {
+        +string AccountId
+        +string EntryId
+        +DateTime Timestamp
+        +decimal Amount
+        +Direction Direction
+        +string TransactionId
+        +int Version
+    }
+    class Balance {
+        +string AccountId
+        +decimal CurrentBalance
+        +int Version
+    }
+    class QueryStrategy {
+        <<interface>>
+        +BuildQuery(AccessPattern) QueryRequest
+    }
+    ILedgerRepository <|.. DynamoDbLedgerRepository
+    LedgerService --> ILedgerRepository
+    DynamoDbLedgerRepository --> QueryStrategy
+    LedgerService --> LedgerEntry
+    LedgerService --> Balance
+```
+
+**Sequence diagram — PostTransaction (double-entry, idempotent)**
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant LedgerService
+    participant IdempotencyStore
+    participant DynamoDB
+
+    Client->>LedgerService: PostTransaction(idempotencyKey, debitAccount, creditAccount, amount)
+    LedgerService->>DynamoDB: TransactWriteItems([Put debit (cond: not exists), Put credit (cond: not exists), Update debitBalance, Update creditBalance])
+    alt success
+        DynamoDB-->>LedgerService: 200 OK
+        LedgerService-->>Client: TransactionResult(Success)
+    else ConditionalCheckFailed (duplicate)
+        DynamoDB-->>LedgerService: TransactionCanceledException
+        LedgerService->>DynamoDB: GetItem(idempotencyKey)
+        DynamoDB-->>LedgerService: prior result
+        LedgerService-->>Client: TransactionResult(prior result, deduplicated)
+    end
+```
+
+**Design patterns used:** **Repository** (`ILedgerRepository` isolates DynamoDB-specific query shaping from `LedgerService`); **Strategy** (`QueryStrategy` selects base-table vs. GSI query construction per access pattern, so adding a new GSI-backed pattern doesn't touch `LedgerService`); **Unit of Work** (`TransactWriteItems` call groups the debit, credit, and both balance updates as one atomic unit); **Idempotent Receiver** (the idempotency-key conditional write pattern, §Expert Q1).
+
+**SOLID mapping:** SRP — `LedgerService` orchestrates business rules, `DynamoDbLedgerRepository` owns DynamoDB API shape, `QueryStrategy` owns per-access-pattern query construction; OCP — a new access pattern is added as a new `QueryStrategy` implementation without modifying `LedgerService`; LSP — any `ILedgerRepository` implementation (DynamoDB today, conceivably a relational adapter later) is substitutable behind the interface; ISP — `ILedgerRepository` exposes only the operations `LedgerService` actually needs, not a generic CRUD-everything interface; DIP — `LedgerService` depends on the `ILedgerRepository` abstraction, not the concrete AWS SDK client.
+
+**Concurrency/thread safety:** the `Version` attribute on `Balance` combined with `ConditionExpression: "Version = :expectedVersion"` on the balance `Update` implements **optimistic concurrency control** — a concurrent balance update racing against another is rejected (`ConditionalCheckFailedException`) rather than silently lost, forcing the caller to retry with the freshly-read version; this composes with, but is distinct from, the idempotency-key check (idempotency prevents the *same* logical operation from double-applying; optimistic locking prevents two *different* concurrent operations from lost-update-clobbering each other's balance change).
+
+## 14. Production Debugging
+
+**Incident:** A trading-settlement reconciliation dashboard, reading from the `TenantDate` GSI, began showing settlement counts that periodically **undercounted** actual settled trades by 3-8% during the last 15 minutes of each trading day's batch window, self-correcting by the next morning's report.
+
+**Investigation:** CloudWatch's `ReplicationLatency` metric for the `TenantDate` GSI (a GSI-specific metric distinct from base-table metrics) showed sustained elevation to 20-45 seconds specifically during the final settlement-batch window, versus a normal sub-second baseline. Cross-referencing with `ConsumedWriteCapacityUnits` on the GSI (not the base table) revealed the GSI's own partition structure — keyed by `TENANT#<id>#<date>` — was concentrating the entire day's final settlement burst onto a small number of `date`-suffixed partitions (every settlement for every tenant, on the same calendar day, landing on the same GSI partition), even though the base table's `ACCOUNT#<id>`-keyed writes were well-distributed. This is a GSI-specific hot partition (§7.3) invisible to base-table monitoring.
+
+**Tools:** CloudWatch GSI-dimensioned metrics (`ReplicationLatency`, per-index `ConsumedWriteCapacityUnits`/`ThrottledRequests`, which are separate CloudWatch dimensions from the base table's own metrics and easy to overlook if dashboards only surface table-level aggregates); AWS X-Ray traces confirmed the dashboard's read path (`Query` against the GSI) was returning correctly per its own consistency model — the data simply hadn't propagated to the GSI yet at read time.
+
+**Fix:** short-term, added an explicit `date`-hour suffix to the GSI's partition key (`TENANT#<id>#<date>#<hourBucket>`) to spread the end-of-day burst across more GSI partitions, reducing propagation lag back to sub-5-second; longer-term, the dashboard's "final" end-of-day figure was changed to read from the **base table** directly (via a scheduled batch `Query` per tenant, tolerable for a once-daily report) rather than the latency-sensitive GSI, reserving the GSI for its originally-intended near-real-time (not final-reconciliation-grade) use case.
+
+**Prevention:** added GSI-specific `ReplicationLatency` and per-index throttling to the standing DynamoDB monitoring checklist (§7.3, §Advanced Q8) as a distinct alerting dimension from base-table metrics — the standing lesson, consistent with this module's central theme, is that a GSI is its **own** independently-partitioned structure with its own hot-partition risk, and monitoring must treat it as such rather than assuming base-table health implies GSI health.
+
+## 15. Architecture Decision
+
+**Options considered for the ledger/account-balance data store:**
+
+| | DynamoDB single-table | DynamoDB multi-table | Relational (SQL Server/PostgreSQL) |
+|---|---|---|---|
+| **Advantages** | One query for co-located entities (account + entries); predictable latency at scale; native TTL/Streams for outbox | Simpler mental model per entity type; independent scaling/capacity per entity type | Native joins for genuinely ad-hoc reporting; mature tooling/DBA familiarity; native multi-row ACID transactions without WCU-cost doubling |
+| **Disadvantages** | Steep schema-design learning curve; hard to reverse key mistakes; GDPR-erasure complexity (§Expert Q8) | Loses single-query co-location benefit; more round-trips for related-entity fetches | Query latency less predictable at very high scale; vertical-scaling ceiling without sharding investment |
+| **Cost** | Pay-per-throughput, can be cheaper at predictable steady scale (provisioned) | Similar to single-table, marginally higher due to duplicated capacity overhead per table | License/instance cost (SQL Server) or instance+storage (managed PostgreSQL); read-replica cost for scaling reads |
+| **Complexity** | High upfront (access-pattern enumeration mandatory) | Moderate | Low upfront, but reporting-query complexity grows organically over time |
+| **Maintainability** | High once correctly modeled; low if key design was wrong (near-full-migration to fix) | Moderate | High — schema evolution via `ALTER TABLE`/migrations is well-understood tooling |
+| **Scalability** | Effectively unbounded *given correct key design* | Same, per-table | Requires explicit sharding/read-replica investment beyond a single primary's ceiling |
+
+**Recommendation:** DynamoDB single-table design, for this specific ledger service, given: access patterns are fully known and stable (account-scoped entry read/write, tenant-scoped reporting via GSI); the double-entry atomicity requirement is satisfiable via `TransactWriteItems`; and the predictable-latency guarantee directly serves the customer-facing balance-check SLA. The recommendation is explicitly **conditional**, not universal — per §Advanced Q7's framework, a service whose query needs are genuinely exploratory/ad-hoc (an internal, evolving BI/analytics need over the same ledger data) should read from a **separate**, relationally-modeled or warehouse-based replica fed by DynamoDB Streams, rather than trying to force that access pattern onto the operational ledger table itself.
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** a correctly-modeled ledger service directly enables customer-facing balance-check latency SLAs and regulatory audit-readiness; a poorly-modeled one (the hot-partition-style mistake, generalized to a money-movement system) risks both availability incidents during peak settlement windows and — more severely — audit findings if reconstruction/reconciliation capability wasn't designed in from the start (§Expert Q4, §Expert Q9).
+
+**Engineering trade-offs:** single-table design's query-efficiency gain is explicitly traded against schema-evolution rigidity and erasure-request complexity (§Expert Q8) — a trade-off worth making when access patterns are genuinely stable, and worth explicitly flagging as a risk in the design review when they aren't.
+
+**Technical leadership:** the access-pattern-enumeration artifact (§Advanced Q10) is the single highest-leverage practice this module identifies — as a Principal Engineer, making this a **non-negotiable, reviewed gate** before any new DynamoDB table's key structure is chosen is a higher-leverage intervention than reviewing any individual schema after the fact, because it structurally prevents the entire class of hot-partition and migration-cost mistakes this module's incidents center on.
+
+**Cross-team communication:** the reconciliation pipeline (§Expert Q9, §14) and its break-classification tiers should be a **shared artifact** between engineering and the operations/finance team consuming break reports — a Principal Engineer's job includes ensuring the technical break-classification logic maps to categories operations actually understands and can act on, not just categories convenient for the engineering team to compute.
+
+**Architecture governance:** require dedicated-table isolation criteria (§Expert Q5) to be a documented, objective threshold (e.g., "tenant throughput exceeding N% of shared-table capacity triggers migration to a dedicated table") rather than an ad-hoc, reactive decision made only after a noisy-neighbor incident already occurred.
+
+**Cost optimization:** provisioned capacity with scheduled scaling ahead of known settlement bursts (§9.2) is materially cheaper than on-demand at this workload's steady, forecastable volume — but only once the access-pattern and cardinality assumptions are validated; using on-demand during the initial validation period (§9.2) is the correct, deliberate cost-for-safety trade during that specific window, not a permanent choice.
+
+**Risk analysis:** the largest tail risk this module's incidents point to isn't average-case throughput — it's the **outlier**: the single hot key (§Production Example), the single 200x-larger tenant (§Expert Q5), the single hyperactive trading account (§Expert Q6). A Principal Engineer's risk review for any DynamoDB schema should explicitly ask "what does the 99.9th-percentile key look like," not just "what does the average key look like."
+
+**Long-term maintainability:** document every access pattern the schema was designed for, explicitly, alongside the schema itself — the single most common cause of expensive future migrations (§Advanced Q3) is a schema whose original access-pattern reasoning wasn't recorded, forcing a future engineer to reverse-engineer intent from key names alone before they can safely evolve it.
 
 ## 18. Revision
 **Key takeaways**: Every DynamoDB query requires a partition key — access patterns must be known and designed for upfront, unlike relational/MongoDB's more flexible ad-hoc querying. Query (partition-key-scoped, efficient) vs. Scan (full-table, expensive, cost-visible in billing) is the central performance/cost distinction. Single-table design co-locates multiple entity types under carefully-designed key prefixes to enable one-query retrieval of related data. GSIs add alternate access patterns with eventual consistency; LSIs share the base partition key with strong consistency but must be defined upfront, unchangeable later. Partition-key cardinality/distribution analysis is the single highest-leverage design practice — a low-cardinality or access-skewed key creates hot partitions no amount of aggregate provisioned capacity can fix.

@@ -2,11 +2,180 @@
 
 > Domain: Performance Engineering | Level: Beginner → Expert | Prerequisite: All prior Performance Engineering modules (101–103) — this is the synthesizing capstone closing the `29-Performance-Engineering` domain, Modules 101–104; [[../27-Observability/02-SLOs-SLIs-ErrorBudgets-AlertingDesign]] (error budgets this module's latency budgets directly parallel)
 >
-> **Note on format:** Per the standing user preference (see `CLAUDE.md`), this module covers only the 40 most-frequently-asked interview questions (10 per level), without the full 15-section deep-dive template.
+> **Note on format:** Originally authored under the leaner Q&A-only format (see `CLAUDE.md`'s 2026-07-18 decision history). Upgraded to the current full-template standard — Fundamentals through Revision — per a later review pass; the original 40 Q&A below are preserved verbatim.
 
 ---
 
-## Interview Questions
+## 1. Fundamentals
+
+**What:** Holistic performance engineering is the organizational discipline of treating "this system is fast enough" as a continuously-verified, governed claim rather than a one-time achievement — allocating an explicit **latency budget** across every component on a request's critical path, gating every change against that budget in CI/CD, and monitoring production continuously to catch both sudden regressions and slow, cumulative drift before either breaches a service's latency SLO.
+
+**Why:** Modules 101-103 established the individual tools (profiling, load testing, caching discipline) a team uses to make one thing fast. None of those tools, applied in isolation and once, prevent a *different* team's unrelated change from silently consuming the latency margin the first team's optimization created. Without an explicit, allocated, and enforced budget, "fast enough" degrades one small, individually-reasonable change at a time — the "death by a thousand cuts" pattern — until a system that was comfortably within its SLO six months ago is now chronically breaching it, with no single change anyone can point to as "the regression."
+
+**When:** Any system with a customer-facing or contractually-significant latency requirement (an authorization API, a trading order-entry path, a checkout flow) needs an explicit latency budget from the point multiple independently-deployed services sit on the same critical path — a single-service system can often get by with a simpler, local SLO; the budget-allocation problem specifically emerges once ownership of the end-to-end latency is distributed across teams who can't see each other's contribution without a shared framework.
+
+**How (30,000-ft view):**
+```
+Overall target (e.g., p99 < 500ms)
+ │
+ ├─ allocate ──▶ Service A budget: 150ms  (gateway/auth)
+ ├─ allocate ──▶ Service B budget: 200ms  (core business logic)
+ ├─ allocate ──▶ Service C budget: 100ms  (downstream dependency)
+ └─ allocate ──▶ Network/serialization overhead: 50ms
+
+ Each service: CI gate compares actual measured latency
+ against its own allocated budget on every change.
+ Production: continuous monitoring + trend-aware alerting
+ catches both sudden regression and slow cumulative drift.
+```
+
+---
+
+## 2. Deep Dive
+
+### 2.1 Latency Budget as the Latency Analogue of an Error Budget
+An SLO's error budget (Module 27 §2) states "we may fail at most X% of requests before we must stop shipping and focus on reliability." A latency budget is structurally identical but for a different dimension: "each component on this critical path may consume at most Y milliseconds before the end-to-end SLO is at risk." The two are genuinely independent — a request can succeed (no error) while still consuming its full latency budget and breaching the latency SLO, and a service can be comfortably within its error budget while simultaneously blowing its latency budget. Treating "reliable" and "fast" as one combined health signal misses real, independently-occurring failure modes each framework is specifically built to catch.
+
+### 2.2 Budget Ownership — a Recursive, Caller-Owns-Callee Model
+The service initiating a request chain (typically the edge/gateway) owns the overall, end-to-end budget and is responsible for allocating a sub-budget to each service it calls directly. Each downstream service then owns its own allocated sub-budget, and if it itself calls further services, recursively sub-allocates a portion of what it was given. This mirrors how a deadline propagates through a call chain (gRPC deadlines, `HttpClient` cancellation tokens carrying a remaining-time budget) — the mechanism isn't just organizational bookkeeping, it can be implemented literally as a propagated, shrinking deadline value in the request context, so a deeply-nested service can make an informed decision (fail fast, skip an optional enrichment call) when it observes its remaining budget is already exhausted before it even starts work.
+
+### 2.3 The Critical Path Determines Where Budgeting Matters
+Only work on the request's critical path — the sequence of operations that must complete sequentially before a response can be returned — affects end-to-end latency. Distributed tracing (spans, parent-child relationships) is the tool that reveals which operations are actually sequential/blocking versus parallel or post-response (fire-and-forget logging, an async event publish that doesn't block the response). Budgeting effort spent on a component not on the critical path — however genuinely, locally slow that component is — produces zero end-to-end latency benefit; this is the single most common wasted-effort pattern in ad hoc, non-budget-governed performance work.
+
+### 2.4 Micro- vs. Macro-Benchmarking, and Where Each Fits the Budget Model
+A micro-benchmark (BenchmarkDotNet-style, isolating one function) measures a component's own contribution in isolation — useful for verifying a specific optimization's effect, but insufficient on its own to confirm end-to-end budget compliance, because a component's interaction with everything else on the critical path (contention, serialization, an added network hop) can dominate over its own isolated execution time. A macro/end-to-end benchmark, run against the full request path via a realistic load test (Module 102), is what actually validates budget compliance — the two are complementary, not substitutes: micro-benchmarks localize a regression once macro-benchmarking or production tracing has flagged that a service is exceeding its allocated share.
+
+### 2.5 The Gradual-Drift Detection Problem — Why Single-Change Comparison Isn't Enough
+A CI gate comparing each individual change's benchmark result against the immediately-preceding baseline catches a sharp, single-change regression reliably, but is structurally blind to many small, individually-negligible regressions accumulating over dozens of unrelated changes — each comparison passes because each *individual* delta is within noise tolerance, while the cumulative trend over weeks quietly consumes the entire budget. Detecting this requires a second, distinct mechanism: a longer-window trend analysis (comparing this week's p99 against a rolling multi-week baseline, not just the immediately-prior commit), because the two detection mechanisms catch genuinely different failure shapes and neither substitutes for the other.
+
+### 2.6 Performance Debt as a First-Class, Tracked Liability
+Not every measured, sub-budget-threatening inefficiency gets fixed the moment it's found — an unindexed query accepted for expediency during a deadline crunch, a synchronous call flagged as "should be async, later" — and treating each such item as an informal, undocumented "someday" note reliably means it never gets prioritized against feature work until it causes a visible incident. Mirroring vulnerability-management practice (a tracked backlog, severity-based prioritization, an explicit remediation SLA), a performance-debt backlog with the same rigor converts an invisible, silently-compounding liability into a visible, governed one — critical since performance debt's cost, like most debt, tends to grow disproportionately with scale rather than remain flat.
+
+---
+
+## 3. Visual Architecture
+
+```mermaid
+graph TB
+    subgraph "Latency budget allocation across a critical path"
+        Edge["Edge/Gateway<br/>budget: 500ms total"] --> Auth["Auth Service<br/>allocated: 50ms"]
+        Edge --> Core["Core Order Service<br/>allocated: 250ms"]
+        Core --> Pricing["Pricing Service<br/>allocated: 100ms"]
+        Core --> Inventory["Inventory Service<br/>allocated: 80ms"]
+        Edge --> Net["Network + serialization<br/>allocated: 20ms"]
+    end
+```
+
+```mermaid
+sequenceDiagram
+    participant CI as CI Pipeline
+    participant Bench as Micro-benchmark gate
+    participant Load as Load-test gate (macro)
+    participant Cache as Cache-health gate
+
+    Note over CI: Every PR touching a hot-path service
+    CI->>Bench: Run BenchmarkDotNet on changed hot-path code
+    Bench-->>CI: Compare vs. tracked baseline
+    CI->>Load: Deploy to canary, run load test
+    Load-->>CI: Compare p99 vs. SLO + baseline
+    CI->>Cache: Verify hit-rate/invalidation-liveness unchanged
+    Cache-->>CI: Pass/fail
+    Note over CI: Merge blocked if ANY gate fails
+```
+
+```mermaid
+graph LR
+    subgraph "Death by a thousand cuts — invisible to single-change comparison"
+        C1[Change 1: +2ms] --> P1[vs. baseline: PASS]
+        C2[Change 2: +1ms] --> P2[vs. baseline: PASS]
+        C3["...50 more changes,<br/>each individually PASS"] --> P3[vs. baseline: PASS]
+        P1 & P2 & P3 --> Trend["Rolling trend over 3 months:<br/>+140ms cumulative — SLO breached"]
+    end
+```
+
+---
+
+## 4. Production Example
+
+**Problem:** A trade-settlement instruction API — the service that receives a confirmed trade and initiates the downstream settlement workflow — had a contractually-referenced p99 latency SLO of 800ms (feeding into a broader, time-boxed same-day settlement cutoff window shared with several downstream counterparties). Twelve months after the SLO was established and comfortably met at launch, p99 latency had crept to 1,100ms, with no single incident, alert, or postmortem ever having flagged the service as degraded along the way.
+
+**Architecture:** The settlement API sat behind an API gateway, called a compliance-check service, a counterparty-reference-data service, and finally wrote to the settlement ledger — four hops on the critical path, each independently owned by a different team, each individually passing its own team's local, single-change CI regression gate on every deploy.
+
+**Implementation:** Investigation (triggered only after a downstream counterparty formally flagged missed cutoff windows, not by any internal alert) traced the 300ms cumulative growth via distributed tracing spans across the four hops: compliance-check had grown from 80ms to 140ms (a series of individually-small validation rules added incrementally over the year, each shipped with its own passing benchmark against its own immediately-prior baseline); counterparty-reference-data had grown from 120ms to 200ms (a growing reference-data table with no corresponding index maintenance as row count scaled); and the remaining ~80ms was attributable to an accumulation of smaller contributions across the gateway and ledger-write hops, none individually alarming.
+
+**Trade-offs:** No single team had done anything an in-isolation code review would have flagged — each change's own local benchmark comparison was genuinely, correctly passing. The organization had never established a shared, end-to-end latency budget allocated across the four teams, nor a longer-window trend-based alert on the aggregate — only per-service, per-change comparisons existed, which is precisely the detection gap this module's §2.5 identifies structurally.
+
+**Lessons learned:** The remediation had two parts, matching the two-layer detection gap. First, tactical: the compliance-check service's incrementally-added validation rules were profiled and two of the costliest were parallelized (previously run sequentially with no dependency between them); the reference-data table got the missing index. This alone brought p99 back under 800ms. Second, and more consequential long-term: the organization established an explicit, owned, allocated latency budget across the four services (gateway 50ms, compliance-check 150ms, reference-data 150ms, ledger-write 250ms, network/serialization 200ms — deliberately generous relative to current measured baselines, to allow real headroom rather than a knife-edge allocation) with a shared dashboard surfacing each service's current consumption against its allocation, plus a rolling 90-day trend alert on the aggregate end-to-end p99 specifically designed to catch the next "death by a thousand cuts" pattern before a counterparty had to flag it externally again.
+
+---
+
+## 5. Best Practices
+- Allocate the latency budget from measured, current per-component contribution and realistic optimization headroom — never split it evenly by component count.
+- Give the request-initiating service explicit ownership of the overall budget, and each downstream service explicit ownership of its own allocated sub-budget — ambiguous, shared ownership means nobody is accountable when the aggregate is violated.
+- Run both a single-change CI gate (catches sharp regressions) and a longer-window trend alert (catches gradual drift) — neither substitutes for the other.
+- Confirm a component is genuinely on the request's critical path (via tracing) before spending optimization effort on it.
+- Track performance debt in a prioritized, owned backlog with an explicit remediation SLA, mirroring vulnerability management.
+- Require a lightweight, explicit performance-impact assessment during design/code review for any change touching a budget-constrained critical path — catch a budget-consuming design decision before implementation, not only via a post-implementation load test.
+- Communicate performance trade-offs to non-technical stakeholders in terms of measured business impact (conversion, cutoff-window compliance), not abstract technical mechanism.
+
+## 6. Anti-patterns
+- Treating "we ran a load test once" as equivalent to having an ongoing performance-engineering practice.
+- Comparing every change only against its immediately-preceding baseline, with no longer-window trend detection — the exact gap the production example exposed.
+- Optimizing a component's own local latency without confirming via tracing that it's actually on the critical path.
+- Leaving latency-budget ownership ambiguous across a multi-service critical path.
+- Deferring all performance consideration to a post-implementation load test, missing the cheaper opportunity to catch a budget-consuming design decision at review time.
+- Treating a low error rate as evidence of acceptable latency — "successful but slow" is a distinct, independently-trackable failure mode.
+- Letting performance debt accumulate informally, addressed only reactively after a visible incident.
+
+---
+
+## 7. Performance Engineering
+
+**CPU/GC:** A latency-budget violation attributable to GC pauses (Gen2 collections on a hot path) requires the same allocation-reduction discipline as any other hot-path optimization (Module 101) — but the budget framework's specific contribution is deciding *how much* GC-pause latency a given service can tolerate before it consumes an unacceptable share of its allocation, turning "GC pauses are bad" into a concrete, measurable threshold.
+
+**Memory:** A service's allocated latency budget should account for tail behavior under memory pressure, not just steady-state average — a service that's fast at p50 but spikes at p99 specifically during periodic large-object-heap collections needs its budget validated against p99, exactly the percentile the SLO itself is defined against, never a comforting but misleading average.
+
+**Latency:** The percentile chosen for a budget (p50 vs. p95 vs. p99) materially changes what "within budget" means — a service can be comfortably within budget at p50 while a meaningful fraction of its slowest requests already breach it; budgets should be defined and enforced against the same percentile the end-to-end SLO itself uses, to avoid a false sense of compliance.
+
+**Throughput:** A latency budget calibrated at a given traffic level can silently become invalid at a higher one if any component's latency is throughput-sensitive (queueing effects, contention) — the budget itself needs periodic re-validation under current, not historical, traffic volume (directly Module 102's load-testing discipline, applied on a recurring cadence rather than once).
+
+**Benchmarking:** Micro-benchmark hot-path code changes on every PR; macro/end-to-end benchmark (a load test against a canary) on every release candidate — the two-tier cadence balances catching a regression early and cheaply against the cost of running a full load test on every single commit.
+
+**Caching:** A service's effective, realistic latency budget compliance is directly a function of its current cache hit rate (Module 103) — a silent hit-rate degradation can cause a latency-budget violation with zero code change, which is why cache-health monitoring belongs inside the same regression-prevention pipeline as latency-budget monitoring, not a separate, disconnected concern.
+
+---
+
+## 8. Security
+
+**Threats:** Latency-variance side-channels — an attacker able to measure response-time differences across requests can sometimes infer information the response body itself doesn't reveal (e.g., whether a specific username exists, based on a cache hit's faster response versus a cache miss's slower database round trip; or whether a specific validation branch executed based on subtly different processing time). A latency-budget/regression-monitoring system that publishes granular, per-component timing data externally (verbose `Server-Timing` headers, detailed error responses including internal latency breakdowns) can itself become reconnaissance data for an attacker profiling the system's internal architecture.
+
+**Mitigations:** Avoid exposing granular, per-component timing information to external, unauthenticated callers — aggregate or omit detailed timing headers on internet-facing endpoints, reserving them for internal, authenticated observability tooling only. For genuinely sensitive existence/validation checks (login, account lookup), apply constant-time or uniform-latency handling regardless of the internal code path taken, specifically to close the timing side-channel. Rate-limit and authenticate access to any internal performance-monitoring/tracing dashboard, since it can reveal architectural detail (service topology, relative call volumes, dependency structure) useful to an attacker planning a more targeted attack.
+
+**OWASP mapping:** API8:2023 Security Misconfiguration (verbose timing/debug information exposed externally); a latency side-channel doesn't map cleanly to a single OWASP category but is a recognized instance of information disclosure through side channels, relevant wherever an authentication or authorization decision's timing could vary observably by outcome.
+
+**AuthN/AuthZ:** Internal performance-monitoring and tracing tooling (Jaeger/Zipkin UIs, an APM dashboard) should be access-controlled and never exposed on a public network segment — the same architectural-disclosure risk applies to anyone able to view trace data, not just an external attacker.
+
+**Secrets:** Trace spans and log correlation IDs should never carry sensitive payload data (account numbers, PII) directly in span attributes/tags, since tracing infrastructure is often retained longer and accessed more broadly than the primary application's own data stores.
+
+**Encryption:** Trace and metrics data in transit to the observability backend should be encrypted (TLS) exactly as any other telemetry data, consistent with the observability-domain's own established practice.
+
+---
+
+## 9. Scalability
+
+**Horizontal:** A latency-budget governance system itself (the shared dashboard, the CI gates) must scale with the number of services and teams adopting it — a platform-provisioned, self-service registration model (a service declares its own budget allocation via a config file consumed by the shared tooling) scales far better than a centrally-maintained spreadsheet requiring manual updates as new services are added.
+
+**Vertical:** Not directly applicable to the governance framework itself; individual services' own vertical-scaling decisions are evaluated against their allocated budget the same way any other architectural choice is.
+
+**HA/DR:** The regression-prevention CI pipeline and the production trend-monitoring system are themselves dependencies the organization now relies on for correctness assurance — an outage or silent failure in either (a benchmark-comparison service down, a trend-alerting pipeline's data source stale) removes the safety net without removing the false confidence that it's still working, requiring the identical liveness-canary discipline established for other verification infrastructure in this course.
+
+**CAP/replication:** Not directly applicable to latency-budget governance itself, though the underlying services it governs are subject to the same CAP trade-offs (Module 103 §9) already established — a budget allocation should account for the latency cost a chosen consistency model (e.g., synchronous multi-region replication) structurally imposes, rather than being set independently of that architectural choice.
+
+**Load balancing:** Latency-budget compliance should be measured per-instance and aggregated, not only as a fleet-wide average — an unevenly-loaded fleet (a hot-spotted partition, an unbalanced load-balancing algorithm) can show acceptable aggregate latency while a subset of requests routed to an overloaded instance silently breach budget, invisible in an averaged view.
+
+---
+
+## 10. Interview Questions
 
 ### Basic (10)
 

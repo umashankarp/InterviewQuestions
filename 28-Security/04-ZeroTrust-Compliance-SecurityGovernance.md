@@ -1,12 +1,157 @@
 # Module 100 — Security: Zero Trust Architecture, Compliance & Security Governance at Scale (Capstone)
 
-> Domain: Security | Level: Beginner → Expert | Prerequisite: All prior Security modules (97–99) — capstone closing the `28-Security` domain, Modules 97–100.
->
-> **Note on format:** Per explicit user request, this module covers only the 40 most-frequently-asked interview questions (10 per level), without the full 15-section deep-dive template used elsewhere in this course.
+> Domain: Security | Level: Beginner → Expert | Prerequisite: [[01-AppSecFundamentals-OWASPTop10-SecureCoding-ThreatModeling]] (Zero Trust's per-request authorization checks are this module's architectural generalization of that module's negative-authorization test discipline), [[02-Cryptography-Encryption-Hashing-Signing-KeyManagement]] (mTLS, workload identity, and encryption-in-transit/at-rest all depend on that module's key-management and certificate-lifecycle mechanics), [[03-SecurityTesting-SAST-DAST-SCA-Fuzzing-PenetrationTesting-VulnerabilityManagement]] (the "declared coverage ≠ actual coverage" finding that module established for security tooling is this module's central recurring risk, now applied to compliance controls and Zero Trust enforcement themselves) — capstone closing the `28-Security` domain, Modules 97–100.
 
 ---
 
-## Interview Questions
+## 1. Fundamentals
+
+**What**: **Zero Trust** is a security architecture model built on one governing principle — "never trust, always verify" — in which no user, device, workload, or network location is granted implicit trust by virtue of position (being "inside" the corporate network, on a previously-authenticated VPN, or behind a firewall). Every request is authenticated, authorized, and encrypted on its own merits, continuously, regardless of origin. **Compliance** is the practice of demonstrating, to an independent auditor or regulator, that a defined set of controls (NIST 800-207 for Zero Trust itself, PCI-DSS for cardholder data, SOC 2 for service-organization controls, GDPR for personal-data handling, SOX for financial-reporting integrity) are both designed correctly and operating effectively. **Security governance** is the organizational layer that makes either of the above durable at scale — policy ownership, exception management, audit evidence, and the standing verification that a declared control is an *actually enforced* one, not merely a configured or documented one.
+
+**Why it exists**: The perimeter model ("trust everything inside the firewall") assumed a bounded, defensible network edge — an assumption cloud computing, remote work, SaaS, and third-party API integration each independently dissolved. A single compromised laptop, leaked credential, or over-permissioned service account inside a perimeter-trusted network historically gave an attacker free lateral movement to everything else on that network — this is precisely the failure mode behind the 2013 Target breach (an HVAC vendor's stolen credentials reached point-of-sale systems because the internal network was flatly trusted) and the 2020 SolarWinds compromise (a trusted software-update channel became a lateral-movement vector across thousands of "inside the perimeter" enterprise and government networks). Compliance frameworks exist because financial regulators, card networks, and enterprise customers need externally-verifiable evidence — not a vendor's self-attestation — that a firm's controls are real. Governance exists because neither Zero Trust nor compliance is self-sustaining: a policy engine misconfigured once, or a control that passed its audit a year ago and has silently drifted since, produces exactly the same blast radius as never having built the control at all.
+
+**When it matters**: Zero Trust matters most for organizations with a large, heterogeneous access surface — hybrid cloud, remote workforces, contractor/third-party access, microservices with many internal service-to-service calls — where a perimeter boundary no longer maps to a meaningful trust boundary. Compliance frameworks apply based on data handled and jurisdiction: PCI-DSS for any organization storing, processing, or transmitting cardholder data; SOX Section 404 for any US-listed public company's financial-reporting systems; GDPR for any organization processing EU residents' personal data, regardless of where the organization itself is based; SOC 2 for any B2B SaaS vendor whose enterprise customers require independent assurance before onboarding. Security governance matters continuously, from day one — it is not a phase that begins "once we're big enough."
+
+**How (30,000-ft view)**:
+```
+ZERO TRUST:  every request -> AUTHENTICATE identity -> AUTHORIZE against policy
+             (device posture + user identity + workload identity, evaluated
+             per-request, continuously) -> ENCRYPT in transit -> LOG for audit
+             NO network position ever substitutes for this chain.
+
+COMPLIANCE:  regulatory/contractual requirement -> mapped to a CONTROL
+             -> control is IMPLEMENTED -> control is AUDITED (design, then
+             operating effectiveness) -> evidence retained for the auditor
+             A control that exists on paper but isn't enforced = compliance
+             theater, indistinguishable from a real control until tested.
+
+GOVERNANCE:  ties both together -- who owns which policy, how exceptions are
+             requested/time-bounded/reviewed, and a STANDING, CONTINUOUS
+             verification that every declared control is still, today,
+             actually enforced -- not merely configured once and assumed.
+```
+
+---
+
+## 2. Deep Dive
+
+### 2.1 The Policy Decision Point / Policy Enforcement Point Split
+NIST 800-207 formalizes Zero Trust architecture around two logically distinct roles. The **Policy Decision Point (PDP)** — composed of a Policy Engine (evaluates trust signals against policy and produces an allow/deny decision, e.g., Open Policy Agent evaluating a Rego policy) and a Policy Administrator (executes that decision by issuing or revoking the session credential) — never touches the request path directly. The **Policy Enforcement Point (PEP)** is the component that actually intercepts every request and enacts the PDP's decision — an API gateway, a service-mesh sidecar (Envoy in Istio), or a middleware layer. This separation matters architecturally for the same reason separating authentication from authorization matters at the code level: it lets policy logic evolve independently of enforcement infrastructure, and it lets one PDP serve many PEPs consistently. Its critical failure mode, and this module's central recurring risk: **a PDP correctly denying a request is worthless if even one access path lacks its own PEP** — a direct database connection bypassing the API gateway, an internal admin tool wired directly to a backend, or an emergency SSH path are all real-world instances of exactly this gap.
+
+### 2.2 Continuous Verification vs. One-Time Authentication
+Traditional session-based authentication establishes trust once (at login) and treats it as valid for the session's full lifetime — often 8+ hours, sometimes days, for a "remember me" cookie. Zero Trust's continuous verification instead re-evaluates trust signals throughout the session: device posture (is the endpoint still compliant — disk encrypted, EDR agent running, OS patched?), behavioral signals (impossible travel, anomalous access-time patterns), and resource sensitivity (a step-up MFA challenge triggered specifically for a high-value action, like a wire-transfer approval, even mid-session). This is not free — every re-verification is a PDP round trip, discussed under Performance (§7) — so real implementations bound it: short-lived, cryptographically-signed tokens (a JWT with a 5–15 minute expiry) rather than a full PDP call on every single request, re-issued only after the signal set is re-checked.
+
+### 2.3 Micro-Segmentation and Workload Identity
+Micro-segmentation replaces coarse network zones (a flat VPC, a broad VLAN) with per-workload isolation, enforced by identity rather than IP address — since IP addresses in a dynamic, autoscaled, containerized environment are ephemeral and meaningless as a durable trust anchor. Workload identity (SPIFFE/SPIRE is the open standard; AWS IAM roles for service accounts and Azure Managed Identity are the corresponding cloud-native mechanisms) issues each workload a short-lived, cryptographically-verifiable identity independent of network location, letting mTLS-based service-to-service authorization ("service A may call service B's `/transfer` endpoint") replace "anything inside this subnet can reach anything else in it."
+
+### 2.4 Device Posture and Identity as the New Perimeter
+With network location no longer conferring trust, the PDP's decision rests on three converging signals: verified user identity (via the organization's IdP — Okta, Azure AD/Entra ID — ideally with phishing-resistant MFA such as a FIDO2 hardware key), device posture (an EDR/MDM attestation confirming the endpoint is managed, patched, and encrypted), and workload identity (§2.3) for machine-to-machine calls. A gap in any one of the three reintroduces exactly the blind trust Zero Trust exists to remove — a correctly-authenticated user on a compromised, unmanaged personal laptop is not a scenario Zero Trust's identity check alone protects against; device posture is what closes that gap.
+
+### 2.5 Compliance Frameworks — What Each Actually Verifies
+**SOC 2** (Type I: control design at a point in time; Type II: control operating effectiveness over 6–12 months) audits against the AICPA's five Trust Services Criteria (security, availability, processing integrity, confidentiality, privacy) — it is process-and-control-existence assurance, not a vulnerability-free guarantee. **PCI-DSS** mandates specific technical controls for any environment touching cardholder data (network segmentation of the cardholder data environment, encryption of PAN at rest and in transit, quarterly ASV scans, annual penetration testing) — critically, PCI-DSS's own segmentation requirement is a direct, formalized instance of Zero Trust's micro-segmentation principle, predating the "Zero Trust" term's popularization. **GDPR** is a legal regime, not a technical control checklist — it mandates data-protection-by-design, breach notification within 72 hours, and a lawful basis for every processing activity, with fines up to 4% of global annual revenue. **SOX Section 404** requires documented, tested internal controls over financial reporting — for engineering, this means change-management, access-control, and audit-trail rigor over any system that feeds the general ledger or financial statements. None of these frameworks are interchangeable, and none is a superset of the others — a firm can be SOC 2 Type II certified and still fail a PCI-DSS assessment, because they audit genuinely different control sets.
+
+### 2.6 The Hidden Cost: Policy Sprawl and Exception Drift
+The single largest hidden cost in mature Zero Trust/compliance programs is not initial implementation — it's **policy sprawl and exception drift**. Every legitimate, time-bounded exception (a legacy system that can't yet support mTLS, a break-glass administrative path) that isn't tracked with an expiry and a periodic re-review becomes a permanent, silently-accumulating gap; a security posture measured only at rollout time, never re-audited, degrades continuously and invisibly — this is the identical "declared ≠ actual" pattern this domain's prior modules established for testing coverage and cryptographic key lifecycle, now recurring at the governance layer itself.
+
+---
+
+## 3. Visual Architecture
+
+### Zero Trust Reference Architecture (NIST 800-207)
+```mermaid
+graph TB
+    subgraph "Control Plane"
+        PE["Policy Engine<br/>(evaluates trust signals -> allow/deny,<br/>e.g. OPA/Rego)"]
+        PA["Policy Administrator<br/>(issues/revokes session credential)"]
+        PE <-->|"decision"| PA
+    end
+    subgraph "Signal Sources"
+        IdP["Identity Provider<br/>(Okta / Entra ID, MFA)"]
+        Posture["Device Posture / EDR-MDM<br/>(patch level, encryption, agent health)"]
+        Threat["Threat Intelligence Feed<br/>(known-bad IPs, anomaly signals)"]
+        WorkloadID["Workload Identity<br/>(SPIFFE/SPIRE, IAM roles)"]
+    end
+    subgraph "Data Plane"
+        Subject["Subject<br/>(user or workload)"] -->|"1. request"| PEP["Policy Enforcement Point<br/>(API Gateway / Service Mesh Sidecar)"]
+        PEP -->|"2. evaluate"| PA
+        PA -->|"3. query signals"| IdP
+        PA -->|"3. query signals"| Posture
+        PA -->|"3. query signals"| Threat
+        PA -->|"3. query signals"| WorkloadID
+        PA -->|"4. allow/deny + short-lived token"| PEP
+        PEP -->|"5a. allow -> forward (mTLS)"| Resource["Protected Resource"]
+        PEP -.->|"5b. deny -> reject + audit log"| AuditLog["Audit Log<br/>(compliance evidence)"]
+    end
+    PE --> AuditLog
+```
+
+### Compliance Control Lifecycle
+```mermaid
+flowchart LR
+    Req["Regulatory/contractual<br/>requirement"] --> Map["Mapped to a<br/>specific control"]
+    Map --> Impl["Control implemented<br/>(policy-as-code / config)"]
+    Impl --> Design["Audited: design<br/>(SOC 2 Type I)"]
+    Design --> Op["Audited: operating<br/>effectiveness (SOC 2 Type II)"]
+    Op --> Evidence["Evidence retained,<br/>continuous monitoring"]
+    Evidence -.->|"drift, no re-verification"| Theater["Compliance theater:<br/>looks enforced, isn't"]
+    Evidence -->|"continuous, automated re-check"| Op
+```
+
+---
+
+## 4. Production Example
+
+**Problem**: A mid-size regional bank, following a regulator-mandated remediation timeline after an examination cited "insufficient network segmentation and excessive standing access" as a finding, had 18 months to demonstrate a Zero Trust architecture across a hybrid estate: an on-prem mainframe-adjacent core banking system, a growing AWS footprint for digital banking and mobile, and roughly 40 third-party vendor integrations (payment processors, credit bureaus, fraud-scoring services). The prior architecture trusted anything inside the corporate VPN uniformly — a contractor's laptop and a core-banking database server were, from a network-trust standpoint, indistinguishable.
+
+**Architecture**: The bank adopted a phased design: an identity-aware proxy (Zscaler Private Access) fronting every internal application, replacing broad VPN access with per-application, per-request brokered access; a service mesh (Istio) providing mTLS and workload identity for the growing set of AWS-hosted microservices; and — for the mainframe-adjacent core system, which could not be retrofitted with modern protocol support in the available timeline — a dedicated, hardened proxy tier mediating every access request to it, so the core system itself needed no modification while every request reaching it still passed through PDP/PEP enforcement.
+
+**Implementation**: Rollout was sequenced by risk, not by convenience: the core-banking access path (highest sensitivity) migrated first, under close regulator visibility, followed by the AWS microservices tier, with the lowest-sensitivity internal tools (an internal wiki, a ticketing system) migrated last. Every migrated application ran in parallel — old VPN-based access and new brokered access both live — for a two-week validation window before the legacy path was formally decommissioned for that application, specifically to avoid a "big bang" cutover that risked either an outage or, worse, a silent coverage gap during transition. Policy-as-code (Rego policies under version control, reviewed via pull request like application code) encoded every access rule, giving the bank a literal, auditable artifact to hand the examiner.
+
+**Trade-offs**: The identity-aware proxy tier added a measured 15–30ms of median latency per request (§7) — acceptable for the bank's transaction volumes, but a deliberate, documented trade-off the architecture review explicitly signed off on rather than discovering post-launch. The core-system proxy-mediation approach was explicitly scoped as an interim measure, not a permanent architecture, since it still left a single, hardened chokepoint whose own compromise would be severe — the bank's roadmap explicitly plans the core system's eventual replacement rather than treating the proxy as a permanent solution to a problem it only partially mitigates.
+
+**Lessons learned**: The regulator's examination, 18 months later, found the segmentation and access-control finding fully remediated — but the examiner's follow-up focus had shifted specifically to **evidence of continuous enforcement**, not merely architecture existence: sample audit-log extracts proving specific access denials had actually occurred, and proof the policy-as-code repository's review history showed genuine, non-rubber-stamp approval on every access-policy change. This is the central lesson the bank's own security leadership took away: a regulator increasingly does not accept "we built it" as sufficient — the deliverable is standing, continuously-verifiable evidence that the control is *presently, actively* enforced, which is a fundamentally different and more demanding bar than a one-time architecture rollout.
+
+---
+
+## 5. Best Practices
+- Separate the Policy Decision Point from the Policy Enforcement Point (NIST 800-207) so policy logic evolves independently of enforcement infrastructure, and audit that **every** access path has its own PEP — not just the primary, well-documented one.
+- Encode compliance controls as policy-as-code (Rego/OPA or equivalent) under version control and code review, so a control's actual, current definition is a single, auditable source of truth rather than a document that can drift from what's actually deployed.
+- Issue short-lived, cryptographically-verifiable credentials (workload identity via SPIFFE/SPIRE, session tokens with 5–15 minute expiry) rather than long-lived static credentials or session cookies valid for a full workday.
+- Sequence Zero Trust migration by risk tier — highest-sensitivity systems first, under closest scrutiny — run old and new access paths in parallel during transition, and never attempt a single "big bang" cutover.
+- Treat every access exception (a legacy-system carve-out, a break-glass path) as time-bounded and subject to periodic, mandatory re-review — an exception with no expiry is a permanent, silently-accumulating gap.
+- Instrument continuous, automated compliance monitoring (compliance-as-code checks run in CI/CD against infrastructure state) rather than relying solely on an annual, point-in-time audit to catch drift up to a year late.
+- Track device posture and workload identity as first-class trust signals alongside user identity — a correctly-authenticated user on a compromised device is not meaningfully "verified."
+
+## 6. Anti-patterns
+- **Compliance theater**: a control that exists on a dashboard, in a policy document, or in an architecture diagram, but is not actually, currently enforced in the live system — the single most consequential, recurring failure pattern in this domain. A firewall rule that was correct at audit time but has since been superseded by a new, unreviewed rule; an IAM policy documented as "least privilege" that was never actually narrowed after the initial, overly-broad rollout; a DLP tool configured and dashboarded but silently not intercepting the traffic it claims to monitor. Each looks identical to a genuine control until specifically, adversarially tested.
+- Treating a passed audit (SOC 2 Type II, a PCI-DSS assessment) as durable, permanent evidence — an audit verifies a specific, bounded period; drift after that period is invisible until the next audit cycle, potentially a year later.
+- Deploying identity-aware access brokering for the primary, well-known application paths while leaving an alternate path (a direct database connection, a legacy admin backdoor, an emergency SSH route) entirely outside PDP/PEP coverage.
+- Granting broad, standing "any internal service may call any other internal service" trust for convenience, recreating perimeter-style implicit trust inside a nominally Zero Trust environment.
+- An access exception with no expiry date and no owner, silently becoming permanent because no process forces its re-review.
+- Fail-open policy-engine behavior — allowing access by default when the PDP is unreachable, rather than failing closed, silently reopening the exact access the architecture exists to gate.
+- Treating certification (SOC 2, ISO 27001) as the end goal rather than a floor — optimizing engineering effort toward passing a specific audit's checklist rather than toward genuine, comprehensive risk reduction.
+
+---
+
+## 7. Performance Engineering
+
+Continuous verification is not free, and pretending otherwise is how "Zero Trust" architectures acquire a reputation for unacceptable latency that then drives exactly the kind of exception-granting and bypass this module warns against. **mTLS handshake overhead**: a full TLS 1.3 handshake with mutual certificate verification adds roughly 1–2 round trips before any application data flows — mitigated in practice by session resumption (TLS session tickets) and by keeping mesh sidecar connections warm/pooled rather than establishing mTLS fresh per request. **PDP round-trip cost**: a naive design that calls the Policy Engine synchronously on every single request adds the PDP's own latency (typically 5–50ms depending on policy complexity and whether the PDP is co-located) directly to the request's critical path — at 10,000 RPS this either requires the PDP to scale horizontally to match, or, more commonly, the design caches a short-lived (5–15 minute), signed authorization decision at the PEP so only a local signature check, not a network round trip, happens on the vast majority of requests. **Device-posture and threat-intel signal freshness** is a similar trade-off: querying an EDR/MDM API synchronously per request is prohibitively slow, so posture is polled/pushed on a bounded interval (minutes, not per-request) and cached, accepting a small, deliberate staleness window in exchange for materially lower latency. The bank in §4 measured 15–30ms added median latency from its identity-aware proxy tier — a number worth stating explicitly in any interview answer, since "Zero Trust adds some overhead" without a concrete figure reads as generic filler rather than engineering judgment. The general principle: **cache authorization decisions, not authorization requirements** — the requirement (verify every request) stays absolute; the mechanism (a fresh PDP call every single time) is the part that gets optimized, with the cache window itself calibrated to the resource's sensitivity.
+
+---
+
+## 8. Security
+
+Zero Trust and compliance governance together form the organization's defense-in-depth answer to three specific threat models. **Insider threat**: a legitimate, authenticated employee or contractor acting maliciously or under coercion — perimeter security has zero defense against this by construction, since the insider is already "inside"; Zero Trust's per-request authorization and continuous behavioral monitoring (anomalous access patterns, impossible travel, off-hours bulk data access) are specifically designed to catch what identity alone cannot. **Lateral movement following initial compromise**: an attacker who has phished one employee's credentials, or exploited one internet-facing service, historically gained free reach to everything else on a flatly-trusted network — micro-segmentation and workload identity (§2.3) bound the blast radius to exactly the resources that compromised identity was actually authorized to reach, converting a potential full-network breach into a contained, single-resource incident. **Credential compromise**: short-lived, cryptographically-verifiable tokens (§2.2) sharply limit a stolen credential's useful life compared to a long-lived API key or session cookie, and continuous re-verification can revoke access mid-session the instant a risk signal (impossible travel, a device-posture failure) fires, rather than waiting for the credential's own, potentially day-long expiry. Layered beneath all three: **fail-closed policy-engine behavior** is the single highest-leverage security decision in this entire architecture — if the PDP is unreachable, every design choice examined in this module treats "deny by default" as non-negotiable for any sensitive or write-capable operation, with a narrow, pre-declared, fully-audited break-glass path as the only sanctioned exception, never a silent fail-open fallback adopted for availability's sake.
+
+---
+
+## 9. Scalability
+
+Two distinct scaling dimensions matter for a Zero Trust/compliance platform at genuine enterprise scale. **Policy engine / PDP throughput**: a single, centralized PDP instance becomes a bottleneck and a single point of failure well before enterprise request volumes are reached — the standard pattern is to run the Policy Engine as a horizontally-scaled, stateless service (OPA instances scale linearly since policy evaluation is a pure function of input + policy) fronted by a load balancer, with the signed, short-lived authorization token (§7) minimizing how often each request actually needs a fresh PDP round trip in the first place. **Multi-region compliance boundaries and data residency**: GDPR and several national banking regulators impose hard data-residency constraints — EU personal data, in many configurations, must not leave the EU even transiently, which directly constrains where the PDP evaluating access to that data may run and where its audit logs may be stored; a single, globally-shared PDP/audit-log store is not merely a scaling concern here but a compliance violation if it causes EU subject data or access decisions about it to transit outside the EU. The standard architecture partitions the policy engine and audit-log storage per compliance region (an EU PDP cluster, a US PDP cluster), each independently scaled, with only non-sensitive, aggregate metrics (never raw request/subject data) rolled up to a global monitoring layer. **High availability**: since fail-closed (§8) is the security-correct default, the PDP's own availability directly becomes the application's availability — this makes PDP redundancy (multi-AZ, ideally multi-region within a compliance boundary) a first-order investment, not an afterthought, precisely because a PDP outage under fail-closed denies legitimate traffic exactly as effectively as it denies an attacker.
+
+---
+
+## 10. Interview Questions
 
 ### Basic (10)
 
@@ -258,6 +403,397 @@
 
 ---
 
-## Domain Complete
+## 11. Coding Exercises
 
-This closes the `28-Security` domain (Modules 97–100): AppSec Fundamentals, Cryptography Fundamentals, Security Testing & Tooling, and Zero Trust/Governance — standard-depth scope.
+### Easy — Least-privilege scope checker
+**Problem:** Given a principal's granted permission scopes and the specific scope a request requires, determine whether the request is authorized, treating an unlisted scope as denied (fail-closed, never fail-open).
+
+```csharp
+public sealed record Principal(string Id, IReadOnlySet<string> GrantedScopes);
+
+public static class ScopeAuthorizer
+{
+    public static bool IsAuthorized(Principal principal, string requiredScope) =>
+        principal.GrantedScopes.Contains(requiredScope);
+
+    // Least privilege audit helper: flags scopes granted but never actually
+    // used in the observed request-log window -- direct input to a periodic
+    // access review (Sec5's "audit for privilege creep" practice).
+    public static IReadOnlySet<string> UnusedGrantedScopes(
+        Principal principal, IReadOnlySet<string> observedUsedScopes) =>
+        principal.GrantedScopes.Except(observedUsedScopes).ToHashSet();
+}
+```
+**Time complexity:** O(1) for `IsAuthorized` (hash-set lookup); O(g) for `UnusedGrantedScopes` where g is granted-scope count.
+**Space complexity:** O(g).
+**Optimized solution:** In production, back `GrantedScopes` with a policy engine call (OPA) rather than a static set, so scope grants can be revoked centrally and take effect on the next evaluation without redeploying every service holding a local copy of the principal's permissions.
+
+### Medium — Fail-closed policy decision with PDP-unavailability handling
+**Problem:** Implement a PEP-side authorization check that calls a (possibly unavailable) PDP, explicitly failing closed — denying the request — if the PDP cannot be reached, rather than defaulting to allow.
+
+```csharp
+public interface IPolicyDecisionPoint
+{
+    Task<bool> EvaluateAsync(string principalId, string resource, string action, CancellationToken ct);
+}
+
+public sealed class FailClosedAuthorizationGate
+{
+    private readonly IPolicyDecisionPoint _pdp;
+    private readonly ILogger<FailClosedAuthorizationGate> _logger;
+
+    public FailClosedAuthorizationGate(IPolicyDecisionPoint pdp, ILogger<FailClosedAuthorizationGate> logger)
+    {
+        _pdp = pdp;
+        _logger = logger;
+    }
+
+    public async Task<bool> IsAllowedAsync(string principalId, string resource, string action, CancellationToken ct)
+    {
+        try
+        {
+            return await _pdp.EvaluateAsync(principalId, resource, action, ct);
+        }
+        catch (Exception ex)
+        {
+            // FAIL CLOSED: any PDP error (timeout, network failure, exception)
+            // denies the request. Never default to "allow" for availability's
+            // sake -- Sec8's central security decision, applied here directly.
+            _logger.LogError(ex,
+                "PDP unreachable evaluating {Principal}/{Resource}/{Action} -- DENYING (fail-closed)",
+                principalId, resource, action);
+            return false;
+        }
+    }
+}
+```
+**Time complexity:** O(1) plus the PDP call's own cost.
+**Space complexity:** O(1).
+**Optimized solution:** Add a short-lived, signed local cache of recent allow decisions (§7's caching pattern) so a transient PDP blip doesn't deny already-legitimately-authorized in-flight sessions, while still failing closed for any *new* authorization decision the cache has no entry for — bounding the availability cost of fail-closed without reopening a fail-open gap.
+
+### Hard — Compliance-control drift detector (policy-as-code vs. live state)
+**Problem:** Given a declared policy-as-code ruleset (e.g., "every S3-equivalent bucket must have public access blocked") and a snapshot of live infrastructure state, detect controls that are declared but not actually enforced in the live environment — directly closing the compliance-theater gap.
+
+```csharp
+public sealed record ControlRule(string RuleId, string Description, Func<ResourceState, bool> IsCompliant);
+public sealed record ResourceState(string ResourceId, string ResourceType, IReadOnlyDictionary<string, object> Properties);
+public sealed record DriftFinding(string RuleId, string ResourceId, string Description);
+
+public static class ComplianceDriftDetector
+{
+    public static IReadOnlyList<DriftFinding> DetectDrift(
+        IReadOnlyList<ControlRule> declaredRules, IReadOnlyList<ResourceState> liveResources)
+    {
+        var findings = new List<DriftFinding>();
+
+        foreach (var rule in declaredRules)
+        {
+            foreach (var resource in liveResources)
+            {
+                // Every resource is checked against every applicable rule --
+                // a resource "not yet checked" is exactly the invisible gap
+                // this module warns about; there is no silent skip path here.
+                if (!rule.IsCompliant(resource))
+                {
+                    findings.Add(new DriftFinding(rule.RuleId, resource.ResourceId,
+                        $"{resource.ResourceId} violates '{rule.Description}'"));
+                }
+            }
+        }
+
+        return findings;
+    }
+}
+```
+**Time complexity:** O(r × n) where r is the rule count and n is the live-resource count.
+**Space complexity:** O(f) for the findings list.
+**Optimized solution:** Index rules by applicable `ResourceType` so each resource is only evaluated against rules that actually apply to its type, reducing the effective cost to O(n × k) where k is the (typically small) number of rules per resource type; run this check continuously in CI/CD against infrastructure-as-code plans *and* on a scheduled interval against live cloud state, since the two can diverge independently (a manual, out-of-band console change bypassing IaC entirely).
+
+### Expert — Short-lived token issuance with continuous re-verification
+**Problem:** Implement a workload-identity token issuer that grants a short-lived, signed authorization token bound to a specific trust-signal snapshot, and a validator that rejects a token if the signal snapshot it was issued against has since become stale — modeling continuous verification (§2.2) without a full PDP round trip on every request.
+
+```csharp
+public sealed record TrustSignalSnapshot(bool DevicePostureOk, bool UserMfaVerified, DateTime EvaluatedAt);
+public sealed record AuthorizationToken(string PrincipalId, string Resource, DateTime IssuedAt, DateTime ExpiresAt, string Signature);
+
+public sealed class ContinuousVerificationIssuer
+{
+    private readonly TimeSpan _tokenLifetime;
+    private readonly ISigner _signer; // HMAC or asymmetric signer -- Module 98's key-management mechanics
+
+    public ContinuousVerificationIssuer(ISigner signer, TimeSpan tokenLifetime)
+    {
+        _signer = signer;
+        _tokenLifetime = tokenLifetime;
+    }
+
+    public AuthorizationToken? TryIssue(string principalId, string resource, TrustSignalSnapshot signals, DateTime now)
+    {
+        // Refuse to issue if the underlying signals were already failing --
+        // never issue a token "optimistically" hoping signals improve later.
+        if (!signals.DevicePostureOk || !signals.UserMfaVerified)
+            return null;
+
+        var issuedAt = now;
+        var expiresAt = now + _tokenLifetime;
+        var payload = $"{principalId}|{resource}|{issuedAt:O}|{expiresAt:O}";
+        var signature = _signer.Sign(payload);
+
+        return new AuthorizationToken(principalId, resource, issuedAt, expiresAt, signature);
+    }
+
+    public bool IsStillValid(AuthorizationToken token, DateTime now)
+    {
+        if (now >= token.ExpiresAt)
+            return false; // bounded re-verification window elapsed -- must re-issue
+
+        var payload = $"{token.PrincipalId}|{token.Resource}|{token.IssuedAt:O}|{token.ExpiresAt:O}";
+        return _signer.Verify(payload, token.Signature);
+    }
+}
+
+public interface ISigner
+{
+    string Sign(string payload);
+    bool Verify(string payload, string signature);
+}
+```
+**Time complexity:** O(1) for issuance and validation (a single sign/verify operation).
+**Space complexity:** O(1) per token.
+**Optimized solution:** Bind the token's re-verification window to the resource's sensitivity tier (a 15-minute window for a low-sensitivity read, a 60-second window for a wire-transfer approval) rather than one fixed lifetime for every resource — directly the risk-proportionate calibration §7 and §2.2 both call for — and add a revocation-check path (a short, centrally-consulted denylist of principals whose posture has just failed) so a token already issued can still be invalidated mid-lifetime on a critical signal change, rather than remaining valid until its fixed expiry regardless of what happens in between.
+
+---
+
+## 12. System Design
+
+**Prompt:** Design a Zero Trust access and continuous-compliance-monitoring platform for a regulated financial services firm with a hybrid estate (on-prem core banking, AWS-hosted digital banking, ~40 third-party integrations), supporting SOC 2 Type II, PCI-DSS, and GDPR obligations simultaneously.
+
+**Functional requirements:** Every human and workload request to any protected resource passes through a PEP enforcing a PDP decision (no path may bypass this); device posture, user identity (MFA), and workload identity are all evaluated per access decision; every access decision (allow and deny) is logged as immutable, queryable compliance evidence; compliance-as-code rules run continuously against live infrastructure state, not only at audit time; access exceptions are time-bounded, owned, and subject to mandatory periodic re-review; EU-resident personal-data access decisions and their audit logs never leave the EU compliance boundary.
+
+**Non-functional requirements:** PDP decisions fail closed under any PDP unavailability; the platform adds no more than ~30ms median latency to a request's critical path (per §7's measured bank example); the PDP tier scales horizontally to at least 10,000 authorization decisions/second per region; audit-log storage is append-only/immutable and retained per the longest applicable regulatory requirement (typically 7 years under SOX-adjacent record-keeping rules); the platform itself has no single region-wide single point of failure.
+
+**Back-of-the-envelope estimation:** Assume 5,000 employees plus ~200 backend services, each service issuing on average 50 internal calls/second at peak → roughly 10,000 authorization decisions/second sustained, bursting to ~25,000/second at peak load. At a signed-token cache hit rate of 95% (§7's caching pattern — most requests reuse a still-valid, previously-issued token rather than round-tripping to the PDP), the PDP itself only needs to sustain roughly 500–1,250 fresh evaluations/second — meaning **the actual PDP-provisioning problem is an order of magnitude smaller than the raw request volume suggests**, which is the number that should drive the PDP-tier sizing decision, not the raw 10,000–25,000 figure.
+
+**Architecture:**
+```mermaid
+graph TB
+    subgraph "EU Compliance Boundary"
+        EUUsers["EU users/services"] --> EUPEP["EU PEP (gateway/mesh)"]
+        EUPEP --> EUPDP["EU-region PDP cluster"]
+        EUPDP --> EUAudit["EU audit-log store<br/>(immutable, EU-resident)"]
+    end
+    subgraph "US Compliance Boundary"
+        USUsers["US users/services"] --> USPEP["US PEP (gateway/mesh)"]
+        USPEP --> USPDP["US-region PDP cluster"]
+        USPDP --> USAudit["US audit-log store<br/>(immutable, US-resident)"]
+    end
+    subgraph "Global (non-sensitive aggregate only)"
+        EUAudit -.->|"aggregate metrics only,<br/>never raw subject data"| GlobalDash["Global compliance dashboard"]
+        USAudit -.->|"aggregate metrics only"| GlobalDash
+        PolicyRepo["Policy-as-code repo<br/>(Rego, version-controlled, PR-reviewed)"] --> EUPDP
+        PolicyRepo --> USPDP
+        DriftDetector["Compliance-drift detector<br/>(Sec11 Hard)<br/>runs continuously"] --> GlobalDash
+        DriftDetector -.->|"checks live state vs. PolicyRepo"| EUAudit
+        DriftDetector -.-> USAudit
+    end
+    IdP["Identity Provider (Okta/Entra ID + MFA)"] --> EUPDP
+    IdP --> USPDP
+    Posture["Device posture (EDR/MDM)"] --> EUPDP
+    Posture --> USPDP
+```
+
+**Database selection:** An append-only, immutable log store (e.g., a write-once object store or an audit-specific database feature) for access-decision evidence — compliance evidence must be tamper-evident, favoring an architecture where even a compromised application credential cannot rewrite history over a general-purpose mutable relational table. A relational store for the policy-exception registry (owner, expiry, review-cadence fields benefit from relational constraints and transactional updates on renewal/expiry).
+
+**Messaging:** Every PDP deny decision, and every compliance-drift-detector finding, publishes an event to a high-priority alerting topic — a security-relevant deny is functionally identical in urgency to any other critical production alert this course has established, never a lower-priority, dashboard-only signal.
+
+**Scaling:** PDP instances are stateless and horizontally autoscaled behind a regional load balancer (§9); the signed-token cache (§7) absorbs the vast majority of request volume without a PDP round trip; audit-log ingestion scales via partitioning by region and time, matching the compliance-boundary partitioning already required for data residency.
+
+**Failure handling:** PDP unreachable → fail closed for every new authorization decision (§8), with a narrow, fully-audited, time-boxed break-glass path as the only sanctioned exception; audit-log write failure is itself treated as a critical, page-worthy incident (silently proceeding without evidence being written is its own compliance failure, not a degraded-but-acceptable state).
+
+**Monitoring:** PDP decision latency (p50/p95/p99), fail-closed-triggered deny counts (a spike indicates either an attack or a PDP health problem, either way worth immediate attention), compliance-drift-detector finding counts by rule, and exception-registry entries approaching expiry — all first-class, always-on dashboard signals rather than something a team must remember to check.
+
+**Trade-offs:** Partitioning the PDP and audit-log tier per compliance region (vs. one global platform) trades operational simplicity for data-residency correctness — a single global platform is materially simpler to build and monitor, but is a compliance violation the moment EU-subject access decisions transit through a non-EU PDP, making the partitioned design non-optional here rather than a scalability nicety.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** Model a PEP/PDP authorization flow with pluggable trust-signal evaluators, a fail-closed default, and an audit trail — extensible to new signal types without modifying the core decision engine.
+
+```mermaid
+classDiagram
+    class AuthorizationRequest {
+        +string PrincipalId
+        +string Resource
+        +string Action
+    }
+    class ITrustSignalEvaluator {
+        <<interface>>
+        +Evaluate(AuthorizationRequest) TrustSignalResult
+    }
+    class IdentityEvaluator {
+        +Evaluate(AuthorizationRequest) TrustSignalResult
+    }
+    class DevicePostureEvaluator {
+        +Evaluate(AuthorizationRequest) TrustSignalResult
+    }
+    class WorkloadIdentityEvaluator {
+        +Evaluate(AuthorizationRequest) TrustSignalResult
+    }
+    class PolicyDecisionPoint {
+        -List~ITrustSignalEvaluator~ evaluators
+        -IAuditLog auditLog
+        +Decide(AuthorizationRequest) Decision
+    }
+    class IAuditLog {
+        <<interface>>
+        +Record(AuthorizationRequest, Decision)
+    }
+    class PolicyEnforcementPoint {
+        -PolicyDecisionPoint pdp
+        +Enforce(AuthorizationRequest) bool
+    }
+
+    ITrustSignalEvaluator <|.. IdentityEvaluator
+    ITrustSignalEvaluator <|.. DevicePostureEvaluator
+    ITrustSignalEvaluator <|.. WorkloadIdentityEvaluator
+    PolicyDecisionPoint --> "many" ITrustSignalEvaluator
+    PolicyDecisionPoint --> IAuditLog
+    PolicyEnforcementPoint --> PolicyDecisionPoint
+```
+
+**Sequence diagram — a request traversing PEP/PDP:**
+```mermaid
+sequenceDiagram
+    participant Subject
+    participant PEP
+    participant PDP
+    participant Evaluators as Trust Signal Evaluators
+    participant Audit as Audit Log
+    participant Resource
+
+    Subject->>PEP: request(resource, action)
+    PEP->>PDP: Decide(request)
+    PDP->>Evaluators: Evaluate(request) [identity, posture, workload]
+    Evaluators-->>PDP: signal results
+    alt any evaluator fails OR PDP unreachable
+        PDP-->>PEP: DENY (fail-closed default)
+    else all signals pass
+        PDP-->>PEP: ALLOW + short-lived signed token
+    end
+    PDP->>Audit: Record(request, decision)
+    alt ALLOW
+        PEP->>Resource: forward request (mTLS)
+        Resource-->>PEP: response
+        PEP-->>Subject: response
+    else DENY
+        PEP-->>Subject: 403 Forbidden
+    end
+```
+
+**Design patterns used:** **Strategy** for `ITrustSignalEvaluator` — new signal types (a future geolocation evaluator, a threat-intel evaluator) plug in without changing `PolicyDecisionPoint`'s core evaluation loop. **Chain of Responsibility** semantics in how evaluators are run — any single evaluator's failure short-circuits to deny, matching fail-closed's non-negotiable default. **Facade** — `PolicyEnforcementPoint` presents a single `Enforce` call to application code, hiding the full evaluator/audit orchestration behind it.
+
+**SOLID mapping:** Open/Closed — adding a new trust-signal type requires only a new `ITrustSignalEvaluator` implementation, never a change to `PolicyDecisionPoint` itself. Single Responsibility — each evaluator owns exactly one signal category; `IAuditLog` owns evidence recording, entirely separate from decision logic. Dependency Inversion — `PolicyDecisionPoint` depends on the `ITrustSignalEvaluator` and `IAuditLog` abstractions, not concrete evaluator implementations, enabling full unit testing with fakes and no live IdP/EDR dependency.
+
+**Extensibility:** Supporting risk-tiered re-verification windows (§7, §11 Expert) requires only parameterizing `PolicyDecisionPoint.Decide` with a resource-sensitivity input consulted when setting the issued token's expiry — no restructuring of the evaluator chain itself.
+
+**Concurrency/thread safety:** `PolicyDecisionPoint` should be implemented as a stateless service (no shared, mutable per-request state across calls) so it is trivially safe under concurrent request handling and horizontally scalable (§9) without coordination; `IAuditLog.Record` must be append-only and safe under concurrent writers — backed in production by a store providing this guarantee natively (an append-only log or write-once object store) rather than requiring explicit application-level locking.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** A firm's quarterly internal compliance dashboard showed 100% coverage — "all production S3-equivalent storage buckets have public access blocked" — for over a year, cited repeatedly in both internal risk reviews and, eventually, in materials prepared for an external SOC 2 Type II audit. During the actual audit, the external auditor's own independent scan of the live cloud environment found three buckets, all created within the prior six months, with public read access enabled — directly contradicting the dashboard's declared 100% figure.
+
+**Root cause:** The compliance dashboard's "100% coverage" check was implemented as a policy-as-code rule evaluated only against **infrastructure-as-code templates in the deployment repository** — it never actually queried live cloud account state. Three buckets had been created via a manual, out-of-band console action (during an incident-response scramble, an engineer had manually provisioned a bucket to unblock a production issue, later forgotten and never back-ported into the IaC templates) entirely outside the IaC pipeline the dashboard's check was scoped to. The dashboard's declared control ("public access blocked") was real and correctly enforced for every resource the check actually looked at — the gap was that the check's own scope silently excluded any resource not provisioned through the IaC path it was written against, and nothing in the dashboard's presentation distinguished "100% of everything" from "100% of what this specific check happens to see."
+
+**Investigation:** Comparing the compliance-as-code rule's evaluation logs against the cloud provider's own resource inventory API revealed the discrepancy directly — the rule had evaluated exactly the IaC-declared resource set, while the cloud account's actual resource count was measurably higher. No individual engineer had disabled or bypassed the control; the check itself had simply never been built to see the resources it was silently missing.
+
+**Tools:** A live cloud-resource inventory scan (the cloud provider's own resource-listing API, independent of the IaC repository) cross-referenced against the compliance-as-code rule's own evaluated-resource list — directly the ground-truth-inventory pattern this domain has established repeatedly for closing exactly this class of scope gap.
+
+**Fix:** (1) Re-scoped the compliance-drift detector (§11 Hard) to evaluate rules against **live cloud account state**, queried directly from the provider's API, rather than solely against IaC templates — closing the specific blind spot at its structural source. (2) Ran the same rule set against both IaC-declared and live state, treating any divergence between the two as its own, separately-flagged finding (a manual, out-of-band resource is itself a governance violation independent of whether that specific resource happens to be compliant on the property being checked). (3) Removed standing console-level provisioning permissions for individual engineers in production accounts, replacing emergency out-of-band access with a time-boxed, fully-audited break-glass process that automatically opens a tracked follow-up ticket requiring the resource's back-port into IaC within a fixed window.
+
+**Prevention:** A compliance dashboard's declared coverage figure is only as trustworthy as the scope of what it actually evaluates — "100%" measured against a self-selected, incomplete resource set is indistinguishable, in its presentation, from genuine, comprehensive 100% coverage, exactly mirroring this domain's now-established finding that a security tool's clean report is ambiguous between "nothing was found" and "almost nothing was actually checked." Every compliance-as-code check going forward is required to state, alongside its pass/fail result, the actual resource-discovery method it used (IaC-declared vs. live-queried) so a reviewer can independently judge whether the check's scope is genuinely comprehensive rather than accepting a bare percentage at face value.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** A financial-services platform selecting its primary mechanism for Zero Trust policy enforcement across a large, growing microservices estate.
+
+**Option A — Centralized policy engine, called synchronously by every service:**
+- *Advantages:* Single source of truth for policy; trivially easy to audit (one place to review every access rule); consistent behavior guaranteed across every service by construction.
+- *Disadvantages:* Every request pays a network round trip to the central PDP unless a caching layer is separately built (§7); the central PDP is a single point of failure and a scaling bottleneck under fail-closed semantics (§8/§9) unless deliberately over-provisioned and made highly available.
+- *Cost/complexity:* Lowest policy-management complexity, highest latency/availability engineering burden to make performant and resilient at scale.
+
+**Option B — Policy embedded per-service (each service ships its own authorization logic/library):**
+- *Advantages:* No network round trip at all — authorization is an in-process function call; no shared infrastructure to keep highly available.
+- *Disadvantages:* Policy logic and its updates must be independently deployed to every service consuming it, creating exactly the drift risk this module has repeatedly identified — a policy fix rolled out to 180 of 200 services, with the remaining 20 silently running a stale, unpatched rule, is a realistic, likely outcome at scale; auditing "what is our actual current access policy" requires inspecting every service's deployed version individually rather than one authoritative source.
+- *Cost/complexity:* Lowest latency, highest governance/drift risk — the option most prone to producing exactly the compliance-theater failure mode (§6, §14) this module centers on.
+
+**Option C — Sidecar/service-mesh enforcement (Istio/Envoy) with a centrally-managed, version-controlled policy source distributed to every sidecar:**
+- *Advantages:* Enforcement happens in-process-adjacent (no true network hop to a remote PDP for the common case — the sidecar evaluates a locally-cached policy bundle), combining Option B's latency profile with Option A's single-source-of-truth governance, since every sidecar pulls from one centrally-managed policy repository rather than embedding independently-versioned logic; mTLS and workload identity (§2.3) are natively part of the same mesh layer, avoiding a second, separately-built mechanism for transport security.
+- *Disadvantages:* Requires adopting and operating a service mesh, a genuine infrastructure investment with its own operational learning curve; policy-bundle propagation to every sidecar is not instantaneous, introducing a small, bounded propagation-delay window between a policy change and its full-fleet effect.
+- *Cost/complexity:* Highest upfront infrastructure investment, but the strongest combination of low per-request latency and centralized governance once the mesh is operating — the mesh's mTLS/identity capability is typically needed for other reasons (§2.3) regardless of the policy-enforcement decision, making its cost partially shared rather than purely incremental to this decision alone.
+
+**Recommendation:** **Option C** for any organization already running, or planning to run, a service mesh at meaningful microservices scale — it resolves Option A's latency/availability bottleneck and Option B's drift risk simultaneously by keeping enforcement local (sidecar) while keeping policy authorship and distribution centralized (one Git-backed policy source, per §5's policy-as-code practice). An organization with a small, low-growth service count, for which a service mesh's operational overhead isn't yet justified, may reasonably start with **Option A** plus an explicit, deliberately-built caching layer (§7, §11 Medium) — with an explicit plan to migrate to Option C once service count and per-request-latency sensitivity justify the mesh investment. **Option B is not recommended** as a durable architecture at any meaningful scale, given its structural tendency to reproduce this module's central compliance-theater failure mode.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** A regulator's finding of "insufficient access control" or a failed SOC 2/PCI-DSS assessment carries direct, board-visible consequences — remediation-timeline mandates, restricted product launches pending re-certification, and, in the banking examples this module draws on, formal consent orders with public disclosure. A Principal Engineer frames Zero Trust and compliance governance investment not as "security overhead" but as the mechanism that keeps the firm's *declared* control posture and its *actual, currently-enforced* one from silently diverging — since, as this module's central incident (§14) demonstrates, that divergence is invisible until an external auditor or a real breach surfaces it, at which point the cost is materially higher than the cost of continuous verification would have been.
+
+**Engineering trade-offs:** The core tension this module returns to repeatedly — continuous verification's latency/availability cost (§7, §9) versus the security and audit value it provides — is not resolved by picking a single global answer; it is resolved by risk-tiering: a low-sensitivity internal read tolerates a longer cache window and looser posture-check cadence than a wire-transfer approval does. A Principal Engineer's job is making that tiering decision explicit and documented, rather than leaving individual teams to informally, inconsistently decide it themselves.
+
+**Technical leadership:** Providing PDP/PEP infrastructure, policy-as-code tooling, and compliance-drift detection as mandatory, platform-provided defaults — rather than expecting each service team to independently implement its own authorization logic — is the single highest-leverage intervention available here, directly preventing Option B's (§15) drift risk from ever taking root organization-wide.
+
+**Cross-team communication:** Compliance and security requirements land far better with engineering teams when communicated as concrete mechanisms and incidents (§14's specific bucket-exposure story, with its specific root cause and fix) than as abstract policy language ("ensure adequate access controls") — the concrete version gives an engineer something actionable to check for in their own service; the abstract version does not.
+
+**Architecture governance:** Every access exception must have a named owner, a stated business justification, and a mandatory expiry with scheduled re-review (§5, §6) — an exception-approval process with no expiry field is, in practice, indistinguishable from simply not having an approval process at all, since nothing ever forces the exception to be reconsidered.
+
+**Cost optimization:** The PDP/policy-engine tier is genuine, ongoing infrastructure spend (compute for horizontally-scaled PDP instances, mesh sidecar resource overhead per pod) — a Principal Engineer weighs this explicitly against the cost of the incidents and regulatory findings it's designed to prevent, using this module's concrete numbers (the bank's 15–30ms latency cost, an examiner's remediation-timeline mandate) as the basis for that conversation rather than an abstract "security is important" framing this course explicitly avoids.
+
+**Risk analysis:** The single highest-risk assumption to actively challenge in any Zero Trust/compliance program is "our dashboard shows green, therefore we are compliant" — §14's incident is the concrete cautionary case; a Principal Engineer's standing responsibility is ensuring every declared-green control has an independent, live-state verification behind it, not merely a check against the artifact (an IaC template, a policy document) most convenient to evaluate.
+
+**Long-term maintainability:** Policy-as-code under version control, reviewed via the same pull-request discipline as application code, is what keeps a compliance program's actual current state legible to a new engineer or a new auditor years later — a policy encoded only in a wiki page or an individual's institutional memory degrades into exactly the kind of undocumented, unverifiable state this entire module exists to prevent.
+
+---
+
+## 18. Revision
+
+**Key Takeaways:**
+- Zero Trust's governing principle is "never trust, always verify" — no network position, prior authentication event, or long-lived credential substitutes for per-request, continuous verification.
+- NIST 800-207's PDP/PEP split is the architectural backbone: a Policy Engine decides, a Policy Enforcement Point enforces — and every access path, not just the primary one, needs its own PEP.
+- Compliance frameworks (SOC 2, PCI-DSS, GDPR, SOX) are not interchangeable and audit genuinely different control sets — passing one says nothing about the others.
+- **Compliance theater** — a declared control that isn't actually, currently enforced — is this module's central, recurring failure mode, and it looks identical to a real control until adversarially tested.
+- Fail-closed is the non-negotiable default when a PDP is unreachable; fail-open silently reopens exactly the access the architecture exists to gate.
+- Continuous verification has a real, measurable performance cost (§7) — the fix is short-lived, cached, signed authorization decisions calibrated to resource sensitivity, not abandoning verification for latency's sake.
+- Multi-region compliance boundaries (data residency under GDPR and similar regimes) are a correctness constraint on architecture, not merely a scaling nicety.
+
+**Interview Cheatsheet:**
+- Zero Trust ≠ "more firewalls" — it's an identity/device/workload-based trust model replacing network-location trust entirely.
+- PDP decides, PEP enforces — always name both explicitly when describing an architecture.
+- mTLS = bidirectional certificate verification, distinct from ordinary one-way TLS.
+- SOC 2 Type I = design at a point in time; Type II = operating effectiveness over 6–12 months.
+- "Assume breach" reframes investment toward detection/containment (micro-segmentation, logging) as co-equal with prevention, not a replacement for it.
+
+**Things Interviewers Love:**
+- Naming NIST 800-207 specifically, and correctly distinguishing PDP from PEP rather than treating "Zero Trust" as a single undifferentiated buzzword.
+- A concrete number attached to a trade-off (this module's 15–30ms latency figure) instead of "there's some overhead."
+- Recognizing that a clean compliance dashboard is not, by itself, evidence of anything — and describing specifically how you'd verify it (live-state cross-reference, per §14).
+- Distinguishing which compliance framework applies to which data/context rather than treating them as generically interchangeable "security certifications."
+
+**Things Interviewers Hate:**
+- Treating Zero Trust as purely a marketing term or a single product a vendor sells.
+- Claiming a system is "fully compliant" or "fully Zero Trust" without qualifying what was actually verified and how.
+- Defaulting to fail-open "for availability" without acknowledging the security cost that decision carries.
+- Reciting compliance framework names without being able to say what each one actually audits.
+
+**Common Traps:**
+- Assuming a passed audit is durable, permanent evidence rather than a point-in-time or bounded-period snapshot.
+- Assuming Zero Trust eliminates the need for network controls entirely, rather than shifting the primary trust basis to identity while network controls remain a defense-in-depth layer.
+- Assuming compliance certification is proof of comprehensive security rather than proof of a specific, bounded, audited control set.
+- Confusing "we have a policy document" with "we have an enforced control" — the gap between the two is this entire module's central theme.
+
+**Revision Notes:** Before an interview, be able to draw the PDP/PEP diagram from memory (§3), state the fail-closed rule and why (§8), give one concrete latency number and one concrete compliance-theater incident (§7, §14) without hesitation, and explain the difference between SOC 2, PCI-DSS, and GDPR in one sentence each — these four are the load-bearing facts a Principal/Staff-level FinTech interview will most reliably probe on this topic.
