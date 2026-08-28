@@ -343,9 +343,142 @@ public abstract class ReportGenerator
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-An e-commerce platform replaces its discount-calculation inheritance hierarchy with a composed `IDiscountStrategy` design, centralizing invariant enforcement in one location rather than trusting every subclass override to independently uphold it, and adopts a parameterized contract-test pattern (Hard exercise) across its remaining, genuinely-appropriate inheritance hierarchies (shape/geometry types) to mechanically catch LSP violations before they ship. The signature production incident — a `PriorityCustomer` subclass's override silently violating the base class's "discount never exceeds order total" contract once combined with a later, unrelated feature — is this module's central lesson: LSP violations are dangerous specifically because they compile cleanly and often work correctly in isolation, only manifesting once a change elsewhere in the codebase interacts with the violated contract in an unanticipated way. Principal-level guidance: require every inheritance-hierarchy proposal to explicitly document the base type's full behavioral contract and walk through each subclass's compliance during design review, catching this class of issue before it's built rather than after it ships.
+**Scenario:** design the object model underpinning a **multi-instrument settlement-instruction engine** for a FinTech platform that must represent domestic wires, cross-border SWIFT payments, and crypto-rail settlements, each with genuinely different lifecycle steps, but all flowing through one shared settlement pipeline (validation → enrichment → routing → execution → confirmation).
+
+**Requirements.**
+- *Functional*: represent every settlement type through a common pipeline; support adding new settlement rails without modifying the pipeline's existing, already-certified code; guarantee no settlement instruction can be executed in an invalid state (missing beneficiary details, unvalidated amount).
+- *Non-functional*: the object model must be safely usable by multiple engineering teams (rails team, compliance team, reconciliation team) without one team's change silently breaking another's; must support unit testing each rail's logic in isolation, with no live network dependency; must remain correct under concurrent processing of thousands of settlement instructions per minute.
+
+**Object-model architecture.** Model `SettlementInstruction` as a **sealed, immutable** value-object-like entity (§2.5 taken to its structural extreme, and directly Expert Q8's `record` discussion) carrying only universally-shared fields (amount as `decimal`, currency, beneficiary reference, a `Status` enum driven through an explicit state machine) — it is *not* the base of an inheritance hierarchy. Rail-specific behavior (how to validate a SWIFT BIC versus a crypto wallet address, how to compute settlement date for a domestic wire versus a cross-border payment) is expressed via a composed **`ISettlementRoute` strategy** per rail (`DomesticWireRoute`, `SwiftRoute`, `CryptoRoute`), resolved from a **rail registry** the same way discount strategies are resolved in this module's own composition-based fix, and the same way the sibling SOLID module resolves `IFeeRule`s in its settlement-core Expert Q1 — deliberately reusing that architecture here, since both are the identical "keep a high-assurance core closed, let genuinely-varying rail logic vary via composition" shape.
+
+**Component walkthrough:**
+1. **Intake API** receives a settlement request, constructs a `SettlementInstruction` through validated construction only (no path exists to build one with an unvalidated amount or missing beneficiary — Expert Q8's invariant-by-construction).
+2. **Pipeline engine** resolves the correct `ISettlementRoute` from the rail registry based on the instruction's declared rail type (a lookup, not a `switch` — OCP-compliant, directly this module's discount-strategy pattern), and drives every instruction through the same four pipeline stages regardless of rail.
+3. Each `ISettlementRoute` implementation supplies rail-specific validation/enrichment/execution logic behind the same interface — new rails (adding a real-time-payments rail) are new classes plus one registry entry, zero modification to the pipeline engine (OCP, §9's "extend without redeploying the core").
+4. **State transitions** (`NOT_STARTED → VALIDATED → ROUTED → EXECUTING → SETTLED | FAILED`) are enforced centrally by the pipeline engine, not by each route — exactly the fix's "centralize invariant enforcement in one place" discipline, so no individual rail implementation can skip a required transition.
+
+**Failure handling:** a route implementation throwing an unhandled exception fails only that specific instruction (caught at the pipeline-engine boundary, instruction marked `FAILED` with a captured reason), never the pipeline engine itself or any other in-flight instruction — the same per-request isolation the notification-channel fix achieves for unrelated channels.
+
+**Monitoring:** per-rail success/failure counters and per-rail p99 processing latency (rail-specific bottlenecks — a crypto rail's on-chain confirmation wait genuinely differs from a domestic wire's — must be independently visible, not averaged away into one aggregate pipeline metric).
+
+**Trade-offs:** the strategy-per-rail design costs one extra layer of indirection (a registry lookup) versus a simple inheritance hierarchy per rail, but buys exactly what the requirements demand — new-rail addition without touching certified pipeline code, independent per-rail unit testing with no shared base-class coupling, and no risk of a rail-specific override silently violating a shared contract (this module's own incident, structurally prevented by never allowing rail-specific behavior to be expressed as an override in the first place).
+
+## 13. Low-Level Design
+
+```mermaid
+classDiagram
+    class SettlementInstruction {
+        <<sealed>>
+        +Guid Id
+        +decimal Amount
+        +string Currency
+        +string BeneficiaryRef
+        +SettlementStatus Status
+        +ISettlementRoute Route
+    }
+    class SettlementStatus {
+        <<enumeration>>
+        NotStarted
+        Validated
+        Routed
+        Executing
+        Settled
+        Failed
+    }
+    class ISettlementRoute {
+        <<interface>>
+        +ValidateAsync(instruction) bool
+        +EnrichAsync(instruction) void
+        +ExecuteAsync(instruction) SettlementResult
+    }
+    class DomesticWireRoute
+    class SwiftRoute
+    class CryptoRoute
+    class SettlementPipelineEngine {
+        -IReadOnlyDictionary~string, ISettlementRoute~ _routes
+        +ProcessAsync(instruction) SettlementResult
+    }
+    SettlementInstruction --> SettlementStatus
+    SettlementInstruction o--> ISettlementRoute : composition, not inheritance
+    ISettlementRoute <|.. DomesticWireRoute
+    ISettlementRoute <|.. SwiftRoute
+    ISettlementRoute <|.. CryptoRoute
+    SettlementPipelineEngine --> ISettlementRoute : resolves via registry lookup
+```
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Pipeline as SettlementPipelineEngine
+    participant Registry as Rail Registry
+    participant Route as ISettlementRoute (SwiftRoute)
+
+    Client->>Pipeline: ProcessAsync(instruction)
+    Pipeline->>Registry: Resolve(instruction.RailType)
+    Registry-->>Pipeline: SwiftRoute instance
+    Pipeline->>Route: ValidateAsync(instruction)
+    Route-->>Pipeline: true
+    Pipeline->>Pipeline: Status = Validated (centralized transition)
+    Pipeline->>Route: EnrichAsync(instruction)
+    Pipeline->>Route: ExecuteAsync(instruction)
+    Route-->>Pipeline: SettlementResult(Settled)
+    Pipeline->>Pipeline: Status = Settled (centralized transition)
+    Pipeline-->>Client: SettlementResult
+```
+
+**Design patterns used:** Strategy (`ISettlementRoute` per rail — the direct LLD realization of this module's composition-over-inheritance fix), Registry (rail-type-to-strategy lookup, avoiding a growing `switch`), Template-method-adjacent centralized state machine (the pipeline engine, not any individual route, owns every status transition — Advanced Q1's "centralize invariant enforcement" applied structurally).
+
+**SOLID mapping:** SRP — `SettlementInstruction` holds data and its own invariant (validated construction); each `ISettlementRoute` implementation owns exactly one rail's validation/enrichment/execution logic and nothing else. OCP — new rails add a class and a registry entry, zero modification to `SettlementPipelineEngine`. LSP — every `ISettlementRoute` implementation is fully substitutable because the interface's contract (`ValidateAsync` returns `bool`, never throws for a merely-invalid instruction; `ExecuteAsync` always returns a `SettlementResult`, never leaves the instruction in an undefined state) is deliberately narrow enough that every rail can genuinely honor it — directly avoiding the sibling SOLID module's `Refund`/`CalculateAccruedInterest` over-promising trap (Expert Q9) by keeping the shared interface to only what every rail can truly deliver. ISP — routes expose exactly three methods, no rail is forced to stub out capability it doesn't have. DIP — `SettlementPipelineEngine` depends only on `ISettlementRoute`, never on a concrete rail implementation.
+
+**Extensibility:** a new rail is a new `ISettlementRoute` implementation plus one DI registration — no existing class is modified, directly OCP in its most concrete, buildable form.
+
+**Concurrency/thread safety:** `SettlementInstruction` is immutable after validated construction (status transitions produce a new instance via a `with`-style non-destructive update, Expert Q8), so concurrently processing thousands of instructions requires no locking on the instruction itself; the rail registry is populated once at startup (read-only thereafter, safe for concurrent lookup without synchronization); each `ISettlementRoute` implementation is stateless (all per-instruction state lives on the `SettlementInstruction` parameter, never on route instance fields), so a single route instance is safely shared and invoked concurrently across many simultaneously-processing instructions without per-call instantiation cost.
+
+## 14. Production Debugging
+
+**Incident:** overnight batch reconciliation flags a settlement instruction stuck in `EXECUTING` for 11 hours with no corresponding execution record at the downstream rail — a state the pipeline's own state machine should make unreachable (every transition into `EXECUTING` is supposed to be followed, within seconds, by a transition to `SETTLED` or `FAILED`).
+
+**Investigation:** the `CryptoRoute` implementation had, three weeks earlier, been given an additional constructor parameter (an injected `IBlockchainConfirmationPoller`) by a different engineer than the one who originally wrote it, and — critically — that engineer had also added a `private bool _hasPolledOnce` field to `CryptoRoute` itself, intended as a local optimization to skip a redundant first poll. Because `CryptoRoute` (like every route) was registered in DI as a **singleton** (a design choice made when routes were believed stateless, per the LLD's concurrency assumption), that one boolean field was silently shared across *every* concurrently-processing crypto settlement instruction routed through the same `CryptoRoute` instance — the first instruction to execute set `_hasPolledOnce = true`, causing every subsequent concurrent instruction's confirmation poll to be incorrectly skipped, leaving them parked in `EXECUTING` indefinitely with no poll ever confirming their on-chain settlement.
+
+**Tools:** correlating the stuck instruction's thread/request ID against nearby `CryptoRoute` invocations in structured logs showed several concurrent settlement instructions entering `ExecuteAsync` within the same few-hundred-millisecond window; a heap snapshot of the running service (via `dotnet-dump`) confirmed exactly one live `CryptoRoute` instance was shared across all of them, with `_hasPolledOnce` already `true` at the time the stuck instruction entered `ExecuteAsync`.
+
+**Root cause:** the LLD's stated invariant — "each `ISettlementRoute` implementation is stateless... a single route instance is safely shared" — was silently violated by a later, well-intentioned change that added instance state to a class registered as a DI singleton, without anyone re-verifying the statelessness assumption the singleton registration depended on. This is precisely §9's object-pooling caution and §2.5's encapsulation-of-invariant discussion converging on a single, concrete bug: `_hasPolledOnce` was correctly encapsulated (private field, no external mutation), but the invariant it silently broke — "this instance's state doesn't leak across logically-unrelated concurrent operations" — was never itself documented or enforced anywhere a later change could be checked against.
+
+**Fix:** removed the `_hasPolledOnce` field from `CryptoRoute` entirely; the "skip a redundant first poll" optimization was reimplemented as a value carried on the `SettlementInstruction`/`SettlementResult` being processed (per-call state, not per-instance state), restoring genuine statelessness. Added an explicit unit test asserting a single `CryptoRoute` instance produces correct, independent results when its `ExecuteAsync` is invoked concurrently for two different instructions — a stateless-instance contract test, directly generalizing this module's Hard exercise (a parameterized contract test across a hierarchy) to a *concurrency* contract, not just a behavioral one.
+
+**Prevention:** any class registered as a DI singleton now requires an explicit code-review checklist item — "does this class have any mutable instance field, and if so, is it genuinely safe to share across every concurrent caller?" — and the LLD's stated statelessness invariant for `ISettlementRoute` implementations was promoted from a design comment into an enforced analyzer rule flagging any mutable, non-readonly instance field added to a class implementing `ISettlementRoute`.
+
+## 15. Architecture Decision
+
+**Decision:** how should rail-specific settlement behavior (§12/§13) be structured — (A) one inheritance hierarchy (`SettlementInstruction` base class, `SwiftSettlement`/`CryptoSettlement` subclasses overriding execution logic), (B) composed `ISettlementRoute` strategy objects (the design adopted), or (C) a single monolithic `SettlementProcessor` class with an internal `switch` per rail type?
+
+| | (A) Inheritance hierarchy | (B) Composed strategy (adopted) | (C) Monolithic switch |
+|---|---|---|---|
+| **Advantages** | Familiar OOP shape; shared fields/behavior inherited automatically | New rails added with zero modification to existing code (OCP); each rail independently unit-testable with no shared base-class coupling; instruction remains immutable/thread-safe | Simplest to write initially; all rail logic visible in one file |
+| **Disadvantages** | Rail-specific overrides risk silently violating the base contract (this module's own core incident, replayed here); adding a rail-specific field pollutes the shared base for every other rail; instruction can no longer be a clean immutable value type once subtype-specific mutable state is involved | One extra indirection layer (registry lookup) per instruction | Every new rail requires modifying the shared, certified `switch` (OCP violation, directly the sibling SOLID module's notification-dispatcher incident, replayed in a settlement context); one rail's bug risks affecting adjacent `case` branches |
+| **Cost/complexity** | Moderate — one class per rail, but coupled to the base | Moderate — one class per rail plus a registry, but decoupled | Low upfront, but complexity concentrated and growing unboundedly in one method |
+| **Maintainability** | Degrades as rail count grows (Expert Q7's override-ratio decay risk) | Stays flat as rail count grows — each addition is isolated | Degrades sharply — every change touches shared, high-risk code |
+| **Scalability (team)** | Poor — multiple teams editing subclasses of a shared base risk fragile-base-class conflicts | Good — each rail team owns its own `ISettlementRoute` class independently | Poor — every team's rail changes collide in the same method/file |
+
+**Recommendation:** (B), composed strategy — for the exact reasons this module's own production incident and the sibling SOLID module's Expert Q1 both independently converge on: a high-assurance, frequently-audited core (the settlement pipeline / state machine) must stay closed to modification as rail count grows, rail-specific behavior must be independently testable and team-ownable, and — most specifically for this domain — no rail's execution logic should be expressible as an *override* of shared behavior, since that's precisely the structural shape that let this module's central incident happen once already. Option (A) reintroduces the module's own lesson; option (C) reintroduces the sibling module's OCP incident. Only (B) avoids both simultaneously.
+
+## 17. Principal Engineer Perspective
+
+**Business impact.** The settlement-engine object model isn't an academic OOP exercise — a design that lets rail-specific behavior silently violate a shared contract (option A above) is a design one incident away from mis-settling client funds, with direct regulatory and client-trust consequences; the extra indirection cost of the composed-strategy design (B) is cheap insurance against a failure mode whose downside is disproportionately larger than its avoided complexity.
+
+**Engineering trade-offs.** Every decision in this module — composition over inheritance, sealed-by-default, centralized invariant enforcement, capability-interface segregation — trades a small, upfront, deliberate cost (an extra interface, a registry, a review checklist item) against a much larger, deferred, probabilistic cost (a production incident whose root cause is subtle enough to survive code review and pass initial tests). A Principal Engineer's job is making that trade-off *visible and deliberate* rather than leaving it implicit — the DI-singleton statelessness incident (§14) happened precisely because an invariant the original design depended on was never made explicit enough for a later, well-intentioned change to check itself against.
+
+**Technical leadership.** The override-ratio heuristic (Expert Q7), the sealed-by-default default (Expert Q6), and the DI-singleton-statelessness checklist item (§14) are all examples of converting a hard-won, incident-derived lesson into a *cheap, repeatable, reviewable check* rather than an anecdote passed down informally — this is the actual mechanism by which an organization's engineering judgment compounds across teams and time instead of each team re-learning the same lesson via its own incident.
+
+**Cross-team communication.** The rail-registry/strategy design (§12) is deliberately also an *organizational* boundary (§9): the rails team, compliance team, and reconciliation team can each own their slice (routes, validation rules, reconciliation consumers) against one shared, stable interface contract, communicating primarily through that contract rather than through ongoing, ad-hoc coordination about a shared base class's evolving behavior — a Principal Engineer designing this object model is simultaneously designing the team topology that will maintain it.
+
+**Architecture governance.** Any proposed new inheritance hierarchy in a money-movement-adjacent codebase should be required, at design-review time, to answer Advanced Q10's question explicitly (document the base contract; walk every subclass's compliance) — governance here means making the review question standard and expected, not relying on any individual reviewer to happen to ask the right question on a given day.
+
+**Cost optimization.** §7's performance discussion (devirtualization, boxing, object headers) matters at a specific, identifiable scale (a tick-processing/matching-engine hot path) and is actively harmful as a *default* optimization applied to ordinary settlement/business logic, where the extra interface indirection of the composed-strategy design is immaterial next to network/database latency — a Principal Engineer's job includes stopping premature micro-optimization of code that isn't the bottleneck, exactly as much as catching genuine bottlenecks that need it.
+
+**Risk analysis and long-term maintainability.** The single biggest long-term risk this module's design pattern addresses is *decay* — a clean composed-strategy design can still decay back toward the fragile-base-class/God-object failure modes it was built to avoid (Expert Q7's override-ratio drift, §14's silently-reintroduced shared mutable state) if the invariants it depends on (statelessness, narrow interface contracts, sealed-by-default) aren't kept explicit and periodically re-verified — good architecture is not a one-time decision but a set of invariants that must remain continuously true as the system evolves, which is precisely why this module pairs every design principle with both a production incident and a concrete, ongoing mechanism (analyzer rule, review checklist, contract test) for keeping the invariant true going forward.
 
 ## 18. Revision
 **Key takeaways**: LSP requires genuine behavioral-contract preservation (preconditions, postconditions, invariants), not just compile-time substitutability. The fragile base class problem is fundamentally a coupling-to-implementation-detail issue, distinct from ordinary API coupling. Composition minimizes coupling to a held type's public interface and allows runtime swappability; inheritance is appropriate specifically for genuine, stable is-a relationships (template-method patterns) where sharing algorithm structure automatically is the actual goal. Centralize invariant enforcement in one location rather than trusting every subclass/strategy implementation to independently uphold it — this structurally prevents an entire class of LSP-violation bugs, not just one instance.

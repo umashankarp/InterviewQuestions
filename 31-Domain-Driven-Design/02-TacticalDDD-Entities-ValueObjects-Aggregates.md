@@ -447,3 +447,483 @@ Every mutation funnels through the Root, which is the only object with the autho
 **Follow-ups:** "Why is the aggregate boundary the same as the consistency boundary here?" / "How do you prevent two concurrent withdrawals both succeeding?"
 
 ---
+
+## 11. Coding Exercises
+
+### Easy — A self-validating `Money` Value Object
+
+**Problem:** Implement `Money` as an immutable, self-validating C# Value Object that rejects a negative amount, rejects arithmetic across mismatched currencies, and provides value-based equality.
+
+**Solution:**
+```csharp
+public readonly record struct Money
+{
+    public decimal Amount { get; }
+    public string Currency { get; }
+
+    public Money(decimal amount, string currency)
+    {
+        if (amount < 0) throw new ArgumentException("Amount cannot be negative.", nameof(amount));
+        if (string.IsNullOrWhiteSpace(currency) || currency.Length != 3)
+            throw new ArgumentException("Currency must be a 3-letter ISO code.", nameof(currency));
+
+        Amount = amount;
+        Currency = currency.ToUpperInvariant();
+    }
+
+    public Money Add(Money other)
+    {
+        if (Currency != other.Currency)
+            throw new InvalidOperationException($"Cannot add {other.Currency} to {Currency}.");
+        return new Money(Amount + other.Amount, Currency);
+    }
+
+    public static Money Zero(string currency) => new(0, currency);
+}
+```
+**Time complexity:** O(1) per operation.
+**Space complexity:** O(1) — a `readonly struct` allocates on the stack, not the heap.
+**Optimized solution:** Already optimal for the hot-path case (Module 110 Advanced Q5) — `readonly struct` avoids per-operation heap allocation a reference-type `record` would incur, while still providing value equality and immutability by construction.
+
+### Medium — An `Order` Aggregate enforcing invariants on every mutation
+
+**Problem:** Implement an `Order` Aggregate Root with an internal, root-mediated collection of `OrderLine`s, enforcing "cannot add a line once shipped" and "total must equal the sum of line totals" on every mutation, not only at construction.
+
+**Solution:**
+```csharp
+public sealed class Order
+{
+    private readonly List<OrderLine> _lines = new();
+    public Guid Id { get; }
+    public OrderStatus Status { get; private set; } = OrderStatus.Draft;
+    public IReadOnlyCollection<OrderLine> Lines => _lines.AsReadOnly();
+
+    public Order(Guid id) => Id = id;
+
+    public void AddLine(Guid productId, int quantity, Money unitPrice)
+    {
+        if (Status != OrderStatus.Draft)
+            throw new DomainException("Cannot modify an order that has already shipped or been confirmed.");
+        if (quantity <= 0)
+            throw new DomainException("Quantity must be positive.");
+
+        _lines.Add(new OrderLine(Guid.NewGuid(), productId, quantity, unitPrice));
+    }
+
+    public Money Total() =>
+        _lines.Aggregate(Money.Zero("USD"), (sum, line) => sum.Add(line.LineTotal()));
+
+    public void Confirm()
+    {
+        if (_lines.Count == 0) throw new DomainException("Cannot confirm an order with no lines.");
+        Status = OrderStatus.Confirmed;
+    }
+
+    public void Ship()
+    {
+        if (Status != OrderStatus.Confirmed) throw new DomainException("Cannot ship an unconfirmed order.");
+        Status = OrderStatus.Shipped;
+    }
+}
+
+public sealed record OrderLine(Guid Id, Guid ProductId, int Quantity, Money UnitPrice)
+{
+    public Money LineTotal() => new(UnitPrice.Amount * Quantity, UnitPrice.Currency);
+}
+
+public enum OrderStatus { Draft, Confirmed, Shipped }
+public sealed class DomainException(string message) : Exception(message);
+```
+**Time complexity:** O(1) amortized for `AddLine`; O(n) for `Total()` (n = line count).
+**Space complexity:** O(n) for the internal line collection.
+**Optimized solution:** Maintain a running `Money` total incrementally on `AddLine`/`RemoveLine` rather than recomputing via `Aggregate()` on every `Total()` call, turning a read-heavy workload's cost from O(n) per read to O(1) per read at the cost of O(1) extra bookkeeping per write — worthwhile once `Total()` is called far more often than lines are added, a realistic profile for an order-status page.
+
+### Hard — Optimistic concurrency with reload-reapply-retry
+
+**Problem:** Implement the save path for the `Order` Aggregate against SQL Server using a native `rowversion` column, with a reload-reapply-retry loop on a detected conflict (Module 110 Advanced Q3).
+
+**Solution:**
+```csharp
+public async Task<Order> AddLineWithRetryAsync(
+    Guid orderId, Guid productId, int quantity, Money unitPrice,
+    IOrderRepository repo, int maxRetries = 3, CancellationToken ct = default)
+{
+    for (var attempt = 0; attempt <= maxRetries; attempt++)
+    {
+        var order = await repo.LoadAsync(orderId, ct);
+        order.AddLine(productId, quantity, unitPrice);
+
+        try
+        {
+            await repo.SaveAsync(order, ct); // throws DbUpdateConcurrencyException on RowVersion mismatch
+            return order;
+        }
+        catch (DbUpdateConcurrencyException) when (attempt < maxRetries)
+        {
+            // another writer updated this Order first — reload current state and retry
+        }
+    }
+    throw new DomainException($"Could not save Order {orderId} after {maxRetries} concurrency retries.");
+}
+```
+**Time complexity:** O(1) per attempt; O(k) worst case across k retries.
+**Space complexity:** O(1) beyond the loaded Aggregate itself.
+**Optimized solution:** Add jittered exponential backoff between retries (`await Task.Delay(baseDelay * 2^attempt + jitter)`) to avoid a thundering-herd of immediate retries under genuine high contention (directly the same shape as the God-Aggregate incident in Advanced Q4) — turning a burst of simultaneous conflicts into a spread-out, successful retry pattern instead of a synchronized retry storm that just recreates the same contention.
+
+### Expert — A generic invariant-adversarial test harness for any Aggregate
+
+**Problem:** Write a reusable, generic C# test helper that, given an Aggregate factory and a list of named "invalid-state-inducing" actions, asserts every single one is rejected with a `DomainException` (Advanced Q8's negative-testing principle), rather than writing bespoke assertions per invariant by hand.
+
+**Solution:**
+```csharp
+public sealed record InvariantCase<TAggregate>(string Name, Action<TAggregate> InvalidAction);
+
+public static class AggregateInvariantTester
+{
+    public static void AssertAllRejected<TAggregate>(
+        Func<TAggregate> createValidAggregate,
+        IEnumerable<InvariantCase<TAggregate>> cases)
+    {
+        var failures = new List<string>();
+
+        foreach (var testCase in cases)
+        {
+            var aggregate = createValidAggregate(); // fresh, valid instance per case
+            try
+            {
+                testCase.InvalidAction(aggregate);
+                failures.Add($"'{testCase.Name}' was NOT rejected — invariant silently allowed an invalid state.");
+            }
+            catch (DomainException)
+            {
+                // expected — invariant correctly enforced
+            }
+        }
+
+        if (failures.Count > 0)
+            throw new Exception(
+                $"{failures.Count} invariant(s) failed to reject an invalid state:\n" +
+                string.Join("\n", failures));
+    }
+}
+
+// Usage:
+AggregateInvariantTester.AssertAllRejected(
+    createValidAggregate: () => new Order(Guid.NewGuid()),
+    cases: new[]
+    {
+        new InvariantCase<Order>("AddLine with zero quantity",
+            o => o.AddLine(Guid.NewGuid(), 0, new Money(10, "USD"))),
+        new InvariantCase<Order>("Confirm an empty order",
+            o => o.Confirm()),
+        new InvariantCase<Order>("Ship an unconfirmed order",
+            o => o.Ship()),
+    });
+```
+**Time complexity:** O(C) — C invariant cases, each O(1)–O(n) depending on the aggregate operation exercised.
+**Space complexity:** O(C) for the failure list.
+**Optimized solution:** Parameterize this harness as an xUnit `[Theory]`/`[MemberData]` source so each case reports as an individually-named, individually-failing test in CI output (rather than one aggregate pass/fail), giving exactly the same regression-catching power (Advanced Q8) with much better failure diagnostics — a future refactor that accidentally weakens one specific invariant fails one specific, clearly-named test rather than a bundled assertion requiring the failure message to be parsed.
+
+## 12. System Design
+
+### Step 1 — Understand the Problem and Establish Design Scope
+
+**Q (interviewer):** "Design the account/ledger core for a digital bank's deposit product — balances, deposits, withdrawals, and holds."
+**A (candidate):** "A few scoping questions first. Single-currency accounts, or must one account hold balances in multiple currencies?"
+**Q:** "Single-currency per account; a customer may have several accounts, one per currency."
+**A:** "Are holds (e.g., a pending card authorization) in scope, or only settled deposits/withdrawals?"
+**Q:** "Holds are in scope — this is a core requirement, not a later phase."
+**A:** "Is this the system of record for the balance, or does an external core-banking platform own that and this is a read-through cache?"
+**Q:** "This is the system of record."
+**A:** "And is cross-account transfer (between two of the bank's own accounts) in scope, or only external ACH/wire in and out?"
+**Q:** "Both — internal transfer and external ACH in/out."
+
+**Functional requirements:**
+- Open an account; deposit funds; withdraw funds; place and release a hold; transfer between two internal accounts; process an external ACH credit/debit.
+- Query current balance (ledger balance and available balance, distinctly — Module 109 §10 Expert E1).
+- Full, immutable transaction history per account.
+
+**Non-functional requirements:**
+- Correctness above all: a balance must never go negative in a way the product doesn't explicitly allow (e.g., no unauthorized overdraft), never be double-counted, never silently drift from the sum of its own postings.
+- Every balance-affecting operation must be atomic and auditable.
+- Availability: balance reads and holds must remain available even during a downstream ACH-processor outage (holds/deposits from card rails must not be blocked by an unrelated external dependency).
+
+**Back-of-the-envelope estimation:** 2,000,000 accounts, average 3 balance-affecting operations/account/day → 6,000,000 ops/day ÷ 86,400 s ≈ **70 ops/sec average**, with intraday peak (evening bill-pay/payroll windows) at roughly 6x average → **~420 ops/sec peak**. This is, again, a low-to-moderate throughput number for a well-indexed relational store — **the numbers tell us correctness and invariant enforcement, not raw write throughput, is the design driver**, exactly Module 109 §12 Step 1's conclusion recurring here at the tactical-DDD, single-Aggregate level: the entire design challenge is making the balance invariant genuinely, structurally impossible to violate under concurrent access, not making 420 ops/sec fast (trivial for SQL Server on modern hardware).
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+**Core flows, treated separately:** (1) **Balance-mutating operations on one account** (deposit, withdrawal, hold placement/release) and (2) **Cross-account operations** (internal transfer, external ACH) that touch more than one Aggregate or an external system.
+
+**Component glossary:**
+- **Account (Aggregate Root)** — owns `LedgerBalance`, `AvailableBalance` (computed as ledger minus active holds), and the append-only `Posting` history; the sole entry point for any balance change.
+- **Hold (Entity, internal to Account)** — a pending authorization reducing `AvailableBalance` without yet affecting `LedgerBalance`.
+- **Posting (Entity, internal to Account, immutable once created)** — one line of the account's permanent transaction history.
+- **Transfer Orchestrator (Domain Service)** — coordinates a two-Account operation (internal transfer) that cannot live inside either Account's own Aggregate boundary alone (Module 110 Expert Q1's driver-matching analogy — mediates across Aggregates, doesn't itself own balance state).
+- **ACH Integration (Anti-Corruption Layer)** — translates the external ACH network's file/status format into this system's own `Posting`/`Account` vocabulary.
+
+**Architecture diagram:**
+```mermaid
+flowchart TB
+ Client[Client / Mobile App] --> API[Account API]
+ API --> App[Application Service]
+ App --> Acct[Account Aggregate]
+ Acct --> DB[(Account DB — SQL Server)]
+ App --> Orch[Transfer Orchestrator]
+ Orch --> Acct
+ ACH[External ACH Network] --> ACL[ACH Integration — ACL]
+ ACL --> App
+```
+
+**End-to-end walkthrough — a withdrawal:**
+1. Client requests a withdrawal via the API, with an `Idempotency-Key` header.
+2. Application Service loads the `Account` Aggregate (by `AccountId`).
+3. `Account.Withdraw(amount)` checks `AvailableBalance >= amount` (the core invariant — Module 110 FT2), and if satisfied, appends a new `Posting` and decrements `LedgerBalance`, all within the Aggregate's own in-memory state.
+4. Application Service calls `SaveAsync`, which persists the Aggregate with an optimistic `RowVersion` check in one transaction (one Aggregate, one transaction — Module 110 Intermediate Q6).
+5. On a `RowVersion` conflict (concurrent withdrawal), reload-reapply-retry (§11 Hard).
+6. On success, return the new `AvailableBalance`.
+
+**REST API (illustrative):**
+
+`POST /accounts/{accountId}/withdrawals`
+
+| Field | Type | Description |
+|---|---|---|
+| `amount` | decimal (as string) | Withdrawal amount — transmitted as a string, not a float/double, to avoid floating-point precision loss over the wire |
+| `currency` | string | ISO currency code, must match the account's own currency |
+| `Idempotency-Key` | header | Client-supplied key; a retried request with the same key returns the original result rather than double-withdrawing |
+
+**Data model:**
+
+`Accounts` table:
+
+| Column | Type | Description |
+|---|---|---|
+| `AccountId` | uniqueidentifier (PK) | Surrogate key |
+| `LedgerBalance` | decimal(18,4) | Authoritative posted balance |
+| `Currency` | char(3) | ISO currency code |
+| `RowVersion` | rowversion | Optimistic concurrency token |
+
+`Postings` table (append-only, one row per balance-affecting event, never updated or deleted):
+
+| Column | Type | Description |
+|---|---|---|
+| `PostingId` | uniqueidentifier (PK) | Surrogate key |
+| `AccountId` | uniqueidentifier (FK) | Owning account — internal to the Aggregate, not a cross-Aggregate reference |
+| `Amount` | decimal(18,4) | Signed amount (positive = credit, negative = debit) |
+| `Type` | varchar(20) | `Deposit` \| `Withdrawal` \| `TransferIn` \| `TransferOut` \| `AchCredit` \| `AchDebit` |
+| `IdempotencyKey` | varchar(100) | Unique index — the durable dedup mechanism preventing double-processing (Module 109 §14's incident, applied here) |
+| `CreatedUtc` | datetime2 | Immutable creation timestamp |
+
+`Holds` table:
+
+| Column | Type | Description |
+|---|---|---|
+| `HoldId` | uniqueidentifier (PK) | Surrogate key |
+| `AccountId` | uniqueidentifier (FK) | Owning account |
+| `Amount` | decimal(18,4) | Held amount |
+| `Status` | varchar(20) | `Active` → `Released` \| `Captured` lifecycle |
+| `ExpiresUtc` | datetime2 | Auto-release deadline if never explicitly captured/released |
+
+### Step 3 — Design Deep Dive
+
+**Internal transfer across two Account Aggregates.** A transfer cannot be a single-Aggregate operation (it touches two `Account` instances) — the Transfer Orchestrator (a Domain Service) reads both accounts, and, because a single database transaction spanning two Aggregate saves is acceptable specifically when both live in the same database/store (Module 109's stated bend-the-guideline case), the orchestrator wraps both `Account.Withdraw`/`Account.Deposit` calls plus both saves in one SQL transaction — each `Account`'s own `RowVersion` check still independently guards against a concurrent, unrelated operation on either account during the transfer.
+
+**Handling failed operations and exactly-once.** Every mutating request carries an `Idempotency-Key`; a `Posting` insert is guarded by a unique index on `IdempotencyKey`, so a client retry after a lost response (the response was lost, but the withdrawal actually succeeded server-side) inserts nothing new and simply returns the original, already-committed result — exactly-once = at-least-once (client retries) + at-most-once (unique-indexed idempotency key), Module 110's identity applied concretely.
+
+**External ACH integration.** The ACH ACL ingests the network's batch file format, validates each record, and translates it into an `Account.ApplyAchCredit`/`ApplyAchDebit` call — ACH credits/debits are provisional for a regulatory return window, modeled as a `Posting` with a `Pending` sub-status the read model surfaces distinctly, converging to `Settled` once the return window passes without a reversal.
+
+**Consistency.** `Account` is strongly, synchronously consistent for its own balance/hold invariants (internal consistency); consistency with the external ACH network is inherently eventual (external consistency) — the ACL's translation boundary is exactly where that shift from external eventual to internal synchronous consistency happens.
+
+**Security.** Every balance-mutating Aggregate method call is authorized at the Application layer before reaching `Account` (Module 109 §8) — `Account` itself additionally re-validates its own invariants regardless of what the caller was authorized to attempt, so even a bug in the authorization layer cannot produce a structurally invalid balance, only an authorization gap for an otherwise-valid operation.
+
+### Step 4 — Wrap-Up
+
+Not covered here: multi-currency accounts (Step 1 deliberately scoped this out), interest accrual (a genuinely separate, time-driven domain service not modeled above), monitoring specifics (reconciliation-break rate, `RowVersion`-conflict rate as a leading indicator of a mis-sized Aggregate per Advanced Q4), and disaster-recovery specifics for the `Postings` append-only table (which, being append-only, is a strong candidate for straightforward log-shipping-style replication). The closing summary diagram is the architecture diagram in Step 2 — every subsequent deep-dive topic elaborates one edge of that same picture.
+
+**References**
+1. Evans, E. — *Domain-Driven Design* (2003), Part III (tactical patterns).
+2. Vernon, V. — *Implementing Domain-Driven Design* (2013), ch. 5–10 (Entities, Value Objects, Aggregates).
+3. Microsoft Learn — "Design a DDD-oriented microservice" (.NET microservices architecture guide).
+4. Fowler, M. — "AggregateBoundaries" / "OptimisticOfflineLock," martinfowler.com.
+5. Pragmatic Engineer — "Designing a Payment System" (four-step system-design methodology this section follows).
+
+## 13. Low-Level Design
+
+### 13.1 Class diagram — the `Account` Aggregate
+
+```mermaid
+classDiagram
+ class Account {
+ <<Aggregate Root>>
+ -AccountId Id
+ -Money ledgerBalance
+ -List~Posting~ postings
+ -List~Hold~ holds
+ +Deposit(Money amount, string idempotencyKey)
+ +Withdraw(Money amount, string idempotencyKey)
+ +PlaceHold(Money amount) HoldId
+ +ReleaseHold(HoldId)
+ +AvailableBalance() Money
+ -EnsureSufficientFunds(Money amount)
+ }
+ class Posting {
+ <<Entity — internal to Account, immutable>>
+ -PostingId Id
+ -Money amount
+ -PostingType type
+ -string idempotencyKey
+ -DateTime createdUtc
+ }
+ class Hold {
+ <<Entity — internal to Account>>
+ -HoldId Id
+ -Money amount
+ -HoldStatus status
+ -DateTime expiresUtc
+ +Release()
+ +Capture()
+ }
+ class Money {
+ <<Value Object>>
+ +Amount decimal
+ +Currency string
+ }
+ class IAccountRepository {
+ <<interface>>
+ +LoadAsync(AccountId) Task~Account~
+ +SaveAsync(Account) Task
+ }
+ Account "1" *-- "many" Posting : append-only, root-mediated
+ Account "1" *-- "many" Hold : root-mediated
+ Account --> Money : ledgerBalance
+ IAccountRepository ..> Account : loads/saves whole aggregate
+```
+
+### 13.2 Sequence diagram — placing a hold, then a concurrent withdrawal attempt
+
+```mermaid
+sequenceDiagram
+ participant App as Application Service
+ participant Acct as Account (Aggregate Root)
+ participant Repo as IAccountRepository
+ participant DB as Account DB
+
+ App->>Repo: LoadAsync(accountId)
+ Repo->>DB: SELECT (incl. RowVersion)
+ DB-->>Repo: Account row + RowVersion=V1
+ Repo-->>App: Account (in memory)
+ App->>Acct: PlaceHold(Money(50, "USD"))
+ Acct->>Acct: EnsureSufficientFunds — checks AvailableBalance
+ Acct-->>App: HoldId (in-memory state updated)
+ App->>Repo: SaveAsync(account)
+ Repo->>DB: UPDATE ... WHERE RowVersion=V1
+ DB-->>Repo: 1 row affected, RowVersion=V2
+ Repo-->>App: OK
+
+ Note over App,DB: Concurrent withdrawal (different request, loaded at V1) now retries
+ App->>Repo: SaveAsync(staleAccount) 
+ Repo->>DB: UPDATE ... WHERE RowVersion=V1
+ DB-->>Repo: 0 rows affected — conflict
+ Repo-->>App: DbUpdateConcurrencyException
+ App->>Repo: reload (V2), reapply Withdraw, retry save
+```
+
+**Design patterns used:** Aggregate/Aggregate Root (the core pattern), Repository (Aggregate-granularity persistence), Domain Service (Transfer Orchestrator, §12), Value Object (`Money`), Factory (implicit — `Account`'s own constructor plus named methods act as the invariant-preserving construction/mutation surface).
+
+**SOLID mapping:** SRP — `Account` owns balance/hold invariants only, not authorization or ACH translation. OCP — a new balance-affecting operation type is a new method on `Account` plus a new `PostingType` enum value, not a change to `Posting`'s own structure. LSP — any `IAccountRepository` implementation (SQL Server today, a future different store) is substitutable without changing calling code. ISP — `IAccountRepository`'s two methods are the minimum surface any consumer needs. DIP — `Account`'s domain logic has zero dependency on EF Core or SQL Server; only the `IAccountRepository` implementation does.
+
+**Extensibility.** A new balance-affecting operation (e.g., `Account.ApplyFee`) is added as a new Root method following the same "validate, then mutate, then append an immutable `Posting`" shape every existing method already follows — no change required to `Posting`, `Hold`, or the Repository contract.
+
+**Concurrency/thread safety.** `Money` and `Posting` are immutable — safe to share with no synchronization. `Account` itself is not designed for concurrent in-process mutation by multiple threads sharing one loaded instance (Module 110 Advanced Q6) — each request loads, mutates, and saves its own instance, with the database-level `RowVersion` optimistic check (§13.2) as the actual cross-process/cross-request concurrency guard, exactly the two-layer model Module 110 establishes: in-process safety by scoping instance lifetime to one operation, cross-process safety by optimistic concurrency at persistence.
+
+## 14. Production Debugging
+
+**Incident: Negative available balance under concurrent card-authorization holds.**
+
+**Symptom:** A customer with a $500 available balance had three near-simultaneous $400 card authorizations (a common fraud-testing pattern, and also a legitimate scenario — three merchants authorizing in the same second) all *succeed*, producing an available balance of −$700 — a state the `Account.PlaceHold` invariant was specifically designed to make impossible.
+
+**Root cause:** The three hold requests arrived on three different application-server instances within the same ~40ms window. Each instance's `Application Service` independently called `LoadAsync`, each receiving the *same* `RowVersion` (all three loads happened before any of the three saves committed). Each instance's in-memory `Account.PlaceHold` check correctly evaluated `AvailableBalance ($500) >= $400` against its own, independently-loaded, stale view — and, because `PlaceHold` was implemented to check the invariant *before* mutating in-memory state but the actual SQL Server `UPDATE` was, on inspection, missing the `WHERE RowVersion = @loaded` clause (a configuration regression from a recent EF Core migration that had inadvertently mapped the concurrency token as `ConcurrencyCheck` on the wrong property after a refactor), all three saves succeeded unconditionally rather than the expected two-of-three failing with a `DbUpdateConcurrencyException`.
+
+**Investigation:** Ops initially suspected a business-logic bug in `PlaceHold`'s invariant check itself — but a focused unit test (using the adversarial-test harness from §11 Expert) confirmed `PlaceHold` correctly rejected an over-limit hold *in isolation*, ruling out the domain logic. Reviewing the generated SQL (via EF Core's logging) for the actual `UPDATE` statement issued in production revealed the missing `RowVersion` predicate — the optimistic-concurrency guarantee had silently degraded to "last write wins" at the database level despite the C# code and the entity configuration both still *declaring* `RowVersion` as a concurrency token.
+
+**Tools:** EF Core SQL logging (`ILogger` category `Microsoft.EntityFrameworkCore.Database.Command`) to inspect the actual generated `UPDATE`, the adversarial invariant-test harness (§11 Expert) to rule out domain-logic-level bugs, and a targeted reconciliation query comparing each affected account's `LedgerBalance`/`AvailableBalance` against the sum of its own `Postings`/active `Holds` to quantify blast radius.
+
+**Fix:** Corrected the EF Core model configuration (`modelBuilder.Entity<Account>().Property(a => a.RowVersion).IsRowVersion()` had been accidentally applied to a *different*, newly-added timestamp property during the earlier migration, leaving the real concurrency column unconfigured) and added an integration test specifically asserting the generated `UPDATE` statement's `WHERE` clause includes the `RowVersion` predicate — a regression class no unit test of `PlaceHold`'s pure domain logic could ever catch, since the domain logic itself was correct throughout; the bug was entirely in the persistence-mapping layer between the correct domain model and the database.
+
+**Prevention:** Added this integration-level "concurrency token is actually enforced at the SQL level" check as a standing, CI-gated test for every Aggregate Root with a `RowVersion`, on the reasoning that Module 110 Advanced Q7's "verify the verifier" principle applies exactly as much to the persistence-mapping layer as to raw-SQL-bypass or ORM-reattachment risks — a correctly-written domain model's invariant guarantee is only as strong as its weakest actual, currently-configured infrastructure link, and that link must be independently, continuously verified rather than assumed correct because it was correct at last review.
+
+## 15. Architecture Decision
+
+**Decision:** How should concurrent modification of the same `Account` Aggregate be protected against?
+
+**Option A — Pessimistic locking (`SELECT ... WITH (UPDLOCK, ROWLOCK)` or application-level distributed lock per `AccountId`).**
+Advantages: simplest mental model — a lock holder is guaranteed no concurrent writer can interleave; no retry logic needed in application code.
+Disadvantages: every hold/deposit/withdrawal on a popular account (a payroll-processing corporate account with thousands of near-simultaneous credits) serializes entirely, capping throughput at whatever one lock holder's transaction duration allows; a held lock across a slow downstream call (e.g., synchronously validating against a fraud service mid-transaction) risks lock-wait timeouts cascading into unrelated request failures.
+Cost/complexity: low conceptual complexity, but real operational risk of lock contention and timeout tuning under real production load.
+Maintainability/scalability: poor under high-contention accounts specifically — the exact accounts (corporate payroll, high-volume merchant) most likely to need good throughput are the ones this option penalizes most.
+
+**Option B — Optimistic concurrency (native `rowversion`, reload-reapply-retry).**
+Advantages: no lock held during a request's processing time — genuine concurrent reads and low-contention concurrent writes proceed freely; retry cost is paid only on genuine conflict, which for most accounts (low simultaneous-transaction rate) is rare.
+Disadvantages: retry logic must be correctly implemented everywhere `Account` is mutated (a discipline requirement, and exactly the correctly-implemented-everywhere gap the Production Debugging incident's root cause actually was — not in the optimistic-concurrency *design* but in its persistence-layer *configuration*); a genuinely high-contention account (payroll) can still suffer retry storms without the jittered-backoff mitigation (§11 Hard).
+Cost/complexity: low runtime cost, moderate discipline cost (every write path must correctly retry, and the concurrency token's actual enforcement must be independently, continuously verified per §14's incident).
+Maintainability/scalability: good for the overwhelming majority of accounts; requires an explicit, documented exception path for the small minority of genuinely high-contention accounts.
+
+**Option C — Event-sourced balance (append-only event log as the sole source of truth, balance derived by replay/snapshot).**
+Advantages: the `Postings` table already being append-only (§12's data model) means this option is a smaller step than it first appears; provides a complete, natural audit trail and trivially supports point-in-time balance reconstruction for regulatory inquiry.
+Disadvantages: full event sourcing (rather than the current-state-plus-append-only-history hybrid already in place) adds real complexity — snapshotting strategy, replay performance at scale (Module 110 Advanced Q5) — for a benefit (complete historical replay) the current design already substantially provides via its immutable `Postings` table without the added replay-performance engineering.
+Cost/complexity: highest of the three, and a materially bigger lift given the existing design.
+Maintainability/scalability: excellent audit properties, but the added operational complexity is not justified purely by the concurrency-protection question this decision is actually about — full event sourcing is a separate, larger architectural decision (this repo's dedicated Event Sourcing domain) better evaluated on its own merits, not smuggled in as a side effect of a concurrency-control choice.
+
+**Recommendation:** Option B, with the mitigations §14's incident surfaced made a standing requirement: (1) a CI-gated integration test verifying the `RowVersion` predicate actually appears in the generated `UPDATE` for every Aggregate Root, and (2) jittered exponential backoff (§11 Hard) on retry to prevent a retry storm on the genuinely high-contention minority of accounts. Optimistic concurrency is the correct default because the estimation in §12 Step 1 already established this system's load profile is low-to-moderate throughput with rare genuine per-account contention — Option A's universal lock cost is unjustified overhead for that profile, and Option C's added complexity solves a problem (full historical replay) the existing append-only `Postings` design already substantially addresses.
+
+## 17. Principal Engineer Perspective
+
+**Business impact.** The Production Example's discovery of an 18-month-old, silently-compounding corporate-actions bug during migration is the concrete business case for tactical DDD investment — an anemic model doesn't merely risk future bugs, it actively hides present ones behind an absence of any check that would surface them; the migration's real payoff was retroactive correctness, not only prospective safety.
+
+**Engineering trade-offs.** Every Aggregate-sizing decision (§2.3) trades synchronous-invariant scope against contention and reconstitution cost — a Principal Engineer's job is making this trade-off with actual, measured evidence (the Black-Friday-scale incident in Advanced Q4 is exactly the kind of evidence that should inform, not follow, a sizing decision) rather than intuition about what "feels related."
+
+**Technical leadership.** Migrating an anemic model to a rich Aggregate (the Production Example) is organizationally disruptive — six call sites needed simultaneous rewriting, and some previously-silent operations became explicitly rejected. Leading this well means sequencing it via Branch by Abstraction and a Parallel Run (Module 109's migration-pattern precedent), not a big-bang cutover, and communicating clearly to stakeholders that discovering latent data-quality issues during the migration is an expected, valuable outcome, not a sign the migration went wrong.
+
+**Cross-team communication.** An Aggregate's invariants encode business rules multiple teams (Trading, Ops, Compliance) may have independently, informally agreed to over time without ever writing them down in one place — implementing them as an enforced Aggregate is often the first time those rules are made explicit and visible to everyone who depends on them, which itself surfaces disagreement (Module 109's Event Storming "hot spot" technique) that's better resolved during design than discovered in production.
+
+**Architecture governance.** The adversarial invariant-test harness (§11 Expert) and the RowVersion-enforcement integration test (§14's prevention) are both examples of converting a governance intention ("invariants must always be enforced," "concurrency protection must actually work") into an automated, CI-gated check — exactly the fitness-function discipline Module 109 establishes, applied here at the tactical, per-Aggregate level.
+
+**Cost optimization.** Not every class needs full tactical-DDD rigor (Module 110 Advanced Q9) — a Principal Engineer actively pushes back on reflexive over-application, reserving the investment for concepts with genuine invariants, identity concerns, or primitive-obsession risk, and leaving simple, low-risk data structures simple.
+
+**Risk analysis.** The §14 incident is a canonical example of risk hiding in the gap between a correct domain model and its actual, currently-configured persistence mapping — a Principal Engineer treats "is the invariant enforced in the code" and "is the invariant's enforcement actually configured correctly in the database" as two independent, both-required verification questions, never assuming the first implies the second.
+
+**Long-term maintainability.** Aggregate boundaries, like bounded-context boundaries (Module 109 Advanced Q2), are subject to the same evolutionary-architecture principle — a boundary correct at initial design can legitimately need re-splitting as genuine new invariants emerge (Intermediate Q7) or re-examination as contention patterns change (Advanced Q4); treating an Aggregate's initial shape as permanent is the same mistake as treating any other architectural decision as permanent.
+
+## 18. Revision
+
+**Key Takeaways:**
+- Entity = identity-based equality, tracked over its lifecycle. Value Object = value-based equality, immutable, interchangeable.
+- The Aggregate is the enforced, synchronous consistency boundary; the Aggregate Root is its sole external entry point.
+- Size an Aggregate to the smallest boundary a genuine, must-be-synchronous invariant actually requires — not to "feels related."
+- Reference other Aggregates only by ID, never by direct object reference.
+- Validate on every mutating method, not only at construction — most of an Aggregate's lifetime is spent being modified.
+- Optimistic concurrency (native `rowversion`, reload-reapply-retry) is the default; pessimistic locking is the documented exception for genuinely high-contention cases.
+- A correct domain model's invariant guarantee is only as strong as its weakest, currently-configured write path and persistence mapping (§14) — verify the verifier, continuously, not once.
+
+**Interview Cheatsheet:**
+- Money is the canonical Value Object: immutable, value-equal, self-validating, currency-safe.
+- "One Aggregate, one transaction" is the default; a multi-Aggregate transaction is a signal to re-examine the boundary, with narrow, explicit exceptions (same-store transfers).
+- Exactly-once = at-least-once (retry) + at-most-once (idempotency key / unique constraint) — Module 110's identity, applied concretely in §12's ACH/idempotency design.
+- A God Aggregate's symptom in production is version-conflict-driven throughput collapse under peak load, not a correctness error.
+
+**Things Interviewers Love:**
+- A candidate distinguishing "the domain logic is correct" from "the persistence mapping actually enforces it" (§14) — two independently-necessary, independently-verifiable things.
+- Concretely justifying an Aggregate's boundary by naming the specific invariant that requires it, not a vague "these belong together."
+- Naming the reload-reapply-retry pattern by name, with backoff, rather than just "handle the conflict."
+
+**Things Interviewers Hate:**
+- A `Money`/similar Value Object with a public setter, or represented as a raw `decimal`.
+- Assuming pessimistic locking is always safer than optimistic concurrency without discussing the throughput cost trade-off.
+- Treating "we have an Aggregate class" as sufficient proof invariants are actually enforced, without considering every possible write path (raw SQL, ORM re-attachment, misconfigured concurrency token).
+
+**Common Traps:**
+- Forgetting that a detached, `AsNoTracking()`-loaded entity graph naively saved back bypasses the Aggregate's own in-memory validation (§2.6).
+- Assuming an EF Core model correctly *declaring* a `RowVersion` concurrency token means it's correctly *enforced* at the SQL level — verify the generated `UPDATE`, don't assume it (§14).
+- Conflating "long-running business process" with "needs multiple Aggregates" — a multi-day workflow can still be one Aggregate's state machine if no independent Aggregate's invariants are involved (Expert Q4 in §10).
+
+---

@@ -423,9 +423,207 @@ public class AuthorizingOrderRepositoryProxy: IOrderRepository
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-A payments platform uses Decorator chains for composable cross-cutting concerns (caching, retry, logging) around its `IPaymentGateway` abstraction, an Abstract Factory (Advanced Q2) for its multi-cloud provider-consistency guarantee, and a protection proxy (Expert exercise) transparently enforcing resource-based authorization across every repository access path. The signature production incident — a monolithic gateway wrapper combining independent concerns inline, both untestable in isolation and unreusable across interfaces — is this module's central lesson: genuinely independent, composable cross-cutting concerns are Decorator's textbook use case, and forcing them into one class violates SRP while forfeiting the reuse benefit a properly-factored chain provides. Principal-level guidance: teach pattern selection via problem-shape diagnostic questions (Advanced Q10), building transferable design judgment rather than pattern-name memorization — and apply every pattern deliberately, where its benefit is demonstrated, never reflexively (Advanced Q9's logging-Decorator-everywhere anti-pattern).
+**Scenario:** A multi-region FinTech platform's **Payment Gateway Abstraction Layer** — a service that lets the rest of the platform charge/refund/query payments through one internal interface (`IPaymentGateway`) while transparently routing to Stripe (US), Adyen (EU), and a regional partner gateway (APAC), each with its own SDK shape, region-specific compliance requirements, and reliability characteristics.
+
+**Functional requirements**
+- Route a charge/refund/query request to the correct regional gateway based on the merchant's configured region, with a consistent internal API regardless of provider.
+- Apply retry-with-backoff, response caching (for idempotent query operations only), and structured audit logging uniformly across every provider, without duplicating that logic per provider.
+- Enforce resource-based authorization (a caller may only access payment records for merchants it's authorized for) transparently, without every call site remembering to check.
+
+**Non-functional requirements**
+- No single provider's SDK quirks may leak into the platform's core payment-processing logic (DIP, satisfied via Adapter).
+- Adding a new regional provider must not require modifying existing, tested provider-integration code (OCP, satisfied via Factory Method + Adapter).
+- Cross-cutting concerns (retry/caching/logging) must be independently unit-testable and reusable for a sibling interface (`IShippingRateProvider`) without duplication (the Production Example's fix).
+- Every payment-record access must be authorized, with no code path able to bypass the check (the Expert exercise's proxy).
+
+**Back-of-the-envelope estimation:** ~5,000 payment operations/second at peak across all regions; at ~40µs of Decorator-chain overhead per call (§7), aggregate Decorator overhead is ~200ms of CPU-time/second across the fleet — negligible against the 50-300ms per-call network latency to the actual provider, confirming (per §7) the chain's overhead is not the bottleneck worth optimizing here; the real design driver is **correctness and provider-consistency**, not raw throughput.
+
+**Architecture:**
+1. `IPaymentGatewayFactory` (Factory Method, §2.1) resolves the correct provider adapter by merchant region.
+2. Each provider gets its own Adapter (`StripeGatewayAdapter`, `AdyenGatewayAdapter`, `RegionalPartnerGatewayAdapter`) implementing `IPaymentGateway`, translating the platform's internal request/response shape to/from each SDK's native shape (§2.5).
+3. The resolved adapter is wrapped, at DI-composition time, in a fixed Decorator chain: `LoggingGatewayDecorator(RetryGatewayDecorator(CachingGatewayDecorator(adapter)))` (§2.6, the Production Example's fix) — retry innermost (so each attempt genuinely re-executes against the real adapter), logging outermost (observing the whole sequence's eventual outcome as one logged event, Advanced Q7 in §10).
+4. Every repository access to persisted payment records passes through an `AuthorizingPaymentRepositoryProxy` (§2.8, the Expert exercise), transparently enforcing resource-based authorization.
+5. A `PaymentProcessingFacade` (§2.7) exposes a single, simplified `ProcessPayment(request)` entry point to the rest of the platform, internally coordinating gateway resolution, fraud-check subsystem calls, and ledger-recording — hiding that complexity from calling services.
+
+**Components:** `IPaymentGatewayFactory`, per-provider Adapters, the fixed Decorator chain, `AuthorizingPaymentRepositoryProxy`, `PaymentProcessingFacade`, a `ReferenceDataCache` Singleton (§10 Expert Q7) for provider-routing configuration.
+
+**Database selection:** A boring, ACID relational store (SQL Server) for payment records and audit logs — payment state transitions need strong consistency and auditability, not NoSQL's scale/flexibility trade-offs, echoing this repo's standing "prefer a boring ACID database for money-movement state" guidance.
+
+**Caching:** Only idempotent, read-only operations (payment-status queries) are cached, with a short TTL (seconds, not minutes) and explicit invalidation on any state-changing operation for the same payment ID — charges/refunds are never cached (the Coding Exercises section's Hard example explicitly notes this).
+
+**Messaging:** Payment-state-change events published to an internal event stream (settlement, reconciliation, and notification subsystems subscribe independently) — decoupling the gateway layer from every downstream consumer of a payment's outcome.
+
+**Scaling:** Each region's adapter and Decorator chain are stateless and horizontally scalable behind a load balancer; the `ReferenceDataCache` Singleton is one-instance-**per-process** (§9), so provider-routing configuration changes must propagate via a refresh mechanism (a `Lazy<T>` reset triggered by a config-change event), not an assumption of one global instance.
+
+**Failure handling:** Retry decorator handles transient provider failures (network timeouts, 5xx responses) with exponential backoff and a bounded attempt count; non-retryable failures (a declined card, a validation error) propagate immediately without retry, classified via the provider Adapter translating provider-specific error codes into a shared `PaymentException` taxonomy the Retry decorator inspects.
+
+**Monitoring:** Per-provider success/failure rate and latency (surfaced by the Logging decorator's structured events); Decorator-chain overhead tracked separately from provider-call latency (§7's profiling discipline) so a regression in the chain itself is distinguishable from a regression in an external provider; authorization-proxy denial rate as a security signal (a spike may indicate a misconfigured caller or an attempted unauthorized access pattern).
+
+**Trade-offs:** The fixed Decorator-chain composition (retry innermost, logging outermost, §10 Advanced Q7) is a deliberate, tested ordering — allowing chain order to vary per call site would reintroduce the exact ordering-mistake risk (caching wrapping retry instead of the reverse) the Production Example's testing strategy exists to catch; trading a small amount of flexibility for a verified-correct, single composition order.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** One internal `IPaymentGateway` interface; per-provider Adapters; a fixed, composable Decorator chain; a transparent authorization proxy over payment-record access; new providers addable without modifying existing code.
+
+**Class diagram:**
+```mermaid
+classDiagram
+ class IPaymentGateway {
+ <<interface>>
+ +ChargeAsync(amount) bool
+ +RefundAsync(txId) bool
+ +GetStatusAsync(txId) PaymentStatus
+ }
+ class StripeGatewayAdapter
+ class AdyenGatewayAdapter
+ class RetryGatewayDecorator {
+ -IPaymentGateway inner
+ }
+ class CachingGatewayDecorator {
+ -IPaymentGateway inner
+ }
+ class LoggingGatewayDecorator {
+ -IPaymentGateway inner
+ }
+ class IPaymentGatewayFactory {
+ <<interface>>
+ +Create(region) IPaymentGateway
+ }
+ class IPaymentRecordRepository {
+ <<interface>>
+ }
+ class AuthorizingPaymentRepositoryProxy {
+ -IPaymentRecordRepository inner
+ -IAuthorizationService authService
+ }
+ class PaymentProcessingFacade {
+ -IPaymentGatewayFactory factory
+ -IPaymentRecordRepository repository
+ +ProcessPayment(request) PaymentResult
+ }
+
+ IPaymentGateway <|.. StripeGatewayAdapter
+ IPaymentGateway <|.. AdyenGatewayAdapter
+ IPaymentGateway <|.. RetryGatewayDecorator
+ IPaymentGateway <|.. CachingGatewayDecorator
+ IPaymentGateway <|.. LoggingGatewayDecorator
+ IPaymentRecordRepository <|.. AuthorizingPaymentRepositoryProxy
+ IPaymentGatewayFactory --> IPaymentGateway : creates
+ LoggingGatewayDecorator o--> RetryGatewayDecorator : wraps
+ RetryGatewayDecorator o--> CachingGatewayDecorator : wraps
+ CachingGatewayDecorator o--> StripeGatewayAdapter : wraps (or Adyen, per region)
+ PaymentProcessingFacade --> IPaymentGatewayFactory
+ PaymentProcessingFacade --> IPaymentRecordRepository
+```
+
+**Sequence diagram — a charge request through the full composed system:**
+```mermaid
+sequenceDiagram
+ participant Client
+ participant Facade as PaymentProcessingFacade
+ participant Factory as IPaymentGatewayFactory
+ participant Log as LoggingGatewayDecorator
+ participant Retry as RetryGatewayDecorator
+ participant Cache as CachingGatewayDecorator
+ participant Adapter as StripeGatewayAdapter
+ participant Proxy as AuthorizingPaymentRepositoryProxy
+
+ Client->>Facade: ProcessPayment(request)
+ Facade->>Factory: Create(region="US")
+ Factory-->>Facade: Log(Retry(Cache(Adapter)))
+ Facade->>Log: ChargeAsync(amount)
+ Log->>Retry: ChargeAsync(amount)
+ Retry->>Cache: ChargeAsync(amount)
+ Cache->>Adapter: ChargeAsync(amount)
+ Adapter-->>Retry: transient failure
+ Retry->>Adapter: retry attempt 2
+ Adapter-->>Log: success (propagates up)
+ Facade->>Proxy: SaveAsync(paymentRecord)
+ Proxy->>Proxy: AuthorizeAsync(currentUser, merchant)
+ Proxy-->>Facade: saved
+```
+
+**Design patterns used:** Factory Method (provider resolution), Adapter (per-provider SDK translation), Decorator (retry/caching/logging composition), Proxy (transparent authorization), Facade (`PaymentProcessingFacade`'s simplified entry point), Singleton (DI-lifetime `ReferenceDataCache` for routing config, §10 Expert Q7).
+
+**SOLID mapping:** SRP — each Decorator and Adapter owns exactly one concern. OCP — a new provider is added via a new Adapter + one new Factory `switch` arm, with zero modification to existing Adapters or Decorators. LSP — every `IPaymentGateway` implementation (real Adapter or Decorator) must be substitutable anywhere the interface is expected, including under failure conditions (a Decorator that swallows exceptions the real Adapter would throw violates this). ISP — `IPaymentGateway` exposes only charge/refund/status, not provider-specific configuration methods. DIP — `PaymentProcessingFacade` depends on `IPaymentGatewayFactory` and `IPaymentRecordRepository` abstractions, never a concrete provider SDK type.
+
+**Extensibility:** A new region/provider requires only a new Adapter class and one new Factory `switch` arm (or DI-keyed registration) — no change to `RetryGatewayDecorator`, `CachingGatewayDecorator`, `LoggingGatewayDecorator`, or `PaymentProcessingFacade`.
+
+**Concurrency/thread safety:** Each Decorator/Adapter instance is stateless per-call (no mutable instance fields beyond the wrapped `inner` reference, itself immutable post-construction) and safe for concurrent use by multiple requests; the `CachingGatewayDecorator`'s underlying `IMemoryCache` is internally thread-safe; the `ReferenceDataCache` Singleton uses `Lazy<T>` with `ExecutionAndPublication` (§10 Expert Q7) to guarantee correct, single initialization under concurrent first access.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** A shared, multi-tenant risk-limits service — used by several trading-desk applications to check a customer's current position limits before allowing a trade — was registered as a DI `Singleton` (for the legitimate reason that its underlying reference-data load was expensive and genuinely process-global). Three weeks after a refactor added a "current customer context" field to the same Singleton class (to avoid passing the customer ID through several layers of method calls, a shortcut taken under deadline pressure), a support ticket reported that Customer B had briefly seen Customer A's position limits during a period of high concurrent load.
+
+**Root cause:** The refactor added a mutable, non-`readonly` field (`CurrentCustomerId`) to a `Singleton`-lifetime class, set at the start of each risk check and read later in the same method — an assumption that "the field will only be read by the same logical request that set it," which is true for a single-threaded, single-request mental model but false the instant two requests execute concurrently on the same Singleton instance: Request A sets `CurrentCustomerId = "A"`, is pre-empted by the thread scheduler, Request B sets `CurrentCustomerId = "B"`, and Request A resumes and reads the now-overwritten `"B"` value — retrieving and briefly displaying Customer B's limits to Customer A's session. This is exactly §8's threat model, materialized under real production concurrency.
+
+**Investigation:** The bug was intermittent and load-dependent (only reproducible under genuinely concurrent requests, never in single-request manual QA), which delayed diagnosis for several days. The eventual finding came from a focused code review specifically looking for non-`readonly` fields on every `Singleton`-lifetime-registered class in the DI container startup configuration (`services.AddSingleton<...>()` call sites), applying the exact review heuristic named in §8's mitigation and §10 Expert Q10's proposed static-analysis rule — the mutable `CurrentCustomerId` field was the only match, and its introduction correlated exactly with the refactor commit that preceded the first support ticket.
+
+**Tools:** DI-container registration audit (grep for `AddSingleton` call sites, then manual review of each registered class's field mutability); a load test reproducing genuine request concurrency against the risk-limits service (single-request QA had never exercised the race); structured logs correlating `CurrentCustomerId` field reads against the originating request's actual authenticated customer ID, confirming the mismatch pattern.
+
+**Fix:** The `CurrentCustomerId` field was removed from the Singleton entirely; the customer ID was instead threaded explicitly as a method parameter through the risk-check call chain (the straightforward, if less convenient, correct fix), with the Singleton restricted back to genuinely global, immutable reference data only (exactly the boundary §8 draws).
+
+**Prevention:** (1) A Roslyn analyzer (§10 Expert Q10's follow-up) added to CI, flagging any non-`readonly` instance field on a class registered with `Singleton` lifetime, failing the build rather than relying on manual review to catch a recurrence. (2) A load test specifically targeting concurrent-request isolation added to the risk-limits service's test suite, asserting that two concurrent requests for different customers never observe each other's data — a test category (concurrent-isolation testing) the team's existing pyramid hadn't previously included. (3) A team-wide review noting the specific shortcut that caused this — "avoid passing an ID through several method-call layers" — as a recognized anti-pattern trade-off: the convenience of a shared field is never worth the multi-tenant data-leak risk it introduces on a Singleton-lifetime class, and the correct fix for "too many parameters through several layers" is a `Scoped`-lifetime context object or an explicit parameter object, never a Singleton field.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Choosing how to integrate three regional payment providers (Stripe, Adyen, a regional partner) behind one internal `IPaymentGateway` interface.
+
+**Option A — Factory Method + per-provider Adapter (the recommended architecture, §12):**
+*Advantages:* New providers added without modifying existing code (OCP); each provider's SDK quirks fully isolated behind its own Adapter; cross-cutting Decorators (retry/caching/logging) reused unchanged across every provider.
+*Disadvantages:* More upfront classes/files than a single "God" gateway class; requires discipline to keep each Adapter genuinely thin (translation only, no business logic).
+*Cost:* Moderate upfront (one Adapter class per provider); low ongoing (new-provider addition is additive, not a modification).
+*Complexity:* Moderate — the Factory + Adapter + Decorator composition requires developers to understand the layering, a real onboarding cost for new team members.
+*Maintainability:* High — each layer (routing, translation, cross-cutting concerns) is independently testable and independently owned.
+*Scalability (team):* High — platform team owns Decorators, each regional/product team can own its own provider Adapter without touching shared code (§9).
+
+**Option B — a single generic gateway client with a large, provider-branching configuration object (no Adapter per provider, one class internally `switch`-ing on provider type at every method):**
+*Advantages:* Fewer classes initially; feels simpler for a single-provider MVP.
+*Disadvantages:* Every new provider requires modifying the same shared class (direct OCP violation); provider-specific SDK quirks leak into shared code, coupling unrelated providers' correctness to the same file; testing one provider's logic requires navigating branches for every other provider.
+*Cost:* Low upfront, but grows superlinearly as providers are added — this is precisely the incident's monolithic-wrapper shape (§4), reproduced here at the provider-integration layer instead of the cross-cutting-concern layer.
+*Complexity:* Low initially, high and worsening over time.
+*Maintainability:* Low — the shape this course has repeatedly shown to accumulate exactly the kind of boundary-condition and cross-provider-interference bugs a properly-factored design avoids.
+*Scalability (team):* Low — every team touching any provider must coordinate changes to the same shared class, a direct scaling bottleneck as more regional teams are added.
+
+**Option C — a fully generic, reflection/configuration-driven provider loader (providers described entirely by external configuration, dynamically instantiated at runtime):**
+*Advantages:* New providers addable via configuration alone, no code deployment.
+*Disadvantages:* Directly the §8 untrusted-instantiation risk if provider configuration isn't tightly, separately access-controlled (this configuration is not "untrusted input" in the same sense as an external API payload, but the same reflection-driven-construction risk class applies if configuration provenance isn't equally trusted); genuinely dynamic-typed configuration also loses compile-time verification that a configured provider actually implements `IPaymentGateway` correctly.
+*Cost:* Low per-provider addition, but high upfront (building safe, validated dynamic loading) and ongoing (configuration governance).
+*Complexity:* High — dynamic loading is inherently harder to reason about and debug than compiled Adapter classes.
+*Maintainability:* Moderate — configuration-driven behavior is often harder to trace/debug than explicit code.
+*Scalability (team):* Moderate — avoids code-change coordination but introduces configuration-governance coordination instead.
+
+**Recommendation: Option A.** For a regulated FinTech payment-integration boundary, the compile-time verifiability, clean OCP compliance, and clean team-ownership boundaries of Factory Method + Adapter outweigh Option B's short-term simplicity (which degrades exactly as this module's Production Example incident demonstrates) and Option C's dynamic-instantiation risk profile, which is particularly unwelcome in a payment-processing boundary subject to PCI-DSS scrutiny. Option C's configurability benefit is only worth its added risk/complexity for genuinely high-provider-churn domains (e.g., a marketplace platform onboarding dozens of small, self-service integrations) — not a fixed, small set of regionally-mandated payment providers, where Option A's compile-time-verified, OCP-compliant structure is the better fit.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** The Singleton-mutable-state incident (§14) is a direct, quantifiable business risk in a regulated FinTech context — a cross-tenant data leak of financial position/limit information is a regulatory-reportable event in most jurisdictions, independent of whether any customer was financially harmed; the cost of the architectural discipline described throughout this module (correct DI lifetime matching, the reflection-instantiation ban, transparent authorization proxies) is trivial against the cost of a single such incident's regulatory, reputational, and customer-trust fallout.
+
+**Engineering trade-offs:** Every pattern in this module trades a small amount of upfront structural complexity (more classes, an extra layer of indirection) for a demonstrated reduction in a specific, recurring failure mode — Decorator against the monolithic-wrapper incident, Adapter/Factory Method against provider-coupling, Proxy against inconsistent authorization enforcement. The Principal-level judgment is recognizing *when* that trade is worth making (a payment-processing boundary, definitely) versus when it's premature complexity for a need that doesn't yet exist (§10 Expert Q6's Bridge-vs-Adapter caution) — the same "match the tool to the demonstrated need" discipline recurring throughout this module, now applied at the trade-off-justification level rather than the pattern-selection level.
+
+**Technical leadership:** Teaching a team to recognize the Singleton-mutable-state anti-pattern *before* it reaches production (via the code-review heuristic and the CI analyzer, §14's prevention) is higher-leverage than catching any single instance of it after the fact — a Principal Engineer's real influence on incident rate is disproportionately through the review heuristics and automated guardrails a team internalizes, not through personally reviewing every PR.
+
+**Cross-team communication:** The Payment Gateway Abstraction Layer's Facade (§12) and clean Adapter boundaries are as much a communication mechanism as a technical one — they let a regional-provider-owning team evolve their Adapter's internals freely without coordinating with every consuming team, as long as the shared `IPaymentGateway` contract stays stable, directly the same "stable public contract, free internal evolution" principle established for Facade generally (§9).
+
+**Architecture governance:** Standardize the security-critical rules (§8, §10 Expert Q10) platform-wide via automated enforcement (the CI analyzer), not manual review — manual review doesn't scale past a handful of teams, and the Singleton incident's multi-week detection delay is a direct argument for shifting this class of check left, into automated, blocking CI gates rather than relying on eventual, reactive code review.
+
+**Cost optimization:** The Decorator chain's ~40µs/call overhead (§7, §10 Expert Q3) is a negligible cost correctly *not* optimized away — a Principal Engineer's cost-optimization judgment includes recognizing when a measured cost is genuinely below the threshold worth engineering effort against, redirecting that effort toward the actual dominant costs (external provider latency, authorization-proxy round-trips at the wrong granularity, §10 Expert Q5) instead.
+
+**Risk analysis:** The dominant risk pattern across this module — a Singleton's lifetime mismatched against the true scope of the state it holds, a Factory's input-trust boundary mismatched against where untrusted data actually enters the system, a Decorator chain's ordering assumption not mechanically re-verified after composition — is, in every case, a **mismatch between a pattern's implicit assumption and the system's actual, current reality**, not a flaw in the pattern itself; risk registers for pattern-heavy architectures should track these assumption/reality correspondences explicitly (which classes are genuinely safe as Singletons, which Factories have genuinely closed input sets), not merely "we use design patterns" as an unqualified, presumed-safe line item.
+
+**Long-term maintainability:** What decays over time, across this module's incidents, is exactly this correspondence — a Singleton that was genuinely stateless at introduction can silently acquire mutable state during a later, deadline-pressured refactor (§14); a Factory's fixed, allow-listed type set can be "temporarily" extended with a reflection-based fallback "just for this one integration" and never revisited. The practice that prevents this drift — the same periodic, structural re-audit discipline recurring across this repo's other domains — is the correct standing governance response here as well: a scheduled, recurring audit of every `Singleton`-lifetime registration's field mutability and every Factory's input-trust boundary, not a one-time architecture review assumed to remain valid indefinitely.
+
+---
 
 ## 18. Revision
 **Key takeaways**: Factory Method (one product) vs. Abstract Factory (a consistent family of related products) — the family-consistency guarantee is the defining distinction. Builder handles complex, multi-step, validated construction; classic Singleton is largely superseded by DI-container `Singleton`-lifetime registration in modern codebases. Adapter bridges incompatible interfaces (enabling DIP with third-party code); Decorator composably adds behavior around a shared interface (avoiding inheritance's combinatorial subclass explosion); Facade simplifies a complex subsystem's interface; Proxy controls/defers access (virtual, protection, remote variants) — structurally near-identical to Decorator, distinguished by intent (access control vs. behavior addition).

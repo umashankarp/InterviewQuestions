@@ -2,7 +2,7 @@
 
 > Domain: Domain-Driven Design | Level: Beginner → Expert | Prerequisite: [[01-StrategicDDD-UbiquitousLanguage-BoundedContexts-ContextMapping]], [[02-TacticalDDD-Entities-ValueObjects-Aggregates]], [[03-DomainEvents-DomainServices-Repositories]] (this capstone synthesizes all three into one worked, end-to-end decomposition rather than introducing new standalone concepts)
 >
-> **Note on format:** Per the standing user preference (see `CLAUDE.md`), this module covers the **top 30 most frequently asked interview questions**, curated by real interview frequency across all four levels (8 Basic / 8 Intermediate / 7 Advanced / 7 Expert) rather than a fixed 10-per-level count, without the full 15-section deep-dive template.
+> **Note on format:** Upgraded to the repo's current full 16-section template (§1–§15, §17–§18; §16 Enterprise Case Study intentionally omitted per the repo's standing template) with 40 Interview Questions (10 Basic / 10 Intermediate / 10 Advanced / 10 Expert) — the original top-30-curated Q&A content is preserved verbatim within §10 and completed to 40.
 
 ---
 
@@ -345,6 +345,24 @@ graph LR
  **Common mistakes:** Treating a context-mapping diagram, once drawn and agreed upon, as a permanent source of truth rather than a claim requiring the same ongoing verification this course has applied to every other architectural declaration (a security control, an alert, a fitness function, an ADR) — the diagram can silently diverge from the actual code and actual team coordination patterns without anyone deliberately deciding to violate it.
  **Follow-ups:** "Which specific prior module's mechanism is most directly reused here?" (the fitness functions, applied to bounded-context isolation specifically — the identical mechanism already used to verify the architectural-style coupling claims, now aimed at the context map's own boundaries.)
 
+8. **Q: A new "Fee Calculation" capability is proposed. Trade Capture wants to own it (fees are computed at trade-booking time); Ledger wants to own it (fees are ultimately just another ledger posting). Resolve this using this module's discovery discipline.**
+ **A:** Neither team's ownership preference should be decided by which context finds it more convenient to implement — run Event Storming specifically for the fee-calculation scenario and ask what domain experts actually call it and what rules govern it: if "calculating a fee" involves genuine, evolving business rules (fee schedules, client-tier discounts, promotional waivers) that domain experts describe as their own coherent concept with its own language, it's a candidate for its own small bounded context (or, if not complex enough to warrant a full context, a clearly-owned Domain Service living inside whichever context's team has the strongest domain expertise in fee-schedule rules) — the deciding factor is where the *rules* genuinely live in the business's own language, not which context's existing code happens to make implementation easier. Given fee rules are typically a distinct, evolving concern with their own stakeholders (pricing/commercial teams) rather than either trading mechanics or ledger-posting mechanics, a dedicated small context is the more likely correct answer, with Trade Capture *requesting* a computed fee (Customer-Supplier, Trade Capture as customer) and Ledger *posting* the result (another Customer-Supplier relationship, Ledger as customer) — neither absorbing the fee logic itself.
+ **Why correct:** Resolves the ownership dispute using the discovery methodology (what do domain experts actually call it, where do the rules genuinely live) rather than an implementation-convenience argument from either side, and proposes a specific, justified structural answer.
+ **Common mistakes:** Resolving this kind of dispute by seniority or team politics rather than by re-running the actual discovery discipline — a decision made this way is exactly as likely to draw the wrong boundary as the original schema-first anti-pattern, just with a different flawed justification.
+ **Follow-ups:** "What would change the answer toward folding fee calculation into Trade Capture instead?" (If fee rules were simple, fixed, and rarely-changing — e.g., a single flat basis-point rate with no tiering or promotional logic at all — the complexity threshold for a dedicated context wouldn't be met, and a simple calculation method directly on the `Trade` Aggregate would be the right-sized answer instead.)
+
+9. **Q: The platform's context map (§3's diagram) shows Market Data as a Generic subdomain feeding both Trade Capture and Risk via an ACL. A cost-cutting proposal suggests building an in-house pricing engine to replace the third-party vendor. Evaluate this from a subdomain-classification standpoint.**
+ **A:** This proposal should be viewed with real skepticism specifically *because* Market Data is classified Generic — the classification framework's whole point is that Generic subdomains are, by definition, not where the business's competitive differentiation lives, so building custom in-house replaces a mature, commoditized, already-solved capability with a multi-year, ongoing engineering investment (accuracy, latency, corporate-actions handling, redundant data-center feeds, regulatory data-licensing) that must be maintained indefinitely, in exchange for cost savings that need to be weighed against that entire ongoing burden, not just the vendor's license fee; the classification doesn't make in-housing impossible, but it does mean the proposal needs to overcome a specifically high bar — a business case for why this Generic capability has actually become good enough, or unique enough, to reclassify.
+ **Why correct:** Applies the classification framework's investment-calibration logic directly to a build-vs-buy decision at platform scale, correctly treating a Generic subdomain's default (buy/integrate) as a strong prior a proposal must specifically overcome, not an absolute rule.
+ **Common mistakes:** Evaluating the proposal purely on projected license-fee savings without weighing the ongoing engineering cost of a capability that's Generic precisely because it's already efficiently solved by specialized vendors — a classic build-vs-buy miscalculation the subdomain classification exists to guard against.
+ **Follow-ups:** "Under what condition would reclassifying Market Data from Generic to Supporting or Core actually be justified?" (If the firm's specific pricing/data needs became genuinely differentiating — e.g., a proprietary alternative-data pricing signal core to a trading strategy — that specific slice might warrant in-house investment even while routine reference pricing stays Generic and vendor-sourced; the classification can, and should, be re-evaluated per capability, not applied as a single platform-wide label.)
+
+10. **Q: A junior engineer asks: "If bounded contexts are supposed to reduce coupling, why does this platform still have so many cross-context Domain Event dependencies — isn't that still coupling?"**
+ **A:** Bounded contexts don't eliminate coupling; they change coupling from *implicit, unreviewed, and tightly synchronous* (the Big Ball of Mud/distributed-monolith failure modes) to *explicit, reviewed, and typically asynchronous* — every cross-context Domain Event relationship in the context map is a deliberate, named, contract-tested dependency (Advanced Q7's ongoing-verification discipline) rather than an accidental one; the goal was never zero coupling (a system with truly zero coupling between its parts couldn't accomplish anything coherent as a whole), it was making every remaining coupling a conscious, governed decision with a known blast radius, rather than an unconscious one discovered only when something breaks.
+ **Why correct:** Corrects a common misconception (bounded contexts eliminate coupling) with the actually accurate framing (bounded contexts convert implicit coupling into explicit, governed coupling), directly useful for explaining the discipline's real value to someone new.
+ **Common mistakes:** Answering as though "fewer dependencies is always better," missing that the real, measurable improvement bounded contexts provide is dependency *visibility and governance*, not dependency *elimination* — a platform doing real, coherent work will always have some genuine cross-context dependencies.
+ **Follow-ups:** "How would you demonstrate, concretely, that this platform's coupling is 'governed' rather than 'accidental,' to a skeptical stakeholder?" (Point to the living context map with one ADR per relationship, each backed by a contract test in CI and a named context-mapping pattern — an auditable, reviewable artifact, versus a system where the only way to discover a dependency is to break something and trace the incident backward.)
+
 ### Expert (7)
 
 1. **Q: From a Principal Engineer's perspective, what is the actual ROI calculus for investing in full tactical DDD (Aggregates, Domain Events, Repositories) versus a simpler CRUD-based design for a new bounded context?**
@@ -402,6 +420,326 @@ graph LR
 **Why correct:** Chooses published-language + ACL context mapping, keeps invariants in the owning context (request-not-mutate), delivers cross-context facts durably, normalizes money semantics, and versions contracts.
 **Common mistakes:** Sharing a model across contexts; Payments mutating Ledger balances directly (bypassing the invariant); no ACL (Ledger internals leak); unversioned contract that breaks the consumer; assuming an in-process call is durable delivery.
 **Follow-ups:** "Why must Payments request a posting rather than update the balance itself?" / "What does the ACL normalize about money data crossing the boundary?"
+
+**FT3. Q: A platform-wide incident review finds that three separate teams independently built direct, undocumented subscriptions to other contexts' internal event shapes over eighteen months (mirroring §4's Risk/Trade-Capture incident), each discovered only after causing its own production issue. As the Principal Engineer accountable for the platform's architecture, design the governance mechanism that prevents a *fourth* occurrence, not just remediates the three found.**
+**A:** Point fixes for the three found instances (retrofitting ACL-shaped contracts, contract tests, context-map entries) address the symptom, not the recurrence pattern — the actual governance gap is that nothing in the platform's tooling or process made an undocumented cross-context dependency *visible* before it caused an incident; each was discovered reactively, once. The durable fix has three parts: (1) an automated, CI-enforced **architectural fitness function** that scans for any context's code referencing another context's internal namespace/assembly/type directly (not via a published contract package) and fails the build — converting a manual-review-dependent rule into a mechanical gate no team can accidentally skip under deadline pressure; (2) a **living context map as a reviewed artifact** (not a one-time diagram) — every new cross-context dependency requires a merged pull request adding an entry (relationship type, contract version, owning teams) before the dependency can exist in production, giving the platform a single, current source of truth auditable at any time, not reconstructed only after an incident; (3) a **quarterly architecture review** cross-checking the living context map against actual runtime telemetry (which contexts are actually calling/consuming which topics in production) specifically to catch any dependency that bypassed the fitness function via a path the automated check doesn't cover (e.g., a shared database table accessed directly rather than a code-level import) — since sufficiently determined time pressure will eventually find whatever gap the automated check doesn't close. The Principal framing: fix the three known instances, but treat their common root cause — undocumented cross-context coupling has no mechanical detection until it breaks something — as the actual incident, closing it with an enforced fitness function plus a living, PR-reviewed context map plus a periodic telemetry cross-check, because three independent teams making the same shortcut over eighteen months is evidence of a systemic gap in the platform's own guardrails, not three unrelated lapses in individual judgment.
+**Why correct:** Treats the recurring pattern (not the three individual incidents) as the actual problem, proposes a three-layer defense (automated CI gate, reviewed living artifact, periodic telemetry audit) rather than a single point fix, and explicitly reasons about the automated check's own blind spots.
+**Common mistakes:** Treating each of the three incidents as independently remediated and considering the review complete, without addressing why the platform's own tooling allowed all three to happen undetected in the first place; proposing only a documentation fix (an updated diagram) with no automated enforcement, which relies on the same discipline that already failed three times.
+**Follow-ups:** "Why is the quarterly telemetry cross-check necessary even with the CI fitness function in place?" (The fitness function only catches code-level, direct-reference coupling; a shared database table, a shared cache, or an out-of-band file drop between contexts can bypass it entirely, so runtime telemetry is the check that catches dependency paths the static analysis structurally can't see.)
+
+---
+
+## 11. Coding Exercises
+
+### Easy: Classify a Subdomain
+**Problem:** Write a small C# rules-engine stub that, given a context's attributes (`IsDifferentiating`, `HasComplexEvolvingRules`, `IsCommodityCapability`), returns a `SubdomainClassification` enum value, and apply it to this capstone's seven contexts.
+**Solution:**
+```csharp
+public enum SubdomainClassification { Core, Supporting, Generic }
+
+public static class SubdomainClassifier
+{
+    public static SubdomainClassification Classify(bool isDifferentiating, bool isCommodity) =>
+        isCommodity ? SubdomainClassification.Generic
+        : isDifferentiating ? SubdomainClassification.Core
+        : SubdomainClassification.Supporting;
+}
+
+// Trade Capture: differentiating=true, commodity=false → Core
+// Market Data:   differentiating=false, commodity=true  → Generic
+// KYC:           differentiating=false, commodity=false → Supporting
+```
+**Time complexity:** O(1) per classification. **Space complexity:** O(1).
+**Optimized solution:** N/A — this is a judgment-encoding stub, not a performance-sensitive routine; the "optimization" that matters is making the classification criteria explicit and reviewable, not the code's runtime cost.
+
+### Medium: Detect Undirected Context Dependencies (the §4 Incident, Automated)
+**Problem:** Given a list of `(SourceContext, TargetContext, IsPublishedContract)` tuples representing every cross-context code reference found by a static scan, return every dependency that bypasses a published contract — the exact fitness function that would have caught §4's incident.
+**Solution:**
+```csharp
+public record ContextDependency(string Source, string Target, bool IsPublishedContract);
+
+public static IEnumerable<ContextDependency> FindUngovernedDependencies(
+    IEnumerable<ContextDependency> scanned) =>
+    scanned.Where(d => !d.IsPublishedContract && d.Source != d.Target);
+
+// Usage in a CI fitness-function test:
+var violations = FindUngovernedDependencies(scanResult).ToList();
+Assert.Empty(violations); // fails the build if Risk directly references Trade Capture's internals
+```
+**Time complexity:** O(n) over scanned dependencies. **Space complexity:** O(v) for violations found.
+**Optimized solution:** For a large monorepo, run the underlying static scan incrementally (only re-scanning changed assemblies/namespaces per commit) rather than a full-repo scan on every CI run, keeping the fitness function fast enough to run on every pull request rather than only nightly.
+
+### Hard: Build a Cross-Context Read Model Projector
+**Problem:** Implement a projector that consumes `TradeBooked`, `SettlementInstructionSettled`, and `LedgerEntryPosted` events and maintains a denormalized `PortfolioSummary` read row per client (§2.5), idempotently under at-least-once delivery.
+**Solution:**
+```csharp
+public class PortfolioSummaryProjector
+{
+    private readonly ReadModelDbContext _db;
+
+    public async Task OnTradeBooked(TradeBookedEvent e, CancellationToken ct)
+    {
+        if (await AlreadyProcessed(e.EventId, ct)) return;
+        var summary = await _db.PortfolioSummaries.FindAsync(new object[] { e.ClientId }, ct)
+                      ?? _db.PortfolioSummaries.Add(new PortfolioSummary { ClientId = e.ClientId }).Entity;
+        summary.OpenTradeCount++;
+        summary.LastTradeAt = e.OccurredAt;
+        await MarkProcessed(e.EventId, ct);
+        await _db.SaveChangesAsync(ct);
+    }
+
+    public async Task OnSettlementInstructionSettled(SettlementInstructionSettledEvent e, CancellationToken ct)
+    {
+        if (await AlreadyProcessed(e.EventId, ct)) return;
+        var summary = await _db.PortfolioSummaries.FindAsync(new object[] { e.ClientId }, ct);
+        if (summary is not null) summary.SettledValue += e.Amount;
+        await MarkProcessed(e.EventId, ct);
+        await _db.SaveChangesAsync(ct);
+    }
+
+    private Task<bool> AlreadyProcessed(Guid eventId, CancellationToken ct) =>
+        _db.ProcessedEvents.AnyAsync(p => p.EventId == eventId, ct);
+
+    private Task MarkProcessed(Guid eventId, CancellationToken ct)
+    {
+        _db.ProcessedEvents.Add(new ProcessedEvent { EventId = eventId, ProcessedAt = DateTime.UtcNow });
+        return Task.CompletedTask;
+    }
+}
+```
+**Time complexity:** O(1) per event (indexed lookups). **Space complexity:** O(c) for c distinct clients tracked in the read model, plus O(e) for processed-event markers.
+**Optimized solution:** Batch multiple events for the same `ClientId` arriving in one poll cycle into a single read-modify-write rather than one round trip per event, and prune `ProcessedEvents` rows older than the source topics' retention window (they can never be usefully redelivered past that point) to bound the dedup table's long-term growth.
+
+### Expert: Combinatorial Context-Map Coverage Check
+**Problem:** Given a platform's set of bounded contexts and its list of *declared* context-mapping relationships, compute which of the (up to) `n*(n-1)/2` unordered context pairs have no declared relationship *and* are shown to have an actual runtime dependency (from a telemetry feed) — surfacing exactly the class of gap FT3's governance design targets.
+**Solution:**
+```csharp
+public record RuntimeCall(string From, string To);
+public record DeclaredRelationship(string A, string B);
+
+public static IEnumerable<(string, string)> UndeclaredButActive(
+    IEnumerable<RuntimeCall> observedCalls,
+    IEnumerable<DeclaredRelationship> declared)
+{
+    var declaredPairs = declared
+        .Select(d => Normalize(d.A, d.B))
+        .ToHashSet();
+
+    return observedCalls
+        .Select(c => Normalize(c.From, c.To))
+        .Distinct()
+        .Where(pair => !declaredPairs.Contains(pair));
+
+    static (string, string) Normalize(string a, string b) =>
+        string.CompareOrdinal(a, b) <= 0 ? (a, b) : (b, a);
+}
+```
+**Time complexity:** O(d + r) where d = declared relationships, r = distinct observed runtime pairs. **Space complexity:** O(d) for the declared-pairs set.
+**Optimized solution:** Run this as a continuous, scheduled job against a streaming telemetry source (not a batch snapshot) so an undeclared-but-active dependency is surfaced within hours of first occurring rather than only at the next quarterly review (FT3) — trading a small amount of ongoing compute for materially faster detection of exactly the failure class this exercise targets.
+
+---
+
+## 12. System Design
+
+**Scenario:** Design the full bounded-context decomposition and integration architecture for a new multi-asset trading platform (equities, FX, fixed income) supporting ~5,000 institutional clients, ~200,000 trades/day, with hard regulatory requirements for trade reporting within 15 minutes of execution (e.g., MiFID II-style post-trade transparency) and a 7-year audit trail for every state transition.
+
+**Requirements:**
+- *Functional:* Capture trades across three asset classes with asset-class-specific validation; settle trades against custodian/CSD confirmations; post every settled movement to an immutable ledger; compute real-time margin/exposure per client; onboard and KYC-verify clients before their first trade; publish regulatory trade reports within the 15-minute SLA.
+- *Non-functional:* Each context independently deployable and independently scalable; zero silent data loss for any money-movement event; 7-year auditability; contained blast radius (Market Data vendor outage must not take down Trade Capture's ability to accept trades using last-known prices within a defined staleness tolerance).
+
+**Component-by-component glossary:** **Trade Capture** — validates and records a trade at execution, asset-class-aware, the platform's primary Core context. **Settlement** — tracks a trade's transition from booked to settled against external custodian confirmations. **Ledger** — the append-only system of record for every posted cash/securities movement, consumed by Risk and Regulatory Reporting. **Risk/Margin** — computes real-time exposure per client from open positions and current market data. **Client Onboarding/KYC** — verifies and authorizes a client before Trade Capture will accept trades for them. **Market Data** — third-party vendor-sourced pricing, consumed behind an ACL by Trade Capture and Risk. **Regulatory Reporting** — subscribes to Ledger and Trade Capture events to generate and submit required regulatory reports within SLA.
+
+**Architecture:** See §3's diagram — Trade Capture and Settlement communicate via a Customer-Supplier relationship with Outbox-durable `TradeBooked`/`SettlementInstructionSettled` events; Ledger is a many-producers-one-consumer downstream of Trade Capture, Settlement, and Risk, each with its own Inbox-scoped dedup key; Market Data is consumed behind an ACL by both Trade Capture and Risk; KYC publishes `ClientOnboarded` as an Open Host Service consumed independently by Trade Capture and Risk, each with its own extraction (§Basic Q9).
+
+**End-to-end operational walkthrough (a single trade, execution to regulatory report):**
+1. Client submits a trade via `POST /trades`; Trade Capture validates against `ClientOnboarded` status (already locally cached from KYC's OHS) and current Market Data price.
+2. Trade Capture's `Trade` Aggregate enforces its invariants, raises `TradeBooked`, commits Aggregate row + outbox row in one transaction.
+3. Outbox relay publishes `TradeBooked` to Kafka, partitioned by `ClientId`.
+4. Settlement's consumer creates a `SettlementInstruction` in `PendingSettlement`, awaiting custodian confirmation.
+5. Risk's consumer updates the client's open-position view and recomputes exposure.
+6. Regulatory Reporting's consumer generates the required post-trade report and submits it, tracked against the 15-minute SLA clock starting at step 2's `OccurredAt` timestamp, not step 6's processing time.
+7. On custodian confirmation (external file/webhook), Settlement's `SettlementInstruction.MarkSettled()` raises `SettlementInstructionSettled`.
+8. Ledger's consumer posts the cash/securities entry, keyed by an Inbox dedup scoped to (Settlement, `InstructionId`).
+9. Regulatory Reporting's consumer, subscribed to Ledger as well, includes the settlement in end-of-day reporting.
+
+**REST API design (Trade Capture, representative):**
+`POST /trades` — request: `{ clientId (string), instrumentId (string), assetClass (enum), quantity (decimal-as-string), side (enum), priceType (enum) }`; response: `{ tradeId (string), status (enum), bookedAt (ISO-8601) }`. Header `Idempotency-Key` required — a resubmitted request with the same key returns the original result rather than double-booking.
+
+**Data model (representative tables):** `Trades(TradeId PK, ClientId, InstrumentId, AssetClass, Quantity, Side, Status, BookedAt, RowVersion)`; `Outbox(Id PK, Type, Payload, OccurredAt, Processed)`; `SettlementInstructions(InstructionId PK, TradeId FK, Status, SettledAmount string, Currency, RowVersion)` — status lifecycle `PendingSettlement → Settled | Failed`; `LedgerEntries(EntryId PK, SourceContext, SourceEventId, Amount string, Currency, PostedAt)` with a unique constraint on `(SourceContext, SourceEventId)` serving as the Inbox dedup key directly at the schema level.
+
+**Database selection:** SQL Server for Trade Capture, Settlement, and Ledger (ACID correctness for money-movement state, mature tooling, DBA availability — outweighing any NoSQL throughput benchmark for this correctness-critical a workload); Kafka for cross-context event distribution with 7-day+ retention supporting replay for Regulatory Reporting's audit needs.
+
+**Scaling:** Trade Capture scales horizontally by `ClientId`-sharded partitions; Ledger's consumer capacity is explicitly provisioned against the *combined* peak of all three producing contexts (§7); Market Data's ACL includes a local, short-TTL cache so a vendor outage degrades to last-known-good pricing within an explicit staleness tolerance rather than blocking Trade Capture entirely.
+
+**Failure handling:** A `TradeBooked` event lost between commit and dispatch is structurally impossible given the Outbox guarantee (Module 03 §2.3); a Regulatory Reporting SLA breach (report not submitted within 15 minutes) triggers its own dedicated alert distinct from general consumer-lag alerting, since a regulatory-SLA breach has compliance consequences a generic lag alert doesn't capture.
+
+**Monitoring:** Per-context outbox age, per-consumer lag, Regulatory Reporting SLA-breach count, Market Data staleness (age of last successfully fetched price), context-map fitness-function pass/fail per CI run (§11 Medium exercise).
+
+**Trade-offs:** A single shared Kafka cluster across all contexts (chosen here) versus per-context message infrastructure trades some blast-radius isolation (a cluster-wide Kafka incident affects every context simultaneously) for significantly lower operational overhead — acceptable given the cluster's own multi-broker HA design, but explicitly revisited if any single context's message volume or compliance profile later warrants its own isolated infrastructure.
+
+---
+
+## 13. Low-Level Design
+
+```mermaid
+classDiagram
+    class BoundedContext {
+        <<concept>>
+        +Name : string
+        +Classification : SubdomainClassification
+        +PublishedContracts : List~IntegrationEventContract~
+    }
+    class ContextMapEntry {
+        +Source : BoundedContext
+        +Target : BoundedContext
+        +RelationshipPattern : ContextMappingPattern
+        +ContractVersion : string
+        +FitnessFunctionId : string
+    }
+    class ContextMappingPattern {
+        <<enumeration>>
+        CustomerSupplier
+        Conformist
+        AntiCorruptionLayer
+        OpenHostService
+        SharedKernel
+    }
+    class IntegrationEventContract {
+        +EventType : string
+        +Version : string
+        +Fields : List~FieldSpec~
+    }
+    class AntiCorruptionLayerAdapter {
+        <<interface>>
+        +Translate(externalContract) InternalModel
+    }
+
+    BoundedContext "1" --> "*" ContextMapEntry : source of
+    ContextMapEntry --> ContextMappingPattern
+    ContextMapEntry --> IntegrationEventContract
+    BoundedContext ..> AntiCorruptionLayerAdapter : consumes via
+```
+
+```mermaid
+sequenceDiagram
+    participant TC as Trade Capture
+    participant OB as Outbox/Relay
+    participant K as Kafka
+    participant ST as Settlement (consumer)
+    participant RK as Risk (consumer)
+    participant LG as Ledger (consumer)
+
+    TC->>TC: Trade.Book() → Raise(TradeBooked)
+    TC->>OB: SaveChangesAsync (Trade row + Outbox row, 1 txn)
+    OB->>K: publish TradeBooked (at-least-once)
+    par independent, decoupled consumers
+        K->>ST: TradeBooked
+        ST->>ST: create SettlementInstruction (Inbox-deduped)
+    and
+        K->>RK: TradeBooked
+        RK->>RK: update open-position view (Inbox-deduped)
+    and
+        K->>LG: TradeBooked (fee posting)
+        LG->>LG: post fee entry (Inbox-deduped, keyed by SourceContext+EventId)
+    end
+```
+
+**Design patterns used:** Anti-Corruption Layer (every ACL boundary in §3's diagram); Open Host Service/Published Language (KYC's `ClientOnboarded`); Customer-Supplier (Trade Capture↔Settlement, Settlement↔Ledger); Domain Event + Outbox + Inbox (every cross-context integration, per Module 03); Repository and Domain Service (within each individual context, per Module 03).
+
+**SOLID mapping:** SRP — each bounded context owns exactly one cohesive business capability. OCP — a new consumer subscribes to an existing published topic without modifying the producing context (§13 sequence diagram's `par` block extends trivially). LSP — any ACL adapter implementing `AntiCorruptionLayerAdapter` is substitutable behind the consuming context's own internal model. ISP — each context's published contract exposes only the fields a genuine consumer need justifies, not a maximal shared model. DIP — every consuming context depends on its own domain-defined ACL abstraction, not directly on a producing context's internal types (the fitness function in §11 Medium enforces this mechanically).
+
+**Extensibility:** A new bounded context (e.g., a future Collateral-Management context) integrates by subscribing to existing published topics and, if needed, publishing its own new contract — zero changes required to any existing context's code, directly realizing the platform-level OCP this decomposition is designed to provide.
+
+**Concurrency/thread safety:** Each context's own Aggregate-level optimistic concurrency (`RowVersion`) governs within-context consistency; cross-context consistency is inherently eventual, governed by each relationship's explicitly-chosen context-mapping pattern rather than any shared lock or distributed transaction spanning contexts.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** Regulatory Reporting began missing its 15-minute post-trade SLA for roughly 8% of trades during the platform's month-end high-volume window, triggering a compliance-visible breach report.
+
+**Root cause:** Regulatory Reporting's consumer computed SLA compliance from the *event's Kafka-consume timestamp*, not the *trade's original `BookedAt` timestamp* embedded in the `TradeBooked` payload — during the month-end volume spike, Trade Capture's outbox relay (provisioned for average, not peak, volume) fell behind, so events sat unprocessed in the outbox for up to 6 minutes before being published at all; by the time Regulatory Reporting consumed and processed them, the *true* elapsed time since booking already exceeded 15 minutes for a meaningful fraction of trades, even though Regulatory Reporting's own processing, measured from its own consume time, looked well within budget.
+
+**Investigation:** Cross-referenced flagged-late reports against Trade Capture's outbox table's own `OccurredAt` vs. actual publish timestamp (recoverable from relay logs), confirming a growing outbox backlog specifically during the month-end window — the exact metric §4 of Module 03 already identifies as the critical signal, here caught only after the compliance-visible breach rather than proactively.
+
+**Tools:** Outbox-age query (`SELECT MIN(OccurredAt) FROM Outbox WHERE Processed = 0`) run retroactively against relay logs for the incident window; Kafka consumer-lag dashboards for Trade Capture's own outbox-relay "consumer" of its polling loop; a reconciliation script comparing each flagged report's `BookedAt` against its actual submission timestamp to confirm the true elapsed time in every case.
+
+**Fix:** (1) Scaled the outbox relay's batch size and instance count for Trade Capture ahead of known month-end volume patterns (a capacity-planning fix). (2) Added the exact outbox-age alert Module 03 §4 already names, now wired specifically as a leading indicator for Regulatory Reporting's SLA risk, not just a generic backlog signal. (3) Corrected Regulatory Reporting's SLA computation to use `BookedAt` (the true business-event time) as the SLA clock start, not its own consume timestamp — a measurement-correctness fix independent of the capacity fix, since even a well-provisioned relay under a future, larger volume spike would otherwise still under-report true SLA risk.
+
+**Prevention:** A dedicated month-end capacity-planning review, informed by the prior month's actual outbox-relay throughput under peak load, feeding into pre-emptive scaling rather than reactive scaling after a breach; a synthetic canary trade injected every few minutes specifically measuring true `BookedAt`-to-regulatory-submission latency end-to-end, alerting well before the 15-minute SLA is actually breached rather than only after compliance flags it.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** How should the platform's context map itself be maintained and enforced as the number of bounded contexts grows past the original five?
+
+**Option A — A design-time diagram, reviewed once at each major architecture review, with no automated enforcement.**
+Advantages: minimal tooling investment; fast to produce. Disadvantages: the exact gap FT3's incident review found — three independently-built undocumented dependencies over eighteen months, each discovered only after causing a production issue; the diagram silently diverges from reality with no mechanical signal. Cost: low upfront, high hidden incident cost. Complexity: low. Maintainability: poor — the diagram is trusted well past the point it's actually accurate.
+
+**Option B — A living context map as a reviewed, version-controlled artifact (one entry per relationship) plus a CI-enforced fitness function blocking undeclared direct cross-context references.**
+Advantages: every new cross-context dependency requires an explicit, reviewed PR before it can exist in production; the fitness function catches the most common violation class (direct code-level coupling) mechanically, with no reliance on individual reviewer vigilance. Disadvantages: doesn't catch dependency paths outside code-level references (a shared database table, an out-of-band file drop) — the exact blind spot FT3 names. Cost: moderate — tooling investment plus ongoing PR review discipline. Complexity: moderate. Maintainability: strong for the coupling class it covers.
+
+**Option C — Option B plus a periodic (quarterly) runtime-telemetry cross-check against the declared context map (§11 Expert exercise), surfacing any active dependency the static fitness function couldn't see.**
+Advantages: closes Option B's specific blind spot by observing what's actually happening in production traffic, not just what the code's static structure shows; catches non-code-level coupling (shared tables, file-based integrations) that no static scan can. Disadvantages: highest ongoing process cost of the three; still only quarterly, so a gap can persist up to one quarter before detection (versus the CI gate's immediate, per-PR detection for the coupling class it does cover). Cost: highest, but concentrated in a periodic review rather than constant overhead. Complexity: highest. Maintainability: strongest — this is the option that actually would have caught all three of FT3's incidents, including any that bypassed code-level references.
+
+**Recommendation:** Option C. Given this platform already has one confirmed, recurring incident pattern (three independent instances of the same undocumented-coupling failure), the marginal cost of the quarterly telemetry cross-check on top of an already-necessary CI fitness function (Option B) is justified specifically by the demonstrated, non-hypothetical recurrence risk — a platform with no incident history in this category might reasonably start with Option B alone and add Option C only if a future review finds it's needed, but this platform's own history already provides that justification.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** A bounded-context boundary that's wrong, or a governance gap that lets coupling silently creep back in, doesn't show up as a code-quality complaint — it shows up as a missed regulatory SLA (§14), a suppressed margin call (§4), or a reconciliation break discovered by an auditor rather than the firm. A Principal Engineer frames every context-mapping and governance decision in terms of which of these concrete business failures it prevents, not "cleaner architecture" as an end in itself.
+
+**Engineering trade-offs:** Full context-map governance (a living artifact, a CI fitness function, periodic telemetry cross-checks) has real, ongoing process cost that competes directly with feature-delivery velocity — the judgment call, demonstrated in §15's recommendation, is calibrating that cost against the platform's actual, demonstrated risk profile rather than either under-investing (Option A, until an incident forces the issue) or over-investing uniformly regardless of a context's actual criticality.
+
+**Technical leadership:** The single most leveraged intervention a Principal Engineer can make on a platform this size isn't reviewing every individual cross-context event definition personally — it's establishing the automated gate (the CI fitness function) that makes correct behavior the path of least resistance for every team, every time, regardless of who's under deadline pressure that particular sprint.
+
+**Cross-team communication:** A living, PR-reviewed context map is as much a communication artifact as a technical one — it's the mechanism by which the Risk team, six months from now, discovers what Trade Capture actually publishes without needing an informal conversation or tribal knowledge that inevitably decays as team membership changes.
+
+**Architecture governance:** This capstone's central, recurring finding — that a declared boundary or contract requires continuous, mechanical re-verification, not one-time design-time trust — is the single governance principle a Principal Engineer should carry into any future, even entirely new, platform: ask not just "what's the intended architecture" but "what specific, automated mechanism verifies the actual architecture still matches it."
+
+**Cost optimization:** The build-vs-buy discipline applied to Market Data (§Advanced Q9) generalizes — a Principal Engineer's default posture toward any Generic-subdomain capability is skepticism toward in-housing, unless a specific, articulable business case overcomes the default; this discipline alone typically prevents far more wasted engineering investment than any single tactical code-review catch.
+
+**Risk analysis:** The FT3 governance design's explicit acknowledgment that its own CI fitness function has a blind spot (non-code-level coupling) is itself the Principal-Engineer-level move — proposing a control while also naming what it doesn't cover is what distinguishes a genuinely risk-aware design from a checkbox-compliance one.
+
+**Long-term maintainability:** A platform where every cross-context dependency is explicit, versioned, and mechanically enforced is one a new team can safely extend eighteen months from now without first needing to archaeology-dig through undocumented, incidentally-discovered couplings — the alternative (this capstone's own §4 incident, generalized) is a platform whose true dependency graph is only ever known in pieces, reconstructed reactively, one incident at a time.
+
+---
+
+## 18. Revision
+
+**Key Takeaways:**
+- Strategic decisions (where are the boundaries) must be settled, via real Event Storming with domain experts, before tactical decisions (how is the model implemented) — the reverse order produces clean code implementing the wrong model.
+- A FinTech platform routinely has multiple simultaneous Core subdomains — investment calibration is per-context, not a single platform-wide label.
+- Bounded contexts don't eliminate coupling; they convert implicit, unreviewed coupling into explicit, governed, typically-asynchronous coupling.
+- An undocumented cross-context dependency is the single most recurring, most expensive failure mode at platform scale — it requires automated, mechanical detection (a CI fitness function plus periodic telemetry cross-checks), not review discipline alone.
+- A context map, like any other architectural claim in this course, is a declaration requiring ongoing, active verification — never a one-time diagram trusted indefinitely.
+
+**Interview Cheatsheet:**
+- Sequencing: Event Storming → subdomain classification → bounded contexts → context mapping → tactical DDD inside each context → ongoing fitness-function verification.
+- Many-producers-one-consumer topologies (e.g., Ledger) need per-producer-scoped Inbox dedup keys, not a single global key.
+- Cross-context reporting reads go through a dedicated, event-populated read model, never chained Aggregate-Repository calls across contexts.
+- Build-vs-buy: a Generic subdomain classification is a strong prior toward buying/integrating, not an absolute rule — a specific business case can overcome it.
+- Governance: living context map (PR-reviewed) + CI fitness function (code-level coupling) + periodic telemetry cross-check (non-code-level coupling) is the three-layer defense against undocumented dependencies.
+
+**Things Interviewers Love:**
+- Correctly distinguishing "coupling eliminated" from "coupling made explicit and governed" when asked what bounded contexts actually buy you.
+- A concrete, numbered incident (an undocumented internal-event subscription silently breaking on an unrelated rename) rather than an abstract description of the risk.
+- Naming the specific blind spot of an automated control (the fitness function's inability to see non-code-level coupling) unprompted.
+- Correctly applying the core/supporting/generic classification to a build-vs-buy decision, not just to Aggregate-investment calibration.
+
+**Things Interviewers Hate:**
+- Treating a context-mapping diagram as self-maintaining evidence of the platform's actual current state.
+- Assuming more, smaller bounded contexts are unconditionally better (missing the over-splitting failure mode).
+- No answer to "how would this platform know if an undocumented cross-context dependency existed right now."
+- Proposing full Event Sourcing or full CQRS platform-wide as a default rather than a need-justified, per-context decision.
+
+**Common Traps:**
+- Confusing a bounded context (a modeling boundary) with a microservice (a deployment boundary) as though they're always the same thing.
+- Resolving a cross-context ownership dispute by team seniority/politics rather than by re-running the actual discovery discipline against where the business's own language and rules genuinely live.
+- Assuming a single global Inbox dedup key is sufficient in a many-producers-one-consumer topology.
+- Measuring a regulatory SLA from a consumer's own processing timestamp rather than the true originating business-event timestamp (§14).
 
 ---
 

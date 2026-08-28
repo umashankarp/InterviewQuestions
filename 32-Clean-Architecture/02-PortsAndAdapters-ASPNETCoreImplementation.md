@@ -6,9 +6,182 @@
 
 ---
 
-## Interview Questions
+## 1. Fundamentals
 
-### Basic (8)
+### 1.1 What is "Ports and Adapters" in the concrete .NET sense?
+
+Module 01 established the ring structure and the Dependency Rule conceptually. This module answers a narrower, practical question: given a real ASP.NET Core / C# solution, what does a Port actually look like as code, what does an Adapter actually look like as code, and how does everything get wired together at application startup? "Port" = a plain C# interface defined in an inner-ring project. "Adapter" = a concrete class, defined in an outer-ring project, implementing that interface using a specific technology (EF Core, an HTTP client, a message broker SDK).
+
+### 1.2 Why does the concrete implementation deserve its own module?
+
+Because "keep dependencies pointing inward" is easy to agree with in the abstract and easy to violate by accident in real code — an ORM attribute added for convenience, a `DbContext` injected "just for this one quick read," a caching decorator registered with the wrong DI lifetime. This module exists to turn Module 01's rule into artifacts a team can actually build, review, and mechanically verify: a specific project-reference graph, specific DI registration code, and a specific, runnable fitness-function test.
+
+### 1.3 When do you reach for the full four-project layout described here?
+
+Per Module 01 §9's organizational-scaling framing: for Core-subdomain, multi-year, multi-team systems, where the compiler-enforced guarantee (not just a fitness function) is worth its extra solution-management overhead. For smaller, shorter-lived, single-team systems, the lighter single-project/folder-based variant (Advanced Q5) captures the same discipline with less ceremony.
+
+### 1.4 How does the mechanics fit together, end to end?
+
+A `Domain` class library holds Entities and Ports; an `Application` class library holds Use Cases and Input/Output boundary types, referencing only `Domain`; an `Infrastructure` class library holds Adapters, referencing `Domain` and `Application`; an `Api` project holds Controllers/Presenters and the DI composition root (`Program.cs`), referencing everything. The one file where every Port and every Adapter are simultaneously visible is `Program.cs` — by design, since that's the only place in the solution allowed to know about all four rings at once.
+
+---
+
+## 2. Deep Dive
+
+### 2.1 The project-reference graph as the actual enforcement primitive
+
+`Domain` has zero `ProjectReference` entries. `Application` references only `Domain`. `Infrastructure` references `Domain` and `Application`. `Api` references all three. This is the entire mechanism — not a linting rule, not a naming convention, a literal MSBuild `.csproj` `<ProjectReference>` graph that the C# compiler enforces on every build. Attempting `using Microsoft.EntityFrameworkCore;` inside a file in the `Domain` project produces `CS0246: The type or namespace name could not be found` — a compile error, not a code-review comment.
+
+### 2.2 DI container internals: how a Port resolves to an Adapter at runtime
+
+`builder.Services.AddScoped<IOrderRepository, EfCoreOrderRepository>()` registers a `ServiceDescriptor` mapping the interface type to the implementation type with a `Scoped` lifetime. When `PlaceOrderUseCase`'s constructor requests an `IOrderRepository`, the built-in `Microsoft.Extensions.DependencyInjection` container walks its internal `ServiceDescriptor` table, finds the match, and recursively resolves `EfCoreOrderRepository`'s own constructor parameters (typically `AppDbContext`) before activating it — all via cached, reflection-backed (or, since .NET 8, partially source-generated for AOT scenarios) activator delegates, not a fresh reflection scan per call.
+
+### 2.3 Lifetime mismatches and captive dependencies
+
+A `Scoped` service (like `AppDbContext`, tied to one HTTP request) captured by a `Singleton` service (constructed once, for the application's lifetime) is a **captive dependency** — the `Singleton` holds onto the *first* request's `Scoped` instance forever, sharing it across every subsequent, unrelated request. ASP.NET Core's `ValidateScopes`/`ValidateOnBuild` host options catch the simple case (a direct `Singleton → Scoped` constructor dependency) as a startup exception in Development by default; a `Singleton` *decorator* wrapping a `Scoped` service two or three layers deep, as in this module's Advanced Q6 incident, can still slip past that validation depending on exactly how the decorator is registered.
+
+### 2.4 MediatR's dispatch mechanics as an Input Boundary implementation
+
+`IMediator.Send<TResponse>(IRequest<TResponse> request)` uses the DI container to resolve `IRequestHandler<TRequest, TResponse>` for the request's runtime type via reflection over generic type arguments, then invokes `Handle`. This is a runtime, not compile-time, binding — a `Command` with no registered handler compiles fine and throws an `InvalidOperationException` only when `Send` is actually called, a real trade-off against a hand-rolled `IPlaceOrderInputBoundary` interface, which the compiler would refuse to build at all if unimplemented.
+
+### 2.5 Fitness-function mechanics: how NetArchTest actually inspects an assembly
+
+`Types.InAssembly(assembly)` uses `Mono.Cecil` (not runtime reflection) to statically parse the compiled assembly's metadata and IL, listing every type reference the assembly's types make — including references that exist in code but are never actually executed. This is why a fitness function catches a violation that a purely behavioral unit test never would: it inspects what the code *could* call, not just what a specific test happened to exercise.
+
+### 2.6 Hidden cost: solution build-time and restore overhead of physical separation
+
+Splitting a solution into four class libraries adds real, measurable build overhead — each project's own `obj`/`bin` output, its own NuGet restore step, and MSBuild's own per-project incremental-build bookkeeping. For a large solution with many such projects, `dotnet build` wall-clock time can meaningfully increase versus a single-project layout, which is one concrete, honest cost behind Advanced Q5's team-size/criticality calibration, not merely an abstract "more ceremony" complaint.
+
+---
+
+## 3. Visual Architecture
+
+```mermaid
+flowchart LR
+    subgraph Domain["Domain (Entities ring) — no ProjectReference"]
+        Order["Order (Entity)"]
+        IOrderRepository["IOrderRepository (Port)"]
+    end
+    subgraph Application["Application (Use Cases ring) — references Domain"]
+        PlaceOrderUseCase["PlaceOrderUseCase"]
+        InputBoundary["IPlaceOrderInputBoundary (Port)"]
+        OutputBoundary["IPlaceOrderOutputBoundary (Port)"]
+    end
+    subgraph Infrastructure["Infrastructure — references Domain + Application"]
+        EfCoreOrderRepository["EfCoreOrderRepository (Adapter)"]
+        AppDbContext["AppDbContext"]
+    end
+    subgraph Api["Api — references all three, composition root"]
+        OrdersController["OrdersController"]
+        PlaceOrderPresenter["PlaceOrderPresenter (Adapter)"]
+        ProgramCs["Program.cs — DI wiring"]
+    end
+
+    PlaceOrderUseCase -.implements.-> InputBoundary
+    PlaceOrderUseCase --> IOrderRepository
+    PlaceOrderUseCase --> OutputBoundary
+    EfCoreOrderRepository -.implements.-> IOrderRepository
+    EfCoreOrderRepository --> AppDbContext
+    PlaceOrderPresenter -.implements.-> OutputBoundary
+    OrdersController --> InputBoundary
+    ProgramCs -. wires .-> EfCoreOrderRepository
+    ProgramCs -. wires .-> PlaceOrderPresenter
+```
+
+Sequence of a single request through every component (numbered, matching Expert Q3's synthesis trace):
+
+```mermaid
+sequenceDiagram
+    participant HTTP as Kestrel/Middleware
+    participant Ctrl as OrdersController
+    participant UC as PlaceOrderUseCase
+    participant Repo as EfCoreOrderRepository
+    participant DB as SQL Server
+    participant Pres as PlaceOrderPresenter
+
+    HTTP->>Ctrl: POST /orders
+    Ctrl->>Ctrl: map request -> PlaceOrderInputData
+    Ctrl->>UC: Execute(inputData) [via IPlaceOrderInputBoundary]
+    UC->>Repo: GetByIdAsync / AddAsync [via IOrderRepository]
+    Repo->>DB: SQL (EF Core)
+    DB-->>Repo: rows
+    Repo-->>UC: Order
+    UC->>Pres: Present(outputData) [via IPlaceOrderOutputBoundary]
+    Pres-->>Ctrl: ViewModel
+    Ctrl-->>HTTP: 201 Created
+```
+
+---
+
+## 4. Production Example
+
+**Problem.** A card-issuing platform's authorization service needed to support both a synchronous REST API (issuer-side authorization decisions, sub-200ms SLA) and an asynchronous batch reconciliation job reading the same authorization rules from a nightly settlement file — two entirely different entry points that had, historically, each re-implemented the authorization-limit logic slightly differently, causing a real discrepancy where the batch job approved a transaction the real-time API would have declined.
+
+**Architecture.** `Domain` held `Card`, `AuthorizationLimit` as Value-Object-enforced invariants; `Application` held a single `AuthorizeTransactionUseCase` behind `IAuthorizeTransactionInputBoundary`; `Infrastructure` held `EfCoreCardRepository` and a `FileBasedTransactionSource` adapter (for the batch path) both feeding the identical Use Case; `Api` held `AuthorizationsController` (the real-time entry point) and a separate `BatchReconciliationWorker` hosted service (the async entry point) — both calling the same `IAuthorizeTransactionInputBoundary`.
+
+**Implementation.** `Program.cs` registered `IAuthorizeTransactionInputBoundary → AuthorizeTransactionUseCase` once; both `AuthorizationsController` and `BatchReconciliationWorker` resolved it identically, guaranteeing byte-for-byte identical authorization-limit logic regardless of entry point. `EfCoreCardRepository` was `Scoped` for the request-driven API path; the batch worker created its own DI scope per processed file via `IServiceScopeFactory` to get a correctly-lifetimed, request-independent `Scoped` graph inside a `BackgroundService`.
+
+**Trade-offs.** The team paid for a second Adapter (`FileBasedTransactionSource`) and the DI-scope-per-batch-item ceremony inside the worker — a `BackgroundService` has no ambient HTTP request to hang a `Scoped` lifetime off, so `IServiceScopeFactory.CreateScope()` had to be called explicitly per unit of work, a detail easy to get wrong (Advanced Q6-style captive-dependency risk applies here too if a scope is created once for the whole batch run instead of per item).
+
+**Lessons learned.** The single-Use-Case-multiple-entry-points structure was what actually fixed the discrepancy — not a code review reminding developers to "keep the logic in sync," a structural guarantee that there was only one place the logic could live at all.
+
+---
+
+## 5. Best Practices
+
+- **Register every Port-to-Adapter mapping in exactly one composition root (`Program.cs`)** — never scatter DI registrations across multiple `IServiceCollection` extension methods spread across projects without at least a single, discoverable entry point calling them all.
+- **Default every Adapter wrapping a `Scoped` resource to `Scoped` registration**, and treat any deviation as a decision requiring an explicit comment explaining why.
+- **Enable `ValidateScopes = true` and `ValidateOnBuild = true` in every environment**, not just Development — Advanced Q6's incident specifically happened because this was only checked in Development.
+- **Keep the `Api` project's request/response contract types separate from `Application`'s Input/Output boundary types**, even when they're identical today (Advanced Q7) — the mapping cost is small and buys independent API versioning.
+- **Write the fitness-function test before the second feature is built**, not after the first violation is found — retrofitting is materially more expensive once violations exist to clean up.
+- **Use `IServiceScopeFactory.CreateScope()` explicitly, per unit of work, inside any `BackgroundService`/queue consumer** — there is no ambient HTTP-request-scoped lifetime to rely on outside a controller action.
+
+---
+
+## 6. Anti-patterns
+
+- **`Singleton` service capturing a `Scoped` dependency**, directly or through a decorator — the single most common, most severe DI-lifetime bug in ASP.NET Core Clean Architecture implementations (Advanced Q6's incident).
+- **Business-rule logic hidden inside a generic MediatR pipeline behavior** meant for cross-cutting concerns (Advanced Q3) — a specific dollar-threshold approval rule buried where no one reading the Use Case would find it.
+- **Reusing `Application`-ring Input/Output DTOs as the literal public API contract** to "save a mapping step," coupling external API consumers to internal refactors (Advanced Q7).
+- **A fitness-function test that exists in the repository but has silently stopped running** in CI due to an unrelated test-filter change — a green build providing zero actual protection (Expert Q4).
+- **Injecting `IConfiguration` directly into a Use Case** "just in case it needs a setting," instead of a purpose-built, strongly-typed port — reintroduces a stringly-typed, compile-time-unchecked dependency into the inner ring.
+- **A single, shared `DbContext` scope created once for an entire batch job's lifetime inside a `BackgroundService`**, rather than per unit of work — silently accumulates tracked entities and stale state across thousands of iterations, degrading performance and correctness simultaneously.
+
+---
+
+## 7. Performance Engineering
+
+- **DI resolution cost is real but small.** Resolving a 4–6-deep `Scoped` service graph (Controller → Use Case → Repository → DbContext) via the built-in container measures in low single-digit microseconds per request on .NET 8/9 — immaterial next to a database round trip (1–5ms) or an external gateway call (50–300ms+). Only on a very tight, sub-millisecond internal-RPC budget does this become worth profiling and addressing (e.g., via source-generated DI or manual composition).
+- **MediatR's reflection-based dispatch adds a small, additional per-request cost** over a direct interface call — typically low-microsecond overhead per `Send`, since handler lookup is cached after the first resolution per request type, not re-scanned from scratch every call; still non-zero versus a hand-rolled `IPlaceOrderInputBoundary` direct call, a real (if usually negligible) trade-off against the convenience it buys.
+- **NetArchTest/fitness-function suites run at test time, not runtime** — their cost is entirely a CI-pipeline-duration concern (typically low single-digit seconds per assembly scanned via Mono.Cecil), never a production-latency concern; keep them in a fast, dedicated CI stage so they don't get skipped under time pressure (a direct mitigation for Expert Q4's silent-failure risk).
+- **`WebApplicationFactory`-based end-to-end tests are comparatively expensive** (typically tens to hundreds of milliseconds per test, spinning up the full DI container and middleware pipeline) — reserve them for wiring/HTTP-contract verification, per the established testing-strategy split, not for re-verifying business rules the millisecond-fast `Domain.Tests`/`Application.Tests` already cover.
+- **Batch/background-worker DI-scope-per-item overhead.** Creating a new `IServiceScope` per processed item in a high-volume batch job (Production Example, §4) has real, measurable per-item allocation cost; for extremely high-volume batches, scoping per small *chunk* of items (with an explicit, deliberate acceptance of the resulting captive-dependency risk within just that chunk) is a documented, conscious trade-off — never an accidental one.
+
+---
+
+## 8. Security
+
+- **Authentication/authorization middleware lives in `Api`, but authorization *decisions* referencing business state belong in the Use Case or Entity.** `[Authorize]` establishes *who* the caller is; whether that specific caller may cancel *this specific* order in *this specific* state is business logic, and must be enforced identically whether invoked via `OrdersController` or a background job calling the same Use Case directly.
+- **Secrets never reach `Domain`/`Application`.** Connection strings and API keys are resolved from `IConfiguration`/a secrets manager (e.g., Azure Key Vault, AWS Secrets Manager) entirely inside `Program.cs`, then passed as already-resolved values into `Infrastructure`-ring adapter constructors — never as a raw `IConfiguration` reference threaded down into inner-ring code.
+- **`Domain`-ring custom exceptions are safe for `Api`-ring middleware to catch and translate**, since outward-referencing (`Api` referencing a `Domain` exception type) is always permitted — the risk direction runs the other way: a `Domain`-ring exception must never itself reference an outer-ring type (an ASP.NET Core-specific response type) in its own definition.
+- **Anti-corruption at every external Adapter.** A third-party SDK's own error codes, status strings, and amount representations must be validated and normalized at the Adapter boundary before crossing into `Domain`/`Application` — an unvalidated or ambiguous vendor status (e.g., a "pending" that could mean success or failure) propagating raw into settlement/ledger logic is a genuine correctness and security risk, not merely a style concern.
+- **Audit-trail capture at the Use Case boundary, once, centrally** — since every business operation from every entry point (API, batch job, gRPC) resolves to exactly one Use Case, that single point is where a consistent, tamper-evident audit record (who, what, when, from where) can be captured without relying on every controller/entry point to remember to log it independently.
+
+---
+
+## 9. Scalability
+
+- **Runtime scaling is orthogonal to the ring structure**, but the concrete implementation choices here directly affect it: `Scoped` DI lifetimes keep each request's object graph isolated, letting the `Api` project scale horizontally behind a load balancer with zero shared in-process state between instances — provided no `Singleton` accidentally captures request-specific state (§6/Advanced Q6).
+- **Message-driven entry points scale independently of the synchronous API.** The Production Example's `BatchReconciliationWorker`, driven by a queue/file rather than HTTP, can be scaled (more consumer instances) or throttled independently of `AuthorizationsController`'s own scaling, because both share only the same `Application`-ring Use Case, not any runtime infrastructure.
+- **Fitness-function CI cost scales with assembly size, not with request volume** — a large `Domain` assembly with thousands of types still completes a Mono.Cecil-based scan in low single-digit seconds; this is a build-pipeline scaling concern, not a production one, and rarely becomes a bottleneck even for large monorepo-style solutions.
+- **Organizational scaling: the four-project split is what lets independent teams own independent Adapters** (one team owns `Infrastructure`'s custodian/payment-rail adapters, another owns `Application`'s Use Cases) without either team's changes requiring the other's review — the concrete .NET mechanism (separate projects, separate `CODEOWNERS` entries) realizing Module 01 §9's organizational-scalability claim in actual repository structure.
+- **The honest limit.** None of the DI/project-structure choices in this module make SQL Server or a downstream custodian API itself scale better — they create the seams (a swappable `IOrderRepository`/`ICustodianGateway` Adapter) that let a team introduce read replicas, sharding, or a different data store later with contained blast radius, which is a necessary precondition for scaling, not a substitute for doing the scaling work itself.
+
+---
+
+## 10. Interview Questions
+
+### Basic (10)
 
 1. **Q: What does the term "Ports and Adapters" mean, and how does it map onto the ring vocabulary?**
  **A:** A "Port" is an interface defined by an inner ring expressing what it needs from, or offers to, the outside world (e.g., `IOrderRepository`, `IPlaceOrderInputBoundary`); an "Adapter" is a concrete class implementing a Port, translating between the inner ring's preferred shape and a specific outer-ring technology's actual shape (e.g., `EfCoreOrderRepository`, `OrdersController`) — this is the identical Dependency-Inversion mechanism already established as the Dependency Rule's enabling mechanism; "Ports and Adapters" is simply the name this specific mechanism goes by in Alistair Cockburn's original terminology (which will cover as Hexagonal Architecture in full), used here purely as the practical, implementation-focused vocabulary for the same rings and rule.
@@ -58,7 +231,19 @@
  **Common mistakes:** Placing `PlaceOrderPresenter` in the `Application` project rather than `Api` — the Presenter is specifically the piece translating Use Case output into an HTTP-response-ready shape, which is an inbound-adapter concern belonging alongside the Controller in the `Api` project, not inside the technology-agnostic `Application` project.
  **Follow-ups:** "Would `OrdersController` reference `PlaceOrderUseCase` directly, or `IPlaceOrderInputBoundary`?" (`IPlaceOrderInputBoundary` — the Controller should depend on the Port/interface, not the concrete Use Case class, keeping the door open to swap or decorate the Use Case implementation, Advanced Q4, without changing the Controller.)
 
-### Intermediate (8)
+9. **Q: What's the concrete difference between `AddScoped`, `AddTransient`, and `AddSingleton`, and which should `PlaceOrderUseCase` itself use?**
+ **A:** `AddSingleton` creates one instance for the application's entire lifetime, shared across every request; `AddScoped` creates one instance per DI scope (one per HTTP request, by default, in ASP.NET Core); `AddTransient` creates a new instance every time it's resolved, even multiple times within the same request. `PlaceOrderUseCase` itself typically holds no meaningful state of its own, so either `Scoped` or `Transient` work correctly for it — the lifetime that actually matters is its *dependencies'* (`IOrderRepository`, wrapping a `Scoped AppDbContext`), which must be at least as narrow as `Scoped` to avoid a captive-dependency bug.
+ **Why correct:** States the three lifetimes precisely and correctly identifies that the Use Case's own lifetime is the less critical decision — its dependencies' lifetimes are where the real risk (Advanced Q6) lives.
+ **Common mistakes:** Registering everything as `Singleton` "for performance," assuming fewer allocations always wins — this is exactly the setup for a captive-dependency bug the moment any dependency in the chain is `Scoped`, and the performance difference between `Scoped` and `Singleton` resolution is negligible (§7) next to the risk.
+ **Follow-ups:** "Would `Transient` registration for `EfCoreOrderRepository` itself be safe?" (Yes, as long as its own `AppDbContext` dependency is `Scoped` — a `Transient` Repository would just mean multiple repository instances per request, each still sharing the same request-scoped `DbContext`, which is safe; the risk is specifically about lifetime *mismatches*, not about using a narrower lifetime than strictly necessary.)
+
+10. **Q: How would you unit-test `Program.cs`'s DI registrations themselves — i.e., verify every registered Port actually has an Adapter and the container can build the full graph — without starting the full application?**
+ **A:** `WebApplicationFactory<TEntryPoint>` (or, more narrowly, building the `IServiceCollection`/`IServiceProvider` directly from `Program.cs`'s composition logic if it's been extracted into a testable method) followed by `serviceProvider.CreateScope()` and resolving every registered interface at least once — this exercises the exact same `ValidateOnBuild`-style graph-construction path the real application startup uses, catching a missing registration or a lifetime mismatch as an immediate test failure rather than only being caught the first time that specific code path is hit at runtime in production.
+ **Why correct:** Gives a concrete, runnable verification approach (resolve every registered service in a test) that specifically targets DI-graph-construction correctness, distinct from and complementary to both the fitness-function tests (checking reference direction) and the business-logic unit tests (checking behavior).
+ **Common mistakes:** Assuming `ValidateOnBuild = true` alone is sufficient without an actual automated test exercising it — `ValidateOnBuild` only runs (and only fails loudly) when the application actually starts; a dedicated test that builds and validates the service provider runs on every CI build regardless of whether anyone remembers to also run the full application in that environment.
+ **Follow-ups:** "What's the risk if a Port has two registered Adapters by mistake (e.g., a leftover registration from a refactor)?" (The container's `AddScoped<TInterface, TImplementation>` uses last-registration-wins semantics for a straightforward resolve — the earlier registration is silently shadowed, not an error, which is exactly why a DI-graph-verification test that also checks resolved-type identity, not just "did it resolve," has genuine additional value.)
+
+### Intermediate (10)
 
 1. **Q: Why is a compile-time `ProjectReference`-graph violation a stronger guarantee than a fitness function alone, and why might a team still want both?**
  **A:** A missing `ProjectReference` makes a Dependency Rule violation *physically impossible to compile* — a developer literally cannot write `Domain` code that references an `Infrastructure` type, since the compiler has no visibility into that assembly at all; a fitness function, by contrast, is a *test* that must actually be run and must actually pass to catch a violation, and (per the own "verify the verifier" point) can itself silently stop running. A team wants both because the compile-time guarantee only catches violations *between separate projects* — it says nothing about internal-namespace discipline within a single project (Basic Q2's single-project alternative) or about more nuanced rules a fitness function can express (e.g., "no `Application`-ring class name may end in `Controller`," a naming-convention check no `ProjectReference` graph could ever enforce).
@@ -108,7 +293,19 @@
  **Common mistakes:** Passing raw configuration values or an `IConfiguration` reference down into `Application`-ring Use Case constructors "just in case a Use Case needs a setting" — even if a Use Case genuinely needs some runtime-configurable value, it should receive that value via a Port-defined interface (e.g., an `IFeatureFlagProvider` the Use Case depends on) rather than `IConfiguration` directly, keeping the concrete configuration-reading mechanism as an outer-ring concern.
  **Follow-ups:** "Why is directly injecting `IConfiguration` into a Use Case worse than injecting a purpose-built interface like `IFeatureFlagProvider`?" (`IConfiguration` exposes a generic string-keyed lookup with no compile-time contract at all — a typo'd configuration key silently returns null at runtime; a purpose-built interface gives the Use Case a strongly-typed, compiler-checked contract, and also keeps the Use Case decoupled from *how* that value is actually sourced, whether from `appsettings.json`, a database, or a remote feature-flag service.)
 
-### Advanced (7)
+9. **Q: How would you implement idempotent request handling (Idempotency-Key header) at the correct ring, for `POST /orders`, without leaking HTTP-specific concepts into the Use Case?**
+ **A:** The HTTP-specific mechanics — reading the `Idempotency-Key` header, the 24-hour storage-window policy, returning a cached response for a repeated key — are an `Api`/`Infrastructure`-ring concern: a `IIdempotencyStore` port (`Task<TResponse?> TryGetAsync(string key)`, `Task SaveAsync(string key, TResponse response)`) defined in `Application`, implemented by a Redis- or SQL-backed `Infrastructure` Adapter, invoked by an `Api`-ring middleware or a MediatR pipeline behavior wrapping `PlaceOrderUseCase`'s execution — the Use Case itself has no awareness that idempotency-key deduplication is even happening; it just executes once, as always, and the wrapping behavior decides whether to call it at all based on whether the key was already seen.
+ **Why correct:** Keeps the *mechanism* (HTTP header, storage) at the correct outer-ring layer while correctly identifying the wrapping-behavior pattern (the same, already-established transaction-behavior mechanism from §6/Advanced Q4) as the right way to add this cross-cutting concern without touching the Use Case's own code.
+ **Common mistakes:** Passing the raw `Idempotency-Key` string down into `PlaceOrderInputData` and having the Use Case itself check for duplicates against a repository — this smuggles an HTTP-transport-specific concept into the Use Case's own contract, coupling it to a header that a second, non-HTTP entry point (the batch worker in §4) would have no natural equivalent for.
+ **Follow-ups:** "Where would you place the idempotency check relative to the transaction-wrapping behavior from Advanced Q4?" (Idempotency check first, transaction wrapping second — if a duplicate key is detected, the wrapped Use Case, and therefore the transaction, should never even begin executing.)
+
+10. **Q: A team wants to add structured, correlation-ID-tagged logging around every Use Case execution. Where does this belong, and how does it interact with distributed tracing (OpenTelemetry)?**
+ **A:** As a generic MediatR pipeline behavior or a Scrutor-based decorator wrapping every registered Use Case — genuinely cross-cutting and Use-Case-agnostic, exactly like the transaction-wrapping behavior (§6/Advanced Q4), logging the request type name, a correlation ID (propagated via `Activity.Current`/`ActivitySource` for OpenTelemetry-compatible distributed tracing), duration, and success/failure outcome uniformly. OpenTelemetry's `ActivitySource.StartActivity` can wrap the same `next()` call the transaction behavior wraps, meaning a single, ordered pipeline (logging → tracing span → transaction → idempotency-check, or whatever order the team settles on) composes multiple legitimate cross-cutting concerns around the identical Use Case with zero Use-Case-specific code.
+ **Why correct:** Correctly places observability instrumentation at the same generic, cross-cutting layer already established for transactions, and connects it concretely to .NET's `System.Diagnostics.Activity`-based OpenTelemetry integration rather than a hand-rolled logging-only approach.
+ **Common mistakes:** Adding `_logger.LogInformation` calls scattered inside individual Use Cases' own method bodies — this duplicates boilerplate across every Use Case and produces inconsistent log shape/fields, exactly the kind of scattered, non-uniform concern a pipeline behavior exists to centralize.
+ **Follow-ups:** "How would you order multiple pipeline behaviors (logging, tracing, transaction, idempotency) correctly?" (Idempotency check outermost, so a duplicate never even starts a trace span or a transaction; tracing/logging next, so timing captures the full remaining pipeline including the transaction; transaction innermost, immediately wrapping the actual Use Case call.)
+
+### Advanced (10)
 
 1. **Q: Write out the concrete `Program.cs` DI-registration code wiring together the full `PlaceOrder` Use Case example.**
  **A:**
@@ -178,7 +375,43 @@ public void Domain_Should_Not_Reference_Infrastructure_Or_EFCore
  **Common mistakes:** Directly exposing `Application`-ring Input/Output DTOs as the literal public API request/response models to avoid "redundant" mapping code — this is the same Basic Q8 anti-pattern (skipping the boundary DTO distinction) now specifically causing public-API versioning pain, since any internal Use Case refactor risks becoming an accidental breaking change for external API consumers who were never supposed to be coupled to the Use Case's internal contract shape in the first place.
  **Follow-ups:** "Is this extra separate-contract-and-mapping layer worth it for an internal-only API with a single, tightly-coupled frontend team?" (Reapplying the calibration principle — for a genuinely internal, single-consumer API where both sides deploy together, the versioning-safety benefit is much less valuable, and a lighter-weight, more directly-coupled approach may be a reasonable, deliberate trade-off.)
 
-### Expert (7)
+8. **Q: Implement `BatchReconciliationWorker` (a `BackgroundService`) correctly invoking `PlaceOrderUseCase`-style Use Cases per file-record, with correct DI scoping — write the concrete code.**
+ **A:**
+ ```csharp
+public sealed class BatchReconciliationWorker : BackgroundService
+{
+    private readonly IServiceScopeFactory _scopeFactory;
+    public BatchReconciliationWorker(IServiceScopeFactory scopeFactory) => _scopeFactory = scopeFactory;
+
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        await foreach (var record in ReadSettlementFileAsync(ct))
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var useCase = scope.ServiceProvider.GetRequiredService<IAuthorizeTransactionInputBoundary>();
+            await useCase.Execute(MapToInputData(record), ct);
+        }
+    }
+}
+ ```
+ A fresh `IServiceScope` is created **per record**, not once for the whole worker or once per file — each scope gets its own `Scoped AppDbContext`/`IAuthorizeTransactionInputBoundary` instance, exactly matching the per-unit-of-work granularity a `Scoped` HTTP request would naturally get, and avoiding the accumulated-tracked-entity/captive-dependency risk of one long-lived scope processing thousands of records.
+ **Why correct:** Shows the exact, correct `IServiceScopeFactory` pattern for a `BackgroundService`, with scope granularity matched to the actual unit of work, directly addressing the anti-pattern named in §6.
+ **Common mistakes:** Injecting `IAuthorizeTransactionInputBoundary` directly into `BatchReconciliationWorker`'s constructor — `BackgroundService` is registered as `Singleton` by the hosting infrastructure, so any `Scoped` dependency injected directly into its constructor is an immediate captive-dependency bug, caught by `ValidateOnBuild` if enabled, or silently broken if not.
+ **Follow-ups:** "What if processing 100,000 records per-record-scope is too slow?" (Batch the scope creation to a deliberately-chosen chunk size — e.g., one scope per 100 records — explicitly accepting that a `DbContext`'s change-tracker will hold onto 100 records' worth of tracked entities within a chunk, a conscious, documented performance/correctness trade-off, not an accident.)
+
+9. **Q: Design a source-generated (compile-time) alternative to reflection-based DI resolution for a very hot path, and state precisely when this optimization is justified.**
+ **A:** .NET's `[GeneratedServiceProviderFactory]`/AOT-friendly DI patterns, or a hand-written factory method (`static PlaceOrderUseCase CreateUseCase(IServiceProvider sp) => new(sp.GetRequiredService<IOrderRepository>(), ...)`) registered via `AddScoped<IPlaceOrderInputBoundary>(CreateUseCase)`, avoids the container's reflection-based constructor discovery at resolution time, trading a small amount of registration verbosity for slightly faster, allocation-lighter resolution. This is justified only when profiling (not assumption) shows DI resolution itself, not the I/O the Use Case performs, is a measurable percentage of a request's latency budget — realistically, only for an extremely tight, sub-millisecond internal RPC path processing very high request volume, not a typical HTTP API with database or network calls dominating latency (§7).
+ **Why correct:** Gives a concrete implementation option and, more importantly, states precisely and honestly the narrow condition under which it's worth doing, directly reapplying §7's "profile first" principle rather than presenting this as a default optimization.
+ **Common mistakes:** Applying manual factory registration or AOT-oriented DI patterns preemptively across an entire codebase "for performance" without ever having measured that DI resolution was a bottleneck — classic premature optimization, adding real registration-code verbosity for a benefit that, per §7's own numbers, is usually immaterial.
+ **Follow-ups:** "Would Native AOT compilation change this calculus?" (Yes — Native AOT deployment specifically requires avoiding runtime-reflection-based DI patterns that can't be statically analyzed at publish time, making source-generated/factory-based registration a *correctness* requirement for that deployment target, not merely a performance optimization — a genuinely different, non-optional justification.)
+
+10. **Q: Critique a real code-review finding: a `PlaceOrderUseCase` unit test uses Moq to mock `IOrderRepository`, but the mock's `GetByIdAsync` setup returns a different `Order` instance than the one later asserted against by `AddAsync.Verify` — the test passes despite this inconsistency. What's wrong, and how would you catch it systematically?**
+ **A:** The test is a false positive — mocking each method call independently, with no shared, stateful backing store, means the mock never actually verifies the Use Case's real behavior of loading, mutating, and persisting *the same* `Order` instance; it only verifies that *some* call happened with *some* argument matching the loose matcher used. The systematic fix is exactly Module 02's own Intermediate Q-tier guidance generalized: prefer a stateful, hand-written `InMemoryOrderRepository` fake (Coding Exercises §11, Medium) over a per-call mock for any test where the Use Case's correctness depends on read-then-write consistency across multiple Repository calls within one execution — a fake's shared internal dictionary makes this class of bug structurally impossible to miss, where a loosely-configured mock can paper over it.
+ **Why correct:** Identifies the specific, subtle testing anti-pattern (per-call mocking hiding a stateful-consistency bug) and gives the concrete, already-established alternative (a stateful fake) as the systematic fix, rather than a vague "write better test assertions" answer.
+ **Common mistakes:** Fixing this one test's specific assertion without recognizing the pattern is likely repeated across every other mock-based Use Case test in the codebase — the systemic fix is a testing-convention change (prefer fakes for stateful, multi-call scenarios), not a one-off patch.
+ **Follow-ups:** "Is a mocking library ever still the right choice over a fake?" (Yes — for a Port with a single, stateless call per test, or where you specifically need to verify call *arguments* or call *count* rather than end-to-end stateful behavior, a mock is simpler and equally safe; the risk is specific to multi-call, state-dependent scenarios.)
+
+### Expert (10)
 
 1. **Q: From a Principal Engineer's perspective, how would you decide, for a specific team, between full four-project physical enforcement versus the single-project/fitness-function-only approach (Advanced Q5)?**
  **A:** Weigh the team's CI/tooling maturity (is a fitness-function suite already reliably running and monitored, per the "verify the verifier" concern, or would it likely be neglected?), team size and turnover (a larger, higher-turnover team benefits more from the compiler's unconditional, review-independent enforcement, since new or less-experienced contributors won't reliably internalize an unenforced convention), and the system's expected criticality and lifespan (matching the own subdomain-classification-based calibration) — a Core-subdomain system with a large, evolving team should default to full physical separation for its stronger, structural guarantee; a small, stable-team, Supporting/Generic-subdomain system can reasonably rely on the lighter single-project/fitness-function approach, with Advanced Q5's noted migration path available if its criticality or team size later grows.
@@ -222,6 +455,24 @@ public void Domain_Should_Not_Reference_Infrastructure_Or_EFCore
  **Common mistakes:** Treating this module as a list of independent.NET-specific facts to memorize (how MediatR works, what `Scoped` means, how `NetArchTest` is used) without recognizing they're all in service of the identical underlying classification-and-verification skill — a reader who's memorized the individual facts but not the generative skill will struggle to correctly place a genuinely new kind of class this module never explicitly discussed.
  **Follow-ups:** "How would this generative skill help decide where a new background-job scheduler's interface belongs, using this module's own concrete tooling?" (Define `IOrderExpiryScheduler` as a Port in `Application`, implement `HangfireOrderExpiryScheduler` as an Adapter in `Infrastructure`, register it in `Program.cs` with an appropriate lifetime, and let the existing Advanced Q2 fitness-function test — unchanged — automatically verify the new Port's placement is correct, with zero additional architecture-specific reasoning required beyond the classification skill itself.)
 
+8. **Q: A large financial-services engineering organization asks you to design the standard for how every new .NET microservice bootstraps its DI composition root, to prevent the Advanced Q6/§6 captive-dependency incident from recurring across dozens of independently-owned services. What would you mandate, and what would you deliberately leave to individual team discretion?**
+ **A:** Mandate, as a non-negotiable, centrally-owned NuGet package or project template: (1) `ValidateScopes = true` and `ValidateOnBuild = true` enabled in every hosting environment, not just Development; (2) a shared, reusable DI-graph-verification test (Basic Q10's pattern) generated into every new service's test project by default; (3) a linting/analyzer rule (a Roslyn analyzer, if one exists or can be built in-house) flagging `Singleton`-lifetime registrations with constructor parameters resolved from `Scoped`-lifetime services, catching the specific Advanced Q6 bug pattern at build time rather than relying on `ValidateOnBuild`'s runtime check alone. Deliberately leave to team discretion: which specific concrete technology fills each Adapter role (which ORM, which HTTP client wrapper, which caching provider) and how finely the four rings are split into physical projects (Advanced Q5's calibration) — those are legitimate, context-dependent choices that a central mandate would over-constrain.
+ **Why correct:** Draws a precise, defensible line between what should be centrally, mechanically enforced (the specific class of bug that already caused a real incident) and what should remain a team-level judgment call, rather than either over-mandating implementation details or under-mandating the actual, demonstrated risk.
+ **Common mistakes:** Mandating a single, specific ORM or DI-registration style organization-wide "for consistency" — this conflates the genuinely risk-driven mandate (preventing a specific, demonstrated bug class) with an unrelated standardization preference that has real cost (removing legitimate team-level technology choice) without a correspondingly real, demonstrated risk to justify it.
+ **Follow-ups:** "How would you roll this out to services that already exist and predate the standard?" (The same golden-path-plus-audit discipline Module 01 Expert Q5 already established — a scheduled, tracked migration wave adding the verification test and validation flags to existing services, prioritized by criticality, not a single, all-at-once mandatory cutover.)
+
+9. **Q: Describe a realistic scenario where strict adherence to this module's ring-and-lifetime discipline itself became the source of an incident, and extract the honest lesson about over-rigidity.**
+ **A:** A team, having internalized "never let `Domain`/`Application` reference `Infrastructure`," refused to let a genuinely time-critical hotfix touch the Repository interface's signature (adding an optional `CancellationToken` parameter needed to fix a real production timeout-cascade bug) because the change required simultaneously updating the interface (`Domain`), the Use Case call site (`Application`), and the implementation (`Infrastructure`) — three separate, sequentially-reviewed pull requests under the team's own overly rigid "one ring boundary per PR" process norm, adding hours of unnecessary review-sequencing delay to a fix that was, correctness-wise, entirely safe to ship as one coordinated change. The lesson: the *Dependency Rule* (reference direction) is non-negotiable and rightly enforced by the compiler/fitness function; a *process* norm layered on top of it, like "one ring per pull request," is a team-invented convention that should flex for genuine urgency — conflating the two, and treating the process norm with the same rigidity as the actual architectural rule, is itself an anti-pattern.
+ **Why correct:** Distinguishes the genuinely non-negotiable architectural rule from a team-invented process convention that got treated with the same, misplaced rigidity, giving a concrete, realistic scenario rather than an abstract "don't be too rigid" platitude.
+ **Common mistakes:** Concluding from this scenario that the Dependency Rule itself should be relaxed under time pressure — the actual lesson is narrower and more precise: the *rule* stayed correctly non-negotiable throughout (the fix was still implemented correctly, respecting ring boundaries); it was the *unrelated process ceremony* around how changes crossing multiple rings get reviewed that needed to flex.
+ **Follow-ups:** "What's a better process norm for a change that legitimately needs to touch a Port's signature across all three rings simultaneously?** (A single, larger, clearly-labeled pull request explicitly touching all three affected projects together, reviewed as one coherent unit with the interface-and-implementation change kept visibly paired — rather than three artificially sequenced PRs that add coordination overhead without adding any actual safety.)
+
+10. **Q: Deliver this module's closing synthesis for a Principal Engineer audience, tying Modules 01 and 02 together — what is the one thing a reader should be able to do after both modules that they couldn't do after Module 01 alone?**
+ **A:** After Module 01 alone, a reader can correctly *reason* about where a new class belongs (which ring, Port or Adapter) and *why* the Dependency Rule matters. After this module, the same reader can *build and mechanically verify* that placement in a real ASP.NET Core solution: write the actual `.csproj` project-reference graph, write the actual interface and its implementing class, write the actual `Program.cs` registration with the correct DI lifetime, and write an actual, runnable NetArchTest assertion that fails the build if any of it drifts. The gap between the two modules is exactly the gap between architectural literacy and architectural *engineering* — and it's the second one, not the first, that a Principal Engineer is actually hired and evaluated to deliver: not "can you describe Clean Architecture," but "can you make Clean Architecture durably, verifiably true in a codebase other engineers will change after you've moved on."
+ **Why correct:** Precisely names the literacy-vs-engineering gap the two modules jointly close, matching this domain's own established distinction between a stated architectural intention and a mechanically-verified one, and correctly frames it as the actual, evaluated Principal Engineer skill rather than restating either module's individual content.
+ **Common mistakes:** Summarizing the two modules as "conceptual, then practical" without naming the specific, load-bearing consequence of that split — that only the second half produces something durable enough to survive team turnover and deadline pressure, which is the entire point of pairing them.
+ **Follow-ups:** "If you could keep only one of the two modules' contributions in a codebase with no time to implement the other, which would you choose and why?" (The mechanical enforcement from this module, even without the full conceptual vocabulary from Module 01 — a compiler-enforced project-reference graph and a passing fitness function protect a codebase's actual dependency direction regardless of whether every engineer touching it can recite the four ring names; the reverse — perfect conceptual understanding with no enforcement — is exactly the "declared ≠ actual" gap this domain has repeatedly warned produces silent, undetected drift.)
+
 ### FinTech Principal Panel — High-Frequency Question
 
 **FT1. Q: Concretely, in ASP.NET Core/C#, model an external card network / payment rail as a port-and-adapter, and show how that lets you test a "settle payment" use case — including its failure and timeout paths — without ever calling the real network. Why does this matter for a regulated engine?**
@@ -233,3 +484,300 @@ public void Domain_Should_Not_Reference_Infrastructure_Or_EFCore
 ---
 
 **Next in this domain:** Module 115 will deliver a deliberately light-touch comparative synthesis of Clean Architecture against Hexagonal Architecture (Ports and Adapters, in its original formulation) and Onion Architecture, building on this module's already-established concrete implementation and correctly scoping the comparison to genuine terminology/emphasis differences rather than re-deriving implementation mechanics — since Module 33 owns Hexagonal Architecture's own full, dedicated treatment.
+
+---
+
+## 11. Coding Exercises
+
+### Easy
+
+**Problem.** Write the `IOrderRepository` Port interface and a minimal `EfCoreOrderRepository` Adapter for `GetByIdAsync` and `AddAsync`, placed in the correct projects.
+
+**Solution.**
+```csharp
+// Domain/IOrderRepository.cs
+public interface IOrderRepository
+{
+    Task<Order?> GetByIdAsync(Guid id, CancellationToken ct = default);
+    Task AddAsync(Order order, CancellationToken ct = default);
+}
+
+// Infrastructure/EfCoreOrderRepository.cs
+public sealed class EfCoreOrderRepository : IOrderRepository
+{
+    private readonly AppDbContext _db;
+    public EfCoreOrderRepository(AppDbContext db) => _db = db;
+    public Task<Order?> GetByIdAsync(Guid id, CancellationToken ct = default) =>
+        _db.Orders.FirstOrDefaultAsync(o => o.Id == id, ct);
+    public Task AddAsync(Order order, CancellationToken ct = default) =>
+        _db.Orders.AddAsync(order, ct).AsTask();
+}
+```
+**Time complexity:** O(1) for `AddAsync` (tracked-entity insert); O(log n) or O(1) for `GetByIdAsync` depending on index (a primary-key lookup is effectively O(1) via a clustered index seek). **Space complexity:** O(1) additional beyond the returned `Order` graph. **Optimized solution:** Add `AsNoTracking()` for read-only query paths that never call `SaveChanges` on the result, avoiding unnecessary EF Core change-tracking overhead.
+
+### Medium
+
+**Problem.** Write a `NetArchTest` fitness-function test asserting `Application`-ring types must not depend on `Microsoft.AspNetCore` (i.e., Use Cases must not know about HTTP-specific types), and a second test asserting `Api`-ring Controllers must not directly reference `Infrastructure` (must go through `Application`'s Input Boundary interfaces only).
+
+**Solution.**
+```csharp
+[Fact]
+public void Application_Should_Not_Depend_On_AspNetCore()
+{
+    var result = Types.InAssembly(typeof(PlaceOrderUseCase).Assembly)
+        .Should().NotHaveDependencyOn("Microsoft.AspNetCore").GetResult();
+    Assert.True(result.IsSuccessful, string.Join(", ", result.FailingTypeNames ?? Array.Empty<string>()));
+}
+
+[Fact]
+public void Controllers_Should_Not_Depend_On_Infrastructure_Directly()
+{
+    var result = Types.InAssembly(typeof(OrdersController).Assembly)
+        .That().ResideInNamespace("Api.Controllers")
+        .Should().NotHaveDependencyOn("Infrastructure").GetResult();
+    Assert.True(result.IsSuccessful, string.Join(", ", result.FailingTypeNames ?? Array.Empty<string>()));
+}
+```
+**Time complexity:** O(t) per assembly scanned via Mono.Cecil metadata inspection, t = number of types — low single-digit seconds even for large assemblies. **Space complexity:** O(t) for reflected type metadata held during the scan. **Optimized solution:** Combine both checks into a single parameterized `[Theory]` test iterating a table of `(assembly, forbiddenNamespace)` pairs, reducing duplication as more ring-boundary rules accumulate.
+
+### Hard
+
+**Problem.** Implement a `TransactionBehavior<TRequest,TResponse>` MediatR pipeline behavior (per §6/Advanced Q4) *and* an `IdempotencyBehavior` (per Intermediate Q9), correctly composed so idempotency short-circuits before the transaction begins, with a unit test proving a duplicate `Idempotency-Key` never invokes the wrapped Use Case a second time.
+
+**Solution.**
+```csharp
+public sealed class IdempotencyBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>, IIdempotentRequest
+{
+    private readonly IIdempotencyStore _store;
+    public IdempotencyBehavior(IIdempotencyStore store) => _store = store;
+
+    public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken ct)
+    {
+        var cached = await _store.TryGetAsync<TResponse>(request.IdempotencyKey, ct);
+        if (cached is not null) return cached;
+        var response = await next();
+        await _store.SaveAsync(request.IdempotencyKey, response, ct);
+        return response;
+    }
+}
+// Program.cs, registered in order: Idempotency first (outermost), then Transaction.
+builder.Services.AddScoped(typeof(IPipelineBehavior<,>), typeof(IdempotencyBehavior<,>));
+builder.Services.AddScoped(typeof(IPipelineBehavior<,>), typeof(TransactionBehavior<,>));
+
+[Fact]
+public async Task DuplicateIdempotencyKey_DoesNotReExecuteUseCase()
+{
+    var store = new InMemoryIdempotencyStore();
+    var executionCount = 0;
+    var behavior = new IdempotencyBehavior<PlaceOrderCommand, PlaceOrderResult>(store);
+    var command = new PlaceOrderCommand("key-123", /* ... */);
+    Task<PlaceOrderResult> Next() { executionCount++; return Task.FromResult(new PlaceOrderResult(Guid.NewGuid())); }
+
+    await behavior.Handle(command, Next, default);
+    await behavior.Handle(command, Next, default);
+
+    Assert.Equal(1, executionCount);
+}
+```
+**Time complexity:** O(1) per pipeline stage beyond the wrapped call itself (a store lookup/save, each O(1) for a key-value backing store). **Space complexity:** O(k) for k stored idempotency keys within their retention window. **Optimized solution:** Back `IIdempotencyStore` with Redis with a TTL matching the business-defined retention window (e.g., 24 hours), rather than an unbounded in-memory/SQL table, to keep storage bounded automatically.
+
+### Expert
+
+**Problem.** Design and implement a DI-registration-lifetime fitness function (per Expert Q1) that fails the build if any `Singleton`-registered service has a constructor parameter whose registered lifetime is `Scoped` or `Transient`-wrapping-`Scoped`, using reflection over the built `IServiceCollection`.
+
+**Solution.**
+```csharp
+[Fact]
+public void No_Singleton_Should_Depend_On_A_Scoped_Service()
+{
+    var services = new ServiceCollection();
+    Startup.ConfigureServices(services); // extracted, testable registration method
+
+    var singletons = services.Where(d => d.Lifetime == ServiceLifetime.Singleton && d.ImplementationType is not null);
+    var scopedTypes = services.Where(d => d.Lifetime == ServiceLifetime.Scoped)
+        .Select(d => d.ServiceType).ToHashSet();
+
+    var violations = new List<string>();
+    foreach (var descriptor in singletons)
+    {
+        var ctor = descriptor.ImplementationType!.GetConstructors().First();
+        foreach (var param in ctor.GetParameters())
+        {
+            if (scopedTypes.Contains(param.ParameterType))
+                violations.Add($"{descriptor.ImplementationType.Name} (Singleton) depends on {param.ParameterType.Name} (Scoped)");
+        }
+    }
+    Assert.True(violations.Count == 0, string.Join("; ", violations));
+}
+```
+**Time complexity:** O(s·p) where s = number of Singleton registrations, p = average constructor parameter count — trivial for a typical service's registration count (tens to low hundreds). **Space complexity:** O(s) for the violation list. **Optimized solution:** Extend the check to walk transitively through a `Singleton` decorator's own dependency graph (not just its immediate constructor parameters) to also catch the two-or-three-layer-deep captive-dependency pattern from Advanced Q6/§14's incident, which a shallow, one-level check would miss.
+
+---
+
+## 12. System Design
+
+**Scenario.** Design the concrete ASP.NET Core solution structure, DI wiring, and CI verification pipeline for a **real-time fraud-scoring service** sitting in the authorization path of a card-issuing platform (building directly on §4's Production Example), where the scoring rules must be swappable per-issuer-program without a redeploy, and every scoring decision must be reproducible for a later regulatory dispute.
+
+**Requirements.** *Functional:* score a transaction against one of several rule sets (issuer-program-specific); persist every scoring decision with the exact rule-set version used. *Non-functional:* P99 scoring latency under 50ms (it sits in a synchronous authorization path); the rule-evaluation logic must be unit-testable without any live data feed; a disputed transaction must be reproducible months later using the exact rule-set version that scored it originally.
+
+**Solution structure.** `Domain`: `FraudRuleSet` (a Value-Object-like, versioned, immutable rule collection), `TransactionRiskProfile`; `Application`: `ScoreTransactionUseCase` behind `IScoreTransactionInputBoundary`, depending on `IFraudRuleSetProvider` (a Port) and `IScoringDecisionStore` (a Port); `Infrastructure`: `CachedFraudRuleSetProvider` (Redis-backed, refreshed on a schedule, never mid-transaction), `EfCoreScoringDecisionStore` persisting the rule-set version alongside every decision; `Api`: `AuthorizationsController` calling the Use Case synchronously in the authorization path.
+
+**Data model.** `ScoringDecisions` table: `TransactionId (PK)`, `RuleSetVersion (not null)`, `Score (decimal)`, `Outcome (enum: Approve/Decline/ReviewQueue)`, `ScoredAtUtc`, `RuleSetSnapshotJson (nvarchar(max), the exact rules evaluated, for dispute reproducibility)` — storing the snapshot, not just a version number, because rule sets may later be edited under the same version during development before being locked for production use.
+
+**Scaling and failure handling.** `CachedFraudRuleSetProvider` is `Scoped`-wrapping-a-`Singleton`-cache (the cache itself is safely `Singleton` because rule sets are immutable once loaded — the *cache*, not a mutable resource, is what's shared, which is the one legitimate exception to the "avoid Singleton" instinct, since there's no captive-`Scoped`-dependency risk when the shared object is itself immutable); a rule-set refresh failure falls back to the last-known-good cached version rather than failing the authorization path open or closed by default, with the fallback event itself recorded as an audit entry.
+
+**Monitoring.** A fitness function blocks any `Domain`/`Application` reference to the Redis client library directly; a scoring-decision-store not-writable alert pages on-call within seconds, since a transaction scored without a persisted, reproducible record is itself a compliance gap, treated with the same severity as a failed authorization.
+
+**Trade-offs.** Storing a full rule-set JSON snapshot per decision (rather than just a version number) trades storage volume for guaranteed dispute-reproducibility — deliberately chosen because reconstructing "what were the rules on that exact version, as they existed at that exact moment" from a mutable, evolving rule-set history proved unreliable in a predecessor system's own incident review.
+
+---
+
+## 13. Low-Level Design
+
+**Class diagram** for the pipeline-behavior composition (Coding Exercises §11, Hard):
+
+```mermaid
+classDiagram
+    class IPipelineBehavior~TRequest,TResponse~ {
+        <<interface>>
+        +Handle(TRequest, RequestHandlerDelegate, CancellationToken) Task~TResponse~
+    }
+    class IdempotencyBehavior~TRequest,TResponse~ {
+        -IIdempotencyStore store
+        +Handle(...)
+    }
+    class TransactionBehavior~TRequest,TResponse~ {
+        -IUnitOfWork unitOfWork
+        +Handle(...)
+    }
+    class IIdempotentRequest {
+        <<interface>>
+        +string IdempotencyKey
+    }
+    class PlaceOrderCommand {
+        +string IdempotencyKey
+    }
+    IdempotencyBehavior ..|> IPipelineBehavior
+    TransactionBehavior ..|> IPipelineBehavior
+    PlaceOrderCommand ..|> IIdempotentRequest
+```
+
+**Sequence diagram** — the composed pipeline for one `PlaceOrderCommand`:
+
+```mermaid
+sequenceDiagram
+    participant Ctrl as OrdersController
+    participant Med as IMediator
+    participant Idem as IdempotencyBehavior
+    participant Tx as TransactionBehavior
+    participant UC as PlaceOrderUseCase (Handler)
+
+    Ctrl->>Med: Send(PlaceOrderCommand)
+    Med->>Idem: Handle(cmd, next)
+    alt duplicate key
+        Idem-->>Med: cached result (short-circuit)
+    else new key
+        Idem->>Tx: next() -> Handle(cmd, next)
+        Tx->>UC: BeginTx, next() -> Handle(cmd)
+        UC-->>Tx: result
+        Tx-->>Idem: CommitTx, result
+        Idem->>Idem: store result under key
+        Idem-->>Med: result
+    end
+    Med-->>Ctrl: result
+```
+
+**Design patterns used.** Decorator/Chain of Responsibility (MediatR pipeline behaviors, composing idempotency + transaction + logging around a Use Case), Repository, Gateway, Unit of Work, Factory (`IServiceScopeFactory` for per-item batch scoping), Strategy (per-issuer-program `IFraudRuleSetProvider` implementations in §12).
+
+**SOLID mapping.** SRP: `IdempotencyBehavior` knows nothing about transactions and vice versa — each behavior has exactly one reason to change. OCP: adding a new pipeline behavior (rate limiting, audit logging) requires zero changes to existing behaviors or to any Use Case. LSP: any `IIdempotencyStore` implementation (in-memory, Redis, SQL) must honor identical get/save semantics for the pipeline to behave predictably across environments. ISP: `IIdempotentRequest` is a narrow, single-property interface a Command opts into, rather than forcing every Command to carry idempotency-related fields it doesn't need. DIP: every behavior depends on a Port (`IIdempotencyStore`, `IUnitOfWork`), never a concrete Adapter directly.
+
+**Extensibility.** A new cross-cutting concern is a new `IPipelineBehavior` registered in `Program.cs`, ordered relative to existing behaviors — no existing Use Case or behavior requires modification.
+
+**Concurrency/thread safety.** `IdempotencyBehavior`'s store must itself provide atomic check-and-set semantics (a Redis `SETNX`-style operation, or a unique-constraint-backed SQL insert) to avoid a race where two concurrent requests with the same key both pass the `TryGetAsync` check before either has called `SaveAsync` — a plain "check then write" pattern without atomicity is a genuine, exploitable double-processing race under concurrent duplicate submissions, exactly the scenario an idempotency mechanism exists to prevent.
+
+---
+
+## 14. Production Debugging
+
+**Incident.** Three weeks after §4's `BatchReconciliationWorker` went live, the batch job's memory usage climbs steadily through a multi-hour overnight run, eventually triggering an `OutOfMemoryException` and killing the container around record 400,000 of a 600,000-record settlement file.
+
+**Investigation.** `dotnet-counters` attached to the running container shows Gen 2 heap size growing monotonically with record count, never returning to baseline between records — inconsistent with the per-record `IServiceScopeFactory.CreateScope()` pattern (Advanced Q8) actually disposing each scope's `AppDbContext` correctly. `dotnet-gcdump` taken mid-run and analyzed shows tens of thousands of live `Order` entity instances still rooted — not by the disposed `DbContext` instances themselves, but by a static, module-level `List<Order>` a developer had added for an unrelated, temporary debugging purpose ("log a sample of processed orders at the end of the run") and never removed before merging.
+
+**Root cause.** A `static` collection at the `Infrastructure`/`Api` composition-root level, entirely outside the ring/DI-lifetime discipline this module otherwise enforces — no fitness function or DI-lifetime check catches this, because a `static` field isn't a DI registration at all; it's a plain language-level construct invisible to every mechanism this module has built so far.
+
+**Tools.** `dotnet-counters` for the live GC/heap growth signal; `dotnet-gcdump` plus a heap-analysis tool (e.g., dotMemory or the `dotnet-gcdump report` GC-root chain) to trace exactly what was rooting the leaked `Order` instances back to the specific `static List<Order>` field.
+
+**Fix.** Removed the debugging `static` collection entirely, replacing the "sample of processed orders" need with a proper, bounded logging statement (logging just the order ID and outcome, not the full entity graph) emitted per record instead of accumulated in memory across the whole run.
+
+**Prevention.** Added a Roslyn analyzer rule (or, at minimum, a documented code-review checklist item) flagging any `static` mutable collection field anywhere in `Infrastructure`/`Api`, since this class of leak is structurally invisible to every DI-lifetime and ring-boundary check this module has built — a direct, honest acknowledgment that the fitness-function suite protects against *ring-boundary and DI-lifetime* violations specifically, not against every possible memory-management mistake, and a reminder that "the fitness function is green" (Module 01 Expert Q4) must never be read as "there are no bugs," only "this specific, named class of bug isn't present."
+
+---
+
+## 15. Architecture Decision
+
+**Decision:** for cross-cutting concerns in this module's stack (transactions, idempotency, logging/tracing, retry), use MediatR pipeline behaviors, a hand-rolled Decorator chain via a DI-container extension (e.g., Scrutor), or inline code duplicated per Use Case?
+
+| Option | Advantages | Disadvantages | Cost | Complexity | Maintainability |
+|---|---|---|---|---|---|
+| **MediatR pipeline behaviors** | Widely known convention; ordering is declarative via registration order; composes cleanly with many concerns | Runtime, reflection-based dispatch (Module 01 Deep Dive 2.4-equivalent); adds a library dependency; a missing/misregistered handler is a runtime, not compile-time, failure | Low-moderate (library learning curve) | Moderate | Good — centralizes concerns, well-understood pattern once adopted |
+| **Hand-rolled Decorator chain (Scrutor or manual)** | No reflection-based dispatch beyond normal DI resolution; explicit, debuggable call chain; no external mediator library dependency | More boilerplate per new behavior; ordering is DI-registration-order-dependent and less discoverable without documentation | Moderate | Moderate-high | Good for teams wanting minimal magic, worse for onboarding speed |
+| **Inline duplication per Use Case** | Zero new abstraction to learn; maximally explicit in each Use Case's own code | Every cross-cutting concern (transaction, idempotency, logging) is copy-pasted per Use Case, drifting out of sync over time — directly reproduces Module 01's original "logic duplicated across entry points" failure mode this whole domain exists to prevent | Lowest upfront, highest long-run (drift, inconsistency, missed updates) | Lowest per-feature, highest in aggregate | Poor — the exact anti-pattern this module's own Production Example (§4) was built to fix |
+
+**Recommendation.** **MediatR pipeline behaviors** for teams already using MediatR for Input Boundary dispatch (the common case in this module's examples) — the marginal cost of adding pipeline behaviors on top of an already-adopted dispatch mechanism is low, and the ordering/composition model is a well-documented, widely-transferable skill new hires are likely to already know. For a team deliberately avoiding MediatR (per Module 01's Basic Q1 note that it's a convenience choice, not a requirement), a hand-rolled Decorator chain achieves the identical architectural outcome with more explicit, if more verbose, code — a legitimate, equally-correct alternative. Inline duplication is never the right long-term choice once more than one Use Case needs the same cross-cutting concern; it's acceptable only as a temporary state for a single Use Case with no near-term second consumer expected.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact.** This module's DI-lifetime and fitness-function discipline is what converts Module 01's architectural intention into something a compliance auditor, a new hire, or a 2am on-call engineer can actually trust without re-deriving it from first principles — the §14 memory-leak incident and the Advanced Q6 captive-dependency incident are both concrete illustrations that "architecturally sound in principle" and "operationally safe in production" are separate properties, each requiring its own, specific engineering attention.
+
+**Engineering trade-offs.** Every pipeline behavior, every fitness-function assertion, every per-record DI scope in a batch worker is a small, deliberate tax paid for a specific, named guarantee — a Principal Engineer's job is ensuring each one is traceable to an actual risk (a real incident, a real audit requirement), not accumulated as generic "best practice" ceremony with no specific justification anyone can articulate under questioning.
+
+**Technical leadership.** Rolling out DI-lifetime-validation and fitness-function tooling across a multi-team organization (Expert Q1/Q2) requires distinguishing what must be centrally mandated (the specific, demonstrated-risk checks) from what legitimately stays a team's own choice (which ORM, how many physical projects) — over-mandating breeds resentment and workarounds; under-mandating lets a known incident class recur elsewhere.
+
+**Cross-team communication.** The composition root (`Program.cs`) being the one place every Port and Adapter are simultaneously visible makes it a natural, legible artifact to walk a cross-team architecture review through — "here is everything this service depends on and how it's wired" is answerable by reading one file, not by archaeology across a dozen classes.
+
+**Architecture governance.** A DI-lifetime fitness function (Coding Exercises §11, Expert) and a reference-direction fitness function (Module 01, Advanced Q2) are two structurally different but equally necessary governance artifacts — one catches "wrong ring," the other catches "right ring, wrong lifetime" — a Principal Engineer maintaining an architecture-governance program should track both as separate, named checks, not conflate them into a single, vaguer "architecture tests" bucket.
+
+**Cost optimization.** The four-project physical split and the fitness-function CI stage both cost real build-pipeline minutes at organizational scale (§7/§9) — worth periodically re-measuring against actual CI infrastructure spend, and worth deliberately trading off against a lighter, single-project variant for genuinely low-criticality services rather than applying the heaviest option uniformly.
+
+**Risk analysis.** The two incidents this module walked through in detail (Advanced Q6's captive dependency, §14's static-collection memory leak) share a structural lesson worth surfacing explicitly to leadership: mechanical enforcement (fitness functions, DI-lifetime checks) closes specific, named risk classes completely, but never all risk — a Principal Engineer's honest risk report names precisely which classes of bug the current tooling does and does not protect against, rather than implying "we have architecture tests" means "we are safe."
+
+**Long-term maintainability.** The golden-path scaffolding template (Module 01, Expert Q5) is the artifact that makes this module's specific implementation choices — not just Module 01's conceptual rules — durable across new services and new hires; a template that generates the DI-lifetime-validation test and the reference-direction fitness function by default is worth more, in practice, than a document describing both.
+
+---
+
+## 18. Revision
+
+**Key Takeaways.**
+- A Port is a plain interface in an inner-ring project; an Adapter is a concrete class in an outer-ring project — the project-reference graph is what makes this a compile-time guarantee, not a convention.
+- `Scoped` is the default-correct DI lifetime for anything touching `DbContext`; a `Singleton` capturing a `Scoped` dependency, directly or via a decorator, is the single most common and most severe implementation bug in this stack.
+- MediatR pipeline behaviors (or a hand-rolled Decorator chain) are the correct home for genuinely cross-cutting concerns (transactions, idempotency, logging) — never for a Use-Case-specific business rule.
+- Fitness functions inspect compiled IL via static analysis (NetArchTest/Mono.Cecil), catching reference-direction violations a behavioral test never would — but they must actually keep running in CI to mean anything.
+- `BackgroundService`/batch workers need explicit, per-unit-of-work `IServiceScopeFactory.CreateScope()` calls — there's no ambient request scope to rely on outside a controller.
+
+**Interview Cheatsheet.**
+- Port = interface, inner ring. Adapter = implementation, outer ring.
+- `AddScoped` for anything wrapping `DbContext`; validate with `ValidateScopes`/`ValidateOnBuild` in every environment.
+- MediatR `IRequest`/`IRequestHandler` = Input Boundary + Use Case, dispatched at runtime via reflection.
+- Fitness function = `NetArchTest`/ArchUnitNET, static IL inspection, run in CI.
+- Idempotency and transaction concerns belong in pipeline behaviors, ordered idempotency-outermost.
+
+**Things Interviewers Love.**
+- Concrete, runnable `Program.cs`/fitness-function code, not just descriptions.
+- Correctly diagnosing a captive-dependency bug from symptoms (intermittent, load-correlated corruption).
+- Distinguishing what a fitness function does and doesn't protect against (§14's static-collection leak).
+- Knowing exactly where idempotency, transactions, and logging each belong, and in what order they compose.
+
+**Things Interviewers Hate.**
+- Registering everything `Singleton` "for performance" without acknowledging the captive-dependency risk.
+- Treating MediatR as synonymous with Clean Architecture rather than one implementation choice for Input Boundary dispatch.
+- Assuming a green fitness-function suite means "no bugs" rather than "this specific, named class of violation isn't present."
+- Forgetting `BackgroundService` is `Singleton`-hosted and needs explicit per-item DI scoping.
+
+**Common Traps.**
+- Injecting a `Scoped` service directly into a `BackgroundService`'s constructor.
+- Per-call mocking hiding a stateful read-then-write consistency bug a fake would have caught.
+- A fitness-function test silently excluded from CI by an unrelated test-filter change.
+- Conflating a team-invented process convention (e.g., "one ring per PR") with the actual, non-negotiable Dependency Rule.

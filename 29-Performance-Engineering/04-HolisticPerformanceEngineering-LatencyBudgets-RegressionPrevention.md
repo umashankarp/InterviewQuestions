@@ -424,3 +424,411 @@ graph LR
  **Why correct:** Synthesizes all four modules into one coherent statement, correctly identifies the domain's specific, distinguishing contribution (gradual/cumulative failure mode) to the broader course theme, and explicitly connects it to the full course arc.
  **Common mistakes:** Summarizing the domain as four separate technical topics without identifying the single, generalizable principle connecting them to the rest of the course, or treating the "gradual failure" distinction as incidental rather than the domain's specific, valuable addition to the broader theme.
  **Follow-ups:** "Why is this synthesis specifically valuable for a Principal Engineer candidate to be able to state fluently, across every domain this course has covered?" (It demonstrates the ability to recognize one deep, generalizable engineering principle recurring across every technical domain examined — Kubernetes, DevOps, CI/CD, Observability, Security, and now Performance Engineering — rather than treating each domain's lessons as isolated facts, precisely the kind of cross-cutting synthesis this course has repeatedly emphasized as the mark of senior, Principal-Engineer-level thinking.)
+
+---
+
+## 11. Coding Exercises
+
+**Easy — Latency-budget checker.**
+*Problem:* Given a list of `(serviceName, allocatedBudgetMs, measuredLatencyMs)` tuples for a critical path, return which services are over budget and the total end-to-end margin remaining.
+*Solution:*
+```csharp
+public record BudgetEntry(string ServiceName, double AllocatedMs, double MeasuredMs);
+
+public record BudgetReport(IReadOnlyList<string> OverBudget, double TotalMarginMs);
+
+public static BudgetReport CheckBudget(IEnumerable<BudgetEntry> path)
+{
+    var entries = path.ToList();
+    var overBudget = entries.Where(e => e.MeasuredMs > e.AllocatedMs)
+                             .Select(e => e.ServiceName).ToList();
+    var totalAllocated = entries.Sum(e => e.AllocatedMs);
+    var totalMeasured = entries.Sum(e => e.MeasuredMs);
+    return new BudgetReport(overBudget, totalAllocated - totalMeasured);
+}
+```
+*Time complexity:* O(n) for n services on the path. *Space complexity:* O(n) for the result list. *Optimized solution:* Already optimal for a linear pass; the only real improvement is streaming the check incrementally as trace spans arrive rather than batching after the full trace completes, reducing detection latency in production.
+
+**Medium — Rolling-window regression detector (the "death by a thousand cuts" detector).**
+*Problem:* Given a time-ordered stream of daily p99-latency measurements, detect a "gradual regression": no single day-over-day change exceeds a noise threshold, but the trailing 30-day average has grown by more than 15% versus the 30-day average from 90 days prior.
+*Solution:*
+```csharp
+public static bool IsGradualRegression(IReadOnlyList<(DateTime Date, double P99Ms)> series, double thresholdPct = 0.15)
+{
+    var ordered = series.OrderBy(s => s.Date).ToList();
+    if (ordered.Count < 120) return false; // need ~90+30 days of history
+
+    var recent30 = ordered.TakeLast(30).Average(s => s.P99Ms);
+    var baseline30 = ordered.Skip(ordered.Count - 120).Take(30).Average(s => s.P99Ms);
+
+    return (recent30 - baseline30) / baseline30 > thresholdPct;
+}
+```
+*Time complexity:* O(n) for n days of history per check. *Space complexity:* O(n) to hold the series (or O(1) with a running-sum rolling-window implementation). *Optimized solution:* Maintain two rolling sums incrementally (add the newest day, subtract the oldest day leaving each window) rather than recomputing `Average` over a fresh slice on every call, turning a repeated O(n) scan into O(1) amortized per new data point.
+
+**Hard — Critical-path extraction from a distributed trace.**
+*Problem:* Given a set of trace spans, each with `(spanId, parentSpanId, startMs, durationMs)`, compute the request's actual critical path — the sequence of spans whose completion time gates the overall response, accounting for spans that run in parallel and don't gate anything.
+*Solution:* Build the span tree; for each node, its "critical" child is the one whose `start + duration` is latest among siblings (the one that finishes last gates the parent's completion); walk from the root selecting the critical child recursively.
+```csharp
+public record Span(string Id, string? ParentId, double StartMs, double DurationMs);
+
+public static List<Span> CriticalPath(IReadOnlyList<Span> spans)
+{
+    var byParent = spans.Where(s => s.ParentId != null)
+                         .GroupBy(s => s.ParentId!)
+                         .ToDictionary(g => g.Key, g => g.ToList());
+    var root = spans.Single(s => s.ParentId == null);
+
+    var path = new List<Span> { root };
+    var current = root;
+    while (byParent.TryGetValue(current.Id, out var children) && children.Count > 0)
+    {
+        // the child that finishes latest is the one gating the parent's own completion
+        var criticalChild = children.OrderByDescending(c => c.StartMs + c.DurationMs).First();
+        path.Add(criticalChild);
+        current = criticalChild;
+    }
+    return path;
+}
+```
+*Time complexity:* O(n log n) dominated by the per-level sort of children (or O(n) if children are pre-sorted per group). *Space complexity:* O(n) for the parent-to-children index. *Optimized solution:* For a trace with high fan-out at any level, avoid re-sorting all children every time by maintaining a max-heap per parent keyed on `start + duration`, reducing repeated-query cost if critical-path extraction runs frequently against the same trace structure (e.g., interactively in a tracing UI).
+
+**Expert — CI regression gate with statistical significance, not raw delta.**
+*Problem:* A naive gate that fails a build if `newLatency > oldLatency` produces false positives from normal run-to-run noise. Implement a gate that only fails when the regression is statistically significant given historical variance, not just a raw increase.
+*Solution:* Use a Welch's t-test-style comparison between the new run's sample and a rolling baseline's sample, failing only when the difference is significant at a chosen confidence level *and* exceeds a minimum practically-meaningful effect size (avoiding flagging a statistically-significant-but-practically-irrelevant 0.1ms change).
+```csharp
+public static bool IsSignificantRegression(
+    double[] baselineSamples, double[] newSamples,
+    double minEffectMs = 5.0, double zThreshold = 2.58 /* ~99% one-tailed */)
+{
+    double Mean(double[] s) => s.Average();
+    double Variance(double[] s, double mean) => s.Sum(x => (x - mean) * (x - mean)) / (s.Length - 1);
+
+    var baseMean = Mean(baselineSamples);
+    var newMean = Mean(newSamples);
+    var effect = newMean - baseMean;
+    if (effect < minEffectMs) return false; // too small to matter, regardless of significance
+
+    var baseVar = Variance(baselineSamples, baseMean);
+    var newVar = Variance(newSamples, newMean);
+    var standardError = Math.Sqrt(baseVar / baselineSamples.Length + newVar / newSamples.Length);
+    if (standardError == 0) return effect > 0;
+
+    var z = effect / standardError;
+    return z > zThreshold;
+}
+```
+*Time complexity:* O(n + m) for sample sizes n and m. *Space complexity:* O(1) beyond the input arrays. *Optimized solution:* Maintain baseline mean/variance incrementally (Welford's algorithm) across every historical run rather than recomputing from a stored raw-sample array on every CI invocation, letting the baseline's sample size grow indefinitely without a corresponding storage or recomputation cost growth.
+
+---
+
+## 12. System Design
+
+### Step 1 — Understand the Problem and Establish Design Scope
+
+**Q&A framing (candidate ↔ interviewer):**
+- *Q: What are we designing?* A: An organization-wide latency-budget governance platform — the shared system from §4's production example's remediation, generalized: services register their allocated budget, CI gates enforce it per-change, and production monitoring detects both sharp regressions and gradual drift.
+- *Q: Which services are in scope?* A: Any service on a critical path with a customer-facing or contractually-referenced latency SLO — starting with the settlement, payments, and order-entry paths; internal batch/back-office paths are explicitly out of scope for v1 (flagged for a later phase).
+- *Q: Is this platform itself allowed to add latency to the request path it monitors?* A: No — the platform must operate entirely out-of-band (via tracing/telemetry already being emitted, and CI-time checks), never as an in-line dependency on the production request path itself.
+- *Q: Multi-region?* A: Single-region for v1; each region would need its own budget allocation if extended, since cross-region network latency is itself a budget-relevant cost, explicitly deferred (Step 4).
+
+**Functional requirements:**
+- Services declare an allocated latency-budget (per percentile, e.g., p99) via a versioned config artifact.
+- CI pipeline enforces per-change compliance via micro- and macro-benchmark gates (§7).
+- Production monitoring computes real-time and rolling-trend budget compliance per service and end-to-end per critical path.
+- A performance-debt backlog item is automatically opened when a service is found chronically over budget.
+
+**Non-functional requirements:**
+- The platform's own CI-gate check must add no more than 5 minutes to a typical release pipeline.
+- Production trend-detection must have a false-positive rate low enough to remain trusted (target: fewer than 1 false page per week across the whole registered fleet).
+- The platform itself must be highly available for its dashboard/query path, though a brief outage in monitoring must never block an unrelated service's deploy (fail-open on platform unavailability, with an explicit, visible "budget check skipped" flag rather than a silent pass).
+
+**Back-of-the-envelope estimation:**
+- ~200 services expected to register, each emitting p50/p95/p99 latency at 1-minute granularity → 200 × 3 × 1440 = ~864,000 data points/day, comfortably within a standard time-series database's ingest capacity.
+- CI gate check: ~50 deploys/day across the fleet, each requiring one baseline-comparison query — negligible load.
+- **What the numbers tell us:** this is not a data-volume or throughput problem at all — it is a *statistical-confidence and organizational-adoption* problem (per §11 Expert's significance-testing requirement, and the governance-buy-in question in §15) — the hard part is trustworthy detection and cross-team accountability, not raw scale.
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+**Two core flows:** (1) the **registration and CI-gate flow** — a service declares its budget and every change is checked against it before merge/deploy; (2) the **production-monitoring flow** — continuous ingestion of real latency data, computing both point-in-time and rolling-trend compliance, driving alerts and automatic performance-debt tracking.
+
+**Component glossary:**
+| Component | Role |
+|---|---|
+| Budget Registry | Stores each service's declared budget allocation (per percentile, per critical path it participates in), versioned. |
+| CI Gate Service | Runs on every PR/release candidate: fetches the relevant budget, compares fresh benchmark/load-test results against it plus historical baseline, using the significance test from §11 Expert. |
+| Telemetry Ingest | Consumes latency spans/metrics already emitted by each service's existing tracing/APM instrumentation — the platform adds no new instrumentation burden. |
+| Trend Analyzer | Computes rolling-window comparisons (§2.5) across the ingested telemetry, flagging gradual drift independently of any single deploy. |
+| Compliance Dashboard | Aggregated, organization-wide view: percentage of services within budget, performance-debt backlog size/age, per-critical-path budget consumption. |
+| Debt Tracker | Automatically opens a tracked performance-debt item when a service is found chronically (not transiently) over budget. |
+
+**Architecture diagram:**
+```mermaid
+graph TB
+    Svc[Service's own CI pipeline] --> Gate[CI Gate Service]
+    Gate --> Registry[(Budget Registry)]
+    Gate -->|pass/fail| Svc
+
+    Prod[Production services'<br/>existing tracing/APM] --> Ingest[Telemetry Ingest]
+    Ingest --> TSDB[(Time-series store)]
+    TSDB --> Trend[Trend Analyzer]
+    Trend -->|chronic violation| Debt[Debt Tracker]
+    TSDB --> Dash[Compliance Dashboard]
+    Registry --> Dash
+    Debt --> Dash
+```
+
+**End-to-end operational walkthrough (a PR triggering the CI gate):**
+1. Developer opens a PR touching a hot-path service's code.
+2. CI pipeline runs the service's existing micro-benchmark suite.
+3. CI Gate Service fetches the service's declared budget from the Budget Registry.
+4. CI Gate Service fetches the rolling historical baseline for the changed benchmark(s) from the Time-series store.
+5. CI Gate Service applies the significance test (§11 Expert): is the new result a statistically significant, practically meaningful regression?
+6. If yes: PR is blocked, with the specific benchmark, delta, and budget context surfaced in the PR check.
+7. If no: CI proceeds to deploy to canary and run a macro/load-test gate against the same budget.
+8. On canary pass, deploy proceeds; the canary's own latency data flows into the Time-series store as a new baseline data point.
+
+**REST API design:**
+
+`PUT /budgets/{serviceName}` — register/update a service's budget.
+| Field | Type | Description |
+|---|---|---|
+| serviceName | path, string | Registering service's identifier |
+| criticalPath | body, string | Which end-to-end critical path this allocation belongs to (a service can participate in more than one) |
+| percentile | body, string | `p50`/`p95`/`p99` |
+| allocatedMs | body, number | Budget allocation in milliseconds |
+| owner | body, string | Owning team, for accountability and alert routing |
+
+`GET /compliance/{criticalPath}` — current compliance status.
+| Field | Type | Description |
+|---|---|---|
+| criticalPath | string | Requested critical path |
+| totalAllocatedMs | number | Sum of every participating service's allocation |
+| totalMeasuredMs | number | Sum of current measured p99 across participants |
+| perService | array | Per-service breakdown: allocated, measured, status (`within`/`over`) |
+
+**Data model:**
+| Table | Columns | Notes |
+|---|---|---|
+| `budget_allocations` | service_name, critical_path, percentile, allocated_ms, owner, version, effective_from | Versioned — never overwritten, only superseded, preserving audit history of budget changes over time |
+| `benchmark_baselines` | service_name, benchmark_name, sample_mean_ms, sample_variance, sample_count, updated_at | Incrementally updated via Welford's algorithm (§11 Expert), not recomputed from raw samples |
+| `performance_debt_items` | id, service_name, description, severity, opened_at, sla_due, status | Mirrors the vulnerability-tracking table shape deliberately, for consistent tooling/reporting patterns across both |
+
+### Step 3 — Design Deep Dive
+
+**External-provider integration:** Not applicable — entirely internal governance tooling.
+
+**Reconciliation:** The Compliance Dashboard's aggregate "percentage of services within budget" figure must be reconciled against the underlying Budget Registry and Time-series store periodically — an automated check confirming every registered service has recent (non-stale) telemetry flowing in, since a service silently failing to emit telemetry would otherwise show as neither compliant nor non-compliant, simply absent, which must be surfaced explicitly (`"telemetry stale"` status) rather than silently omitted from the aggregate.
+
+**Handling processing delays:** Telemetry ingestion is asynchronous and can lag briefly; the Trend Analyzer's rolling-window computation tolerates this naturally since it operates on windows of days, not real-time streaming — but the CI Gate Service's baseline lookup must use the most recent *stable* baseline, not an in-flight, still-settling one, to avoid comparing against noisy, incomplete data.
+
+**Internal service communication:** The CI Gate Service calls the Budget Registry synchronously (low-latency, in the CI critical path, must not itself become a release bottleneck); the Trend Analyzer consumes from the Time-series store asynchronously on a scheduled batch cadence, since trend detection has no real-time latency requirement.
+
+**Handling failed operations:** Per the non-functional requirement above, if the Budget Registry or baseline store is unavailable during a CI run, the CI Gate Service fails **open** with an explicit, visible warning annotation on the PR (`"budget check skipped — registry unavailable"`) rather than either blocking an unrelated deploy on the platform's own availability, or silently passing with no visible indication the check didn't actually run — the same fail-open-but-loudly-flagged pattern established for cache outages in Module 103.
+
+**Exactly-once/idempotency:** Budget-allocation updates are versioned, append-only records (never in-place updates) — a duplicate `PUT` request for an identical allocation is naturally idempotent (creates a new version identical to the current one, a no-op in effect), avoiding the need for explicit idempotency-key deduplication on this specific write path.
+
+**Consistency:** The Compliance Dashboard's aggregate figures are eventually consistent with production reality by design (telemetry ingestion lag, batch trend computation) — an explicit, stated staleness bound (e.g., "compliance figures reflect data up to 5 minutes old") is surfaced on the dashboard itself, rather than implying real-time accuracy the underlying pipeline doesn't actually provide.
+
+**Security:** Budget-registry write access restricted to each service's own owning team (enforced via the `owner` field and a service-identity-based authorization check) — a team should not be able to silently loosen another team's budget allocation to hide their own critical path's degradation.
+
+### Step 4 — Wrap-Up
+
+**Not covered, flagged as follow-up:** multi-region budget allocation (network-hop cost between regions as its own explicit budget line item); a self-service UI for teams to model "what if" budget reallocation scenarios before committing; integration with the incident-management system so a production SLO breach automatically cross-references the Compliance Dashboard's current budget-consumption view for faster root-cause triage; detailed alerting-fatigue tuning for the Trend Analyzer specifically to keep the false-positive rate within the stated non-functional target.
+
+**Closing summary diagram:**
+```mermaid
+graph LR
+    Dev[Developer PR] --> CIGate[CI Gate Service] --> Registry[(Budget Registry)]
+    CIGate -->|pass| Deploy[Canary/Prod Deploy]
+    Deploy --> Telemetry[Production Telemetry]
+    Telemetry --> Trend[Trend Analyzer]
+    Trend -->|chronic breach| Debt[Performance Debt Backlog]
+    Telemetry --> Dash[Compliance Dashboard]
+    Registry --> Dash
+```
+
+**References:**
+1. Google SRE Workbook — "Implementing SLOs": https://sre.google/workbook/implementing-slos/
+2. BenchmarkDotNet documentation — statistical rigor in micro-benchmarking: https://benchmarkdotnet.org/articles/guides/statistics.html
+3. OpenTelemetry specification — distributed tracing and span semantics: https://opentelemetry.io/docs/specs/otel/trace/api/
+4. Welford, B. P. (1962) — "Note on a Method for Calculating Corrected Sums of Squares and Products" (the incremental variance algorithm used in §11 Expert).
+5. Brendan Gregg — "Systems Performance," 2nd ed., Ch. 2 (Methodology) — critical-path and latency-budget reasoning.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** A CI-integrated regression gate implementing §11 Expert's statistical significance test, pluggable across benchmark result sources, feeding into the Budget Registry from §12.
+
+**Class diagram:**
+```mermaid
+classDiagram
+    class IBenchmarkResultSource {
+        <<interface>>
+        +GetLatestSamplesAsync(benchmarkName) Task~double[]~
+    }
+    class IBaselineStore {
+        <<interface>>
+        +GetBaselineAsync(benchmarkName) Task~Baseline~
+        +UpdateBaselineAsync(benchmarkName, newSamples) Task
+    }
+    class Baseline {
+        +double Mean
+        +double Variance
+        +int SampleCount
+    }
+    class RegressionGate {
+        -IBenchmarkResultSource _source
+        -IBaselineStore _baselineStore
+        -double _minEffectMs
+        -double _zThreshold
+        +EvaluateAsync(benchmarkName) Task~GateResult~
+    }
+    class GateResult {
+        +bool Passed
+        +double EffectMs
+        +double ZScore
+        +string Explanation
+    }
+    IBenchmarkResultSource <.. RegressionGate
+    IBaselineStore <.. RegressionGate
+    RegressionGate --> GateResult
+    IBaselineStore --> Baseline
+```
+
+**Sequence diagram (CI gate evaluation):**
+```mermaid
+sequenceDiagram
+    participant CI as CI Pipeline
+    participant Gate as RegressionGate
+    participant Src as IBenchmarkResultSource
+    participant Store as IBaselineStore
+
+    CI->>Gate: EvaluateAsync("OrderService.PlaceOrder")
+    Gate->>Src: GetLatestSamplesAsync(name)
+    Src-->>Gate: double[] newSamples
+    Gate->>Store: GetBaselineAsync(name)
+    Store-->>Gate: Baseline (mean, variance, count)
+    Gate->>Gate: compute effect + z-score
+    alt significant regression
+        Gate-->>CI: GateResult(Passed=false, explanation)
+    else within tolerance
+        Gate->>Store: UpdateBaselineAsync(name, newSamples)
+        Gate-->>CI: GateResult(Passed=true)
+    end
+```
+
+**Design patterns used:**
+- **Strategy** — `IBenchmarkResultSource` abstracts where benchmark data comes from (BenchmarkDotNet output, a load-test harness's report, production canary telemetry), letting the same `RegressionGate` logic run against any of them.
+- **Adapter** — a `BenchmarkDotNetResultAdapter` and a `LoadTestReportAdapter` each implement `IBenchmarkResultSource` against their own native output format.
+- **Template Method** — `RegressionGate.EvaluateAsync` fixes the fetch-compare-update sequence, with the statistical test itself as an overridable/configurable step (allowing a future swap from a z-test to a more sophisticated method without restructuring the gate).
+
+**SOLID mapping:**
+- **SRP:** `Baseline`'s incremental-update math is isolated from `RegressionGate`'s orchestration logic — a bug in one doesn't risk the other.
+- **OCP:** A new benchmark-data source is added via a new `IBenchmarkResultSource` implementation, with zero change to `RegressionGate`.
+- **DIP:** `RegressionGate` depends on the two interfaces, not concrete storage/source implementations, injected via constructor — the same pattern used throughout this domain's LLD sections.
+
+**Extensibility:** Swapping the significance test from a z-test to a full Welch's t-test (accounting for small-sample-size degrees-of-freedom more precisely) is a change localized entirely to `RegressionGate`'s internal computation, with no change to either interface or any caller.
+
+**Concurrency/thread safety:** `IBaselineStore.UpdateBaselineAsync` must handle concurrent updates safely if multiple CI pipelines for different benchmarks run in parallel — implemented via an atomic, versioned compare-and-swap update at the storage layer (an optimistic-concurrency check on the baseline's version, retried on conflict) rather than a naive read-modify-write that could lose an update under concurrent writers.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** A market-data-ingestion service's p99 latency SLO (400ms, feeding a downstream pricing-engine dependency with its own tight budget allocation) was breached during a specific 90-minute window every trading day, always starting almost exactly at the same time, for several consecutive days — but the CI regression gate had shown every recent deploy passing cleanly, and no code change correlated with the onset.
+
+**Root cause:** The service's latency budget had been allocated and validated under load-test conditions using a *synthetic, uniform* traffic profile — steady request volume across the test's duration. Real production traffic, however, had a sharp, recurring volume spike during a specific market-open-adjacent window each day, driving the service's connection pool (Module 103 §2.4) to its configured ceiling during exactly that window, producing queueing delay that never appeared in the load test's uniform-traffic model at all.
+
+**Investigation:** Distributed tracing during the affected window showed the added latency concentrated almost entirely in a single span: time spent waiting to acquire a database connection from the pool, not query execution time itself — ruling out a code-level regression (consistent with the CI gate's correctly showing no regression, since the gate's own load test never exercised this specific traffic shape). Correlating the connection-pool-wait metric against request volume confirmed the pool was saturating specifically during the recurring spike window, each day, at a volume level the original load test's steady-traffic profile never reached even at its peak.
+
+**Tools:** Distributed tracing (span-level breakdown isolating connection-pool-wait as the dominant contributor); the database driver's own connection-pool metrics (active/idle/waiting counts) correlated against a request-volume time series; a side-by-side comparison of the original load test's traffic-generation profile against actual production traffic shape, which revealed the mismatch directly.
+
+**Fix:** Immediate: increased the connection pool's maximum size to accommodate the observed peak, verified against the database's own connection-ceiling headroom (Module 103 §2.4's fleet-wide budgeting discipline, applied here to one service's specific peak). Structural: the load-testing harness (Module 102) was updated to model the *actual*, recurring, spike-shaped production traffic profile rather than a synthetic uniform one, and the latency budget's own validation was re-run against this corrected profile — surfacing that the originally allocated budget had genuinely never been validated under realistic conditions, only under a conveniently uniform approximation of them.
+
+**Prevention:** A recurring, scheduled re-validation of every registered critical path's load-test traffic profile against current, actual production traffic shape (not just current volume) was added to the governance platform (§12) as a periodic, non-optional check — directly extending §7's "budgets need periodic re-validation under current traffic" finding from a volume-only concern to a traffic-*shape* concern as well, since this incident demonstrated that matching volume alone is insufficient if the temporal distribution of that volume differs meaningfully from what was tested.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Choosing the regression-detection strategy for the CI gate in §12/§13 — comparing a naive raw-delta threshold, a fixed-percentage-change threshold, and the statistical-significance approach actually adopted (§11 Expert).
+
+**Option A — Naive raw-delta threshold (fail if `new - old > X ms`).**
+- *Advantages:* Trivial to implement and explain to any engineer without a statistics background.
+- *Disadvantages:* Produces frequent false positives from ordinary run-to-run noise (a busy CI runner, thermal throttling, GC timing variance), which — per the earlier friction-vs-bypass finding recurring across this course — reliably trains engineers to distrust and route around the gate once it's cried wolf enough times.
+- *Cost/complexity:* Lowest.
+- *Maintainability:* Low in practice, despite its implementation simplicity — the threshold itself becomes a constant source of tuning disputes as false positives accumulate.
+- *Scalability:* Scales fine computationally; scales poorly organizationally as trust erodes.
+
+**Option B — Fixed-percentage-change threshold (fail if `(new - old) / old > 10%`).**
+- *Advantages:* Somewhat more robust than a raw absolute delta across benchmarks of very different baseline magnitudes (a 10% change means something more comparable across a 5ms and a 500ms benchmark than a fixed absolute-ms threshold would).
+- *Disadvantages:* Still doesn't account for each specific benchmark's own actual, historical variance — a benchmark that's always noisy by 15% run-to-run will false-positive constantly; a benchmark that's normally rock-stable within 1% would let a genuine 8% regression through undetected.
+- *Cost/complexity:* Slightly higher than Option A, still low.
+- *Maintainability:* Better than A, still not variance-aware.
+- *Scalability:* Same organizational-trust erosion risk as A, at a somewhat reduced rate.
+
+**Option C — Statistical significance test against each benchmark's own historical variance, plus a minimum practical-effect-size floor (the design actually adopted, §11 Expert/§13).**
+- *Advantages:* Correctly calibrates each benchmark's own noise floor, dramatically reducing false positives for naturally-variable benchmarks while still reliably catching a genuine regression in an unusually stable one; the minimum-effect-size floor additionally avoids flagging a statistically-real-but-practically-irrelevant micro-change (e.g., 0.05ms) that would waste engineering attention.
+- *Disadvantages:* Requires maintaining a per-benchmark historical baseline (mean, variance, sample count) rather than a single global constant — genuine, ongoing operational overhead; harder for an engineer to intuitively explain the gate's decision without some statistical grounding, a real communication cost when a gate blocks a PR and the author asks "why."
+- *Cost/complexity:* Highest of the three, though bounded and largely automatable (Welford's incremental algorithm keeps the ongoing per-run cost low).
+- *Maintainability:* Highest once built — the false-positive-driven trust erosion that undermines A and B specifically doesn't occur here, which is itself a maintainability property, not just a correctness one.
+- *Scalability:* Scales cleanly across a large, heterogeneous fleet of benchmarks with very different natural variance profiles, which A and B specifically cannot handle uniformly well.
+
+**Recommendation:** Option C. The organizational-trust argument is decisive, not merely the statistical-correctness one: a gate that cries wolf — regardless of how simple its underlying logic is to explain — gets bypassed, and a bypassed gate provides zero actual protection while still imposing its full friction cost. The added implementation and explanation complexity of Option C is justified specifically because it is the only option of the three that remains trustworthy, and therefore actually used, at the scale of hundreds of benchmarks across dozens of teams with genuinely different variance characteristics.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** §4's production example ties a latency-budget governance gap directly to a missed contractual settlement cutoff — a concrete, quantifiable business consequence, not an abstract engineering-quality concern; the same framing (what specific business commitment does this latency underpin) should justify every latency-budget investment decision, not a generic "performance matters" appeal.
+
+**Engineering trade-offs:** The regression-gate design in §15 explicitly accepts higher implementation and explanation cost (Option C) in exchange for durable organizational trust and therefore actual, sustained use — a trade-off a Principal Engineer should be able to articulate and defend specifically in terms of the alternative's demonstrated failure mode (gate-bypass via accumulated false-positive fatigue), not merely "the fancier option is better."
+
+**Technical leadership:** Establishing the caller-owns-callee budget-ownership model (§2.2) as a shared, organization-wide convention removes a recurring, unproductive cross-team argument ("whose latency problem is this") before it starts — a structural fix to an organizational friction point, exactly the kind of leverage a Principal Engineer's design decisions should aim for beyond the immediate technical problem.
+
+**Cross-team communication:** §4's incident was only caught because an external counterparty escalated — the internal absence of a shared, cross-team compliance view (§12's Compliance Dashboard) meant no internal party had visibility into the cumulative, cross-team drift until it became externally visible; building and championing that shared visibility is a leadership responsibility distinct from any individual team's own local performance work.
+
+**Architecture governance:** The performance-debt backlog (§2.6, §12's Debt Tracker) deliberately mirrors the vulnerability-management system's shape — a Principal Engineer recognizing and reusing an already-proven governance pattern for a structurally analogous problem, rather than inventing a parallel, differently-shaped tracking mechanism, reduces the total number of distinct processes the organization has to teach, staff, and maintain.
+
+**Cost optimization:** A latency-budget governance platform has a real, ongoing operational cost (§12's own infrastructure, the CI-gate time budget); justifying that cost requires being able to state, concretely, the cost of the alternative — the settlement-cutoff-miss incident in §4 and its downstream counterparty-relationship and potential penalty exposure — rather than treating the governance platform as self-evidently worthwhile.
+
+**Risk analysis:** The fail-open-but-visibly-flagged design for CI-gate platform unavailability (§12 Step 3) is a deliberate risk trade-off: availability of the broader release pipeline is prioritized over the governance check's own availability, but only because the flag makes the gap visible and auditable rather than silently absent — a Principal Engineer should be able to defend why fail-open-and-flagged is the correct choice here versus fail-closed (which would make an unrelated platform outage block every team's deploys) or silent-fail-open (which would erode the very trust the platform exists to build).
+
+**Long-term maintainability:** The versioned, append-only budget-allocation history (§12's data model) exists specifically so that a future investigation into "when and why did this critical path's allocation change" has an auditable trail — a small, deliberate design decision whose payoff is entirely in avoided future investigation cost, the kind of investment a Principal Engineer champions even when no immediate feature requirement demands it.
+
+---
+
+## 18. Revision
+
+**Key Takeaways:**
+- A latency budget is the latency-domain analogue of an error budget — genuinely independent, both requiring separate tracking (a request can succeed but still be too slow).
+- Budget ownership is recursive: the caller owns and allocates to what it calls; ambiguous, shared ownership leaves nobody accountable.
+- Two distinct detection mechanisms are both required: single-change comparison (catches sharp regressions) and longer-window trend analysis (catches gradual, cumulative drift) — neither substitutes for the other.
+- A regression gate's trustworthiness depends on being calibrated to each benchmark's own historical variance, not a uniform threshold — an untrustworthy, noisy gate gets bypassed, providing zero actual protection.
+- A latency budget must be validated against realistic production traffic *shape*, not just volume — a uniform-traffic load test can miss a real, recurring, time-of-day-driven bottleneck entirely (§14's incident).
+- Performance debt deserves the same tracked-backlog, severity-prioritized rigor as security vulnerability management.
+
+**Interview Cheatsheet:**
+- Latency budget vs. error budget: same governance shape, orthogonal dimensions.
+- Critical path: only sequential, response-gating work matters for budgeting; use tracing to confirm before optimizing.
+- Detection: single-change CI gate + longer-window trend alert, both required.
+- Regression-gate false positives destroy trust and get bypassed — calibrate against historical variance, not a flat threshold.
+- Budget re-validation must account for both traffic volume and traffic shape/timing.
+
+**Things Interviewers Love:**
+- A candidate who names "successful but slow is a distinct failure mode from an error" unprompted.
+- Distinguishing gradual, cumulative regression detection from single-change regression detection as two separate, both-necessary mechanisms.
+- Citing a concrete business consequence (a missed cutoff, a lost transaction) as the reason a latency budget matters, not an abstract "performance is important."
+
+**Things Interviewers Hate:**
+- "We load tested it once at launch" presented as ongoing assurance.
+- A regression-gate design with no acknowledgment of false-positive risk and its effect on team trust/bypass behavior.
+- Conflating "no errors" with "meets its latency SLO."
+
+**Common Traps:**
+- Optimizing a component not actually on the critical path, discovered only after tracing reveals it doesn't gate the response.
+- A load test using a synthetic, uniform traffic profile that never reproduces a real, time-of-day-driven production bottleneck.
+- Assuming a passing CI regression gate on every individual change rules out a slow, cumulative regression across many changes.
+- Treating a latency-budget governance platform itself as exempt from needing its own liveness/health verification.

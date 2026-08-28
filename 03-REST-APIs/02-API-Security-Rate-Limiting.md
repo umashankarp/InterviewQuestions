@@ -186,6 +186,30 @@ This section goes past the module's core BOLA/rate-limiting/OWASP-API-Top-10 cov
  **Common mistakes:** One DTO for all audiences; opt-out (default-visible) field exposure; exposing raw PAN anywhere instead of tokenizing; no per-scope output assertions.
  **Follow-ups:** "Default-deny vs. default-allow for new fields — why does it matter?" / "How do you expose a PAN only to an authorized, audited path?" / "How would you test that the partner scope never sees the internal risk score?"
 
+4. **Q: An attacker has stolen a valid, unexpired OAuth2 access token for a payments API (via a compromised logging pipeline that captured Authorization headers). Standard bearer-token validation passes. How do you detect and stop this specific attack, and how would you have prevented the token from being stolen this way in the first place?**
+ **A:** Bearer tokens are inherently "possession = access" — once stolen, they're indistinguishable from legitimate use to a validator checking only the signature and expiry. Detection: **anomaly signals on token usage** — a sudden change in calling IP/geolocation/device fingerprint for a token that previously showed a stable pattern; concurrent use of the same token from two geographically implausible locations; a token suddenly exercising scopes/endpoints it's never used before. Stopping it: revoke the specific token (and, if the theft vector suggests broader compromise, the entire session/refresh-token family) via a revocation list checked on every request (accepting the resulting look-aside cost, or using short-lived tokens to bound exposure without needing revocation at all). Prevention of the theft vector itself: **never let bearer tokens reach logs** — redact/mask `Authorization` headers at the logging middleware layer as a mandatory, structural control (not a per-team convention), and move toward **sender-constrained tokens** (DPoP/mTLS-bound, §8) so that even a captured token is useless without the corresponding private key, which a log-scraping attacker doesn't have. The Principal framing: bearer tokens are a *convenience* trade-off (bearer = access, no extra proof required) that's only safe if the token genuinely never leaks — the moment logging, tracing, or error-reporting infrastructure can incidentally capture one, bearer tokens become a structural liability, and the durable fix is sender-constrained tokens plus mandatory redaction, not merely "be more careful with logs."
+ **Why correct:** Distinguishes detection (anomaly-based, since validation alone can't tell theft from legitimate use) from prevention (structural redaction + sender-constraining), and correctly frames bearer-token risk as a design trade-off, not an implementation bug.
+ **Common mistakes:** Assuming token expiry alone bounds the risk adequately for a money-movement API; treating "redact logs" as a one-off fix rather than a mandatory, centrally-enforced middleware control; not distinguishing revoking one token from revoking a compromised session's entire token family.
+ **Follow-ups:** "Why does DPoP defeat this specific theft vector where a short expiry alone doesn't fully?" / "What's the operational cost of checking a revocation list on every request?" / "How would you retroactively audit how far back the logging pipeline captured tokens?"
+
+5. **Q: Your rate limiter is correctly implemented (Redis-backed, atomic, correctly fleet-wide) and correctly blocks a single client from exceeding its limit — yet a coordinated attack using thousands of newly-registered free-tier accounts, each individually staying under its own per-account limit, still degrades your API's overall capacity. What's the actual gap, and how do you close it without punishing legitimate free-tier growth?**
+ **A:** Per-identity rate limiting protects **fairness between individual callers**, but says nothing about **aggregate capacity consumption across a coordinated set of callers** — a limiter correctly enforcing "each account gets 100 req/min" provides zero protection against 10,000 newly-registered accounts each legitimately using their full 100 req/min allotment simultaneously. This requires a *second*, orthogonal control layer: (1) **global/tenant-tier capacity ceilings** — an aggregate cap across the entire free tier (or a specific cohort), independent of individual account limits, that triggers tighter admission control (e.g., a queue, a CAPTCHA gate on new signups, or a tightened per-account limit applied fleet-wide) once crossed; (2) **signup-velocity anomaly detection** — a spike in new-account creation rate from correlated signals (shared IP ranges, shared device fingerprints, disposable-email patterns) is itself the leading indicator, actionable *before* the accounts start consuming capacity; (3) **cohort-based, not purely identity-based, rate limiting** — grouping newly-registered, unverified accounts into a stricter shared pool distinct from established, verified accounts' pool, so the blast radius of a coordinated signup-and-abuse attack is contained to the new-account cohort's own budget rather than the platform's total capacity. The Principal framing: per-identity fairness and aggregate-capacity protection are two distinct controls answering two distinct questions ("is this one caller fair?" vs. "can the platform survive many simultaneously-fair callers?") — a system that only implements the first has a coordinated-abuse gap regardless of how correctly the first is built.
+ **Why correct:** Identifies that per-identity correctness doesn't imply aggregate-capacity protection, and proposes a cohort/global-ceiling layer plus signup-velocity anomaly detection as the orthogonal fix, without simply tightening individual limits (which would punish legitimate users).
+ **Common mistakes:** Concluding the rate limiter is "broken" when it's functioning exactly as designed for its actual scope (per-identity fairness); fixing this by tightening every account's individual limit, degrading legitimate free-tier UX for a problem that's actually about aggregate, cohort-level capacity.
+ **Follow-ups:** "Why does cohorting new accounts separately help contain, not just detect, this attack?" / "What signup-time signals would you correlate to catch this before capacity is even consumed?" / "How is this the same underlying gap as the card-testing problem, restated for account signup instead of payment authorization?"
+
+6. **Q: Design the authorization model for a webhook endpoint that must accept inbound calls from an external payment processor (e.g., Stripe/Adyen) — a caller you cannot issue your own API keys or OAuth tokens to. What's the correct authentication/authorization approach, and what happens if you get it wrong?**
+ **A:** A webhook receiver can't use your normal inbound-auth model (you don't control the caller's credential-issuance flow) — the standard, correct pattern is **HMAC signature verification**: the payment processor signs the raw request body with a shared secret (provisioned out-of-band, at webhook-endpoint registration time) and sends the signature in a header (e.g., Stripe's `Stripe-Signature`); your endpoint independently recomputes the HMAC over the *exact raw, unparsed* request body using the shared secret and compares in constant time, rejecting any mismatch. Critical details often gotten wrong: (1) **verify against the raw body bytes**, not a re-serialized/re-parsed version — any framework middleware that parses-then-re-serializes JSON before your handler sees it can silently change byte-for-byte content (key ordering, whitespace), breaking legitimate signatures; (2) **timestamp/nonce checking** to prevent **replay** of a captured, legitimately-signed webhook payload being re-sent later — a valid signature alone doesn't prove freshness; (3) **constant-time comparison** for the signature check itself, avoiding a timing side-channel that could help an attacker forge a valid signature byte-by-byte; (4) idempotent processing of the webhook's payload regardless of verification (the payment-idempotency discipline this course establishes generally), since the processor's own retry behavior means the same legitimately-signed webhook may arrive more than once. Getting this wrong (e.g., trusting an unsigned `X-Forwarded-For`-style "trust the source IP" check, or skipping signature verification because "it's just a notification") means **anyone who discovers the webhook URL can inject fabricated payment-status events** — directly forgeable "payment succeeded" notifications, a severe integrity failure for a money-movement system. The Principal framing: an inbound webhook is an *unauthenticated-by-default* surface unless you build explicit, correctly-implemented signature verification — the risk isn't hypothetical, it's the same class of vulnerability as a completely unauthenticated write endpoint, just less obviously so because the payload looks like routine, benign infrastructure traffic.
+ **Why correct:** Names the correct pattern (HMAC over raw body, verified constant-time, plus replay protection) and is explicit about the severe consequence (forgeable payment events) of getting it wrong.
+ **Common mistakes:** Trusting source-IP allowlisting alone as sufficient authentication (spoofable, and processors' IP ranges change); verifying the signature against a re-parsed/re-serialized body instead of the raw bytes; treating webhook payload processing as safe to run without idempotency handling.
+ **Follow-ups:** "Why does verifying against re-parsed JSON break legitimate signatures?" / "How does replay protection differ from signature verification — why do you need both?" / "What's the blast radius if this endpoint is compromised for a money-movement API?"
+
+7. **Q: Synthesize this module's full defense-in-depth stack (Expert Q2) against a single, concrete attack scenario: an attacker with a leaked, low-privilege partner API key attempts to escalate to reading and modifying other partners' payment data. Walk through every layer that should stop them, and identify which single layer's failure would be most catastrophic if it alone were missing.**
+ **A:** Walking the layered stack (Expert Q2) against this specific attacker: (1) **Edge/WAF** — doesn't stop this attack; the key is valid, so requests look legitimate at the transport layer. (2) **Authentication** — passes; the key is genuinely valid, just low-privilege. (3) **Rate limiting** — doesn't stop a slow, patient enumeration attempt staying under threshold; limits abuse *volume*, not scope. (4) **Authorization — function-level** — should block any admin-only *operation* the low-privilege key attempts; this stops privilege-escalation-via-operation. (5) **Authorization — per-object (BOLA)** — should block reading/modifying any specific resource (another partner's invoice/payment) not owned by this key's partner; this is the layer that actually stops the described attack (enumerating and reading other partners' data), and it is, per this module's own findings, the single most commonly missing or incompletely-implemented layer in real systems. (6) **Input validation** — irrelevant to this specific attack vector. (7) **Fraud/velocity controls** — might eventually flag unusual read-volume-per-key as anomalous, a secondary, slower-acting safety net, not the primary stop. (8) **Output minimization** — even if BOLA fails, narrow response DTOs limit how much sensitive data leaks per successful unauthorized read, bounding damage rather than preventing it. (9) **Audit/observability** — doesn't prevent the attack but is what allows detecting it occurred and scoping the blast radius after the fact. Conclusion: **per-object authorization (BOLA prevention) is the layer whose absence would be most catastrophic for this specific scenario** — every other layer either doesn't apply to this attack shape or only mitigates its severity/detects it after the fact; BOLA is the only layer that actually *prevents* the core harm (unauthorized cross-tenant data access) outright. This is consistent with, and a direct synthesis of, this module's repeated finding that BOLA is simultaneously the most common real-world gap and the layer carrying disproportionate weight for this exact attack class.
+ **Why correct:** Walks the full defense-in-depth stack against one concrete scenario (not abstractly), correctly identifies which layers are inapplicable versus load-bearing for this specific attack, and justifies naming BOLA as the single most consequential layer with a scenario-specific argument rather than merely restating the general claim.
+ **Common mistakes:** Claiming every layer "helps" without distinguishing which layers actually prevent versus merely detect or bound this specific attack; failing to notice that rate limiting and WAF are essentially irrelevant to a valid-credential, low-volume enumeration attack.
+ **Follow-ups:** "Which layer would matter most if the attacker instead had a *stolen* (not merely low-privilege) key with full partner scope?" (Likely audit/observability plus anomaly detection, since authorization would correctly pass for the legitimate partner's own data.) / "How would output minimization alone have bounded the damage even with a BOLA gap present?" / "Why is function-level authorization insufficient on its own here?"
+
 ---
 
 ## 11. Coding Exercises
@@ -272,9 +296,156 @@ public async Task GetInvoice_Should_Return_404_For_Other_Partners_Invoice
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-A partner API platform enforces resource-based authorization on every endpoint (mandatory checklist item), narrow response DTOs everywhere, and Redis-backed token-bucket rate limiting keyed by authenticated partner identity, with automated BOLA-probing tests as a CI gate. The production-debugging signature pattern for this module is exactly the incident — diagnosed by systematically testing cross-tenant access on every resource-ID-accepting endpoint, not by waiting for a reported breach. Principal-level guidance: BOLA and mass assignment/excessive exposure are the two highest-value, most mechanically-auditable API vulnerability classes — invest in automated, CI-enforced testing for both before investing in more exotic security controls, since these two categories dominate real-world API breach statistics.
+**Scenario:** Design the security and rate-limiting architecture for a public-facing Payment Initiation API serving thousands of third-party partner integrators (each issued a partner API key/OAuth client) and processing money-movement requests, deployed across a horizontally-scaled, multi-region fleet.
+
+**Functional requirements:** authenticate every partner via OAuth2 client-credentials flow; enforce per-object authorization so no partner can read/modify another partner's transactions; rate-limit each partner's aggregate usage fleet-wide; accept and verify signed webhooks from an upstream payment processor; reject malformed/oversized/injected input at the edge.
+
+**Non-functional requirements:** rate-limit enforcement must be identical regardless of which region/replica serves a request (§2.3); authorization checks add negligible (<5ms) latency to the payment-initiation hot path; the system must survive a rate-limiter-infrastructure outage per an explicit, documented fail-open/fail-closed policy (Advanced Q8); webhook signature verification must be immune to replay (§8/Expert Q6).
+
+**Architecture:** edge WAF/TLS termination → API gateway performing coarse authentication (OAuth2 token validation) and initial rate-limit check against a shared Redis cluster → application services performing per-object (BOLA) authorization and business logic → a dedicated webhook-ingestion service performing HMAC signature verification independently of the partner-facing authentication path (Expert Q6, since webhook callers can't hold partner OAuth credentials).
+
+**Components:** `PartnerAuthenticationMiddleware` (OAuth2 token validation, short-lived tokens, DPoP-bound where available); `DistributedRateLimiter` (Redis Lua-script token bucket, keyed by partner identity); `ResourceAuthorizationFilter` (per-object ownership check on every resource-ID-accepting route, Advanced Q2's mandatory-checklist pattern); `WebhookSignatureVerifier` (raw-body HMAC verification with replay-window nonce tracking); `NarrowResponseProjector` (enforces DTO-only responses, closing excessive-data-exposure).
+
+**Database selection:** the rate-limit state store is Redis specifically for its atomic Lua-script execution and sub-millisecond latency at the volume a shared fleet-wide limiter demands; the transactional/partner data store remains a relational, ACID-compliant database for the same auditability/consistency reasoning applied throughout this course's payment-system guidance.
+
+**Caching:** short-TTL local cache of "well under limit" verdicts (§7) to reduce Redis round-trip volume on the common case; no caching of authorization *decisions* for money-movement operations, since staleness there is a direct security risk, not merely a UX one.
+
+**Messaging:** webhook ingestion is decoupled from downstream processing via a queue immediately after signature verification succeeds, so a slow downstream consumer never causes the processor's webhook delivery to time out and retry unnecessarily.
+
+**Scaling:** stateless application replicas behind the load balancer, authorization and rate-limit state entirely externalized to Redis/the database (§9); Redis itself sharded by partner-key hash once a single instance's throughput becomes the bottleneck.
+
+**Failure handling:** rate-limiter outage triggers the pre-agreed fail-open-with-aggressive-alerting policy (Advanced Q8) for standard payment initiation, but fail-closed for any endpoint explicitly flagged as carrying unbounded-abuse risk; webhook signature-verification failures are logged and rejected (404, not detailed error) without ever processing the payload.
+
+**Monitoring:** per-partner request volume and rejection rate; BOLA-probe CI test results as a release gate; webhook signature-failure rate (a spike is a strong signal of either a processor-side key rotation gone wrong or an active forgery attempt); anomaly dashboards for credential-stuffing/card-testing-shaped traffic (§8).
+
+**Trade-offs:** centralizing rate-limit and authorization state in Redis adds an external dependency and a genuine single-point-of-failure risk to every request — accepted deliberately because per-replica local state (the alternative) is trivially bypassable at fleet scale, making the centralization non-negotiable despite its operational cost.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** every resource-ID-accepting request is authorized per-object before data access; rate-limit checks are atomic and fleet-consistent; webhook signatures are verified against raw bytes with replay protection; response DTOs never leak unintended fields.
+
+**Class diagram:**
+```mermaid
+classDiagram
+ class IResourceAuthorizationHelper {
+ <<interface>>
+ +AuthorizeAsync(resourceId, callerIdentity) AuthorizationResult
+ }
+ class InvoiceAuthorizationHelper {
+ +AuthorizeAsync(resourceId, callerIdentity) AuthorizationResult
+ }
+ class IRateLimiter {
+ <<interface>>
+ +TryAcquireAsync(clientKey) RateLimitResult
+ }
+ class RedisTokenBucketLimiter {
+ +TryAcquireAsync(clientKey) RateLimitResult
+ }
+ class IWebhookSignatureVerifier {
+ <<interface>>
+ +Verify(rawBody, signatureHeader, secret) bool
+ }
+ class HmacWebhookVerifier {
+ +Verify(rawBody, signatureHeader, secret) bool
+ -CheckReplayNonce(nonce) bool
+ }
+
+ InvoiceAuthorizationHelper..|> IResourceAuthorizationHelper
+ RedisTokenBucketLimiter..|> IRateLimiter
+ HmacWebhookVerifier..|> IWebhookSignatureVerifier
+```
+
+**Sequence diagram (payment initiation, full stack):**
+```mermaid
+sequenceDiagram
+ participant Partner
+ participant Gateway as API Gateway
+ participant RL as RedisTokenBucketLimiter
+ participant AuthZ as InvoiceAuthorizationHelper
+ participant Svc as PaymentService
+
+ Partner->>Gateway: POST /payments (Bearer token)
+ Gateway->>Gateway: Validate JWT signature + expiry
+ Gateway->>RL: TryAcquireAsync(partnerId)
+ RL-->>Gateway: Allowed (token available)
+ Gateway->>AuthZ: AuthorizeAsync(resourceId, partnerId)
+ AuthZ-->>Gateway: Authorized (ownership confirmed)
+ Gateway->>Svc: InitiatePayment(request)
+ Svc-->>Gateway: PaymentResponse (narrow DTO)
+ Gateway-->>Partner: 201 Created
+```
+
+**Design patterns used:** Chain of Responsibility (middleware pipeline — authentication, then rate limiting, then authorization, each able to short-circuit); Strategy (`IRateLimiter`/`IWebhookSignatureVerifier` implementations are swappable); Decorator (a caching decorator wrapping the base rate limiter for the local-verdict-cache optimization, §7).
+
+**SOLID mapping:** Single Responsibility (authentication, rate limiting, authorization, and signature verification are each independent, separately-testable components); Open/Closed (a new resource type's authorization helper is added without modifying the middleware pipeline); Liskov (any `IResourceAuthorizationHelper` implementation must genuinely enforce ownership — a violating implementation silently reintroduces BOLA for every consumer trusting the interface's contract); Interface Segregation (rate limiting, authorization, and signature verification are distinct interfaces, not one monolithic security-checker); Dependency Inversion (the gateway pipeline depends on the `IRateLimiter`/`IResourceAuthorizationHelper` abstractions, not concrete Redis/database implementations).
+
+**Extensibility:** a new partner-facing resource type implements `IResourceAuthorizationHelper` and is wired into the pipeline without touching the rate-limiting or authentication layers.
+
+**Concurrency/thread safety:** the Redis Lua-script token-bucket check (Advanced Q1) is the mechanism that makes concurrent requests from the same partner across multiple replicas race-free; authorization checks are inherently read-only and stateless per request, requiring no additional locking.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** A partner integration began receiving sporadic `429 Too Many Requests` responses despite the partner's dashboard showing usage well under its contracted limit, causing the partner's own retry logic to compound the problem into a cascading failure on their side.
+
+**Root cause:** the partner's traffic was being load-balanced across two API gateway edges — one fronted by a CDN performing its own, independently-configured rate limiting (a default, generic limit never tuned for this partner's actual contracted rate) in addition to the application-level, correctly-provisioned Redis-backed limiter — the distributed-rate-limit-bypass discussion's inverse failure mode (§8): instead of an attacker exploiting inconsistent edge limits to bypass enforcement, a legitimate partner was incorrectly throttled by an edge layer's limit that was never intended to be authoritative and was inconsistent with the application layer's correctly-configured limit.
+
+**Investigation:** correlating the partner's 429 timestamps against request logs showed the rejections originated at the CDN edge (a distinct `X-Cache` / edge-identifying response header), never reaching the application-level Redis-backed limiter at all — the application layer's own metrics showed the partner's usage correctly tracked, well under its actual limit, confirming the mismatch was entirely at the edge layer.
+
+**Tools:** CDN edge logs and rate-limit configuration export; correlation of partner-reported timestamps against both edge and application-level request logs; a synthetic canary request pattern replicating the partner's traffic shape to reproduce the edge-level throttling deterministically.
+
+**Fix:** removed the CDN's independent, generic rate-limiting configuration for authenticated partner API traffic entirely, making the application-level Redis-backed limiter the sole source of truth for rate-limit enforcement (directly the "single source of truth for rate-limit state" fix named in §8); the CDN retained only its DDoS/volumetric protection role, not fine-grained per-partner limiting.
+
+**Prevention:** added an explicit architecture-review requirement that any new edge/CDN layer's rate-limiting configuration be reviewed against the application-level limiter's configuration for consistency before deployment, and added a monitoring dashboard specifically distinguishing edge-rejected versus application-rejected 429s, so a future edge/application limit mismatch surfaces as a dashboard anomaly rather than requiring a partner complaint to discover.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Choosing where and how to enforce rate limiting and authentication across a multi-layer edge (CDN/WAF, API gateway, application service).
+
+**Option A — Rate limiting enforced only at the CDN/edge layer:**
+*Advantages:* Rejects abusive traffic before it consumes any application-layer compute; simplest single-layer configuration.
+*Disadvantages:* Typically coarser-grained (IP-based, not identity-based) since the edge often can't see authenticated identity; the incident's failure mode (edge and application-intended limits disagreeing) is structurally likely if application-level nuance (per-partner contracted limits) can't be expressed at the edge.
+*Cost:* Low — reuses existing CDN capability.
+*Risk:* Moderate-to-high — misconfiguration risk (the incident) and insufficient granularity for fair, identity-based enforcement.
+
+**Option B — Rate limiting enforced only at the application layer (Redis-backed, identity-keyed):**
+*Advantages:* Full access to authenticated identity for precise, per-partner/per-contract limits; single, authoritative source of truth, avoiding the incident's edge/application disagreement entirely.
+*Disadvantages:* Abusive/volumetric traffic still reaches the application fleet before being rejected, consuming some compute/network capacity even for requests ultimately denied.
+*Cost:* Moderate — Redis infrastructure and the distributed-limiter implementation (Advanced Q1).
+*Risk:* Low for correctness; the limiter's own availability becomes a dependency requiring the fail-open/fail-closed decision (Advanced Q8).
+
+**Option C — Layered: coarse volumetric/DDoS protection at the edge, precise identity-based enforcement at the application layer, explicitly configured as non-overlapping concerns:**
+*Advantages:* Edge layer stops genuine volumetric/DDoS abuse before it reaches the fleet at all; application layer remains the sole authority for identity-based, contract-aware fairness enforcement — each layer has one clearly-scoped job, eliminating the incident's root cause (two layers both attempting identity-aware enforcement and disagreeing).
+*Disadvantages:* Requires disciplined configuration governance to keep the two layers' responsibilities from re-overlapping over time (exactly what drifted in the incident).
+*Cost:* Highest initial design effort; lowest ongoing incident risk.
+*Risk:* Low, provided the architecture-review discipline (the incident's prevention fix) is actually maintained.
+
+**Recommendation: Option C, with an explicit, documented boundary — the edge layer handles only volumetric/DDoS protection, never partner-aware rate limiting; the application-layer Redis-backed limiter is the sole source of truth for any identity-scoped enforcement.** This is the option that structurally prevents the incident's root cause (two independently-configured layers both claiming identity-aware rate-limiting authority) rather than merely detecting it faster after the fact — the review-checklist prevention fix is a necessary but insufficient safeguard without this clean, non-overlapping ownership boundary defined up front.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** a partner-facing API's security and rate-limiting posture directly gates partner trust and integration velocity — an incident like this module's BOLA vulnerability or the edge/application rate-limit mismatch damages a partner relationship's credibility in a way that's disproportionately expensive to repair relative to the engineering cost of preventing it upfront.
+
+**Engineering trade-offs:** the recurring trade this module documents — availability versus strict security enforcement (fail-open vs. fail-closed, Advanced Q8) — has no universally correct answer; a Principal Engineer's job is ensuring the choice is made deliberately, per endpoint, by people with the authority and context to own the business-risk trade-off, not defaulted to by whichever engineer happened to configure the middleware first.
+
+**Cross-team communication:** the CDN/application rate-limit-mismatch incident (§14) is fundamentally a cross-team communication failure — the team owning the CDN configuration and the team owning application-level rate limiting each made locally reasonable decisions without a shared, explicit ownership boundary; the fix (Option C's non-overlapping-concerns boundary) is as much an organizational agreement as a technical one.
+
+**Architecture governance:** BOLA prevention and rate-limit-layer ownership are exactly the kind of structural, easy-to-silently-regress concerns that benefit from being enforced by governance (mandatory CI-gated BOLA tests, an architecture-review checklist item for any new edge-layer configuration) rather than relying on point-in-time correctness that erodes as teams and infrastructure change.
+
+**Cost optimization:** over-aggressive edge-layer volumetric protection (Option A misconfigured, as in the incident) has a real, measurable cost in lost partner trust and support burden that often exceeds the infrastructure savings the coarse edge rule was meant to provide — a reminder that security/abuse-prevention tuning decisions need to weigh false-positive cost, not just true-positive abuse-prevention benefit.
+
+**Risk analysis:** the highest-leverage risk-reduction investment for a partner-facing money-movement API is, per this module's own repeated finding, BOLA-prevention testing and a clean, non-overlapping rate-limiting ownership boundary — both are mechanically auditable, both dominate real-world incident statistics for APIs at this scale, and both are cheaper to get right upfront than to retrofit after a partner-visible incident.
+
+**Long-term maintainability:** every defense this module builds (resource-based authorization, narrow DTOs, fleet-wide atomic rate limiting, HMAC webhook verification, layered edge/application ownership) degrades the same way over time if not actively maintained: a new endpoint, a new edge-layer configuration change, or a new partner integration can silently reintroduce a gap that automated, CI-enforced testing and periodic architecture review are what keep from recurring — the discipline, not the one-time implementation, is what actually protects the system long-term.
 
 ## 18. Revision
 **Key takeaways**: BOLA = authentication without per-object authorization, the #1 real-world API vulnerability. Mass assignment (input) and excessive data exposure (output) are the same architectural mistake (binding directly to rich entities) manifesting on both sides of the API boundary. Token bucket = the standard rate-limiting algorithm, allowing bursts while enforcing steady-state limits. Distributed (Redis-backed, Lua-atomic) rate limiting is required for genuine fleet-wide enforcement — per-replica limiting is trivially bypassed. Always return 429 + `Retry-After`; return 404 (not 403) to avoid confirming a resource's existence to an unauthorized caller.

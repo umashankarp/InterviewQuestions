@@ -78,6 +78,44 @@ graph LR
 
 ---
 
+## 7. Performance Engineering
+
+**CPU**: The lock manager's per-lock bookkeeping (acquire, track, release) is genuine, non-trivial CPU overhead at scale — a heavily-locking workload at very high concurrency can exhibit measurable **spinlock contention** on the lock manager's internal hash tables (visible as `SOS_SUSPEND_QUEUE`/spinlock waits in `sys.dm_os_spinlock_stats`) even before any query-level blocking is visible, a genuinely advanced diagnostic scenario distinct from ordinary `LCK_*` waits. RCSI/Snapshot Isolation trade this away for a different CPU cost: maintaining row versions in tempdb on every write adds CPU overhead to the writer, in exchange for eliminating reader-side lock-acquisition overhead entirely.
+
+**Memory**: Every held lock consumes lock-manager memory (roughly 64-128 bytes per lock depending on version/edition) — a single statement holding millions of row locks is itself a meaningful memory consumer, which is part of *why* lock escalation exists (trading granularity for memory-management overhead, §2.2), not purely a blocking-avoidance mechanism. Under RCSI/Snapshot Isolation, the **tempdb version store** is the analogous memory/disk cost center — sized by total concurrent version volume, directly proportional to write rate × longest-running open snapshot transaction's age (§Advanced Q7).
+
+**Latency**: A blocking chain's latency cost compounds linearly with chain depth — each waiter's total latency includes every transaction ahead of it in the queue, which is why a single long-running transaction can produce order-of-magnitude latency degradation for dozens of unrelated, individually-fast transactions queued behind it (§4's production incident). The background deadlock monitor's detection interval is dynamic (starts around 5 seconds, shortens automatically as deadlocks are found more frequently) — meaning a *sustained* deadlock storm is detected faster than an isolated, rare one, a genuinely useful fact when explaining why deadlock-frequency metrics (not just presence/absence) matter for triage.
+
+**Throughput**: Pessimistic locking (Read Committed through Serializable) imposes a hard throughput ceiling under high write contention on the same rows — RCSI/Snapshot Isolation removes reader-writer contention specifically but not writer-writer contention, so throughput under heavy *concurrent-write* contention on the same rows is bounded by row-level locking regardless of isolation level chosen; only genuine data-model changes (finer-grained keys, optimistic retry with backoff, or in-memory OLTP's lock-free MVCC, Expert Q2) address writer-writer throughput ceilings.
+
+**Benchmarking**: Diagnose via `sys.dm_os_wait_stats` (aggregate `LCK_*`/`PAGELATCH_*` wait time as a first triage signal), `sys.dm_exec_requests`/`sp_WhoIsActive` for live blocking-chain snapshots, and Extended Events' `xml_deadlock_report` for full deadlock-graph capture — never benchmark concurrency-sensitive behavior (locking, deadlock frequency) against a single-session test harness, since the entire class of bug only manifests under genuine concurrent load.
+
+**Caching**: An application-tier read cache (Redis) in front of frequently-read, rarely-changing reference data (instrument static data, account metadata) removes that read traffic from the lock manager's scope entirely — a structurally different, often higher-leverage lever than any isolation-level tuning, since data that's never read from SQL Server never contends for a SQL Server lock at all.
+
+## 8. Security
+
+**SQL injection**: Never build `SET TRANSACTION ISOLATION LEVEL` or any transaction-control statement from unsanitized user input — while a less common injection vector than a `WHERE` clause, a dynamically-constructed isolation-level or lock-hint statement from untrusted input is exactly as exploitable as any other string-concatenated SQL, and there's no legitimate reason a request-level input should ever directly select a session's isolation level.
+
+**Least privilege**: `VIEW SERVER STATE` (required to query blocking/lock DMVs for diagnostics) should be granted narrowly to an operations/diagnostics role, not bundled with broader `sysadmin` rights an on-call engineer doesn't otherwise need — a common over-provisioning pattern where "give them what they need to debug blocking" turns into "give them full admin," a genuine least-privilege violation worth catching in access review.
+
+**Audit logging**: Changes to database-level concurrency settings (`ALTER DATABASE... SET READ_COMMITTED_SNAPSHOT ON`, isolation-level defaults) are exactly the kind of low-frequency, high-blast-radius change that should be captured by SQL Server Audit/DDL triggers and go through the same change-management/audit-trail process as any other production schema change — a silent, undocumented switch to RCSI (even though usually beneficial, §4) changes observable transaction semantics application code may implicitly depend on, and should never happen outside a reviewed, recorded change.
+
+**Encryption**: TDE encrypts tempdb (when enabled instance-wide) including the version store RCSI/Snapshot Isolation maintains there — since uncommitted, in-flight financial data transiently lives in that version store, this is a genuine, non-obvious reason to ensure TDE covers tempdb specifically, not just user database files, in any environment handling sensitive financial transaction data.
+
+**Row-Level Security interaction**: RLS security predicates are evaluated as part of query execution under whatever isolation level the session is running — under Snapshot Isolation/RCSI specifically, the RLS predicate is evaluated against the transaction's *versioned snapshot*, not the live current state, meaning a permission change (e.g., revoking a user's access to a set of rows) may not be reflected mid-transaction for a long-running snapshot transaction already in flight — a subtle, security-relevant interaction between isolation level and access control worth explicitly testing for any RLS-protected, snapshot-isolated table.
+
+## 9. Scalability
+
+**Read replicas**: Always On Availability Group **readable secondaries** always operate under an implicit, forced row-versioning (snapshot-like) read behavior regardless of the primary's isolation-level configuration — reads on a secondary never take locks against the redo stream applying changes, meaning the RCSI-vs-not decision that matters so much on the primary is effectively moot on a readable secondary, though the secondary's own replication-lag staleness (§Expert Q3) becomes the analogous trade-off to reason about instead.
+
+**Partitioning**: Table partitioning narrows lock/latch scope to the specific partition(s) a transaction actually touches, reducing contention between transactions operating on logically-unrelated partitions (e.g., different date ranges) even without any isolation-level change — a structural contention reducer complementary to, not a replacement for, correct isolation-level and lock-ordering choices.
+
+**Sharding**: Sharding eliminates cross-shard locking by construction (no single lock manager spans shards) — the trade is that any operation genuinely needing atomicity across shards can no longer use a local ACID transaction at all, requiring the saga/outbox eventual-consistency patterns (Expert Q2) rather than any database-level isolation setting.
+
+**HA/DR**: Always On AG **synchronous-commit** mode adds real commit latency — every transaction's commit must wait for the synchronous secondary to harden the log before acknowledging, directly trading transaction throughput/latency for a zero-data-loss (RPO=0) guarantee; **asynchronous-commit** secondaries remove this latency cost but accept a small, non-zero RPO — this HA/DR mode selection is itself a concurrency-adjacent, business-risk-driven architectural decision a Principal Engineer should make deliberately, not accept as an unexamined default (§17).
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -151,6 +189,42 @@ graph LR
  **Why correct:** Uses a UNIQUE-constrained idempotency key committed in the same transaction as the effect, explains why it beats app-level check-then-insert under concurrency, and notes it removes the need for stricter isolation.
  **Common mistakes:** App-level "check exists then insert" (races); recording idempotency in a separate transaction from the effect; relying on higher isolation instead of a constraint.
  **Follow-ups:** "Why does a UNIQUE constraint beat SELECT-then-INSERT under Read Committed?" / "How do you return the original response on a duplicate?" / "How does this pair with the outbox pattern?"
+
+5. **Q: A regulatory report aggregating daily trade totals uses `SELECT... FROM Trades WITH (NOLOCK)` for speed, since it's "just a read." Explain precisely how this can produce a materially wrong (not just stale) total, distinct from the ordinary dirty-read risk.**
+ **A:** `NOLOCK` (Read Uncommitted) is usually explained only as "might see uncommitted data" — the more dangerous, less-understood risk for a large aggregating scan is that it can **skip rows entirely or count a row twice**, independent of any concurrent uncommitted transaction. This happens because `NOLOCK` takes no locks at all, including no protection against **concurrent page splits**: if a scan is mid-page-read when an insert on another row triggers a B+ tree page split (the page's rows redistributing across two pages), a `NOLOCK` scan can either miss rows that moved to a newly-allocated page it had already passed, or re-read rows that moved to a page it hasn't yet reached but that duplicate rows the original page still shows — producing a **materially incorrect aggregate total**, not merely a stale-but-internally-consistent one, and with no error raised at all. For a regulatory trade-total submission, this is a genuine compliance risk: the report can be silently, provably wrong in a way that looks identical to a correct one. The fix: never use `NOLOCK` for any query whose correctness matters (aggregations, regulatory reports, reconciliation) — use RCSI/Snapshot Isolation instead, which gives the same "readers don't block writers" benefit `NOLOCK` is usually reached for, but via a **consistent, versioned snapshot** rather than an unprotected, page-split-vulnerable raw scan.
+ **Why correct:** Identifies the specific mechanism (concurrent page split causing missed/duplicated rows during an unprotected scan) beyond the commonly-cited dirty-read risk, and prescribes RCSI/Snapshot Isolation as the correct alternative achieving the same non-blocking goal safely.
+ **Common mistakes:** Explaining `NOLOCK`'s risk only as "might see uncommitted data," missing the page-split row-skip/duplicate mechanism entirely; assuming `NOLOCK` is an acceptable default for "just reporting" queries without considering aggregation correctness.
+ **Follow-ups:** "Why doesn't RCSI have this page-split risk?" (Its versioned snapshot is a consistent, point-in-time view maintained via tempdb row versions, not a raw, unprotected scan of live, concurrently-mutating pages.) / "How would you detect this had happened after the fact?" (Extremely difficult — there's no error or log entry; this is exactly why permanent, independent reconciliation against an external source of truth, not query-level trust, is the real backstop.)
+
+6. **Q: An order-matching engine needs multiple competing consumer processes to safely dequeue work items from a `PendingOrders` table without two consumers ever processing the same row, and without a slow consumer blocking every other consumer's dequeue attempt. Design the SQL-level concurrency pattern.**
+ **A:** Combine `UPDLOCK` and `READPAST` in the dequeue statement: `UPDATE TOP (1) PendingOrders WITH (UPDLOCK, READPAST) SET Status = 'Claimed', ClaimedBy = @workerId OUTPUT INSERTED.OrderId WHERE Status = 'Pending'`. `UPDLOCK` takes an update lock on the row it selects, preventing a second concurrent consumer from claiming the *same* row (solving the double-processing risk); `READPAST` tells the engine to **skip over any row currently locked by another transaction** rather than blocking and waiting for it — so a second consumer's dequeue attempt, instead of queuing up behind the first consumer's in-flight claim, simply moves on to the next available unlocked row. This gives exactly the desired behavior: no two consumers ever claim the same row (mutual exclusion via `UPDLOCK`), and no consumer is ever blocked waiting for another's claim to resolve (non-blocking skip via `READPAST`) — a SQL-native work-queue pattern avoiding both double-processing and consumer-blocking-consumer contention, without needing a dedicated message broker for this specific use case.
+ **Why correct:** Combines `UPDLOCK` (mutual exclusion) and `READPAST` (non-blocking skip) correctly and explains why each is individually necessary for the stated dual requirement.
+ **Common mistakes:** Using only `UPDLOCK` without `READPAST` (correct mutual exclusion, but consumers block behind each other, defeating the "don't block other consumers" requirement); using a plain `SELECT` then separate `UPDATE` (a race — two consumers can both select the same row before either updates it).
+ **Follow-ups:** "What happens if a worker crashes after claiming but before completing?" (The row is left in `Claimed` status indefinitely unless a separate reaper/timeout process detects stale claims and resets them — a real operational gap this pattern alone doesn't solve.) / "Why not just use a message broker instead?" (A broker is usually the better long-term answer for this exact use case — this pattern is valuable specifically when the work items must remain queryable/joinable as first-class rows in the same transactional database as the rest of the domain data.)
+
+7. **Q: A multi-step stored procedure posts several related ledger entries inside `BEGIN TRY... BEGIN TRANSACTION... COMMIT... END TRY BEGIN CATCH ROLLBACK... END CATCH`, yet a production incident shows a partial commit occurred despite the CATCH block running. Diagnose using `XACT_STATE()`.**
+ **A:** Not every error inside a transaction leaves it in a rollback-able state — a sufficiently severe error (certain constraint violations under specific conditions, or explicitly via `SET XACT_ABORT ON` combined with certain error classes) can mark the transaction as a **doomed transaction** (`XACT_STATE() = -1`, uncommittable but also **not yet rolled back**) rather than simply erroring out (`XACT_STATE() = 0`, no open transaction) or remaining healthy (`XACT_STATE() = 1`). A naive `CATCH` block that unconditionally calls `ROLLBACK TRANSACTION` handles the healthy-transaction-with-a-later-recoverable-error case fine, but a doomed transaction *also* requires an explicit `ROLLBACK` — the actual bug here was more subtle: `XACT_ABORT` was **not** set `ON`, so a specific runtime error (e.g., an arithmetic overflow) aborted only the *individual statement*, not the whole batch, and execution continued to a subsequent statement inside the same still-open transaction that then committed — the CATCH block never even ran, because the statement-abort didn't raise a catchable batch-level error at all without `XACT_ABORT ON`. **Fix**: `SET XACT_ABORT ON` at the top of the procedure ensures *any* runtime error immediately aborts the entire batch and rolls back the transaction, converting the previously-silent statement-level-only abort into the batch-level abort the `TRY/CATCH` structure was actually designed to assume; the `CATCH` block itself should also check `XACT_STATE()` explicitly and only call `ROLLBACK` when it's `-1` or `1` (never blindly, since calling `ROLLBACK` with no open transaction, `XACT_STATE() = 0`, itself raises an error).
+ **Why correct:** Correctly diagnoses the missing `XACT_ABORT ON` as allowing a statement-level abort to silently bypass the intended batch-level `TRY/CATCH` rollback, and prescribes both the `XACT_ABORT ON` fix and defensive `XACT_STATE()` checking in the CATCH block.
+ **Common mistakes:** Assuming any error inside a `TRY` block automatically triggers the `CATCH` block and a full rollback, without realizing `XACT_ABORT`'s default-`OFF` behavior lets many errors abort only the current statement, silently continuing the batch inside a still-open, now-partially-applied transaction.
+ **Follow-ups:** "Why is `XACT_ABORT ON` not the SQL Server default?" (Backward compatibility with legacy T-SQL written before its introduction, which relied on statement-level-only abort behavior — a real, if unfortunate, ongoing footgun for anyone assuming modern transactional-safety defaults.) / "Does this fix apply to .NET `TransactionScope`-wrapped ADO.NET code too?" (The equivalent discipline is: never assume a caught exception implies the underlying SQL transaction was safely rolled back — always explicitly verify/rollback in the `catch`/`finally`, and set `XACT_ABORT ON` server-side regardless of client-side transaction management.)
+
+8. **Q: A ledger-posting service under extreme write contention (thousands of concurrent postings/second to a relatively small set of hot accounts) is evaluated for migration to In-Memory OLTP (Hekaton). Explain the underlying concurrency model difference and when this migration is actually justified.**
+ **A:** In-Memory OLTP tables use a fundamentally different, **lock-free, latch-free** concurrency model based on **multi-version optimistic concurrency control (MVCC)** at the row level, distinct from both classic pessimistic locking *and* RCSI's tempdb-based versioning — every row version is held natively in-memory with begin/end timestamps, readers never take locks or latches at all, and writers detect conflicts **only at commit validation time** (an optimistic "did anyone else touch what I touched, since I started" check), never by blocking during the transaction itself. For a genuinely hot-account, extreme-contention workload, this eliminates the classic pessimistic-locking throughput ceiling (§Performance Engineering) entirely, since there's no lock/latch acquisition step to contend over in the first place. The trade-offs: a write-write conflict under In-Memory OLTP still requires application-level retry (conceptually identical to Snapshot Isolation's write-write conflict, error 41302/41325, just at a different layer), the memory-resident table's size is bounded by available RAM (durable-but-memory-resident, with the log still providing durability), and not every T-SQL construct/isolation-level combination is supported inside natively-compiled stored procedures. The migration is justified specifically when profiling (§7's spinlock/wait-stat diagnostics) shows the *lock/latch manager itself*, not I/O or query-plan inefficiency, is the measured bottleneck for a small, well-understood hot-row working set — not as a default modernization for every table, given the real constraints on supported features and memory sizing.
+ **Why correct:** Correctly explains In-Memory OLTP's native MVCC (distinct from tempdb-based RCSI versioning), its commit-time optimistic conflict detection, and scopes the recommendation to a measured lock/latch-bound bottleneck rather than a blanket modernization.
+ **Common mistakes:** Conflating In-Memory OLTP's native row-versioning with RCSI/Snapshot Isolation's tempdb-based versioning, as though they're the same mechanism; recommending the migration without first confirming via wait-stat/spinlock diagnostics that lock/latch contention (not something else) is the actual bottleneck.
+ **Follow-ups:** "What happens on a write-write conflict under In-Memory OLTP?" (The later-committing transaction's commit validation fails with a specific retryable error, requiring the same application-level retry-with-backoff discipline as any other optimistic-concurrency conflict.) / "Is durability sacrificed for this speed?" (No — memory-optimized tables can still be fully durable via the transaction log, though a `SCHEMA_ONLY` non-durable option exists for pure-performance, acceptable-data-loss-on-restart use cases, which would never be appropriate for ledger data.)
+
+9. **Q: A distributed transaction spanning a linked server (cross-instance) occasionally hangs indefinitely rather than deadlocking cleanly. Explain why SQL Server's standard deadlock detection doesn't reliably catch this, and the recommended alternative architecture.**
+ **A:** SQL Server's background deadlock monitor (§2.3) detects cycles **within a single instance's** lock-manager wait-for graph — it has no visibility into a *distributed* transaction's wait-for relationships spanning a linked server/cross-instance MSDTC-coordinated transaction, where Instance A's transaction might be waiting on a lock held by Instance B's, while Instance B's transaction is simultaneously waiting on a lock held by Instance A's — a genuine cross-instance deadlock cycle **invisible to either instance's own local deadlock monitor**, which is exactly why it can manifest as an indefinite hang rather than a clean, fast deadlock-victim error. MSDTC does have its own, separate distributed-transaction timeout mechanism, but it's typically configured much longer than a local deadlock monitor's detection interval, explaining the "hangs for a long time before eventually erroring" symptom. The recommended architecture, consistent with Advanced Q2's broader distributed-transaction guidance, is to **avoid cross-instance distributed transactions for this exact reason** — replace the linked-server 2PC pattern with the outbox-plus-idempotent-consumer or saga-with-compensation pattern, converting an opaque, hard-to-diagnose cross-instance locking problem into a set of independently-reasoned, locally-transactional steps with explicit, observable compensation logic instead.
+ **Why correct:** Correctly explains why local deadlock detection can't see a cross-instance wait-for cycle, identifies MSDTC's separate and typically much longer timeout as the reason for the "hang" symptom, and connects the fix back to the established outbox/saga guidance.
+ **Common mistakes:** Assuming SQL Server's deadlock monitor operates across linked servers/distributed transactions the same way it does locally; treating a hung distributed transaction as a mysterious, unexplainable production anomaly rather than a known, structural limitation of cross-instance 2PC.
+ **Follow-ups:** "How would you diagnose this while it's happening, given local deadlock detection won't fire?" (`sys.dm_tran_locks` on each involved instance individually, manually correlating wait/blocking relationships across instances — inherently more effort than a single-instance blocking-chain query, itself a strong practical argument against ever relying on cross-instance distributed transactions.) / "Does In-Memory OLTP change this risk?" (No — this is specifically a cross-instance coordination problem, orthogonal to whichever concurrency model either individual instance uses internally.)
+
+10. **Q: Compliance requires that a regulatory "as of 4:00pm market close" report reflect the true, fully-committed state of every trade — but the report runs against an Always On readable secondary for load-isolation reasons (§9), and secondaries always have some replication lag. Design the correctness guarantee.**
+ **A:** A readable secondary's implicit, forced snapshot-style reads (§9) guarantee **internal consistency** (every row the report sees reflects a single, coherent point in time) but say nothing about **how current** that point in time is relative to the primary — the secondary could be lagging by milliseconds or, under an unusual replication delay, considerably longer, and a report that silently runs against a lagging secondary without checking this is a genuine, if usually invisible, correctness risk for a hard compliance deadline like "as of market close." The correct design explicitly checks replication lag **before** running the report: query `sys.dm_hadr_database_replica_states` (specifically `last_hardened_time`/`redo_queue_size` for the secondary in question) immediately before report generation, and if the lag exceeds a defined tolerance (e.g., a few seconds), either wait briefly for it to catch up, or — for a genuinely hard compliance deadline — fail over to running the report against the primary directly rather than silently accepting stale data. This converts an implicit, unverified staleness assumption into an explicit, checked precondition — directly the same "verify the precondition rather than assume it" discipline this module applies to isolation-level and locking assumptions generally, now applied to the replication-topology layer specifically.
+ **Why correct:** Correctly distinguishes internal consistency (guaranteed) from currency/freshness (not guaranteed) for a readable secondary, and prescribes an explicit, checked lag-tolerance precondition rather than an unverified assumption.
+ **Common mistakes:** Assuming a readable secondary's snapshot-consistent reads mean the data is also necessarily current/fresh; running a hard-deadline compliance report against a secondary with no lag check at all.
+ **Follow-ups:** "What would you do if the secondary is unacceptably lagged right at the reporting deadline?" (Fail over the specific report to the primary as a fallback path, accepting the primary-load cost this specific report normally avoids, since correctness for a hard regulatory deadline outweighs the isolation benefit for that one run.) / "Is this risk specific to Always On, or does it generalize?" (It generalizes to any read-replica/secondary architecture — the same explicit lag-check discipline applies equally to a read replica in any other database engine used for compliance-sensitive reporting.)
 
 ---
 
@@ -226,9 +300,161 @@ END
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-An order-processing platform runs under RCSI by default for its primary OLTP database specifically to eliminate reader-writer contention between transactional order processing and concurrent reporting/analytics queries, with a shared, cross-team-documented lock-acquisition-order convention (Advanced Q2) preventing deadlocks between independently-developed services touching overlapping tables, and a standard deadlock/write-write-conflict retry wrapper (Hard exercise) applied uniformly across all database-calling code. The signature production incident — a reporting query silently blocking all order-processing writes under default Read Committed locking — is this module's central lesson: isolation-level choice is a first-class architectural decision, not a fixed platform default, and RCSI is frequently the single highest-leverage fix available for exactly this common OLTP-plus-reporting contention pattern.
+**Scenario**: Design the transaction/concurrency architecture for a **core account-ledger and order-settlement service** at a payments/brokerage firm — the system must post debits/credits atomically, prevent double-spend/overdraft under high concurrent load on the same hot accounts, support a live operational dashboard querying the same tables continuously, and never allow a partial (torn) financial write to become visible or committed.
+
+- **Functional requirements**: Atomic multi-entry ledger postings (a single logical transaction may touch several accounts); real-time balance/overdraft enforcement under concurrent postings to the same account; a live dashboard reading current balances/pending postings without impacting posting throughput; idempotent handling of retried posting requests.
+- **Non-functional requirements**: No double-spend or lost update under any concurrent load pattern (a hard correctness requirement, not a best-effort one); posting-path p99 latency low enough to support real-time payment authorization; the dashboard must never block or be blocked by the posting path; full recoverability (no torn writes) across any crash/failover.
+- **Architecture**: The database runs under **RCSI** by default (§4) so the dashboard's continuous reads never take shared locks against posting transactions and vice versa — eliminating the reader-writer contention class entirely at the database-setting level, no per-query change required. The actual **balance-mutation path**, however, does not rely on RCSI's optimism for its correctness guarantee — every posting uses the **conditional atomic update** pattern (Module 18-equivalent: `UPDATE Accounts SET Balance = Balance - @amt WHERE Id=@id AND Balance >= @amt` checked via `@@ROWCOUNT`), which is safe under any isolation level because the check-and-write is a single atomic statement under the row's exclusive lock, not a separate read-then-write. Every posting entry additionally carries a client-supplied **idempotency key enforced via a UNIQUE constraint** (§Expert Q4), committed in the *same* transaction as the balance mutation, so a retried request can never double-post regardless of isolation level. Cross-account, multi-entry postings acquire their row locks in a **consistent, ascending-key order** (Easy coding exercise) across every code path, structurally eliminating the classic opposite-order deadlock pattern (§2.3) rather than relying on retry logic alone to paper over it.
+- **Data model**: An append-only `LedgerEntries` table (double-entry: every posting is a balanced set of debit/credit rows) is the source of truth and audit trail; a `Accounts.Balance` column is maintained **transactionally, in the same transaction**, as a materialized, fast-to-read current balance — never updated in a separate transaction from its corresponding ledger entries, avoiding the divergence risk of updating a derived value out-of-band. Every posting's status follows `NOT_STARTED → EXECUTING → SUCCESS | FAILED`, consistent with this course's standing lifecycle convention, with `FAILED` postings leaving no partial ledger entries by construction (the whole multi-entry transaction either fully commits or fully rolls back).
+- **Messaging/failure handling**: A deadlock (1205) or snapshot write-write conflict (3960) is caught by a standard retry-with-exponential-backoff wrapper (Hard coding exercise) applied uniformly across every database-calling code path — both are treated as expected, retryable conditions under concurrency, never as application bugs requiring manual intervention.
+- **Scaling**: Read-heavy dashboard/reporting traffic is offloaded to an Always On readable secondary (§9) rather than adding read load to the primary posting path at all; the primary is reserved exclusively for the posting write path and any read genuinely requiring up-to-the-millisecond currency (e.g., an authorization check immediately preceding a debit).
+- **Monitoring**: Blocking-chain depth/duration (`sys.dm_exec_requests`, Advanced Q4) and deadlock/write-conflict retry rates are tracked as first-class production health signals, not just ad-hoc diagnostic queries — a rising retry rate is treated as an early-warning signal of growing contention on specific hot accounts, worth investigating before it manifests as a customer-visible latency incident.
+- **Trade-offs**: The conditional-atomic-update pattern is deliberately preferred over pessimistic `UPDLOCK`/`HOLDLOCK` for the single-account debit case specifically because it requires no explicit lock-hint discipline and is correct under any isolation level by construction — accepted at the cost of needing a slightly less intuitive `WHERE`-clause-as-invariant-guard pattern that must be consistently taught and code-reviewed across the engineering organization (§17).
+
+## 13. Low-Level Design
+
+**Scenario**: Design a reusable, deadlock-safe, idempotent `TransferFundsService` used by every code path in the organization that moves money between two accounts — directly operationalizing §2.3's consistent-lock-ordering discipline and Expert Q4's idempotency-key discipline as shared, hard-to-misuse infrastructure rather than a convention every team must independently remember to apply.
+
+### Class Diagram
+```mermaid
+classDiagram
+    class ITransferFundsService {
+        <<interface>>
+        +TransferAsync(TransferRequest) TransferResult
+    }
+    class TransferFundsService {
+        -IDbConnectionFactory _connections
+        -IDbRetryPolicy _retryPolicy
+        +TransferAsync(TransferRequest) TransferResult
+        -OrderAccountIds(int, int) (int First, int Second)
+    }
+    class IDbRetryPolicy {
+        <<interface>>
+        +ExecuteAsync~T~(Func~Task~T~~) T
+    }
+    class DeadlockAwareRetryPolicy {
+        +ExecuteAsync~T~(Func~Task~T~~) T
+    }
+    class TransferRequest {
+        +string IdempotencyKey
+        +int FromAccountId
+        +int ToAccountId
+        +decimal Amount
+    }
+    ITransferFundsService <|.. TransferFundsService
+    IDbRetryPolicy <|.. DeadlockAwareRetryPolicy
+    TransferFundsService --> IDbRetryPolicy
+    TransferFundsService ..> TransferRequest
+```
+
+```csharp
+public interface IDbRetryPolicy
+{
+    Task<T> ExecuteAsync<T>(Func<Task<T>> operation);
+}
+
+public sealed class TransferFundsService : ITransferFundsService
+{
+    private readonly IDbConnectionFactory _connections;
+    private readonly IDbRetryPolicy _retryPolicy;
+
+    public TransferFundsService(IDbConnectionFactory connections, IDbRetryPolicy retryPolicy)
+        => (_connections, _retryPolicy) = (connections, retryPolicy);
+
+    public Task<TransferResult> TransferAsync(TransferRequest request) =>
+        _retryPolicy.ExecuteAsync(async () =>
+        {
+            var (first, second) = OrderAccountIds(request.FromAccountId, request.ToAccountId);
+            // Consistent ascending-Id lock order (Easy exercise) -- every caller goes through
+            // THIS one code path, so no team can accidentally introduce an opposite-order deadlock.
+            await using var conn = await _connections.OpenAsync;
+            await using var tx = await conn.BeginTransactionAsync;
+
+            // Idempotency key UNIQUE constraint (Expert Q4) makes a retried request a no-op, not a double-post.
+            var alreadyProcessed = await InsertIdempotencyRecordAsync(conn, tx, request.IdempotencyKey);
+            if (alreadyProcessed) return await LoadPriorResultAsync(conn, tx, request.IdempotencyKey);
+
+            var debited = await ConditionalDebitAsync(conn, tx, request.FromAccountId, request.Amount);
+            if (!debited) { await tx.RollbackAsync; return TransferResult.InsufficientFunds; }
+
+            await CreditAsync(conn, tx, request.ToAccountId, request.Amount);
+            await tx.CommitAsync;
+            return TransferResult.Success;
+        });
+
+    private static (int First, int Second) OrderAccountIds(int a, int b) => a < b ? (a, b) : (b, a);
+}
+```
+
+### Sequence Diagram
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Svc as TransferFundsService
+    participant Retry as DeadlockAwareRetryPolicy
+    participant DB as SQL Server
+
+    Caller->>Svc: TransferAsync(request)
+    Svc->>Retry: ExecuteAsync(operation)
+    Retry->>DB: BEGIN TRANSACTION
+    Retry->>DB: INSERT idempotency record (UNIQUE key)
+    alt duplicate key (already processed)
+        DB-->>Retry: constraint violation
+        Retry-->>Svc: return prior result
+    else new request
+        Retry->>DB: conditional debit (WHERE Balance >= @amt)
+        Retry->>DB: credit destination account
+        Retry->>DB: COMMIT
+        alt deadlock (1205) or snapshot conflict (3960)
+            DB-->>Retry: error 1205/3960
+            Retry->>Retry: backoff, retry from BEGIN TRANSACTION
+        else success
+            DB-->>Retry: committed
+            Retry-->>Svc: TransferResult.Success
+        end
+    end
+```
+
+### Design Patterns / SOLID / Concurrency
+- **Decorator/Policy pattern**: `IDbRetryPolicy` wraps the core transfer logic with deadlock/conflict retry behavior, keeping retry concerns fully separate from the business logic itself — directly reusing the exception-filter retry pattern from Module 19's Hard coding exercise as shared, injectable infrastructure.
+- **Template Method (implicit)**: every transfer follows the identical sequence (order accounts → idempotency check → conditional debit → credit → commit) regardless of caller, making it structurally impossible for a new call site to skip the lock-ordering or idempotency steps.
+- **S**ingle Responsibility: `TransferFundsService` only orchestrates a transfer; `IDbRetryPolicy` only handles retry; each is independently testable.
+- **D**ependency Inversion: callers depend on `ITransferFundsService`, never on raw ADO.NET/transaction code directly, so the deadlock-safety discipline is enforced by the abstraction's only implementation, not by convention each caller must remember.
+- **Concurrency/thread-safety**: The service itself holds no mutable instance state across calls (each `TransferAsync` call opens its own connection/transaction), making it safely reusable as a singleton; correctness under concurrent calls comes entirely from the database-level guarantees (conditional atomic update, UNIQUE idempotency constraint, consistent lock order), not from any in-process locking — consistent with this course's general preference for pushing concurrency correctness into the database rather than reimplementing it in application-tier locks.
+
+## 14. Production Debugging
+
+### Incident: Regulatory trade-total report silently under-reports due to NOLOCK page-split row loss
+- **Symptoms**: A daily regulatory trade-total submission was found, during an internal audit reconciliation, to be short by a small but non-trivial number of trades on several historical dates — no error had ever been raised by the report job, and the discrepancy had gone undetected for weeks.
+- **Investigation**: The report's query used `WITH (NOLOCK)` on the main `Trades` table "for performance," inherited from an older, smaller-scale version of the report; correlating the specific missing trades against the ingest pipeline's timing showed each missing trade had been inserted during a window where a concurrent page split on the `Trades` table (driven by ordinary high-volume same-day trading activity) coincided with the report's own scan passing through that region of the table — exactly the mechanism in §Expert Q5.
+- **Tools**: Extended Events capturing page-split events correlated against the report job's execution window; a targeted repro on a staging environment reproducing the row-loss under simulated concurrent inserts plus a `NOLOCK` scan.
+- **Root cause**: `NOLOCK` taking no locks at all, including no protection against concurrent page splits reshuffling rows mid-scan, causing a subset of rows to be silently skipped rather than raising any error (§Expert Q5) — a materially incorrect, not merely stale, aggregate.
+- **Fix**: Removed `NOLOCK` from the report entirely and switched the reporting database to **RCSI**, giving the report the same non-blocking behavior it was originally reaching for via `NOLOCK`, but through a consistent, versioned snapshot immune to the page-split row-loss mechanism.
+- **Prevention**: A code-review policy banning `NOLOCK` for any query whose output feeds a regulatory, financial, or reconciliation-relevant report, enforced via a static-analysis lint rule scanning for the hint in any file under the reporting codebase's directory; retroactively audited every other existing report for the same pattern, finding and fixing two additional instances before they caused a similar undetected discrepancy.
+
+## 15. Architecture Decision
+
+**Decision**: Choosing the concurrency-control strategy for the account-balance-update hot path under high write contention on a relatively small set of frequently-traded "hot" accounts.
+
+| Option | Advantages | Disadvantages | Cost | Complexity | Maintainability | Performance | Scalability | Ops Overhead |
+|---|---|---|---|---|---|---|---|---|
+| **A. Pessimistic locking (`UPDLOCK`/`HOLDLOCK` or a plain guarded UPDATE)** | Simple, well-understood mental model; no retry logic needed for the common case since conflicts are prevented, not detected after the fact | Blocking under genuinely high contention on the same hot rows caps throughput; requires disciplined, consistent lock ordering to avoid deadlocks | Low | Low | High | Good for moderate contention | Limited by lock-manager throughput on hot rows | Low |
+| **B. Optimistic concurrency (rowversion + retry)** | No blocking at all — readers/writers never wait on each other; scales well when actual conflicts are rare relative to total volume | Requires explicit, correct retry logic everywhere; wasted work on every conflict-driven retry; can degrade badly (many wasted retries) if contention is actually *high*, not rare | Low | Medium | Medium (retry logic must be consistently applied) | Excellent under low-to-moderate contention | Good under low contention, poor under sustained high contention | Medium (retry-rate monitoring needed) |
+| **C. In-Memory OLTP (native MVCC, Expert Q8)** | Eliminates lock/latch contention structurally; best raw throughput ceiling for a small, extremely hot working set | Real feature/T-SQL restrictions inside natively-compiled procedures; memory-sizing constraint; genuine migration effort and new operational model | High (migration effort + licensing/edition) | High | Requires specialized team familiarity | Best-in-class for hot-row extreme contention | Best for this specific workload shape | Medium-High (new monitoring/tooling model) |
+
+**Recommendation**: **Option A** (the conditional-atomic-update pattern, §12) as the default for the general ledger-posting path — it is correct under any isolation level, requires no retry logic for the common single-account-debit case, and is the simplest to teach and code-review correctly across a large engineering organization. **Option B** is the right choice specifically for genuinely low-contention, high-read-to-write-ratio paths (e.g., updating a rarely-contended metadata field) where blocking-free optimism's retry cost stays low in practice. **Option C** is reserved for a *proven*, measured bottleneck (§7's spinlock/wait-stat diagnostics confirming lock/latch contention is the actual ceiling) on a specific, narrow, extremely hot working set — not adopted preemptively or organization-wide, given its real migration cost and operational-model change; most ledger-posting workloads, even under significant load, are well-served by Option A's simplicity and don't reach the contention level that justifies Option C's added complexity.
+
+## 17. Principal Engineer Perspective
+
+- **Business impact**: This module's incidents span a correctness spectrum a Principal Engineer must weigh explicitly: a blocking-chain latency incident (§4) degrades customer experience and throughput but is recoverable and visible; a `NOLOCK`-driven silent under-reporting incident (§14) is a genuine regulatory-compliance risk that went undetected for weeks precisely *because* it raised no error — the second class deserves disproportionately more governance attention than its "just a reporting query" framing suggests, since the business cost of an undetected wrong regulatory submission materially exceeds the cost of a detected, retried, blocked transaction.
+- **Engineering trade-offs**: Pessimistic correctness-by-construction (the conditional atomic update) versus optimistic throughput-under-low-contention (rowversion retry) versus In-Memory OLTP's structural elimination of lock contention at real migration cost — a Principal Engineer's job is matching the *actual measured contention profile* of a specific hot path to the right point on this spectrum, not applying one strategy uniformly across a codebase for consistency's own sake.
+- **Technical leadership**: Champion the conditional-atomic-update pattern (`WHERE Balance >= @amt`, checked via `@@ROWCOUNT`) as the default, taught pattern for any financial mutation, specifically because it's correct by construction under any isolation level and doesn't require every engineer to correctly reason about `UPDLOCK`/`HOLDLOCK` semantics for the common case — reserving explicit lock hints for the genuinely more complex multi-row scenarios that actually need them.
+- **Cross-team communication**: Translate the `NOLOCK` incident for non-technical stakeholders precisely: "a shortcut used to make a report run faster meant it could silently skip counting some trades under normal, everyday trading activity, with no error or warning that anything was wrong — we've removed that shortcut and replaced it with a safer one that gives the same speed without that risk."
+- **Architecture governance**: Mandate that any isolation-level or lock-hint change (`ALTER DATABASE... SET READ_COMMITTED_SNAPSHOT`, any `NOLOCK`/`UPDLOCK`/`READPAST` usage) go through the organization's standard change-review process (§8) — these are exactly the kind of low-frequency, easy-to-overlook, high-blast-radius changes that benefit disproportionately from a second reviewer's scrutiny relative to how often they're actually made.
+- **Cost optimization**: A high deadlock/write-conflict retry rate isn't just a latency problem — every retried transaction is wasted database compute (in a cloud-hosted vCore/DTU model, directly billed compute) redone from scratch; treating retry-rate reduction (via better lock ordering, or migrating a genuinely hot path to Option C) as a cost-optimization lever, not purely a reliability one, broadens the business case for addressing contention proactively.
+- **Risk analysis and long-term maintainability**: A codebase where lock-ordering discipline and idempotency-key enforcement are informal conventions individual engineers must remember, rather than structurally enforced by shared infrastructure (§13's `TransferFundsService`), accumulates risk silently over time as team composition changes and institutional memory of "why we always order account IDs ascending" fades — investing in shared, hard-to-misuse infrastructure that makes the correct pattern the *only* easily-available one is a long-term risk-reduction investment a Principal Engineer should actively sponsor, not an optional nicety.
 
 ## 18. Revision
 **Key takeaways**: Read Committed (SQL Server default) prevents dirty reads but allows non-repeatable reads; Repeatable Read adds that protection but still allows phantoms; Serializable prevents all three at the cost of concurrency. RCSI/Snapshot Isolation uses row versioning instead of locks, eliminating reader-writer blocking at the cost of tempdb overhead and requiring write-write-conflict retry handling. Deadlocks (a genuine wait-for cycle, error 1205) are prevented via consistent lock-acquisition ordering; blocking chains (no cycle, just a long queue) are usually caused by one long-running transaction and resolved by shortening it or switching isolation models. Lock escalation (~5,000 row-lock threshold) can silently convert a large batch operation into a full table lock, blocking unrelated concurrent work.

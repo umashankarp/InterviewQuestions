@@ -2,7 +2,7 @@
 
 > Domain: Domain-Driven Design | Level: Beginner → Expert | Prerequisite: [[02-TacticalDDD-Entities-ValueObjects-Aggregates]] (this module's Domain Events, Domain Services, and Repositories are all defined relative to, and require, that module's Aggregate concept already being in place, per its own closing synthesis)
 >
-> **Note on format:** Per the standing user preference (see `CLAUDE.md`), this module covers the **top 30 most frequently asked interview questions**, curated by real interview frequency across all four levels (8 Basic / 8 Intermediate / 7 Advanced / 7 Expert) rather than a fixed 10-per-level count, without the full 15-section deep-dive template.
+> **Note on format:** Upgraded to the repo's current full 16-section template (§1–§15, §17–§18; §16 Enterprise Case Study intentionally omitted per the repo's standing template) with 40 Interview Questions (10 Basic / 10 Intermediate / 10 Advanced / 10 Expert) — the original top-30-curated Q&A content is preserved verbatim within §10 and completed to 40.
 
 ---
 
