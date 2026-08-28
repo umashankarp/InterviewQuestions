@@ -96,6 +96,48 @@ graph LR
 
 ---
 
+## 7. Performance Engineering
+
+**Key Vault throttling limits:** Key Vault enforces per-vault, per-operation-type request-rate limits (e.g., roughly 2,000 `GET` operations per 10 seconds for Standard-tier secrets, materially lower for HSM-backed Premium-tier key operations, which involve genuine cryptographic hardware round-trips rather than a simple lookup) — a workload that fetches a secret or performs a `sign`/`decrypt` operation on **every request path** (rather than caching) will hit these limits under realistic production load long before any compute-tier bottleneck appears, surfacing as `429 Too Many Requests` responses that, if not specifically handled with exponential backoff, cascade into request failures indistinguishable at first glance from a genuine outage. The correct mitigation is in-memory caching of secret/key material for a bounded window (typically minutes, balanced against the operational cost of a slower credential-rotation propagation) — never calling Key Vault synchronously on the hot path of every business transaction.
+
+**Entra ID token-caching cost:** every OAuth2/OIDC token acquisition against Entra ID (via MSAL or the underlying token endpoint) is a network round-trip with real latency (typically tens of milliseconds, more under Entra ID's own load or during a regional incident) — MSAL's built-in token cache should be relied upon rather than bypassed, since an application acquiring a fresh token on every single request (rather than reusing a cached, still-valid token until shortly before expiry) multiplies both its own latency and Entra ID's aggregate load unnecessarily; this is directly analogous to the Key Vault caching discussion — any credential/token source with its own rate limit must be treated as a resource to cache against, not a free, unlimited lookup.
+
+**Managed Identity token acquisition:** a Managed-Identity-backed token request goes through the Azure Instance Metadata Service (IMDS) locally on the compute resource rather than a network call to Entra ID directly for the initial hop — this is materially faster and doesn't consume Entra ID's own rate-limit budget the way a direct service-principal-secret-based token request does, an additional, often-overlooked performance argument (beyond the security argument) for preferring Managed Identities over service-principal-secret authentication wherever both are viable.
+
+**RBAC evaluation latency:** an authorization check against Azure RBAC (evaluating a principal's effective permissions, potentially inherited across several scope levels) adds measurable latency to a resource-plane API call, particularly for a principal with many role assignments across a deep scope hierarchy — this is generally invisible to application code (Azure's control plane absorbs this cost for ARM-level operations) but becomes directly relevant for any custom authorization layer built to mimic RBAC-style hierarchical evaluation, where the same "effective permission = union of all inherited assignments" computation must be performed on every request unless cached.
+
+**Benchmarking:** load-test the actual steady-state secret/token-retrieval rate an application generates under production traffic, not a synthetic single-request test, since the rate-limit risk (Key Vault throttling, Entra ID token-endpoint load) only manifests at realistic aggregate volume across all instances of a horizontally-scaled service, not a single instance in isolation.
+
+---
+
+## 8. Security
+
+**RBAC role-assignment sprawl:** beyond the single-incident scope-inheritance risk already covered in §2.1/§4, role-assignment **sprawl** — the accumulation, over time, of many individually-reasonable-at-the-time role assignments, most never revoked when the original need ends (a contractor's temporary access, a one-off incident-response grant) — is a distinct, additive risk: each individual assignment may be correctly scoped, but the aggregate **effective-access surface** grows unboundedly without a standing revocation discipline. Azure AD Access Reviews (periodic, mandatory re-justification of existing assignments, Module 66 Advanced Q1) is the structural control against sprawl specifically, distinct from the scope-discipline control against any single over-broad assignment — both are necessary, and neither substitutes for the other.
+
+**Managed Identity vs. service-principal-secret risk:** a service principal authenticated via a **client secret** (or certificate) introduces a genuine, standing credential that must be stored, rotated, and can be leaked, stolen from source control, or exfiltrated from a compromised process — exactly the class of risk this course's secrets-management discipline addresses generally. A **Managed Identity** has **no credential to manage at all** — Azure itself handles the underlying token issuance transparently via IMDS, with nothing an attacker could steal from application configuration or environment variables even if they fully compromised the running process's filesystem/memory (the credential material never exists in a form retrievable that way). This is a structural, not merely a convenience, security improvement: **any workload capable of using a Managed Identity should never use a service-principal secret instead**, and a security review finding a client-secret-based service principal in use should treat this as a specific, checkable finding requiring justification (is Managed Identity genuinely unavailable for this specific cross-cloud/cross-tenant scenario, or was the secret-based path simply the default the team reached for).
+
+**Key Vault access-policy vs. RBAC authorization model:** Key Vault supports **two, mutually-exclusive-per-vault** authorization models — the legacy **vault access-policy** model (a flat, vault-wide permission list, with no support for Azure's broader Conditional Access/PIM integration) and the newer, recommended **Azure RBAC** model (Module 66 §2.1's hierarchical scope-inheritance model, applied down to individual Key Vault objects, and fully integrated with PIM's just-in-time activation and Conditional Access). A vault still configured under the legacy access-policy model cannot enforce PIM-gated, time-bound access to its secrets at all — a materially weaker least-privilege posture for a vault holding production credentials — making migration to the RBAC authorization model (a one-time, per-vault configuration setting) a genuine, checkable security-hardening action, not a cosmetic modernization.
+
+**Secrets never in application configuration:** a Key Vault reference (via Managed Identity, at application startup or via a configuration provider that resolves references transparently) should be the **only** way secret material ever reaches a running application — never a secret value copy-pasted into an App Service configuration setting, environment variable, or `appsettings.json`, each of which persists the secret in a location (deployment logs, source control history, a misconfigured diagnostic export) outside Key Vault's own access-control and audit-logging boundary.
+
+**Audit trail:** Key Vault emits detailed access logs (every `GET`/`SET`/`DELETE` operation, by principal, timestamp, and result) to Azure Monitor/Log Analytics — for a PCI-DSS or SOX-relevant vault, these logs, combined with RBAC role-assignment history and PIM activation logs, form the complete, required audit trail demonstrating who accessed which credential and when; architecting for this export from day one (rather than retrofitting logging after an audit request) is a standing FinTech-specific requirement this module's Key Vault discussion should be read against.
+
+---
+
+## 9. Scalability
+
+**Entra ID multi-tenant scaling:** a single Entra ID tenant scales to very large user/group/service-principal counts without the application needing to manage sharding — but an organization spanning multiple, genuinely separate business entities (e.g., following an acquisition, or maintaining strict regulatory separation between distinct regulated subsidiaries) may deliberately maintain **multiple tenants**, each with its own independent identity boundary, rather than a single shared tenant — **B2B guest access** (inviting an identity from one tenant into another, with its own, separately-scoped RBAC assignments in the invited tenant) is Azure's mechanism for controlled cross-tenant collaboration without merging the tenants' identity boundaries, a materially different problem from AWS's cross-account `AssumeRole` model, since AWS accounts don't carry a separate, independent *identity provider* the way Entra ID tenants do.
+
+**Key Vault regional failover:** a Key Vault is a regional resource — for a multi-region production deployment, the standard pattern is provisioning **one Key Vault per region** (not relying on cross-region replication of a single vault, which Key Vault does not natively provide as a managed capability the way geo-replicated storage does) with application configuration resolving to the region-local vault, and a documented, tested process for keeping secret material synchronized across regional vaults (either application-driven dual-write at rotation time, or an external secrets-synchronization pipeline) — a multi-region DR plan that names Key Vault availability but doesn't explicitly address this per-region-vault-plus-synchronization requirement has an unaddressed gap that only surfaces during an actual regional failover drill.
+
+**RBAC at scale — custom roles and Access Reviews:** as an organization's Azure footprint grows across hundreds of subscriptions and Resource Groups, the volume of individual role assignments grows correspondingly — Azure AD Access Reviews and Azure Policy-driven periodic reporting (Module 66 Advanced Q1/Q3) become operationally necessary, not optional, at this scale, since manual review of the full assignment set stops being tractable well before an organization reaches this size.
+
+**PIM at scale:** PIM's approval-workflow overhead, while valuable for genuinely high-risk roles, does not scale well if applied uniformly to every role assignment across a large organization — the correct scaling discipline is tiering: PIM-gated, approval-required activation reserved for genuinely high-privilege roles (Owner-equivalent, production data-plane access), while lower-risk, frequently-needed roles (read-only diagnostics) remain standing assignments, avoiding both the security risk of blanket standing access and the operational-friction cost of blanket PIM gating.
+
+**High availability:** Entra ID and Key Vault are both Microsoft-managed, multi-instance services with their own internal HA — the scaling/resilience concern for a workload's own architecture is not "will Entra ID/Key Vault stay up" (a Microsoft-managed SLA concern) but "does my application correctly handle a transient token-acquisition or secret-retrieval failure with retry/backoff," since even a highly-available managed service has a non-zero transient-error rate that an application's own resilience code, not the platform's uptime, is responsible for absorbing gracefully.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -143,6 +185,37 @@ graph LR
  **A:** Configure the privileged role as **PIM-eligible** (not permanently active) for the on-call engineering rotation, requiring: MFA re-challenge at activation time, a maximum activation duration matched to a typical incident-response window (e.g., 4 hours, auto-expiring rather than requiring manual deactivation), and an activation-justification note logged and automatically routed to a security/audit channel for post-hoc review (not a blocking pre-approval, which would defeat genuine emergency responsiveness) — this specifically balances Advanced Q9's/the emergency-responsiveness concern (no blocking approval delay) against PIM's core value (no standing, continuously-active high-privilege access, and a durable audit trail of every activation for after-the-fact review).
 10. **Q: As a Principal Engineer establishing Azure IAM standards for an organization already operating on AWS, design the specific set of standing architectural reviews and automated checks (synthesizing this entire module) you would require, explicitly addressing where Azure-specific risks require genuinely new checks beyond what the AWS IAM standards (§Advanced Q10) already cover.**
  **A:** (1) Mandatory effective-permissions computation and drift detection accounting for RBAC inheritance (Advanced Q3) — a genuinely new check with no AWS equivalent, since AWS's flatter model doesn't have this specific drift risk. (2) Mandatory periodic re-justification (Azure AD Access Reviews) for any Subscription-or-higher-scope role assignment (Advanced Q1) — again, addressing a risk unique to Azure's inheritance model. (3) Mandatory PIM time-bound activation for any high-privilege role, with a defined break-glass emergency path (Advanced Q9) — stronger than the AWS equivalent, since AWS has no native PIM-equivalent mechanism to require. (4) Mandatory object-level (not vault-level) Key Vault RBAC scoping, paired with mandatory private-endpoint network isolation (Advanced Q8) — the Azure-specific recovery of the two-factor defense-in-depth AWS's split KMS/Secrets Manager model provides more natively. (5) Mandatory custom-role migration review for any workload still using broad built-in roles (Advanced Q7). This standard set explicitly extends, rather than merely duplicates, the AWS IAM governance program — items (1) and (2) specifically exist *because* Azure RBAC's inheritance model introduces a risk category AWS's flatter model structurally doesn't have.
+
+### Expert (10)
+1. **Q: Design the specific Key Vault authorization migration plan for an organization discovering that 40% of its production vaults still use the legacy access-policy model, preventing PIM-gated access to secrets in those vaults, without a risky, all-at-once cutover.**
+ **A:** Apply the same incremental, dual-running migration pattern this course establishes for RBAC-permission tightening: (1) for each legacy-model vault, inventory its current access-policy grants and map each to an equivalent RBAC role assignment; (2) enable the RBAC authorization model on the vault (a one-time, reversible setting) and create the mapped RBAC assignments *alongside* the still-present legacy policies; (3) monitor access patterns for a validation window to confirm the RBAC assignments correctly cover all genuinely-used access paths; (4) only after validation, remove the legacy access policies and correctly enable PIM gating on the now-RBAC-only vault's high-privilege roles — each step independently verifiable and reversible, avoiding a big-bang cutover that could break a legitimate, currently-working access path mid-migration.
+
+2. **Q: A team argues that since Managed Identities eliminate standing credentials entirely, a workload using Managed Identity for all its Azure resource access has eliminated its credential-leak risk surface completely. Evaluate this claim.**
+ **A:** Overstated — Managed Identity eliminates the risk of a *long-lived, storable* credential being leaked, but the **token** a Managed Identity acquires via IMDS is itself a short-lived bearer credential that, if exfiltrated from a compromised process's memory during its (typically ~1 hour) validity window, grants the attacker the identity's full permitted access for that remaining window — Managed Identity narrows the credential-leak risk surface substantially (no long-lived secret to steal from configuration/source control) but does not eliminate the shorter-lived, in-memory token-theft risk surface entirely; defense-in-depth (least-privilege scoping, so even a stolen token's blast radius is small; monitoring for anomalous token-usage patterns) remains necessary regardless of Managed Identity adoption.
+
+3. **Q: Design a comprehensive effective-permissions drift-detection system for an organization using both Azure RBAC (Module 66) and Key Vault's own object-level authorization, accounting for the fact that a principal's actual access to a specific secret depends on BOTH layers simultaneously.**
+ **A:** A principal's true effective access to a specific Key Vault secret is the **intersection** of (a) its RBAC-computed effective permission on that Key Vault/object (accounting for full scope-hierarchy inheritance, Module 66 Advanced Q3) and (b) the vault's own network-access restrictions (private endpoint/firewall, §8) currently permitting that principal's network path to reach the vault at all — a drift-detection system must compute both independently and report the intersection, since a change narrowing either one (a network-firewall rule change, or an RBAC scope change) changes actual effective access even if the other layer is unchanged; reporting only the RBAC layer (as a naive drift detector might) would miss a network-layer change that silently altered actual accessibility.
+
+4. **Q: A Principal Engineer is designing IAM for a workload that spans Azure and AWS (a genuinely multi-cloud service needing to read a secret stored in Azure Key Vault from a workload running in AWS). Design the authentication mechanism, avoiding a long-lived shared secret crossing the cloud boundary.**
+ **A:** Use **Workload Identity Federation** (§2.5): configure Entra ID to trust AWS's own OIDC-compatible identity mechanism (or, more directly, configure federated credential trust between the AWS workload's own short-lived identity token — e.g., an AWS IAM Roles Anywhere-issued token or an AWS-side OIDC provider — and an Entra ID Service Principal scoped to exactly the required Key Vault secret), so the AWS workload exchanges its own short-lived AWS credential for a short-lived Entra ID token with no long-lived shared secret ever provisioned on either side — directly the cross-cloud extension of the same federated-trust pattern §2.5 establishes for GitHub Actions, applied here across a genuine cloud boundary rather than within Azure alone.
+
+5. **Q: Critique the following claim: "Since Conditional Access requires MFA and a compliant device for all sign-ins, and our RBAC assignments are all correctly scoped to least privilege, our IAM posture is complete — no further review is needed."**
+ **A:** Incomplete on at least two axes this module establishes independently: (1) it addresses neither Key Vault's own object-level-vs-vault-level scoping distinction (§4/§6) nor its network-isolation posture (§8) — a correctly-scoped RBAC role can still grant vault-wide, rather than object-level, access, and a correctly-configured Conditional Access policy says nothing about whether the vault's network firewall is appropriately restrictive; (2) it says nothing about role-assignment **sprawl** (§8) — individually well-scoped assignments accumulating unrevoked over time still grow the aggregate effective-access surface, a risk Conditional Access and point-in-time RBAC correctness don't address at all. A complete IAM posture requires all of: authentication-time controls (Conditional Access), authorization-time controls (RBAC, correctly scoped and periodically re-justified), and resource-level controls (Key Vault object scoping plus network isolation) — each independently necessary.
+
+6. **Q: Design the specific incident-response procedure for a suspected Managed Identity token-theft event (a process compromise where an attacker may have exfiltrated a currently-valid IMDS-issued token), given that no credential-revocation mechanism exists for an already-issued Managed Identity token the way a service-principal secret can be rotated/revoked immediately.**
+ **A:** Because a Managed Identity token cannot be individually revoked before its natural expiry (typically ~1 hour), the incident-response procedure must instead: (1) immediately remove or narrow the Managed Identity's RBAC role assignments (Module 66's structural-enforcement principle) — this takes effect for *new* authorization checks even against an already-issued, still-technically-valid token, since RBAC evaluation happens per-request, not only at token issuance; (2) if the compromised resource is a VM/Function App, disable or delete the compromised identity itself (removing its ability to issue further tokens) and redeploy with a fresh identity; (3) treat the token's remaining validity window as an active blast-radius period requiring monitoring (anomalous resource-access patterns from that specific principal) rather than assuming the threat ends the instant the identity is disabled, since a already-cached, already-issued token in the attacker's possession remains technically valid for its original lifetime unless the underlying RBAC permission is pulled.
+
+7. **Q: Design the specific Entra ID Conditional Access and PIM configuration for an on-call rotation requiring emergency, time-bound access to a production Key Vault holding payment-processor credentials, balancing genuine incident-response speed against the standing-privilege risk this module's PIM discussion addresses.**
+ **A:** Configure the relevant Key Vault Secrets Officer (or narrower, custom) role as **PIM-eligible** (never standing) for the on-call security group, scoped to the specific vault (object-level where the vault's authorization model supports it, §6/§8) rather than subscription-wide; require MFA re-challenge and a mandatory justification/ticket-number field at activation (logged, not blocking, per Module 66 Advanced Q9's balance); set Conditional Access to additionally require a managed/compliant device for this specific role's activation (an additional authentication-time control layered on top of PIM's authorization-time gate, directly applying the two-independent-axes principle from Module 66 Intermediate Q6); auto-expire the activation at a duration matched to a realistic incident window (e.g., 4 hours) rather than requiring manual deactivation, so a forgotten, un-deactivated emergency grant doesn't silently become a new standing-privilege risk.
+
+8. **Q: Explain why a security review that verifies "this service uses Managed Identity, not a service-principal secret" as its sole IAM check for a given workload is insufficient, using this module's full scope to identify what else must be independently checked.**
+ **A:** Managed Identity adoption addresses exactly one risk axis (standing-credential-leak risk, §8/Expert Q2) — it says nothing about whether the identity's RBAC role assignment is correctly scoped (could still be a Subscription-wide Contributor grant, Module 66's core incident, regardless of how the identity authenticates) nor about Key Vault's own object-level-vs-vault-level access granularity if the workload reads secrets, nor about whether Conditional Access/PIM gates the identity's most sensitive permissions appropriately. A complete review must independently verify: authentication mechanism (Managed Identity — good), authorization scope (RBAC role and scope level — separately verified), resource-level granularity (object-level Key Vault scoping — separately verified), and privilege-elevation discipline (PIM for anything high-risk — separately verified) — each is an independent finding, and passing one says nothing about the others.
+
+9. **Q: A Principal Engineer discovers that Key Vault access logs show a service principal (not a Managed Identity) reading a payment-processor API key at a rate consistent with calling Key Vault on every single payment-processing request, rather than caching it. Diagnose every distinct issue this single observation reveals, beyond the immediate performance concern.**
+ **A:** This single observation reveals at least three distinct, independently-actionable issues this module covers: (1) a **performance** issue (§7) — uncached, per-request Key Vault calls risk throttling under real production volume and add unnecessary latency to the payment hot path; (2) a **security** issue (§8/Expert Q2) — using a service-principal secret rather than Managed Identity for a workload that (being an Azure-hosted service, presumably) could very likely use Managed Identity instead, retaining unnecessary standing-credential risk; (3) an **audit-trail volume** issue — the resulting high-frequency access-log volume makes genuinely anomalous access patterns (an actual credential-theft attempt) harder to distinguish from routine legitimate traffic in the same log stream, degrading the audit trail's practical usefulness as a detective control (§8) even though every individual access is legitimate. Each of these three would be independently worth fixing even in the absence of the other two.
+
+10. **Q: As a Principal Engineer establishing Azure IAM/Key Vault standards for a FinTech organization operating across multiple regions and, in some cases, multiple clouds, design the complete standing governance program synthesizing this entire module.**
+ **A:** (1) Mandatory Managed Identity for any workload capable of using it, with documented, reviewed exceptions only for genuine cross-cloud/cross-tenant cases requiring Workload Identity Federation instead (Expert Q4) — never a bare service-principal secret as a default. (2) Mandatory RBAC-model (not legacy access-policy) authorization on every Key Vault, migrated via the incremental plan (Expert Q1), with object-level (not vault-level) scoping for production secrets and mandatory network isolation (private endpoint/firewall). (3) Mandatory PIM-gated, time-bound activation with device-compliant Conditional Access (Expert Q7) for any high-privilege role, tiered so lower-risk roles aren't subject to the same friction (§9). (4) Mandatory, scheduled Azure AD Access Reviews specifically targeting role-assignment sprawl (§8), independent of and in addition to point-in-time scope-correctness review. (5) Mandatory per-region Key Vault provisioning with a documented, tested secret-synchronization process for any multi-region production deployment (§9), verified via the same drill discipline established in Module 65 for zone/region failover. (6) A standing effective-access drift-detection system computing the intersection of RBAC and Key Vault network/object-level restrictions (Expert Q3), not either layer in isolation. This program treats IAM correctness as a continuously-verified, structurally-enforced property — never a one-time configuration assumed to remain correct as the organization, its role assignments, and its cross-cloud footprint all continue to evolve.
 
 ---
 
@@ -234,9 +307,194 @@ await _pimClient.ActivateRoleAsync(activationRequest);
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-*(the incident, the four exercises, and the Advanced-tier Q&A — especially Advanced Q1's effective-permissions drift detection, Advanced Q7's zero-downtime custom-role migration, and Advanced Q10's Azure-specific governance additions beyond the AWS baseline — collectively constitute this module's system-design, debugging, and Principal-Engineer-level content.)*
+**Scenario:** design the identity and secrets-management architecture for a multi-region card-payment authorization platform: an authorization service calling out to card-network/issuer-processor APIs, a reconciliation service reading settlement files, and an on-call operations rotation needing emergency, time-bound diagnostic access — all within a PCI-DSS-scoped environment.
+
+**Functional requirements:** every service authenticates to Azure resources with no long-lived credential in configuration; every payment-processor API key is stored and rotated centrally; emergency human access to production is time-bound and fully audited; access works correctly through a regional failover.
+
+**Non-functional requirements:** zero standing high-privilege access; every credential-access event logged and exportable for PCI-DSS audit; secret-retrieval latency does not add materially to the payment-authorization hot path (§7); RBAC scope for every service is the lowest necessary, verified, not assumed.
+
+**Architecture:**
+```mermaid
+graph TB
+ subgraph "East US 2 (primary)"
+  Auth[Auth Service<br/>System-assigned Managed Identity]
+  KV1[Key Vault: payments-prod-eastus<br/>RBAC model, object-level scoping]
+  Recon[Reconciliation Service<br/>System-assigned Managed Identity]
+  Auth -->|Key Vault Secrets User<br/>on card-processor-api-key ONLY| KV1
+  Recon -->|Key Vault Secrets User<br/>on settlement-sftp-creds ONLY| KV1
+ end
+ subgraph "West Europe (standby)"
+  KV2[Key Vault: payments-prod-westeu<br/>synchronized via rotation pipeline]
+ end
+ PIM[PIM: Key Vault Secrets Officer<br/>eligible, not standing]
+ OnCall[On-call engineer] -->|activate: MFA + device compliance<br/>+ justification, 4h auto-expire| PIM
+ PIM -->|time-bound| KV1
+ KV1 -.->|rotation-time sync| KV2
+```
+
+**Component glossary:** each service has its own system-assigned Managed Identity (§2.3) — no shared identity across services, so a compromise of one service's identity doesn't grant access to another's secrets; each Key Vault uses the RBAC authorization model (§8) with object-level role assignments scoped to exactly the one secret each service needs; PIM governs the only human, standing-privilege-capable path into the vault.
+
+**REST API design (internal secret-resolution, illustrative):**
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/internal/config/card-processor-key` | GET | Resolved by the config provider via Managed-Identity-authenticated Key Vault reference at startup — never a direct application-level HTTP call on the payment hot path |
+
+**Data model — audit table (application-level supplement to Key Vault's own logs):**
+
+| Column | Type | Description |
+|---|---|---|
+| `AccessId` | `uniqueidentifier` | Primary key |
+| `PrincipalId` | `nvarchar(64)` | Managed Identity or user object ID from Key Vault's diagnostic log |
+| `SecretName` | `nvarchar(128)` | Never the secret value itself |
+| `Operation` | `nvarchar(16)` | GET / SET / DELETE |
+| `TimestampUtc` | `datetime2` | |
+| `PimActivationId` | `uniqueidentifier NULL` | Populated only for human access via PIM, correlating to the activation justification/ticket |
+
+**Caching:** each service caches its resolved secret in memory for a bounded window (§7), refreshing proactively before expiry rather than reactively on a `403`/expired-credential failure, to avoid a thundering-herd re-fetch against Key Vault's rate limit at the moment of expiry.
+
+**Messaging:** not directly applicable to the identity plane; rotation events publish to an internal Event Grid topic so dependent services can proactively invalidate their cache rather than waiting for a stale-credential failure.
+
+**Scaling:** per §9, one Key Vault per region, with a scheduled rotation-time synchronization job (not real-time replication, which Key Vault doesn't natively provide) — the sync job itself authenticates via its own narrowly-scoped Managed Identity, with write access to both regional vaults' specific secrets only.
+
+**Failure handling:** a regional failover routes the standby region's services to `payments-prod-westeu`, which must have received the current secret value via the last successful sync — the DR runbook explicitly verifies sync freshness as a pre-failover check, since a stale secret in the standby vault would cause authorization failures immediately upon cutover, a distinct and separate failure mode from the compute/network failover this domain's Module 65 addresses.
+
+**Monitoring:** Key Vault diagnostic logs and PIM activation logs exported to the same Log Analytics workspace as the application audit table above, with a scheduled reconciliation query flagging any Key Vault access event with no corresponding PIM activation record for a human principal (a structural check for the Expert Q9 audit-trail-volume concern, applied specifically to detect unexpected out-of-band access).
+
+**Trade-offs:** object-level (not vault-level) RBAC scoping is chosen despite its higher initial configuration effort, because a vault-level grant to any of the three services would violate the least-privilege requirement stated in the non-functional requirements — the added configuration cost is accepted as the direct, necessary price of the stated PCI-relevant requirement, not an optional hardening step.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** every service's identity is independently scoped; secret retrieval is cached and rate-limit-safe; human access is PIM-gated and fully auditable; the design is expressible as reviewable Infrastructure-as-Code.
+
+**Class diagram:**
+```mermaid
+classDiagram
+ class ManagedIdentity {
+  +string PrincipalId
+  +ResourceLifecycle boundTo
+ }
+ class RoleAssignment {
+  +string Scope
+  +string RoleDefinition
+  +ManagedIdentity principal
+ }
+ class KeyVaultSecretClient {
+  -TokenCredential credential
+  -MemoryCache cache
+  +GetSecretAsync(name) Secret
+  -RefreshBeforeExpiry() void
+ }
+ class PimActivation {
+  +string Justification
+  +TimeSpan Duration
+  +DateTime ActivatedAt
+  +bool RequiresDeviceCompliance
+ }
+ class AuditLogger {
+  +LogAccess(principalId, secretName, operation) void
+ }
+ KeyVaultSecretClient --> ManagedIdentity : authenticates via
+ RoleAssignment --> ManagedIdentity
+ PimActivation --> RoleAssignment : grants time-bound
+ KeyVaultSecretClient --> AuditLogger
+```
+
+**Sequence diagram — cached secret retrieval, avoiding per-request Key Vault calls (§7, Expert Q9):**
+```mermaid
+sequenceDiagram
+ participant Svc as Auth Service
+ participant Cache as In-memory cache
+ participant MI as Managed Identity / IMDS
+ participant KV as Key Vault
+
+ Svc->>Cache: get card-processor-api-key
+ alt cache hit, not near expiry
+  Cache-->>Svc: cached value
+ else cache miss or near expiry
+  Svc->>MI: acquire token (local IMDS call)
+  MI-->>Svc: token
+  Svc->>KV: GET secret (RBAC + network check)
+  KV-->>Svc: secret value
+  Svc->>Cache: store with TTL
+ end
+```
+
+**Design patterns used:** Proxy (`KeyVaultSecretClient` wrapping the raw SDK call with caching, transparent to callers); Decorator (`AuditLogger` wrapping access without the core client needing awareness of audit requirements); Template Method (PIM activation lifecycle — request, MFA/device check, time-bound grant, auto-expire).
+
+**SOLID mapping:** Single Responsibility (`KeyVaultSecretClient` handles retrieval/caching only; `AuditLogger` handles logging only — a change to audit-log format never touches retrieval logic); Open/Closed (a new secret consumer implements against the same `KeyVaultSecretClient` interface without modifying it); Liskov (any `TokenCredential` implementation — Managed Identity, or a federated-credential implementation for Expert Q4's cross-cloud case — must be substitutable without the `KeyVaultSecretClient` needing to know which); Dependency Inversion (services depend on the `KeyVaultSecretClient` abstraction, never on a raw HTTP call to Key Vault's REST API directly).
+
+**Extensibility:** a new service onboards by requesting its own system-assigned Managed Identity and one narrowly-scoped `RoleAssignment` — no shared-identity refactor required, preserving each service's independent blast radius as the system grows.
+
+**Concurrency/thread safety:** the in-memory cache's refresh-before-expiry logic must avoid a **cache stampede** — multiple concurrent requests discovering an expired entry simultaneously and all independently calling Key Vault — mitigated via a single-flight/lock-per-key pattern so only one caller actually issues the Key Vault call while concurrent callers await its result, directly protecting against the §7 throttling risk under concurrent load.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** the payment-authorization service began intermittently returning `503`s during a regional traffic spike (a marketing-driven volume surge), correlating with a burst of `429 Too Many Requests` responses from Key Vault visible in the service's own dependency-failure logs, though overall CPU/memory on the authorization service's compute tier showed no saturation.
+
+**Root cause:** a recent deployment had introduced a code path (a new fraud-scoring feature) that read a second, separate Key Vault secret (a fraud-vendor API key) **on every authorization request**, without the same caching wrapper the original card-processor-key retrieval used — the new code called the Key Vault SDK directly, bypassing `KeyVaultSecretClient` entirely, because the engineer implementing the feature was unaware the caching wrapper existed as a required pattern rather than an optional convenience. Under normal traffic volume this uncached call rate stayed below Key Vault's per-vault throttling threshold; the marketing-driven spike pushed the aggregate uncached request rate (across all horizontally-scaled instances of the authorization service) past the threshold, and Key Vault began returning `429`s, which the new code path didn't retry with backoff, propagating as authorization failures.
+
+**Investigation:** Key Vault's own diagnostic logs (exported to Log Analytics, §12's monitoring design) showed the `429` rate correlating precisely with the traffic spike and with requests for the new fraud-vendor secret specifically, not the existing card-processor secret (which remained within its cached, low-rate access pattern) — immediately isolating the new code path as the source rather than a vault-wide capacity issue.
+
+**Tools:** Key Vault diagnostic logs/Azure Monitor metrics (request rate and throttling responses per secret); Application Insights dependency tracking on the authorization service, correlating `503`s to the specific upstream Key Vault dependency call; a code review of the new fraud-scoring feature's commit history confirming the missing caching wrapper.
+
+**Fix:** the fraud-vendor secret retrieval was refactored to use the existing `KeyVaultSecretClient` caching wrapper (§13), immediately resolving the throttling; a retry-with-exponential-backoff policy was additionally added at the `KeyVaultSecretClient` layer itself (not per-call-site) so any future direct-SDK bypass would still inherit basic resilience even if the caching convention were again missed.
+
+**Prevention:** (1) a static-analysis/lint rule flagging any direct `SecretClient`/Key Vault SDK usage outside the sanctioned `KeyVaultSecretClient` wrapper, converting "use the wrapper" from an unenforced convention into a build-time-enforced requirement (this course's recurring "structural enforcement over reliance on individual knowledge" principle); (2) load-testing new features that introduce a Key Vault dependency explicitly against a realistic traffic-spike scenario before production rollout, not only steady-state load (§7's benchmarking guidance); (3) an architecture-review checklist item requiring any new secret-consuming code path to explicitly state its caching strategy before merge.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** choosing the authentication mechanism for services needing to read production Key Vault secrets.
+
+**Option A — Managed Identity (system-assigned):**
+*Advantages:* no standing credential to leak (§8); no rotation burden; simplest configuration for the common single-resource case; faster token acquisition via local IMDS (§7).
+*Disadvantages:* tied to a single Azure resource's lifecycle; not usable from outside Azure (a genuinely external or cross-cloud workload cannot use it directly, Expert Q4).
+*Cost:* no direct cost; indirect operational savings from eliminated secret-rotation overhead.
+*Complexity:* low.
+
+**Option B — Service principal with client secret:**
+*Advantages:* works from anywhere, including outside Azure, with no dependency on Azure-hosted compute.
+*Disadvantages:* a genuine, standing, storable credential — the exact risk class Expert Q2 examines; requires an active rotation discipline or the credential becomes a long-lived, high-value target.
+*Cost:* ongoing operational cost of secret rotation and secure storage of the secret itself (a bootstrapping problem — where does *this* credential live?).
+*Complexity:* moderate, with meaningfully higher standing risk than Option A.
+
+**Option C — Workload Identity Federation (service principal + external OIDC trust):**
+*Advantages:* no long-lived shared secret, works from outside Azure (CI/CD pipelines, other clouds) — combines Option A's no-standing-credential property with Option B's outside-Azure reach.
+*Disadvantages:* more complex initial trust-relationship configuration than either alternative; requires the external system to have its own OIDC-compatible short-lived-token issuance capability.
+*Cost:* low ongoing cost once configured; moderate one-time setup cost.
+*Complexity:* moderate-to-high initial configuration, low ongoing operational burden.
+
+**Recommendation: Option A (Managed Identity) as the unconditional default for any Azure-hosted workload; Option C (Workload Identity Federation) for any workload genuinely running outside Azure or across a cloud boundary; Option B (service-principal secret) only where neither A nor C is technically viable, with mandatory, documented justification and an active rotation schedule.** This ordering directly reflects §8's structural framing — the choice isn't a matter of preference but a matter of technical necessity, and Option B's standing-credential risk should never be accepted as a convenience when Option A or C is genuinely available.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** a payment-processor credential leak or an over-broad RBAC grant reaching production credential material carries direct regulatory (PCI-DSS) and financial consequence — the object-level Key Vault scoping and Managed Identity defaults this module establishes are not abstract security hygiene but a direct control against a specific, quantifiable class of incident regulators and card networks explicitly audit for.
+
+**Engineering trade-offs:** the recurring trade in this module — Option A's simplicity against Option C's broader applicability, PIM's activation friction against standing-privilege risk — always resolves the same way at this bar: accept the added configuration/process cost when it closes a genuine, named risk (credential leak, standing high-privilege access), and never accept a convenience shortcut (a shared identity, a vault-level grant, a standing secret-based service principal) purely to save initial setup time.
+
+**Technical leadership:** the Production Debugging incident (§14) is a leadership lesson as much as a technical one — a well-designed caching wrapper (`KeyVaultSecretClient`) provided no protection the moment a new engineer, unaware it existed as a required pattern, bypassed it; the durable fix isn't just the retry-policy addition but the lint-rule enforcement (§14's prevention item 1), converting institutional knowledge that lived only in one team's heads into something the build system itself enforces for every future contributor.
+
+**Cross-team communication:** onboarding a new service to this platform's IAM model requires the platform/security team and the application team to agree explicitly on scope (which specific secret, which specific role) before any code is written — the object-level RBAC design (§12/§13) makes this negotiation concrete and reviewable (a specific role-assignment PR) rather than an informal, undocumented "just grant access" request that tends to default toward over-broad convenience.
+
+**Architecture governance:** every Managed Identity, role assignment, and Key Vault access-policy-to-RBAC migration should be expressed in Infrastructure-as-Code and reviewed through standard change management — a portal-driven, manually-configured Key Vault access policy is both unauditable and precisely the kind of undocumented, hard-to-review change a PCI-DSS audit will specifically flag as a finding.
+
+**Cost optimization:** Managed Identity's elimination of secret-rotation operational overhead (§9's HA discussion) is a genuine, if easy-to-overlook, cost saving beyond the direct security benefit — the engineering time spent building and maintaining rotation automation for service-principal secrets is a real, recurring cost that Managed Identity adoption largely eliminates for any workload capable of using it.
+
+**Risk analysis:** the two incidents in this module (RBAC scope-inheritance sprawl; Key Vault throttling from an uncached bypass) share the same underlying shape as this domain's networking module's incidents: a component that appeared correct under normal observation (a role assignment that "worked," a service that functioned fine under steady-state load) carried a latent gap that only a specific triggering condition (a compliance audit; a traffic spike) exposed — risk registers for IAM/secrets infrastructure should explicitly track "conditions not yet exercised," including untested regional-failover secret synchronization and undrilled PIM emergency-access paths.
+
+**Long-term maintainability:** RBAC assignments, Key Vault scoping, and caching conventions all decay identically without active, scheduled hygiene review — the standing governance program (Expert Q10) exists precisely because each individual convenient shortcut (one broad grant, one bypassed cache wrapper) is locally reasonable in isolation, and only a structural, periodic re-audit prevents the cumulative drift from eventually becoming the next incident in this module's own pattern.
+
+---
 
 ## 18. Revision
 **Key takeaways**: Azure RBAC's hierarchical scope inheritance is the single most consequential structural divergence from AWS IAM covered in this module — a role assignment at a high scope silently and automatically cascades to everything beneath it, including resources created later, with no local visibility at the affected resource itself, making an AWS-derived "check each resource's explicit attachments" review habit systematically insufficient. Entra ID unifies identity provisioning and RBAC's authorization backbone more tightly than AWS's separate IAM/Cognito split, and Conditional Access provides a genuinely distinct authentication-time policy layer complementing (not duplicating) RBAC's resource-authorization-time layer. Key Vault's combined KMS-plus-Secrets-Manager model requires deliberately recreating AWS's two-factor defense-in-depth via object-level RBAC scoping and network isolation, rather than inheriting it automatically from a two-service split. Managed Identities and Workload Identity Federation solve the same problems as AWS instance/execution roles and cross-account AssumeRole, respectively, with genuinely different mechanics worth knowing precisely rather than assuming naive equivalence. PIM's just-in-time activation model has no direct AWS-native equivalent and represents a materially stronger default least-privilege posture for high-risk roles, at the cost of requiring an explicit break-glass path for genuine emergency responsiveness.

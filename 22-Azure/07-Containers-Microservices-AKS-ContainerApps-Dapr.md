@@ -97,6 +97,58 @@ graph TB
 
 ---
 
+## 7. Performance Engineering
+
+**CPU/Memory:** AKS node-pool sizing is a bin-packing problem, not a per-pod-request exercise — a node pool sized against average pod requests without accounting for the **kubelet's reserved capacity** (`--kube-reserved`, `--system-reserved`, roughly 20-25% of a small node's total capacity on AKS's default reservation formula) systematically overcommits, leaving pods evicted or pending under real load even though the raw node-count math looked sufficient on paper. Pod density per node is bounded not just by CPU/memory requests but by AKS's per-node **max-pods** limit (30 by default on Azure CNI, up to 250 with Azure CNI Overlay) — a workload with many small, low-resource pods can exhaust the pod-count ceiling well before exhausting CPU/memory, silently forcing more, larger nodes than the resource math alone would suggest.
+
+**Latency:** Dapr's sidecar-injection model adds a **network hop through localhost** for every building-block call (`daprd` intercepts the call, applies mTLS, resolves the target, forwards it) — typically 1-3ms of added latency per hop for co-located sidecar-to-sidecar traffic, which is negligible for most business logic but compounds meaningfully in a call chain with several sequential Dapr-mediated hops (a 5-hop saga-style chain can accumulate 5-15ms of pure sidecar overhead before any business logic executes) — a Principal Engineer should benchmark actual chain depth against latency SLA before assuming Dapr's convenience is free.
+
+**Throughput:** Dapr sidecar CPU overhead (`daprd` typically requests 100m CPU / 250Mi memory per pod by default) multiplies across every pod in a mesh — at 500 pods, that's 50 vCPU and 125GiB of pure sidecar overhead cluster-wide, a real, budgeted line item, not a rounding error, and directly competes with application-pod capacity for the same node-pool budget the sizing exercise above computed.
+
+**Scalability:** KEDA's polling-interval configuration (`pollingInterval`, default 30s) is a direct latency-vs.-cost trade-off for event-driven scale-out — a shorter interval detects scaling need faster (reducing the queue-backlog-to-scale-out lag) at the cost of more frequent scaler-API calls against the event source (Service Bus, Kafka), which itself has rate limits; sizing this interval against the workload's actual burst profile, not leaving it at the default, is the same "verify the default against actual requirement" discipline recurring throughout this domain.
+
+**Benchmarking:** Benchmark Container Apps' cold-start-from-zero latency under the *actual* container image size and runtime in use — a .NET AOT-compiled image scaling from zero can start in under a second, while a large, JIT-warming JVM image can take 10-20+ seconds, a difference that decisively determines whether scale-to-zero is viable at all for a given latency SLA (2.5's cold-start discipline, now with concrete numbers).
+
+**Caching:** Dapr's state-management API supports a configurable local, in-memory cache layer per state-store component for read-heavy workloads, trading a bounded staleness window for materially reduced round-trips to the backing store — evaluate explicitly per field, since a stale read is not free just because Dapr makes the caching configuration trivial to turn on.
+
+---
+
+## 8. Security
+
+**Threats:** An AKS cluster with Kubernetes RBAC left in its cluster-local (non-Azure-AD-integrated) mode means cluster access grants are invisible to, and unauditable from, the organization's central identity governance — an ex-employee's cluster-local `ClusterRoleBinding` can silently outlive their Azure AD account deprovisioning entirely, a genuine, common finding in cluster security reviews. A Dapr mesh running without mTLS enforced between sidecars exposes every building-block call (state, pub/sub, service invocation) to plaintext interception by anything with pod-network access.
+
+**Mitigations:** Enable **AKS-managed Azure AD integration** (`azurermkubernetescluster` with `azure_active_directory_role_based_access_control` block) so every `kubectl` action authenticates against and is authorized by Azure AD identities and groups, not cluster-local service accounts — this makes cluster access reviewable via the same Azure AD access-review process already governing every other resource in this domain, rather than a separate, easily-forgotten cluster-local permission model. Enable Dapr's mTLS (on by default since Dapr 1.0, backed by a self-hosted or Azure Key Vault-backed root certificate) and explicitly verify it hasn't been disabled for a "simpler local debugging" reason that persisted into production.
+
+**OWASP mapping:** Broken access control if cluster-local RBAC bindings persist independent of Azure AD deprovisioning; security misconfiguration if Dapr mTLS or Container Apps ingress is left in an overly permissive default; sensitive data exposure if Dapr sidecar-to-sidecar traffic traverses the pod network unencrypted.
+
+**AuthN/AuthZ:** Container Apps' **managed identity** integration (system- or user-assigned) lets a Container App authenticate to Key Vault, Azure SQL, or Storage without any credential ever appearing in application configuration — directly the same credential-elimination discipline established for Managed Identity elsewhere in this domain, now at the serverless-container tier specifically. Dapr's own access-control policies (`dapr.io/config` scoping which apps may invoke which other apps' endpoints) should be explicitly configured per-application rather than left at Dapr's permissive default, which allows any app in the mesh to invoke any other app's exposed methods.
+
+**Secrets:** Route Dapr's Secrets building-block API through Key Vault rather than a local, less-governed secrets store, preserving this domain's centralized-secrets-governance posture even as Dapr's abstraction makes the specific backing store swappable.
+
+**Encryption:** mTLS in transit for all Dapr sidecar communication (on by default, explicitly verify not disabled); standard Azure Disk/Storage encryption-at-rest for AKS persistent volumes and Container Apps-mounted storage.
+
+---
+
+## 9. Scalability
+
+**Horizontal scaling:** AKS's **cluster autoscaler** adds/removes nodes based on pending-pod scheduling pressure, while **KEDA** scales pod replica counts based on external event-source metrics — these operate at different layers and must be tuned together (7's node-pool-exhaustion finding): a KEDA scaler that can request more pods than the cluster autoscaler can provision nodes for fast enough recreates the exact node-pool-capacity-exhaustion risk already flagged.
+
+**Vertical scaling:** AKS node-pool VM SKU selection should be matched to the workload's actual CPU-to-memory ratio (compute-optimized vs. memory-optimized SKUs) rather than defaulting to a general-purpose SKU uniformly — a mismatch wastes the unused resource dimension across every node in the pool, compounding at scale.
+
+**Caching:** See 7 — Dapr's optional state-store caching layer.
+
+**Replication/Partitioning:** Container Apps environments can span multiple **revisions** with configurable traffic-splitting, enabling canary/blue-green rollout patterns natively without a separate service-mesh traffic-management layer — a genuine operational simplification over AKS, where equivalent traffic-splitting requires an explicit ingress controller or service-mesh configuration.
+
+**Load balancing:** AKS's default Azure Load Balancer (Layer 4) or an ingress controller (Layer 7, e.g., NGINX or Application Gateway Ingress Controller) must be explicitly chosen based on whether path-based/host-based routing is actually required — defaulting to a Layer 7 ingress controller for a workload that only ever needed Layer 4 routing adds unnecessary operational surface.
+
+**High Availability:** AKS control-plane HA is automatic on the Standard tier (SLA-backed, multi-zone control plane); node-pool HA requires explicit **zone-redundant node pools** spanning multiple Availability Zones, directly recurring the "AZ is chosen, not automatic" theme established for VMs elsewhere in this domain, now at the AKS node-pool layer.
+
+**Disaster Recovery:** Container Apps' true scale-to-zero and Dapr's portable building-block APIs both simplify DR for stateless services (redeploying to a secondary region requires no state migration for the compute layer itself), but stateful backing services (the Dapr state store, any AKS-attached persistent volume) still require the explicit, workload-specific DR strategy this domain's earlier modules established — the orchestration layer's own DR-simplicity doesn't extend to the data it depends on.
+
+**CAP theorem:** Not directly applicable to the orchestration layer itself; the CAP trade-offs belong to whichever backing store (Cosmos DB, Redis, Service Bus) Dapr's building blocks are configured against, per this domain's Cosmos DB module.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -144,6 +196,67 @@ graph TB
  **A:** (1) A mandatory architecture-review checklist item requiring explicit justification for any new AKS cluster provisioning request, specifically requiring the requester to document the concrete Kubernetes-API-level requirement Container Apps cannot satisfy (directly operationalizing the decision framework as a required, structured question rather than assuming awareness). (2) An internal reference architecture/decision-tree document (like this module's diagram) made mandatory reading in any Azure onboarding process, specifically because demonstrated that without such a structured prompt, an entire viable tier can go unconsidered indefinitely.
 10. **Q: As a Principal Engineer establishing Azure container-platform standards for an organization migrating from AWS, design the specific set of standing architectural reviews and automated checks (synthesizing this entire module) you would require for every new Azure containerized workload.**
  **A:** (1) Mandatory documented justification for AKS over Container Apps, requiring an articulated Kubernetes-API-level requirement (Advanced Q9) — necessary given the demonstrated risk of defaulting to AKS purely from incomplete cross-cloud mental models. (2) Mandatory scale-to-zero cold-start SLA verification testing for any Container Apps workload before production launch (Advanced Q3) — necessary because container-based framing misleadingly suggests no cold-start concern exists. (3) Mandatory Dapr-abstraction-sufficiency review before adopting Dapr's generic APIs for any integration requiring a backing-service-specific advanced capability (Advanced Q4, Advanced Q5) — necessary to avoid silently forfeiting needed functionality behind a lowest-common-denominator abstraction. (4) Mandatory aggregate, correlated-spike node-pool capacity planning for any AKS cluster hosting multiple KEDA-scaled workloads (Advanced Q7) — necessary because per-workload scaler configuration alone doesn't guarantee sufficient shared cluster capacity. (5) Mandatory dedicated "Azure-native-only capability" research phase as a distinct, required step in any AWS-to-Azure migration plan, independent of concept-by-concept comparative mapping (Advanced Q1, Advanced Q8) — the single most structurally important finding this module contributes, since it addresses a blind spot in this domain's own comparative-teaching methodology, not just a specific service's configuration risk.
+
+### Expert (10)
+1. **Q: A payments platform runs a Dapr-mediated saga across five microservices (order → risk-check → funding → settlement → notification) on AKS. During a load test, p99 latency for the full saga is 3x higher than the sum of each individual service's own measured p99. Diagnose.**
+ **A:** Each service's own p99 was measured in isolation, but the saga chains five sequential Dapr-mediated hops — per 7, each hop adds 1-3ms of sidecar overhead, but more significantly, a chain of independently-measured p99s does not compose additively: if each hop has a 1% chance of hitting its own p99 tail latency, the probability at least one of five sequential hops hits its tail is roughly 1-(0.99)^5 ≈ 4.9%, meaning the *chain's* p99 is driven by a materially more frequent event than any single hop's own p99 — the fix is to load-test and alert on the full saga's end-to-end latency distribution directly, not infer it by summing component p99s, and to identify whether any specific hop's tail is disproportionately contributing (via Application Insights-style distributed tracing across the Dapr-mediated chain).
+ **Why correct:** Correctly applies tail-latency composition math rather than naive summation, and ties the diagnosis to Dapr's specific hop-count structure.
+ **Common mistakes:** Assuming end-to-end latency is simply the sum of component latencies, missing that tail probabilities compound multiplicatively across a chain.
+ **Follow-ups:** "How would you reduce the saga's tail sensitivity without redesigning the five-service topology?" (Parallelize independent hops where the saga's actual dependency graph allows it — not every step needs to be strictly sequential — reducing the effective chain depth contributing to tail compounding.)
+
+2. **Q: A team wants to run a stateful, ordered-processing workload (a trade-matching engine requiring strict in-memory sequencing) on Container Apps for its scale-to-zero economics. Evaluate.**
+ **A:** Push back — Container Apps' scale-to-zero and KEDA-driven horizontal scaling model assumes a workload's instances are stateless and interchangeable; a trade-matching engine requiring strict in-memory ordering needs a *single, continuously-running, stateful* instance (or a carefully partitioned set of them with explicit ownership), which directly conflicts with scale-to-zero's premise that any instance can be safely terminated and a fresh one started to serve the next request — Container Apps can still host such a workload (with `minReplicas: 1` and no scale-to-zero), but doing so forfeits the exact economic benefit that motivated the Container Apps choice in the first place, meaning the workload's actual requirement (strict ordering, statefulness) should drive toward AKS with an explicit StatefulSet and pod-identity-based partitioning, or a dedicated single-writer-region pattern, not Container Apps chosen primarily for a cost benefit it cannot actually realize for this workload shape.
+ **Why correct:** Identifies the structural conflict between scale-to-zero's statelessness assumption and the workload's genuine ordering requirement.
+ **Common mistakes:** Assuming any workload can be "made to fit" Container Apps by simply setting `minReplicas: 1`, without recognizing this forfeits the platform's core value proposition for that workload.
+ **Follow-ups:** "What would a correctly-scoped Container Apps use case within the same trading platform look like?" (The stateless notification or risk-check services in the same saga, Expert Q1 — genuinely interchangeable, horizontally-scalable instances with no ordering requirement.)
+
+3. **Q: Design a rollback strategy for a Dapr component configuration change (e.g., swapping the state-store backing service from Cosmos DB to Redis) that minimizes blast radius, given that Dapr component changes are typically applied cluster/environment-wide.**
+ **A:** Use Dapr's **scoped components** feature (`scopes` field in the component YAML) to restrict the new component configuration to a specific, canary subset of applications first, rather than applying the change environment-wide simultaneously — deploy the new Redis-backed state-store component scoped only to a non-critical, low-traffic service, verify correctness and latency characteristics under real production traffic for that scoped subset, then progressively widen the scope, directly the same canary-rollout discipline this course applies everywhere, now specifically enabled by a Dapr-native mechanism rather than requiring a separate deployment-pipeline feature.
+ **Why correct:** Names the specific Dapr mechanism (`scopes`) that enables safe, incremental rollout of what would otherwise be a blast-radius-wide configuration change.
+ **Common mistakes:** Assuming Dapr component changes are inherently all-or-nothing across the environment, missing the scoping mechanism that exists specifically to avoid this.
+ **Follow-ups:** "What would you monitor during the canary window specifically?" (State-store operation latency and error rate for the scoped app, compared against its own pre-change baseline — not just absolute thresholds, since Redis and Cosmos DB have genuinely different latency profiles.)
+
+4. **Q: An AKS cluster's node OS image falls behind Microsoft's supported patch baseline because the team disabled auto-upgrade to avoid unplanned pod disruption during business hours. Assess the risk this creates and design a fix.**
+ **A:** Disabling auto-upgrade entirely to avoid disruption trades a managed, predictable risk (scheduled node upgrades with configurable surge/max-unavailable settings) for an unmanaged, compounding one (an increasingly unpatched node OS, eventually falling outside Microsoft's support window entirely, and accumulating an increasingly large, higher-blast-radius upgrade when finally performed) — the correct fix is not disabling auto-upgrade but scheduling it via AKS's **maintenance windows** feature, confining node upgrades to an explicitly chosen low-traffic window, combined with a `PodDisruptionBudget` ensuring the upgrade's rolling surge respects the workload's actual availability requirement during that window — achieving both goals (patched nodes, controlled disruption timing) rather than trading one off against the other entirely.
+ **Why correct:** Identifies the false dichotomy and proposes the specific AKS features (maintenance windows, PodDisruptionBudget) that resolve it.
+ **Common mistakes:** Treating "disable auto-upgrade" and "accept disruption" as the only two options, missing AKS's scheduling and disruption-control features designed specifically for this trade-off.
+ **Follow-ups:** "What's the risk of relying solely on a PodDisruptionBudget without a maintenance window?" (An upgrade could still trigger at an unpredictable time, respecting the availability budget but not necessarily the business's actual low-traffic preference — both mechanisms address different halves of the same concern.)
+
+5. **Q: A Container App using KEDA HTTP-based scaling exhibits a scaling "flap" — rapidly scaling from 2 to 15 replicas and back to 2 within a 90-second window, under a traffic pattern that is not actually bursty at the request level. Diagnose.**
+ **A:** Likely cause: the `concurrentRequests` scale-rule threshold is set too low relative to the workload's actual per-instance capacity, combined with KEDA's default cooldown period being too short for the workload's actual request-duration profile — if requests take, say, 2-3 seconds each and the scaler evaluates concurrency every few seconds with an aggressive scale-up and a short cooldown, a normal, non-bursty request pattern can still trigger oscillating scale-up/scale-down cycles as the scaler chases a noisy, short-window concurrency measurement rather than a stable trend — the fix is tuning `cooldownPeriod` (extending it to smooth over transient dips) and/or the concurrency threshold itself against a measured, not assumed, per-instance capacity, and considering KEDA's stabilization-window equivalent to dampen rapid reversals.
+ **Why correct:** Correctly diagnoses a scaler-tuning issue rather than an actual traffic-pattern issue, and proposes the specific parameters to adjust.
+ **Common mistakes:** Assuming scaling flap always indicates genuinely bursty traffic, without first checking whether the scaler's own tuning (cooldown, threshold) is amplifying a non-bursty pattern into oscillation.
+ **Follow-ups:** "What operational cost does this flap create beyond the obvious resource churn?" (Repeated cold-start latency for the newly-scaled-up replicas, per 2.5 and 7 — the flap isn't just wasteful, it's actively degrading the tail latency the scaling was meant to protect.)
+
+6. **Q: Design an approach for achieving zero-downtime Dapr sidecar version upgrades across a large AKS cluster, given that `daprd` is injected per-pod and a version mismatch between sidecar and control-plane components could cause compatibility issues.**
+ **A:** Use Dapr's documented rolling-upgrade path: upgrade the Dapr **control-plane components** (`dapr-operator`, `dapr-sidecar-injector`, `dapr-placement`, `dapr-sentry`) first, verifying Dapr's stated backward-compatibility guarantee between adjacent minor versions covers the specific upgrade path in question, then trigger a rolling restart of application pods (via a deployment rollout, not a manual bulk pod deletion) so each pod picks up the new sidecar image individually, under the deployment's own `PodDisruptionBudget`/surge settings — critically, verify in a non-production environment first that the specific sidecar-version jump is within Dapr's supported compatibility window, since a version skew outside that window risks exactly the kind of silent building-block API incompatibility this domain has repeatedly warned about for unverified assumptions.
+ **Why correct:** Names the correct upgrade ordering (control plane before sidecars) and the specific verification step (compatibility window) that prevents a version-skew failure.
+ **Common mistakes:** Upgrading application pods and Dapr control-plane components in the same rollout without staging, or bulk-restarting pods outside the deployment's own rolling-update mechanism, forfeiting disruption control.
+ **Follow-ups:** "How would you detect a sidecar-version-skew issue if it occurred despite this process?" (Dapr's sidecar exposes its own version via its health/metadata endpoint; a monitoring check comparing sidecar version across all pods against the expected target version would surface stragglers or failed rollouts immediately.)
+
+7. **Q: A FinTech firm's compliance team requires that all inter-service calls within a Dapr mesh be independently auditable — every service invocation logged with caller identity, callee identity, and timestamp, retained for seven years per regulatory requirement. Design this without modifying every service's application code.**
+ **A:** Leverage Dapr's **middleware pipeline** — specifically a custom or configured HTTP middleware component inserted into the Dapr sidecar's request pipeline (via Dapr's `pipeline.yaml` configuration) that intercepts every service-invocation call transparently, at the sidecar layer, logging caller/callee identity (available from the mTLS-established SPIFFE identity Dapr's Sentry component issues per 2.3/8) and timestamp to a durable, long-retention sink (Azure Monitor / Log Analytics with an explicit seven-year retention policy, or an immutable Storage Account with legal-hold configuration) — this achieves the audit requirement at the infrastructure layer, transparently to every service using Dapr's Service Invocation building block, avoiding the need to instrument audit logging into each of potentially dozens of services' application code individually, and ensuring no service can accidentally omit the required audit trail.
+ **Why correct:** Uses Dapr's actual middleware extension point and its mTLS-derived identity to satisfy the requirement transparently and consistently, rather than relying on per-service discipline.
+ **Common mistakes:** Proposing per-service application-code logging, which is both more implementation effort and creates the risk that a future new service simply forgets to include it — missing that Dapr's sidecar architecture is specifically well-suited to enforcing cross-cutting concerns transparently.
+ **Follow-ups:** "What's the retention-cost implication of seven years of full audit logging, and how would you manage it?" (Directly this module's sibling file's Log Analytics ingestion-vs-retention cost trade-off — tiering: hot/queryable retention for a shorter operationally-useful window, cold/archive-tier storage for the remaining regulatory-mandated years at materially lower cost.)
+
+8. **Q: Critique the following claim from a platform team: "Since our AKS cluster passes its liveness and readiness probes for every pod, our deployment is healthy and safe to leave unattended overnight during a major traffic event."**
+ **A:** Overstated — liveness/readiness probes verify only that each individual pod can respond to its own configured probe endpoint; they say nothing about whether the *cluster* has sufficient node capacity for the current or an impending KEDA-triggered scale-out (7/9's node-pool-exhaustion risk), whether the Dapr control plane itself is healthy (a `dapr-placement` outage can silently break service-invocation routing while individual pods remain probe-healthy), or whether a saga-style multi-hop request chain's *end-to-end* success rate is acceptable even if every individual hop's pod-level health checks pass (Expert Q1's composition-latency finding, applied to error rate instead of latency) — pod-level probe health is a necessary but structurally insufficient signal for "the system is healthy," the same "component correctness ≠ system correctness" theme recurring at the container-orchestration layer.
+ **Why correct:** Correctly scopes what liveness/readiness probes actually verify and names three concrete failure modes they would miss entirely.
+ **Common mistakes:** Treating "all probes green" as equivalent to "system healthy," without considering cluster-capacity, control-plane, or cross-service composition failure modes outside any single pod's probe scope.
+ **Follow-ups:** "What additional signal would close this gap?" (End-to-end synthetic transaction monitoring exercising the full saga chain, plus explicit Dapr control-plane component health checks — the pod-level probes plus these two additional layers together approximate genuine system health.)
+
+9. **Q: A Container App's managed identity is granted `Key Vault Secrets User` at the Key Vault's root scope, and the team argues this is simpler to manage than per-secret access policies. Evaluate from a Principal Engineer's risk-analysis perspective.**
+ **A:** This is the same object-scoping violation this domain has repeatedly flagged for shared/broad identities, now at the Key Vault-secret-access layer specifically — a root-scoped grant means the Container App's identity (and anything that later compromises it) can read *every* secret in the Key Vault, not just the ones that specific application genuinely needs, meaning a single compromised, low-privilege-seeming service becomes a blast-radius-unlimited secrets-exfiltration vector; the operational-simplicity argument is real but should be weighed against this materially larger blast radius — the correct default is scoping access to the specific secrets (or, if Key Vault's access-control granularity requires it, a dedicated Key Vault per bounded-context/service-tier) the application actually needs, accepting the marginal management overhead as the direct cost of the blast-radius reduction, exactly the same trade already resolved in this domain's favor of explicit scoping for every prior identity/access-grant decision.
+ **Why correct:** Correctly identifies the pattern as a recurrence of this domain's established blast-radius discipline and states the trade honestly rather than dismissing the simplicity argument outright.
+ **Common mistakes:** Accepting "simpler to manage" as sufficient justification without weighing it against the concretely larger blast radius a compromised identity would have.
+ **Follow-ups:** "How would you structurally enforce this going forward across a growing number of Container Apps?" (An Azure Policy definition denying Key Vault role assignments scoped above the individual-secret or dedicated-vault level for any Container App managed identity — directly this domain's recurring "known lessons require automated enforcement, not just documentation" finding.)
+
+10. **Q: As a Principal Engineer setting the container-platform standard for a FinTech organization's new trading-adjacent microservices estate, synthesize this module's findings (including 7-9) into the specific set of standing platform guardrails you would mandate before any team can deploy to production.**
+ **A:** (1) Mandatory three-tier justification (AKS vs. Container Apps vs. ACI) per workload, per Advanced Q10, extended with an explicit statefulness/ordering-requirement check (Expert Q2) disqualifying Container Apps for genuinely stateful, strictly-ordered workloads. (2) Mandatory node-pool zone-redundancy and aggregate KEDA-scaling-capacity planning (9, Advanced Q7) verified against correlated multi-workload spike scenarios, not per-workload in isolation. (3) Mandatory Dapr mTLS and per-application invocation-scoping policy configuration (8) with a default-deny posture rather than Dapr's permissive default. (4) Mandatory end-to-end, full-chain latency and error-rate monitoring for any multi-hop Dapr-mediated saga (Expert Q1, Expert Q8), not solely per-hop or per-pod health signals. (5) Mandatory least-privilege, per-secret or per-vault Key Vault scoping for every Container App/AKS pod managed identity (Expert Q9), enforced via Azure Policy rather than relying on individual team discipline. (6) Mandatory AKS maintenance-window scheduling with `PodDisruptionBudget`-governed rolling upgrades (Expert Q4), rejecting "disable auto-upgrade" as an acceptable long-term posture. Each guardrail traces directly to a specific, demonstrated failure mode this module identified — the standard is not aspirational best practice but a direct, evidenced response to this module's own findings.
+ **Why correct:** Synthesizes the module's full depth — including the newly added performance/security/scalability sections — into concrete, enforceable platform policy rather than restating individual findings in isolation.
+ **Common mistakes:** Proposing generic "best practices" disconnected from this module's specific, evidenced failure modes, or omitting the enforcement mechanism (policy-as-code) that this domain has repeatedly shown is necessary for a known lesson to actually propagate reliably.
+ **Follow-ups:** "Which of these guardrails would you implement as a hard, blocking gate versus a soft, warn-and-track finding, and why?" (Hard-block: mTLS/scoping defaults and Key Vault scoping, since their failure mode is silent and severe; soft-warn initially for node-pool capacity planning, since it requires workload-specific judgment better surfaced for review than mechanically blocked, converting to a hard gate only once the review process has matured enough to set reliable thresholds.)
 
 ---
 
@@ -259,9 +372,178 @@ public class OrderNotificationPublisher
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-*(the incident, the four exercises, and the Advanced-tier Q&A — especially Advanced Q1's dedicated Azure-native-capability research-phase safeguard, Advanced Q4's targeted Dapr-abstraction escape hatch, and Advanced Q10's synthesized governance checklist — collectively constitute this module's system-design, debugging, and Principal-Engineer-level content.)*
+**Scenario:** Design the microservices platform underlying a FinTech firm's real-time payment-authorization system: an `order-intake` service accepts payment requests, a `risk-check` service scores fraud risk, a `funding` service moves money via an external payment processor, a `ledger` service posts the double-entry accounting record, and a `notification` service informs the customer — five services, each independently deployable, needing to communicate reliably under a strict sub-second p99 authorization SLA.
+
+**Functional requirements**
+- Accept payment-authorization requests and orchestrate the five-service flow to a terminal `APPROVED`/`DECLINED`/`FAILED` state.
+- Guarantee each step's state transition is durable and auditable (regulatory requirement — every hop's caller/callee/timestamp recorded, per Expert Q7).
+- Support independent per-service scaling under bursty, correlated transaction-volume spikes (e.g., a retail partner's flash sale).
+
+**Non-functional requirements**
+- p99 end-to-end authorization latency under 800ms (Expert Q1's tail-composition math directly applies against this budget).
+- Zero silent message loss between services (building on this domain's Event Grid dead-lettering discipline).
+- Full audit trail retained seven years (Expert Q7).
+- Services deployable and independently rollback-able without full-platform downtime.
+
+**Back-of-the-envelope estimation:** 200 TPS peak (a mid-size FinTech's realistic authorization volume) × 5 sequential Dapr-mediated hops = 1,000 hop-invocations/sec cluster-wide. At ~2ms average sidecar overhead per hop (7), that's roughly 10ms of pure sidecar latency consumed of the 800ms budget — not the bottleneck; the risk driver is tail-latency composition across five hops (Expert Q1), not raw throughput.
+
+**Architecture:** Each service deployed as its own AKS Deployment (chosen over Container Apps specifically because the `risk-check` service depends on a third-party fraud-scoring CRD-based operator, an articulated Kubernetes-API requirement per the three-tier framework), with Dapr sidecars providing service invocation (mTLS-secured, per 8), pub/sub (Service Bus-backed, for the asynchronous `notification` step, decoupling it from the synchronous authorization critical path), and state management (Cosmos DB-backed, for saga-state tracking). KEDA scales each service independently based on its own Service Bus queue depth or HTTP concurrency, with aggregate node-pool capacity planned against the correlated-spike scenario (9, Advanced Q7).
+
+**Components:** API Management (external-facing ingress, rate-limiting, and API-key validation); `order-intake`, `risk-check`, `funding`, `ledger` (synchronous, in the critical authorization path); `notification` (asynchronous, off the critical path via pub/sub); Dapr sidecars co-located with every service pod; Cosmos DB (saga state); Service Bus (pub/sub backbone); Log Analytics/Application Insights (this domain's sibling module's observability layer, correlating the full five-hop trace).
+
+**Database selection:** Cosmos DB for saga state specifically, chosen for its native multi-region write capability matching the platform's active-active DR posture (this domain's Databases module) — not a generic default, an explicit match to the "must remain available during a regional failover mid-authorization" requirement.
+
+**Caching:** Dapr's optional state-store read cache (7) applied specifically to `risk-check`'s reference data (merchant risk profiles), which changes infrequently and tolerates the bounded staleness window, explicitly *not* applied to any field participating in the authorization decision's own critical, must-be-current state.
+
+**Messaging:** Synchronous Dapr Service Invocation for the four steps genuinely on the authorization critical path (order-intake → risk-check → funding → ledger); asynchronous Dapr pub/sub for `notification`, since a customer notification delay of a few seconds has no authorization-correctness impact, directly avoiding adding a fifth synchronous hop to the latency budget unnecessarily.
+
+**Scaling:** Per-service KEDA scalers tuned against each service's actual per-instance capacity (Expert Q5's flap-avoidance tuning), with aggregate cluster node-pool capacity sized against the correlated-peak scenario, not each service's independent scaler configuration alone.
+
+**Failure handling:** A failed step triggers the saga's compensating-transaction path (this domain's Serverless/EDA modules' saga pattern), with idempotency keys on every step (this course's standing exactly-once discipline) preventing a retried `funding` call from double-charging. Dapr's built-in retry policies (`resiliency.yaml`) handle transient failures per-hop; a terminal failure after retries exhausted routes to a dead-letter path for manual investigation, never silently dropped.
+
+**Monitoring:** End-to-end saga trace latency and success rate (Expert Q8's "component health ≠ system health" finding directly motivates this), per-hop sidecar overhead trending (7), KEDA scaling-event correlation against node-pool capacity (9), and the mandatory audit-trail completeness check (Expert Q7).
+
+**Trade-offs:** AKS chosen over Container Apps specifically for `risk-check`'s CRD dependency, accepting AKS's operational burden for that one service while the remaining four services could, in principle, run on Container Apps instead — a mixed-tier deployment is a legitimate, deliberate outcome of applying the three-tier framework per-service rather than uniformly across the whole platform.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements:** Each saga step is idempotent, independently retryable, auditable, and composable into a coordinated multi-service authorization flow with a clear terminal state.
+
+**Class diagram:**
+```mermaid
+classDiagram
+ class IPaymentStep {
+ <<interface>>
+ +ExecuteAsync(context) StepResult
+ +CompensateAsync(context) void
+ }
+ class OrderIntakeStep {
+ +ExecuteAsync(context) StepResult
+ }
+ class RiskCheckStep {
+ +ExecuteAsync(context) StepResult
+ +CompensateAsync(context) void
+ }
+ class FundingStep {
+ +ExecuteAsync(context) StepResult
+ +CompensateAsync(context) void
+ }
+ class LedgerStep {
+ +ExecuteAsync(context) StepResult
+ }
+ class SagaOrchestrator {
+ -List~IPaymentStep~ steps
+ +RunAsync(authorizationRequest) SagaResult
+ }
+ class DaprClient {
+ +InvokeMethodAsync(appId, method, data) T
+ +SaveStateAsync(store, key, value) void
+ }
+
+ SagaOrchestrator --> IPaymentStep
+ OrderIntakeStep ..|> IPaymentStep
+ RiskCheckStep ..|> IPaymentStep
+ FundingStep ..|> IPaymentStep
+ LedgerStep ..|> IPaymentStep
+ SagaOrchestrator --> DaprClient
+```
+
+**Sequence diagram:**
+```mermaid
+sequenceDiagram
+ participant Client
+ participant Orchestrator as order-intake (Orchestrator)
+ participant Risk as risk-check
+ participant Funding as funding
+ participant Ledger as ledger
+ participant Notify as notification (async)
+
+ Client->>Orchestrator: POST /authorize (Idempotency-Key: xyz)
+ Orchestrator->>Risk: InvokeMethodAsync("risk-check", "score")
+ Risk-->>Orchestrator: risk score: LOW
+ Orchestrator->>Funding: InvokeMethodAsync("funding", "charge")
+ Funding-->>Orchestrator: charge: SUCCESS
+ Orchestrator->>Ledger: InvokeMethodAsync("ledger", "post")
+ Ledger-->>Orchestrator: posted: SUCCESS
+ Orchestrator-->>Client: 200 APPROVED
+ Orchestrator--)Notify: PublishEventAsync("payment-approved") — off critical path
+```
+
+**Design patterns used:** Saga/Orchestration (the `SagaOrchestrator` coordinating steps with compensating actions); Strategy (each `IPaymentStep` implementation independently substitutable); Sidecar (Dapr itself, the architectural pattern underlying every inter-service call); Circuit Breaker (Dapr's built-in resiliency policies wrapping each `InvokeMethodAsync` call).
+
+**SOLID mapping:** Single Responsibility (each step class owns exactly one saga stage); Open/Closed (a new step type implements `IPaymentStep` without modifying the orchestrator); Liskov (every `IPaymentStep` must genuinely support both execute and compensate semantics where applicable — a step claiming compensability that silently no-ops would violate this); Interface Segregation (`IPaymentStep` exposes only execute/compensate, not unrelated concerns); Dependency Inversion (`SagaOrchestrator` depends on `IPaymentStep` and `DaprClient` abstractions, never a concrete service's HTTP client directly).
+
+**Extensibility:** A new step (e.g., a `SanctionsScreeningStep`) implements `IPaymentStep` and is inserted into the orchestrator's step list without modifying existing steps — directly the Open/Closed application.
+
+**Concurrency/thread safety:** Each saga instance's state is keyed by a unique saga ID and persisted via Dapr's state-management API after every step transition, so a mid-saga process restart (a pod eviction, a node upgrade per Expert Q4) can resume from the last durably-recorded step rather than restarting the entire flow or losing track of partial completion — the state store's own consistency guarantees (Cosmos DB session consistency, this domain's Databases module) govern correctness under concurrent saga-instance processing.
+
+---
+
+## 14. Production Debugging
+
+**Incident:** Three months after the payment-authorization platform (12) went live, the `funding` service began intermittently double-charging a small fraction (roughly 0.3%) of transactions during periods of elevated Dapr sidecar-to-sidecar latency, discovered via the ledger-reconciliation process (this course's standing final-detection-layer pattern) flagging a mismatch between authorized and actually-settled transaction counts.
+
+**Root cause:** The `order-intake` service's retry logic, wrapping its Dapr `InvokeMethodAsync` call to `funding`, treated any exception — including a client-side timeout where the request had, in fact, been received and processed successfully by `funding` but the *response* was lost in transit during a sidecar-latency spike — as a signal to retry the entire charge request. The retried call carried the same `Idempotency-Key` header, but `funding`'s idempotency-key implementation stored keys with a **five-minute expiry**, sized against the team's assumption of "any retry will happen within seconds" — under the sidecar-latency spike, a subset of retries arrived just outside that five-minute window, after the original key had already expired and been evicted, causing `funding` to process the retried request as a genuinely new charge.
+
+**Investigation:** Application Insights' end-to-end trace (this domain's sibling module) for affected transactions showed, for each double-charge, two `funding.charge` invocations with an identical `Idempotency-Key` but separated by 5-7 minutes — just past the five-minute expiry — correlating precisely with a Dapr sidecar CPU-throttling event visible in the same timeframe (nodes under memory pressure from an unrelated batch job, causing `daprd` to be CPU-starved and its own internal request queue to back up, per 7's sidecar-overhead discussion, now manifesting as an availability risk rather than a raw-latency one).
+
+**Tools:** Application Insights distributed tracing (correlating the two invocations by `Idempotency-Key`); AKS node-level CPU/memory metrics (identifying the co-located batch job's resource contention); Dapr sidecar's own metrics endpoint (confirming `daprd` request-queue depth spiked during the affected window).
+
+**Fix:** Immediate: extended the idempotency-key expiry window from five minutes to 24 hours, sized against the realistic worst-case retry-delay tail rather than an optimistic assumption of near-instant retries (directly this course's standing "size the window against the tail, not the median" idempotency discipline). Medium-term: moved the unrelated batch job to a dedicated, isolated node pool, eliminating the resource-contention source entirely rather than only compensating for its downstream symptom.
+
+**Prevention:** (1) The idempotency-key TTL is now a documented, explicitly-justified value (not a default), reviewed against each service's actual measured retry-delay distribution, not assumed. (2) A standing AKS node-pool isolation policy separating latency-sensitive, synchronous-critical-path services from batch/background workloads, preventing this exact resource-contention class from recurring for any other service sharing a node pool. (3) A synthetic-transaction canary specifically exercising the retry-after-timeout scenario in a pre-production environment under artificially injected sidecar latency, added to the deployment gate — steady-state testing alone, as this course has repeatedly found, would never have exercised the specific window-boundary condition that caused the incident.
+
+---
+
+## 15. Architecture Decision
+
+**Context:** Choosing the inter-service communication mechanism for the payment-authorization platform's synchronous critical path.
+
+**Option A — Dapr Service Invocation (chosen in 12):**
+*Advantages:* Built-in mTLS, retry/resiliency policies, and transparent load-balancing across service instances without application code implementing any of it directly; consistent with the platform's broader Dapr adoption for state/pub-sub, avoiding a second, bespoke inter-service-call mechanism.
+*Disadvantages:* Adds sidecar-hop latency (7, Expert Q1's tail-composition risk) and a dependency on the Dapr control plane's own health (Expert Q8).
+*Cost:* Low incremental cost given Dapr is already adopted platform-wide for other building blocks.
+*Risk:* Moderate — the double-charge incident (14) demonstrates a real, non-obvious failure mode requiring explicit idempotency-window tuning against sidecar-latency tail behavior.
+
+**Option B — Direct HTTP/gRPC calls between services (no Dapr):**
+*Advantages:* No sidecar hop, marginally lower baseline latency; no dependency on Dapr control-plane health.
+*Disadvantages:* Every service must independently implement retry policy, mTLS, and service discovery — the exact duplicated-effort and drift risk this course's sidecar-pattern discussion established as the reason meshes/sidecars exist in the first place; loses the audit-trail transparency Expert Q7's Dapr middleware approach provides for free.
+*Cost:* Higher long-term engineering cost (each service reimplementing resilience/security logic) despite lower per-call latency.
+*Risk:* Higher — inconsistent per-service resilience implementations are a known source of exactly the kind of silent, uneven reliability this domain has repeatedly flagged.
+
+**Option C — A dedicated message broker (Service Bus) for every inter-service call, including synchronous-seeming ones, via request-reply queues:**
+*Advantages:* Fully decouples services, natural backpressure handling under load.
+*Disadvantages:* Request-reply-over-queue adds materially more latency than a direct or Dapr-mediated synchronous call, poorly suited to the 800ms end-to-end SLA (12's estimation) for four services genuinely on the synchronous critical path.
+*Cost:* Higher latency-driven infrastructure cost to hit the same SLA (would require significant over-provisioning to compensate).
+*Risk:* SLA risk is the dominant concern — the synchronous authorization path's latency budget doesn't tolerate asynchronous-messaging overhead for every hop.
+
+**Recommendation: Option A, Dapr Service Invocation, for the four synchronous critical-path steps, combined with Option C's underlying broker (Service Bus, via Dapr's pub/sub) specifically for the `notification` step, which is genuinely asynchronous and off the latency-critical path.** This is not a uniform, one-size-fits-all choice but a per-step application of "match the mechanism to the step's actual latency and coupling requirement" (12's architecture) — the idempotency-window tuning surfaced by the incident (14) is the necessary, ongoing operational discipline that keeps Option A's chosen trade-off safe in production, not a reason to abandon it for Option B or C.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact:** The double-charge incident (14), while caught before material customer or regulatory harm via the ledger-reconciliation safety net, represents exactly the class of silent financial-correctness failure a FinTech platform cannot tolerate at scale — the business case for the idempotency-window and node-pool-isolation fixes is directly, quantifiably a customer-trust and regulatory-exposure avoidance case, not merely an engineering hygiene improvement.
+
+**Engineering trade-offs:** The central trade this module's platform choice embodies — Dapr's operational convenience and consistency (8/12) against the sidecar-hop latency and control-plane dependency it introduces (7, Expert Q8) — is a sharper, FinTech-stakes instance of this course's standing convenience-vs-directness trade, resolved here in favor of Dapr specifically because the *consistency* benefit (uniform mTLS, retry, audit-trail behavior across every service) outweighs the marginal latency cost for a platform where inconsistent per-service resilience implementation is the larger, harder-to-detect risk.
+
+**Technical leadership:** A Principal Engineer's role in this platform's design was not selecting Dapr (a reasonable, defensible technology choice many capable engineers could make) but insisting on the specific operational disciplines that keep that choice safe in production — the idempotency-window sizing against measured tail latency, the node-pool isolation, the end-to-end (not per-hop) SLA monitoring — the technology choice is the easy 20%; the surrounding operational discipline is the harder, more valuable 80% a Principal Engineer is specifically accountable for.
+
+**Cross-team communication:** The `risk-check` service's CRD dependency (12) — the specific, articulated reason it runs on AKS rather than Container Apps — must be documented and visible to any future platform-standardization effort, so a well-intentioned future initiative to "migrate everything to Container Apps for operational simplicity" doesn't silently break `risk-check` by attempting to migrate a service with a genuine, undocumented Kubernetes-API dependency.
+
+**Architecture governance:** Every service's chosen tier (AKS vs. Container Apps), its Dapr building-block usage, and its idempotency-key TTL should be recorded in a central architecture registry — the double-charge incident specifically stemmed from an undocumented, un-reviewed default (a five-minute TTL nobody had explicitly justified against real retry-latency tail behavior) rather than a deliberate, reviewed engineering decision.
+
+**Cost optimization:** The mixed AKS/Container-Apps deployment (12) is itself a cost-optimization outcome of applying the three-tier framework per-service rather than defaulting the whole platform to AKS's higher operational overhead — a Principal Engineer should expect, and design for, genuinely mixed-tier platforms as the normal, correct outcome of rigorous per-workload evaluation, not push for uniform-tier simplicity at the cost of unnecessary operational overhead for services that never needed it.
+
+**Risk analysis:** The double-charge incident's root cause — an idempotency window sized against an optimistic assumption rather than a measured tail — is a specific instance of this course's broader, recurring finding that reliability mechanisms fail not at their core logic but at an unaudited, unverified sizing assumption; a risk register for this platform should explicitly track every timeout/TTL/retry-window value's justification and last-validated-against-real-data date, not merely note "idempotency is implemented."
+
+**Long-term maintainability:** As the platform's transaction volume and service count grow, the correlated-spike node-pool capacity risk (9, Advanced Q7) and the tail-latency composition risk (Expert Q1) both worsen non-linearly with additional services/hops — a Principal Engineer should treat "how many synchronous hops are on the critical path" as a metric to actively monitor and minimize over the platform's lifetime, not a fixed architectural decision made once at initial design and never revisited as the saga's step count inevitably grows with new compliance or business requirements.
+
+---
 
 ## 18. Revision
 **Key takeaways**: Azure's container landscape has a genuine third tier — Container Apps — with no precise AWS equivalent, combining Kubernetes-based KEDA scaling (including true scale-to-zero) with full abstraction of the Kubernetes API; this should be the default choice absent an articulated Kubernetes-API-level requirement, extending the complexity-matching discipline across three tiers instead of two. This module's central incident is structurally distinct from every prior Azure-domain incident: rather than misapplying a known AWS concept, the team's AWS-derived two-tier mental model entirely **missed an option category** with no AWS parallel to have prompted its discovery — implying that comparative, concept-by-concept AWS-to-Azure mapping (this domain's primary teaching method through Modules 65-70) is necessary but not sufficient, and must be supplemented by a dedicated research pass for Azure-native-only capabilities. Dapr's sidecar pattern shares App Mesh's deployment architecture but has a materially broader, explicitly-integrated application-level API scope (state, pub/sub, secrets, service invocation) rather than App Mesh's transparent, network-only interception — offering genuine backing-service portability at the cost of a lowest-common-denominator API surface requiring explicit verification against any workload's advanced, backing-service-specific requirements. KEDA is portable to AKS directly, decoupling "need Kubernetes API access" from "must forfeit event-driven scale-to-zero economics."

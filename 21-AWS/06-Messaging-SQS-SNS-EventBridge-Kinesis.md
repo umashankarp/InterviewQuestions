@@ -98,6 +98,52 @@ graph TD
 
 ---
 
+## 7. Performance Engineering
+
+**SQS visibility-timeout tuning is the primary performance/correctness lever, and it's a genuine trade-off, not a "set it high to be safe" default.** The visibility timeout must exceed a consumer's actual maximum processing time (including retries of its own downstream calls) or messages will be redelivered while still legitimately being processed (§61's incident, cross-referenced from Module 61/§4 in this domain) — but setting it far higher than needed delays legitimate redelivery of messages whose consumer genuinely crashed or hung, extending the time before a truly-stuck message reaches its DLQ. The correct value is derived from measured P99.9 consumer processing time plus margin, not a round number — and for variable-duration processing (a function whose duration depends on payload size or downstream latency), `ChangeMessageVisibility` should be called to **extend** the timeout dynamically mid-processing for a specific message taking unusually long, rather than statically setting every message's timeout to the worst-case duration up front (which needlessly slows redelivery for the common-case fast messages).
+
+**SQS long polling vs. short polling is a direct, measurable cost and latency lever.** Short polling (`WaitTimeSeconds: 0`) returns immediately even when no messages are available, meaning a consumer polling on a tight loop against an empty queue generates a high volume of billed, empty `ReceiveMessage` API calls — long polling (`WaitTimeSeconds` up to 20) holds the connection open until a message arrives or the wait expires, collapsing what would be dozens of empty polls into one, materially reducing both API call cost and the empty-poll CPU/network overhead on the consumer side, with no correctness trade-off. There is essentially no legitimate reason to run a production SQS consumer on short polling.
+
+**Kinesis shard throughput limits are hard, per-shard ceilings, not a soft guideline.** Each shard supports 1MB/s or 1,000 records/second ingest (whichever is hit first) and 2MB/s standard read throughput (shared across all consumers reading that shard, unless using Enhanced Fan-Out) — a hot partition key (one customer ID, one symbol, one high-volume merchant driving a disproportionate share of records into the same shard via a deterministic hash) hits these per-shard ceilings long before the stream's aggregate provisioned capacity is exhausted, producing `ProvisionedThroughputExceededException` on writes to that specific shard while the stream's other shards sit comfortably underutilized — fleet-average Kinesis metrics hide this exactly the way fleet-average CPU hides an AZ skew elsewhere in this course; per-shard `IncomingBytes`/`IncomingRecords`/`WriteProvisionedThroughputExceeded` metrics are required to actually see it.
+
+**Kinesis Enhanced Fan-Out (EFO) is the fix for the shared-2MB/s-read-throughput ceiling with multiple consumers.** Without EFO, every consumer application reading a shard shares that shard's single 2MB/s read allocation via the (polling-based) `GetRecords` API — three consumer applications each attempting to read the full stream divide that 2MB/s three ways in practice, even though each believes it's entitled to the full throughput. EFO gives each registered consumer (up to 20 per stream) its own dedicated 2MB/s throughput via a push-based HTTP/2 model, eliminating the shared-throughput contention at a materially higher per-consumer-hour cost — the correct choice specifically when multiple independent consumer applications genuinely need full-throughput access to the same stream simultaneously (§4's clickstream/fraud-detection scenario is exactly this case), not a default applied to every Kinesis consumer regardless of consumer count.
+
+**SNS/EventBridge throughput is generally not the bottleneck — the fan-out target's own capacity is.** SNS and EventBridge both scale to very high publish/delivery rates without the shard-provisioning concerns Kinesis has, but a fan-out to many subscribers only moves the throughput ceiling downstream — the slowest subscriber (an HTTP endpoint with its own rate limit, an SQS queue whose consumer under-provisions concurrency) becomes the effective bottleneck for that specific delivery path while every other subscriber proceeds unaffected, precisely because SNS delivers to each subscriber independently rather than at a synchronized, lowest-common-denominator rate.
+
+**Benchmarking discipline.** Load-test Kinesis producers against realistic partition-key cardinality and distribution, not synthetic uniform random keys — a benchmark using perfectly uniform keys will never surface the hot-shard behavior a real skewed production key distribution (customer ID, where a small number of customers generate disproportionate volume) will produce. For SQS, benchmark under genuinely variable consumer processing time (including simulated downstream slowness), not a fixed, artificially uniform processing duration, since visibility-timeout-driven redelivery specifically activates under duration variance, not average-case load.
+
+---
+
+## 8. Security
+
+**SQS/SNS access-policy misconfiguration is the dominant, most consequential risk in this topic.** Every SQS queue and SNS topic has a resource-based access policy (distinct from IAM identity-based policies) governing which principals may send/receive/subscribe — the single most common, damaging misconfiguration is an access policy with `Principal: "*"` and no restrictive `Condition` block, which makes the queue/topic **publicly writable or readable from any AWS account**, not just within the owning account. This is a materially different and more severe risk than an overly broad IAM role (which at least confines the blast radius to principals within the account) — a public SQS queue accepting `sendMessage` from any AWS principal can be used to inject arbitrary, attacker-controlled messages directly into a production processing pipeline, and a public SNS topic can be subscribed to by an external account, silently exfiltrating every message published to it. The correct default is a `Condition` block scoping the policy to specific source ARNs (a specific SNS topic, a specific Lambda/service) or `aws:SourceAccount`/`aws:SourceArn` conditions, never a bare wildcard principal without a matching condition.
+
+**EventBridge cross-account event-bus risk is a distinct, EventBridge-specific version of the same class of mistake.** EventBridge supports cross-account event buses by design (a legitimate, common pattern for a hub-and-spoke multi-account organization publishing shared domain events) — but this requires an explicit resource-based policy on the event bus granting `events:PutEvents` to specific external account IDs, and the risk is symmetric to the SQS/SNS case: an overly permissive event-bus policy (matching too broad an account/organization pattern, or lacking a condition restricting to specific event sources) allows an unintended account to publish events that downstream rules and targets will process as if they were legitimate, potentially triggering real business logic (a Lambda function, a Step Functions workflow) from an untrusted source. Additionally, EventBridge rules that route events out to a target Lambda/SQS/Step Functions execution require their **own** execution role scoped narrowly to only the specific targets that rule should invoke — a rule with an overly broad target-invocation role compounds the cross-account risk if the source-account restriction is also misconfigured.
+
+**Kinesis-specific security surface.** Kinesis stream access is governed by IAM policy (no separate resource-based policy layer analogous to SQS/SNS, since Kinesis doesn't natively support the same cross-account resource-policy model without going through a different sharing mechanism), meaning least-privilege IAM scoping (per-stream ARN grants, not `kinesis:*` on `Resource: "*"`) is the primary control, directly the Module 61 execution-role discipline applied to Kinesis producer/consumer IAM roles specifically. Server-side encryption (SSE-KMS) should be enabled by default for any Kinesis stream carrying sensitive financial data, with the specific customer-managed KMS key's own key policy providing an additional, independently-auditable access-control layer beyond the stream's own IAM policy — a defense-in-depth pairing directly analogous to the mTLS-plus-security-group layering established elsewhere in this course.
+
+**DLQ access must be equally scoped, not left as an afterthought.** A DLQ frequently accumulates the *most sensitive* subset of a pipeline's traffic (the messages that failed processing, sometimes precisely because they contained malformed or unusual data worth investigating) — an access policy that was carefully scoped on the primary queue but left broad or default on its DLQ (a common oversight, since DLQs are often provisioned as an afterthought alongside the primary queue) creates an inconsistent security posture where the most operationally-sensitive data sits behind the weakest access control.
+
+**Encryption and PII in event payloads.** SQS, SNS, EventBridge, and Kinesis all support encryption at rest (SSE-SQS/SSE-KMS, SNS server-side encryption, Kinesis SSE-KMS) and in transit (TLS) — but encryption at the transport/storage layer does not address the application-level concern of PII or sensitive financial data being embedded directly in a message/event payload that then propagates to every subscriber/consumer, some of which may not have a legitimate need to see that specific field (the same over-broad-payload-exposure concern raised for Step Functions execution history in Module 61 §8) — the correct discipline for genuinely sensitive fields is tokenization or a reference/pointer pattern (publish a reference ID, let authorized consumers separately fetch the sensitive detail from a tightly-access-controlled store) rather than broadcasting the raw sensitive value to every fan-out target by default.
+
+---
+
+## 9. Scalability
+
+**SQS scaling is close to unbounded for Standard queues, and consumer-side concurrency is the actual scaling lever.** SQS Standard imposes no meaningful queue-level throughput ceiling in practice — the real scaling constraint is almost always on the **consumer** side: how many concurrent Lambda executions (reserved concurrency, per Module 61 §9) or how many consumer processes/threads are pulling from the queue. Scaling an SQS-backed pipeline is therefore primarily a matter of scaling consumer concurrency to match the required processing rate, with SQS itself absorbing whatever backlog accumulates during a burst as durable buffering — the queue depth (`ApproximateNumberOfMessagesVisible`) is the direct, correct signal for whether consumer concurrency needs to scale up, and Lambda's SQS-triggered concurrency scaling (which itself has its own ramp-up characteristics, not instantaneous) should be understood and tested against realistic burst shapes, not assumed to scale in lockstep with queue depth instantaneously.
+
+**Kinesis shard scaling — resharding is a deliberate, non-instantaneous operation, unlike SQS's implicit elasticity.** Increasing a Kinesis stream's throughput capacity requires explicitly resharding (splitting a hot shard into two, or merging underutilized shards) — either manually or via **on-demand mode** (Kinesis's auto-scaling capacity mode, trading some cost premium for AWS-managed shard scaling based on observed throughput). Resharding is not instantaneous and old/new shards briefly coexist during the operation, meaning a sudden, unplanned traffic spike on a **provisioned-mode** stream can hit `ProvisionedThroughputExceededException` well before manual resharding (or even on-demand mode's own reactive scaling) catches up — for workloads with genuinely unpredictable burst patterns, on-demand mode's higher baseline cost is frequently justified purely by removing this manual-resharding-lag risk, while workloads with well-understood, predictable throughput growth can use provisioned mode with proactive resharding ahead of anticipated growth, cheaper but requiring genuine capacity planning discipline.
+
+**Partition-key design is the single highest-leverage Kinesis scalability decision, made once and hard to change cheaply later.** A partition key with too little cardinality (all records for a given day funneled to a single key) makes horizontal shard scaling structurally ineffective — adding shards doesn't help if the hash of a low-cardinality key set still concentrates records onto a small subset of them (directly the "adding shards doesn't fix a hot key" restatement of the Kafka partitioning lesson from the EDA/Kafka modules) — the key must be chosen for even distribution across the *realistic* production key-value distribution, not a theoretical uniform distribution that benchmark data might imply but production traffic won't match.
+
+**EventBridge fan-out at scale — rule-evaluation cost and target-invocation throughput both need explicit capacity planning.** EventBridge scales its own ingestion and rule-matching to very high event rates, but each **target** invoked by a matching rule has its own independent throughput ceiling (a Lambda function's reserved concurrency, an SQS queue's consumer concurrency, a Step Functions execution-start rate limit) — at genuine fan-out scale (one high-volume event type matched by dozens of rules, each invoking a different target), the aggregate downstream invocation rate across all matched targets can exceed what any single target's own capacity planning anticipated, even though EventBridge itself never showed any sign of being the bottleneck — this is the messaging-layer's version of the "AWS-native service scales, but everything downstream of it might not" pattern established for Lambda in Module 61 §9's overgeneralization warning, now applied to EventBridge's fan-out specifically.
+
+**SNS fan-out scaling — subscriber count and delivery-retry policy interact.** SNS's own publish throughput scales well, but a topic with a very large number of subscribers (particularly HTTP/S endpoint subscribers, which have their own independent availability/latency characteristics per §2.2) means a single slow or failing subscriber's retry policy (SNS's configurable retry backoff for failed deliveries) can accumulate a meaningful redelivery volume against that one subscriber without affecting delivery to any other subscriber — at scale, per-subscriber delivery-success monitoring (not just aggregate publish-success) is required to catch a single degrading subscriber before its accumulating retry volume itself becomes a capacity concern.
+
+**High availability and multi-region.** SQS, SNS, and EventBridge are regional services (with EventBridge additionally supporting explicit cross-region event routing via bus-to-bus targets for multi-region architectures) and Kinesis streams are also regional — genuine multi-region messaging resilience requires explicit application-level design (dual-region publishing, cross-region EventBridge routing rules, or a consumer capable of failing over to a secondary-region queue/stream) rather than any of these services providing automatic cross-region failover on their own, the same "the managed service being regional doesn't imply the application is multi-region-resilient by default" lesson established for Lambda/API Gateway/Step Functions in Module 61 §9.
+
+---
+
 ## 10. Interview Questions
 
 ### Basic (10)
@@ -145,6 +191,67 @@ graph TD
  **A:** Once a messaging service is embedded as the integration point between multiple independently-deployed services (each built assuming that service's specific delivery/ordering/replay semantics), changing it later — as the incident demonstrates — requires a carefully-sequenced, multi-step migration across every producer and consumer simultaneously, not a localized code change; the semantic mismatch (SQS's delivery-and-remove model versus Kinesis's replayable-log model) is architectural, not merely an implementation swap, making the initial choice genuinely consequential and worth the same upfront rigor demands for network topology.
 10. **Q: As a Principal Engineer establishing AWS messaging standards for an organization, design the specific set of standing architectural reviews and automated checks (synthesizing this entire module) you would require for every new event-driven integration.**
  **A:** (1) Mandatory explicit requirements-elicitation against the ordering/fan-out/replay decision framework (Advanced Q1) before any messaging service is chosen, including an explicit question about foreseeable future multi-consumer/replay needs. (2) Mandatory SNS-to-SQS fan-out (never direct subscriber attachment) for any topic with more than one consumer type — necessary to preserve durable, independent per-consumer buffering. (3) Mandatory per-stage DLQ configuration for every distinct hop in a multi-service messaging pipeline — necessary because failures at each stage are independent and a single DLQ doesn't generalize across stages. (4) Mandatory idempotent-consumer review for any Lambda or service consuming from any of these AWS messaging services (§Intermediate Q7), extending the requirement universally. (5) Mandatory justification review requiring an explicit, articulated unmet-requirement before provisioning Kafka/MSK over AWS-native alternatives (Advanced Q8) — necessary to prevent unnecessary operational-overhead over-engineering. Each standard targets a distinct, concrete failure or over-engineering mode this module identified, extending the governance-gate pattern from Modules 57-61 into the messaging layer specifically.
+
+### Expert (10)
+1. **Q: A fraud-detection pipeline reads from a Kinesis stream with 20 shards using Enhanced Fan-Out and is still seeing an unexpected, sustained `ReadProvisionedThroughputExceeded`-equivalent throttling signal despite aggregate stream utilization sitting at only 40%. Diagnose the likely cause.**
+ **A:** With Enhanced Fan-Out, each *registered consumer* gets its own dedicated 2MB/s-per-shard allocation — but that allocation is still **per shard**, not a pooled aggregate across the stream, meaning a partition-key skew concentrating a disproportionate share of records onto a small subset of the 20 shards (§7) can push those specific shards' *individual* read throughput against their dedicated ceiling even while the stream-wide aggregate utilization (averaged across all 20 shards) looks comfortably low. EFO removes the shared-consumer contention problem but does nothing to fix an underlying hot-shard partition-key problem — the fix is diagnosing and correcting the partition-key distribution (§9), not adding more EFO consumers or more shards without addressing the key-distribution root cause, since more shards alone won't help if the key hash still concentrates onto a minority of them.
+ **Why correct:** Correctly distinguishes what EFO fixes (shared-consumer throughput contention) from what it doesn't (a hot-shard root cause from key skew), avoiding the common conflation of the two.
+ **Common mistakes:** Assuming EFO's per-consumer dedicated throughput means shard-level ceilings no longer apply; recommending "add more shards" without first checking per-shard `IncomingRecords` metrics for skew.
+ **Follow-up:** What partition-key redesign would you propose if the natural business key (e.g., merchant ID) is inherently skewed toward a few high-volume merchants? (Append a random or hash-based suffix to the natural key for the highest-volume merchants specifically — a form of key salting — while preserving per-merchant ordering only where genuinely required, since spreading a single hot merchant's records across multiple shards sacrifices per-merchant strict ordering for throughput, a trade-off that must be explicitly evaluated against whether that merchant's records genuinely need cross-record ordering.)
+
+2. **Q: A team migrates from SQS Standard to SQS FIFO for a payment-processing queue to gain exactly-once processing, but afterward observes a new class of intermittent processing delays under load that didn't exist with Standard. Explain the likely mechanism.**
+ **A:** SQS FIFO's ordering guarantee is scoped **per message group** — messages within the same `MessageGroupId` are strictly processed in order, one at a time, which means if the migration used a single, coarse message-group ID (e.g., one group for "all payments," rather than a per-account or per-transaction-type group), every message in that group is now serialized through a **single logical consumer stream** regardless of how much consumer concurrency is actually provisioned, since FIFO enforces in-order, non-concurrent processing within a group specifically to preserve ordering. This directly recreates the SQS-FIFO throughput ceiling discussed in §2.1 — the fix is redesigning the message-group-ID scheme to the finest granularity that still satisfies the actual ordering requirement (e.g., per-account, if only per-account ordering is genuinely needed, not global ordering across all accounts), restoring the ability for multiple groups to process concurrently while still guaranteeing the ordering that's actually required.
+ **Why correct:** Correctly identifies that a coarse message-group ID is the root cause of the observed serialization, not "FIFO is inherently slower," and gives the actionable fix.
+ **Common mistakes:** Treating FIFO's lower throughput as an unavoidable fixed cost of exactly-once semantics rather than recognizing it's frequently a message-group-granularity design mistake; not knowing message groups scale independently.
+ **Follow-up:** How would you verify the message-group design change actually fixed the bottleneck rather than just moved it? (Monitor per-message-group processing latency/backlog via custom application-level metrics — SQS itself doesn't expose per-group depth natively — confirming multiple groups are now processing concurrently rather than serialized through one.)
+
+3. **Q: Design an EventBridge-based architecture for a multi-account trading platform where a "TradeExecuted" event published in a trading-execution account must reach a compliance-monitoring account, a settlement account, and a client-reporting account — each owned by a different team — without any producer awareness of the three consumers, and with an explicit audit requirement that every cross-account event delivery is provably authorized.**
+ **A:** Use a hub-and-spoke EventBridge topology: the trading-execution account publishes `TradeExecuted` to its own **local** event bus (never directly to another account's bus), and each of the three consuming accounts has its own event bus with a resource-based policy explicitly granting `events:PutEvents` **only** to the trading-execution account's specific account ID (never a wildcard or organization-wide grant, per §8) as the source. A **central rule** in the trading-execution account's bus, rather than three separate ad hoc integrations, forwards matching events to each of the three target buses — this centralizes the audit-relevant question "which accounts receive TradeExecuted events" into one reviewable rule definition rather than three independently-configured integrations a compliance reviewer would have to discover and reconcile separately. Each receiving account then defines its own local rules routing the event to its own targets (a Step Functions workflow, an SQS queue) with zero coupling to or awareness of the other two receiving accounts, preserving the choreography model's decoupling while making the cross-account authorization surface centrally auditable via the source account's own bus policy and forwarding-rule configuration, both queryable via CloudTrail and the EventBridge console/API as a compliance artifact.
+ **Why correct:** Correctly applies least-privilege per-account resource policies (not a broad grant) while centralizing the audit-relevant fan-out decision in one place rather than three independently-discoverable integrations.
+ **Common mistakes:** Granting a broad organization-wide `PutEvents` permission "for simplicity" (directly the §8 anti-pattern); having each of the three consuming accounts independently subscribe/pull rather than a centrally-defined push, losing the single-place-to-audit property.
+ **Follow-up:** How would you handle one of the three consuming accounts needing a filtered subset of TradeExecuted events (only trades above a threshold) without the trading-execution account needing to know about that filter? (The filtering happens in the *consuming* account's own local rule content-based pattern matching against the forwarded event — the trading-execution account's central forwarding rule still just forwards every TradeExecuted event to that account's bus, preserving decoupling; the consuming account owns its own filtering logic entirely.)
+
+4. **Q: A Lambda function consuming from Kinesis via the standard event-source mapping starts falling behind (rising `IteratorAgeMilliseconds`) specifically after a downstream dependency it calls becomes slow, and — unlike the SQS case — you observe the Lambda is retrying the *entire batch* repeatedly rather than just the failed record. Explain why, and how to fix it.**
+ **A:** Lambda's Kinesis event-source mapping delivers records in **batches**, and by default, a batch that produces an unhandled error is retried **as a whole** — including any records in that batch that were already successfully processed before the error occurred on a later record in the same batch — because Kinesis's checkpoint/iterator model advances per-batch, not per-record, unless the function explicitly reports partial batch failure. The fix is enabling **`ReportBatchItemFailures`** on the event-source mapping and having the function return the specific sequence numbers/item identifiers of only the records that genuinely failed — Lambda then only retries from the first failed item onward, not the entire batch, both reducing wasted reprocessing of already-successful records and (critically) avoiding redundant side effects on those already-processed records, which is itself an idempotency concern (the same duplicate-processing risk as the rest of this module, now specifically arising from batch-level rather than record-level retry semantics).
+ **Why correct:** Identifies the specific mechanism (batch-level vs. record-level retry) and the specific, named remediation feature, not a generic "add retries with backoff" answer.
+ **Common mistakes:** Assuming Kinesis/Lambda retries are always per-record like SQS's redelivery; not knowing `ReportBatchItemFailures` needs explicit opt-in configuration on the event-source mapping, not automatic behavior.
+ **Follow-up:** Does enabling `ReportBatchItemFailures` eliminate the need for idempotent processing? (No — even with partial-batch-failure reporting, a batch can still be retried more than once under various failure/retry conditions, and the records within it may still be reprocessed; idempotency remains required regardless, this feature only reduces unnecessary reprocessing, it doesn't provide exactly-once guarantees.)
+
+5. **Q: Critique the following claim from a design review: "Since we've configured a DLQ on every SQS queue in our pipeline, we have full visibility into every failure mode in our system."**
+ **A:** Incomplete on at least two axes. First, per §2.6/§Intermediate Q5, a DLQ only catches failures that occur *after* a message successfully entered that specific queue and exhausted its `maxReceiveCount` — it says nothing about SNS-to-subscriber delivery failures (which have their own, separately-configured DLQ), EventBridge target-invocation failures (also a separate DLQ configuration on the rule/target itself), or a Lambda function's own unhandled synchronous invocation errors when invoked directly (its own DLQ or on-failure destination) — "a DLQ exists somewhere in the pipeline" doesn't generalize to "every distinct failure point in a multi-service pipeline has been captured," each of which requires its own explicit configuration (§Intermediate Q5's original point). Second, and more subtly, a DLQ captures messages that *failed processing* but provides zero visibility into messages that were **silently dropped before ever reaching a queue** at all — a publish call that failed and wasn't itself wrapped in retry-then-alerting logic (e.g., §Expert Q9's EventBridge-publish-from-a-synchronous-Lambda-path scenario in Module 61) never generates a DLQ entry anywhere, because it never became a message in the first place.
+ **Why correct:** Identifies two distinct, non-overlapping gaps (per-stage DLQ coverage, and pre-ingestion publish failures) rather than accepting the claim at face value or naming only one gap.
+ **Common mistakes:** Accepting "we have DLQs" as sufficient without probing whether every stage specifically has one; not considering the pre-ingestion publish-failure gap at all, since it's the least visible of the two.
+ **Follow-up:** How would you close the pre-ingestion gap specifically? (Wrap every publish call — to SNS, SQS, EventBridge, Kinesis — with an explicit local retry-then-alert/local-fallback-queue pattern in the publishing code itself, since no downstream DLQ mechanism can catch a message that never successfully left the producer.)
+
+6. **Q: A settlement-reconciliation system needs to process a Kinesis stream's records in strict chronological order across the entire stream (not just per-shard), for regulatory audit purposes. Explain why this requirement is fundamentally in tension with Kinesis's scalability model, and design an approach.**
+ **A:** Kinesis (like Kafka) only guarantees ordering **within a shard**, never across the full stream — a stream with N shards processing concurrently offers no cross-shard ordering guarantee whatsoever, and this is not a configuration gap to be fixed but an inherent structural property of horizontal partitioning: genuine global ordering requires funneling all order-sensitive records through a single ordered channel, which is exactly the throughput-vs-ordering trade-off already established for SQS FIFO (§2.1) and Kafka partitioning. Two honest options: (a) accept a **single-shard** stream for the specific subset of data requiring true global ordering (capping that subset's throughput at one shard's ceiling, ~1MB/s, likely acceptable if the regulatory-ordering-sensitive subset is genuinely low-volume relative to the full pipeline), or (b) process the multi-shard stream normally for throughput, but have the reconciliation consumer buffer and **re-sort records by their embedded event timestamp** (not arrival order) within a bounded, tunable time window before emitting them for audit purposes — trading a deliberate, bounded processing-latency delay for the ability to reconstruct global chronological order after the fact, without sacrificing the ingestion-side throughput of the full multi-shard stream. Which option is correct depends entirely on whether the "chronological order" requirement is genuinely about **audit reconstruction** (option b, latency-tolerant) or a hard real-time processing-order guarantee (option a, throughput-constrained) — conflating the two is the actual design mistake to watch for in this question.
+ **Why correct:** Correctly frames global ordering as structurally incompatible with horizontal partitioning rather than a solvable configuration problem, and offers two honestly-scoped options rather than a false "just use X" answer.
+ **Common mistakes:** Proposing a single global sequence number as if that alone provides consumer-side ordering without addressing that concurrent shard consumers still process independently; not distinguishing audit-reconstruction (latency-tolerant) from real-time ordering (throughput-constrained) as genuinely different requirements.
+ **Follow-up:** How would you size the re-sort buffering window in option (b)? (Based on the measured maximum clock skew and inter-shard consumer lag variance observed in production — a window too short risks emitting records still out of order because a slower shard's consumer hadn't yet delivered an earlier-timestamped record; empirically derived, not guessed.)
+
+7. **Q: A team wants to replace their existing SNS-to-multiple-SQS-queues fan-out architecture with a single EventBridge bus with per-consumer rules, arguing it's "strictly more capable, so it should be the default everywhere." Evaluate this claim using the decision framework established in this module.**
+ **A:** Push back on "strictly more capable, so default everywhere" — EventBridge and SNS-to-SQS solve genuinely overlapping but not identical problems, and the decision should still be requirement-driven (§4's central lesson), not capability-maximizing by default. EventBridge's content-based routing is a genuine advantage when different consumers need different **filtered subsets** of a broader event stream (the exact use case SNS+SQS fan-out can't cleanly express, since SNS delivers every message to every subscriber unless message-filtering policies are layered on — SNS does support subscription filter policies, closing some of this gap, but EventBridge's schema-aware, content-based routing is the more natural, purpose-built fit). But for a simple, stable "every subscriber wants every message" fan-out (the canonical use case SNS+SQS was built for), EventBridge adds no genuine capability while adding a layer of indirection (rules, targets) that's unnecessary complexity for that specific case — the same over-engineering-by-default risk this module's decision framework (§2.5) warns against for Kafka/MSK, now correctly generalized to "any more-capable-but-more-complex tool defaulted to universally rather than matched to the actual requirement."
+ **Why correct:** Correctly resists the "more capable = better default" framing and re-applies the module's own requirement-matching discipline rather than treating EventBridge as an unconditional upgrade.
+ **Common mistakes:** Accepting "more capable" as sufficient justification for a universal migration without asking whether the specific use case's requirements actually need that additional capability; not knowing SNS itself supports filter policies, which narrows the actual capability gap in the simple-fan-out case.
+ **Follow-up:** Under what specific condition would the migration be clearly justified? (When a genuine majority of the topic's consumers need meaningfully different filtered subsets of the event stream, not full copies — at that point EventBridge's content-based routing removes real complexity SNS's filter-policy model would otherwise accumulate as an increasingly complex set of per-subscription filter expressions.)
+
+8. **Q: Explain the specific failure mode where an SQS queue's redrive policy (`maxReceiveCount`) is set correctly, a DLQ is correctly configured, but messages are still being silently lost rather than reaching the DLQ — and how you'd diagnose it.**
+ **A:** The most common cause is an IAM/resource-policy gap on the DLQ itself rather than the primary queue's redrive configuration — the primary queue's `RedrivePolicy` references the DLQ's ARN, but if the consumer's (or the SQS service's own) permission to actually deliver to that DLQ ARN is missing or scoped incorrectly (a common oversight per §8's DLQ-left-as-an-afterthought observation), the redrive attempt itself fails, and depending on the specific failure mode, the message can be silently dropped rather than raising an obviously visible error, since the redrive mechanism doesn't have its own independent alerting by default. Diagnosis: compare `ApproximateNumberOfMessagesVisible` trends on the primary queue (is the backlog shrinking in a way that implies successful processing, or messages disappearing without a corresponding DLQ arrival) against the DLQ's own `NumberOfMessagesSent` metric — a primary queue showing messages disappearing with no matching increase in DLQ arrivals, combined with no corresponding successful-processing signal from the consumer's own application logs, points directly at a redrive-permission gap rather than a processing-logic bug.
+ **Why correct:** Names the specific, non-obvious root cause (DLQ permission gap, not redrive-policy misconfiguration) and the specific metric comparison that distinguishes it from other causes.
+ **Common mistakes:** Assuming a correctly-configured `RedrivePolicy` is sufficient on its own without verifying the underlying permission to actually write to the DLQ ARN; not knowing to cross-reference DLQ arrival metrics against primary-queue depletion metrics as the diagnostic technique.
+ **Follow-up:** What proactive check would catch this before it causes silent message loss in production? (An automated, periodic synthetic-message test — deliberately publish a message designed to fail processing and verify it actually arrives in the DLQ within the expected timeframe — treating DLQ delivery as a tested code path, not an assumed-working configuration.)
+
+9. **Q: A Principal Engineer is evaluating whether to introduce Kafka/MSK specifically to gain exactly-once semantics (EOS) for a financial event-processing pipeline currently built on Kinesis. Explain what Kinesis genuinely cannot provide here, and what the idempotent-consumer pattern already established in this module can and cannot substitute for.**
+ **A:** Kafka's transactional EOS (idempotent producers plus transactional writes spanning multiple partitions/topics atomically) provides a genuinely stronger guarantee than "consumer applies its own idempotency check" — specifically, Kafka's EOS can atomically commit a write to multiple output topics **and** the consumer's own offset commit as a single transaction, meaning a producer or consumer crash mid-operation cannot leave the system in a state where one downstream topic received a write and another didn't, or where a message was processed but the offset commit was lost (a genuine, rare but real gap even with an application-level idempotency check, since the idempotency check and the actual side effect aren't necessarily atomic with each other unless carefully designed as such). Kinesis (and SQS/SNS/EventBridge) provide no equivalent atomic, multi-target transactional guarantee — the module's idempotent-consumer discipline (dedupe by domain key before acting) substitutes for EOS in the **overwhelmingly common case** where a single side effect (one ledger write, one notification) needs to not be duplicated, which is sufficient for the vast majority of financial event-processing requirements, but does **not** substitute for the specific case of needing multiple, genuinely atomic writes across independent downstream systems as a single unit — if that specific multi-target-atomicity requirement is real (not just "would be nice to have stronger guarantees"), it is one of the few genuinely defensible reasons to introduce Kafka's EOS specifically, per §2.5's decision framework, rather than continuing to layer application-level idempotency checks that can't fully close this particular gap.
+ **Why correct:** Correctly scopes exactly what Kafka EOS adds beyond application-level idempotency (multi-target atomicity) rather than treating EOS as a vague "stronger guarantee" or dismissing it as unnecessary in all cases.
+ **Common mistakes:** Claiming idempotent consumers fully substitute for EOS in all cases (they don't, for genuine multi-target atomicity); or conversely over-justifying a Kafka migration for a single-side-effect use case where application-level idempotency is already fully sufficient.
+ **Follow-up:** Can DynamoDB transactions (`TransactWriteItems`) close this gap without introducing Kafka at all? (Partially — if all the atomically-required writes are within DynamoDB itself, `TransactWriteItems` provides genuine cross-item atomicity; it doesn't help if the atomicity requirement spans genuinely different systems, e.g., a DynamoDB write and a separate downstream Kinesis publish, which is the actual case EOS is uniquely suited for.)
+
+10. **Q: As a Principal Engineer, design the specific set of standing capacity-planning derivations (not just governance checklists) you'd require to be computed, not guessed, before any new Kinesis stream or high-volume SQS queue goes to production in a financial-services estate.**
+ **A:** (1) **Shard count** derived from `ceil(max(peakIngestBytesPerSecond / 1MB, peakIngestRecordsPerSecond / 1000))`, computed from actual measured or realistically-modeled peak traffic, not a round guessed number — and explicitly re-derived whenever traffic patterns materially change, since a shard count correct at launch silently becomes wrong as volume grows (§9). (2) **Partition-key cardinality validation** — before launch, a check that the proposed partition key's realistic production value distribution (not a synthetic uniform benchmark) doesn't concentrate more than an agreed threshold (e.g., no single key value exceeding 20% of total volume) onto any single shard's hash range, catching §7/§Expert Q1's hot-shard risk before it reaches production rather than after. (3) **SQS consumer concurrency** derived from `requiredThroughput × averageProcessingDurationSeconds`, reconciled against the downstream dependency's own actual capacity (Module 61 §2.4's recurring reconciliation requirement, applied here to SQS-triggered consumers specifically). (4) **Visibility timeout** derived from measured P99.9 consumer processing duration plus explicit margin, never a default or round-number guess (§7). (5) **DLQ permission and delivery verified via an automated synthetic test** (§Expert Q8), not assumed correct from configuration review alone. Each derivation converts a number someone would otherwise guess, copy from another team's unrelated workload, or leave at a service default into a number computed from that specific workload's actual, measured characteristics — the same "derive, don't default" discipline established for load-balancer timeout ordering elsewhere in this course, applied here to the AWS messaging layer's own capacity-planning surface.
+ **Why correct:** Gives concrete, computable formulas tied to measured inputs for each derivation, not vague "capacity plan appropriately" guidance, directly extending the module's own recurring theme that defaults are decisions nobody explicitly made.
+ **Common mistakes:** Proposing a governance checklist of things to "review" without specifying the actual derivation formula each item requires; omitting the requirement that these be *re-derived* periodically as traffic evolves, treating capacity planning as a one-time launch gate rather than an ongoing discipline.
+ **Follow-up:** How would you enforce these derivations are actually performed, rather than trusted to be done? (Require the derivation's inputs and computed output as a mandatory, reviewed field in the infrastructure-as-code pull request template for any new stream/queue — e.g., a comment block showing the peak-traffic input and the resulting shard-count calculation — making the derivation an artifact reviewers can check, not a claim taken on faith.)
 
 ---
 
@@ -245,9 +352,287 @@ var ruleTarget = new PutTargetsRequest
 
 ---
 
-## 12–17. System Design / LLD / Debugging / Decision / Case Study / Principal
+## 12. System Design
 
-*(the incident, the four exercises, and the Advanced-tier Q&A — especially Advanced Q1's requirements-elicitation safeguard, Advanced Q3's zero-downtime SQS-to-Kinesis migration, and Advanced Q10's synthesized governance checklist — collectively constitute this module's system-design, debugging, and Principal-Engineer-level content.)*
+**Brief.** Design the event-driven backbone for a multi-asset trading platform's post-trade pipeline: trade execution events must reach a real-time risk-monitoring service (sub-second), a settlement saga (Module 61-style Step Functions orchestration), an analytics data lake (high-volume, replayable), and a compliance-archival system (immutable, long-retention) — with strict ordering required only within a single instrument's trade sequence.
+
+### Requirements
+
+**Functional**
+- Publish a `TradeExecuted` event on every trade, fanning out to four independent consumer categories with different latency/ordering/replay needs.
+- Risk monitoring must react within 500ms of trade execution.
+- Settlement must be exactly-once, auditable, and support multi-hour holds for manual review.
+- Analytics must support replay of historical trade data for backtesting and bug-driven reprocessing.
+- Compliance archival must retain every event immutably for the regulatory retention period.
+
+**Non-functional**
+- Peak throughput: 50,000 trades/second across all instruments combined.
+- No consumer's failure or slowness may affect any other consumer's delivery.
+- Per-instrument ordering must be preserved for any consumer that requires it (risk, settlement); cross-instrument ordering is not required.
+- Zero data loss — every trade event must reach every required consumer, with provable delivery for compliance.
+
+### Architecture
+
+```
+Trade Execution Service
+        |
+        v
+Kinesis Data Stream: "trade-events"     <-- partition key = instrumentId (per-instrument ordering)
+  (provisioned mode, shard count derived from 50k TPS / 1000 records/shard = 50 shards min,
+   sized up for headroom and hot-instrument skew per §7/§Expert Q1)
+        |
+        +--> EFO Consumer: Risk Monitoring Lambda (dedicated 2MB/s/shard, sub-second reaction)
+        |
+        +--> EFO Consumer: Settlement Trigger Lambda --> EventBridge "TradeReadyForSettlement"
+        |                                                        |
+        |                                                 Step Functions STANDARD (settlement saga,
+        |                                                 idempotent on tradeId, per Module 61 §13)
+        |
+        +--> Standard Consumer: Firehose --> S3 data lake (analytics, replayable via re-read from
+        |                                     TRIM_HORIZON or via Firehose's own S3 objects)
+        |
+        +--> Standard Consumer: Compliance Archival Lambda --> S3 (Object Lock, immutable,
+                                  long retention) + a separate DynamoDB delivery-receipt table
+```
+
+**Component glossary.** **Kinesis Data Stream** is the single ingestion point and system of record for trade events — chosen over SQS/SNS specifically because *multiple independent consumers need to replay and re-read the same event history at their own pace* (risk monitoring reads near-real-time; analytics reads in large batches; compliance reads for archival verification), the exact requirement SQS/SNS structurally cannot satisfy (§4's decision framework). **Partition key = instrumentId** guarantees per-instrument ordering (the only ordering requirement stated) while allowing different instruments to scale across shards independently. **Enhanced Fan-Out** is used specifically for the two latency-sensitive consumers (risk monitoring, settlement trigger) so their read throughput is never contended by the two high-volume, latency-tolerant consumers (analytics, compliance) sharing the same stream — directly the §7 EFO rationale. **Kinesis Data Firehose** (rather than a hand-rolled consumer) delivers to the S3 data lake with built-in batching/compression/format-conversion, appropriate because analytics has no sub-second latency requirement and Firehose removes the operational burden of a custom batching consumer. **EventBridge** decouples the settlement trigger from the actual Step Functions saga, preserving the choreography-style decoupling within the settlement domain specifically (a team boundary: the "trade events" team owns the Kinesis stream; the "settlement" team owns everything past the `TradeReadyForSettlement` event, with no awareness of Kinesis internals required).
+
+### End-to-end walkthrough
+1. Trade Execution Service publishes a `TradeExecuted` record to the Kinesis stream, `PartitionKey = instrumentId`, payload including a server-generated `tradeId` (the domain idempotency key every downstream consumer will use).
+2. The record lands on the shard determined by hashing `instrumentId`, guaranteeing all records for that instrument are strictly ordered relative to each other.
+3. The Risk Monitoring Lambda (EFO consumer) receives the record via its dedicated push-based channel within tens of milliseconds of publish, evaluates real-time exposure limits, and raises an alert if breached — well within the 500ms SLA, unaffected by any load on the analytics/compliance consumers reading the same stream.
+4. The Settlement Trigger Lambda (separate EFO consumer) receives the same record independently, performs an idempotency check (has this `tradeId` already been forwarded to settlement — a domain-derived key check against a short-TTL DynamoDB table, per Module 61 §13's `IdempotencyGuard` pattern reused here), and publishes `TradeReadyForSettlement` to EventBridge.
+5. EventBridge triggers the Step Functions Standard settlement saga (exactly-once, fully audited, supporting multi-hour manual-review holds — the same Module 61 §12 reasoning for choosing Standard over Express applies identically here).
+6. Independently, Kinesis Data Firehose batches records from the stream (reading via a standard, non-EFO consumer registration, since the analytics use case tolerates seconds-to-minutes of latency) and delivers compressed, partitioned Parquet files to S3, queryable via Athena for backtesting.
+7. The Compliance Archival Lambda (also a standard consumer) writes each record immutably to an S3 bucket with Object Lock enabled (write-once, retention-locked per regulatory requirement) and records a delivery receipt (tradeId + S3 object key + timestamp) in a DynamoDB table — this receipt table is itself the provable-delivery audit artifact required by the non-functional requirement.
+8. If any single consumer (say, the compliance archival path) falls behind or fails temporarily, its EFO/standard registration's own shard-iterator position is independent of every other consumer's — a slow compliance consumer never throttles or delays risk monitoring, settlement, or analytics, directly satisfying the "no consumer's failure affects any other" requirement structurally, not just by convention.
+
+### Data model
+
+**`settlement_sagas` table** (as Module 61 §12's `authorizations` table pattern, reused): `tradeId` (PK), `status` (`NOT_STARTED` → `LEDGER_POSTED` → `SETTLEMENT_COMPLETE` or `SETTLEMENT_COMPENSATED`), `instrumentId`, `amountMinorUnits` (string, never float).
+
+**`compliance_delivery_receipts` table**: `tradeId` (PK), `s3ObjectKey`, `archivedAt` (ISO-8601), `checksumSha256` (for provable-integrity verification, not just provable-delivery).
+
+### Failure handling and monitoring
+Per-shard `IncomingRecords`/`WriteProvisionedThroughputExceeded` (hot-instrument detection, §7), `GetRecords.IteratorAgeMilliseconds` per consumer registration (each of the four consumers monitored independently — a rising iterator age on the compliance consumer alone is a distinct, isolated alert from a rising iterator age on risk monitoring), and the compliance delivery-receipt table's own count reconciled nightly against the Kinesis stream's total record count for that day (an explicit, automated proof that zero trades were lost, satisfying the non-functional zero-data-loss requirement with evidence, not just architecture).
+
+### Trade-offs
+Provisioned-mode Kinesis with proactively-derived shard count (§7/§Expert Q10) was chosen over on-demand mode despite on-demand's operational simplicity, because trading volume has a well-understood, plannable daily/seasonal pattern (market open/close spikes, quarterly options-expiry volume) that provisioned mode's cheaper steady-state cost can be sized against with genuine confidence — on-demand mode remains the documented fallback if volume patterns become genuinely unpredictable. EFO's higher per-consumer-hour cost is accepted for exactly the two consumers whose latency SLA justifies it, not applied to all four consumers by default, directly the §7 "not a default, a deliberate choice per consumer" discipline.
+
+---
+
+## 13. Low-Level Design
+
+**Requirements.** A reusable, per-shard-skew-aware Kinesis producer wrapper that (a) validates partition-key distribution health at runtime via a lightweight sampling mechanism, (b) exposes a pluggable key-salting strategy for hot keys without the caller needing to know which keys are currently hot, and (c) preserves per-instrument ordering for all non-salted keys.
+
+### Class diagram
+```mermaid
+classDiagram
+    class IPartitionKeyStrategy {
+        <<interface>>
+        +string ResolveKey(TradeEvent evt)
+    }
+    class NaturalKeyStrategy {
+        +ResolveKey(TradeEvent evt) string
+    }
+    class HotKeySalter {
+        -IHotKeyDetector _detector
+        -IPartitionKeyStrategy _inner
+        +ResolveKey(TradeEvent evt) string
+    }
+    class IHotKeyDetector {
+        <<interface>>
+        +bool IsHot(string key)
+        +void RecordObservation(string key, long bytes)
+    }
+    class SlidingWindowHotKeyDetector {
+        -ConcurrentDictionary~string,long~ _counters
+        +IsHot(string key) bool
+        +RecordObservation(string key, long bytes) void
+    }
+    class KinesisProducer {
+        -IAmazonKinesis _client
+        -IPartitionKeyStrategy _keyStrategy
+        -string _streamName
+        +Task PutRecordAsync(TradeEvent evt)
+    }
+
+    IPartitionKeyStrategy <|.. NaturalKeyStrategy
+    IPartitionKeyStrategy <|.. HotKeySalter
+    HotKeySalter --> IPartitionKeyStrategy : wraps
+    HotKeySalter --> IHotKeyDetector
+    IHotKeyDetector <|.. SlidingWindowHotKeyDetector
+    KinesisProducer --> IPartitionKeyStrategy
+```
+
+### Sequence diagram
+```mermaid
+sequenceDiagram
+    participant P as Producer app
+    participant KP as KinesisProducer
+    participant S as HotKeySalter
+    participant D as HotKeyDetector
+    participant N as NaturalKeyStrategy
+    participant K as Kinesis stream
+    P->>KP: PutRecordAsync(tradeEvent)
+    KP->>S: ResolveKey(tradeEvent)
+    S->>N: ResolveKey(tradeEvent)
+    N-->>S: "instrumentId=AAPL"
+    S->>D: IsHot("instrumentId=AAPL")
+    alt key is hot
+        D-->>S: true
+        S->>S: append salt suffix (e.g. hash(tradeId) % 8)
+        S-->>KP: "instrumentId=AAPL#3"
+    else key is normal
+        D-->>S: false
+        S-->>KP: "instrumentId=AAPL"
+    end
+    KP->>K: PutRecord(key, payload)
+    KP->>D: RecordObservation(key, payloadBytes)
+```
+
+### Implementation
+```csharp
+public interface IPartitionKeyStrategy
+{
+    string ResolveKey(TradeEvent evt);
+}
+
+public sealed class NaturalKeyStrategy : IPartitionKeyStrategy
+{
+    public string ResolveKey(TradeEvent evt) => evt.InstrumentId;
+}
+
+public interface IHotKeyDetector
+{
+    bool IsHot(string key);
+    void RecordObservation(string key, long bytes);
+}
+
+// Deliberately approximate -- exact per-shard accounting isn't the point;
+// catching sustained skew before it becomes ProvisionedThroughputExceededException is.
+public sealed class SlidingWindowHotKeyDetector(long hotThresholdBytesPerWindow) : IHotKeyDetector
+{
+    private readonly ConcurrentDictionary<string, long> _counters = new();
+
+    public void RecordObservation(string key, long bytes) =>
+        _counters.AddOrUpdate(key, bytes, (_, existing) => existing + bytes);
+
+    public bool IsHot(string key) =>
+        _counters.TryGetValue(key, out var total) && total > hotThresholdBytesPerWindow;
+
+    // Called on a timer by the host -- resets the window. Not shown: a real implementation
+    // would use a proper sliding window (e.g. per-minute buckets), not a naive full reset.
+    public void ResetWindow() => _counters.Clear();
+}
+
+public sealed class HotKeySalter(IPartitionKeyStrategy inner, IHotKeyDetector detector, int saltBuckets = 8)
+    : IPartitionKeyStrategy
+{
+    public string ResolveKey(TradeEvent evt)
+    {
+        var naturalKey = inner.ResolveKey(evt);
+
+        // Salting sacrifices strict per-instrument ordering for that specific hot instrument --
+        // an explicit, evaluated trade-off (§Expert Q1), never applied silently to every key.
+        if (detector.IsHot(naturalKey))
+        {
+            var bucket = Math.Abs(evt.TradeId.GetHashCode()) % saltBuckets;
+            return $"{naturalKey}#{bucket}";
+        }
+
+        return naturalKey;
+    }
+}
+
+public sealed class KinesisProducer(IAmazonKinesis client, IPartitionKeyStrategy keyStrategy, IHotKeyDetector detector, string streamName)
+{
+    public async Task PutRecordAsync(TradeEvent evt)
+    {
+        var key = keyStrategy.ResolveKey(evt);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(evt);
+
+        await client.PutRecordAsync(new PutRecordRequest
+        {
+            StreamName = streamName,
+            PartitionKey = key,
+            Data = new MemoryStream(payload)
+        });
+
+        detector.RecordObservation(key, payload.Length);
+    }
+}
+```
+
+**Design patterns used.** *Decorator* — `HotKeySalter` wraps `NaturalKeyStrategy`, adding salting behavior without the base strategy or the producer knowing salting exists. *Strategy* — `IPartitionKeyStrategy` allows the key-derivation policy to vary independently of the producer. *Observer (implicit)* — `RecordObservation` feeds the detector without the producer needing to know how hotness is computed.
+
+**SOLID mapping.** *SRP* — key resolution, hotness detection, and record publishing are three separate concerns in three classes. *OCP* — a new detection algorithm (e.g., an exponentially-weighted moving average instead of a naive sliding window) implements `IHotKeyDetector` without touching `HotKeySalter` or `KinesisProducer`. *LSP* — `HotKeySalter` is itself an `IPartitionKeyStrategy`, freely substitutable anywhere `NaturalKeyStrategy` was used, including nesting further decorators. *DIP* — `KinesisProducer` depends only on the abstractions, enabling a test double `IHotKeyDetector` that deterministically reports specific keys as hot for testing the salting path.
+
+**Extensibility.** A `CompositePartitionKeyStrategy` could apply different salting bucket counts per instrument class (equities vs. less-liquid instruments). The detector's sliding-window implementation is swappable for a CloudWatch-metric-backed implementation querying actual per-shard `IncomingRecords` server-side, closing the gap between the producer's local, approximate view and the stream's true per-shard reality.
+
+**Concurrency and thread safety.** `ConcurrentDictionary.AddOrUpdate` provides thread-safe increment semantics under concurrent `RecordObservation` calls from multiple producer threads without external locking. The salting decision itself is a pure function of the current detector state at call time — a benign race where two concurrent calls briefly disagree on whether a key just crossed the hot threshold results, at worst, in one extra record going to the natural (unsalted) key before the next call salts correctly, an acceptable imprecision given the mechanism's purpose is trend detection, not an exact real-time cutover.
+
+---
+
+## 14. Production Debugging
+
+**Incident.** A market-data distribution platform's EventBridge-based fan-out (a `PriceUpdated` event type, matched by 40+ rules across 12 downstream consuming teams) began exhibiting a slow, creeping increase in end-to-end delivery latency to a subset of consumers — not all of them — over roughly three weeks, with no single team reporting a change on their end.
+
+**Investigation.**
+1. `PutEvents` latency and success rate on the publishing side were both nominal — the publish path was healthy throughout.
+2. Per-rule target-invocation metrics showed the delay concentrated specifically in rules targeting **Lambda functions without reserved concurrency**, while rules targeting SQS queues (which simply buffer) showed no equivalent delay.
+3. Cross-referencing account-level `ConcurrentExecutions` (Module 61 §7's account-wide metric) against a timeline showed steady organic growth — three new, unrelated Lambda-based services had been launched in the same account over the same three-week window, each with its own burst traffic pattern, none configured with reserved concurrency.
+4. The affected EventBridge-target Lambda functions were being intermittently throttled at the account-concurrency level (`Throttles` metric rising in step with the other three services' own growth) — invisible from EventBridge's own perspective, which retries a throttled invocation per its configured retry policy, converting what should have been an immediate delivery into a delayed one after one or more retry backoff intervals.
+
+**Root cause.** Twelve independently-configured EventBridge-to-Lambda targets shared the same AWS account's concurrency pool with three newly-launched, unrelated services — none of the fifteen functions involved had reserved concurrency, meaning the account-level ceiling was a genuinely shared, unpartitioned resource, and organic growth in three unrelated services silently degraded delivery latency for twelve others with zero configuration change on the affected side — the multi-tenant resource-contention risk named abstractly in Module 61 §9, now observed as a real, slow-onset incident rather than a hypothetical.
+
+**Tools.** EventBridge per-rule invocation/target metrics; Lambda's account-level `ConcurrentExecutions` and per-function `Throttles` metrics; CloudTrail/deployment history across all fifteen functions (confirming the three new services' launch dates aligned with the onset); EventBridge's DLQ configuration (fortunately present per §8's discipline, confirming no events were outright lost — only delayed).
+
+**Fix.**
+1. Immediate: applied reserved concurrency to the twelve latency-sensitive EventBridge-target functions, explicitly carving out their share of the account's concurrency pool so the three newer services' growth could no longer contend with them.
+2. Structural: instituted an account-wide reserved-concurrency budget spreadsheet (soon after, a Service Quotas-based automated check) requiring any new Lambda function's expected peak concurrency to be declared and reconciled against remaining unreserved account headroom before launch — closing the gap where three services launched independently, each individually reasonable, collectively exhausted shared headroom nobody was tracking in aggregate.
+3. Detection: added an account-level alarm on aggregate `ConcurrentExecutions` as a percentage of the account limit, with a warning threshold well below 100% specifically so headroom exhaustion is caught while there's still time to request a limit increase or reserve capacity, rather than after functions are already being throttled.
+
+**Prevention.** The transferable lesson: Lambda's account-level concurrency pool is a **shared, unpartitioned resource across every team deploying to that account**, and — exactly like the LB-scoped-attribute incident pattern elsewhere in this course — an individually reasonable, individually reviewed change (launching a new service) can silently degrade an unrelated service's behavior purely by consuming a shared ceiling nobody was tracking in aggregate. Any organization running many Lambda functions in a shared account needs an explicit, continuously-tracked concurrency budget, not per-function tuning considered in isolation.
+
+---
+
+## 15. Architecture Decision
+
+**Decision.** Given the §14 incident, how should the organization structurally prevent Lambda account-concurrency contention across many independently-deployed teams sharing one AWS account?
+
+### Option A — Mandatory reserved concurrency on every Lambda function, enforced via policy-as-code
+- **Advantages:** directly closes the gap — every function explicitly carves out its share, making the account's remaining unreserved headroom always visible and computable; low implementation cost (a CI/CD policy check); no new infrastructure.
+- **Disadvantages:** reserved concurrency is a *cap*, not a *guarantee* — reserving concurrency for every function requires the sum of all reservations to stay under the account limit, meaning this doesn't scale indefinitely as team count grows; requires every team to actually know and declare their expected peak concurrency, which is often genuinely uncertain for a new service.
+- **Cost:** near-zero — no new spend, only process/tooling. **Complexity:** low. **Maintainability:** requires ongoing budget-spreadsheet/quota discipline as teams grow. **Scalability:** eventually hits the account concurrency ceiling itself as the organization grows, requiring a limit-increase request cycle. **Ops overhead:** low, concentrated in the periodic budget reconciliation.
+
+### Option B — Multi-account strategy: one AWS account per team/service domain, each with its own concurrency ceiling
+- **Advantages:** structurally eliminates cross-team concurrency contention entirely — each account's concurrency pool is genuinely isolated, no shared-resource reasoning required at all; aligns with AWS's own multi-account best-practice guidance for blast-radius isolation generally (not just concurrency).
+- **Disadvantages:** a substantial organizational and tooling investment (account vending, cross-account networking, centralized logging/monitoring aggregation, cross-account IAM for any genuinely-needed shared resources) — this is a much larger structural change than a Lambda-specific fix, and for the EventBridge cross-account fan-out pattern shown in §12/§Expert Q3, it directly requires and builds on multi-account patterns already needed elsewhere.
+- **Cost:** higher — per-account baseline AWS costs, plus the tooling investment for account management at scale. **Complexity:** high. **Maintainability:** excellent once mature — the isolation is structural, not procedural. **Scalability:** excellent, avoids ever hitting one account's shared ceiling. **Ops overhead:** high upfront, low ongoing once account-vending is automated.
+
+### Option C — Do nothing beyond the immediate §14 fix; rely on the new alarm and budget spreadsheet
+- **Advantages:** zero additional cost or complexity beyond what §14 already did.
+- **Disadvantages:** a spreadsheet-based budget is exactly the kind of procedural (not structural) governance this course repeatedly shows decaying under delivery pressure — a team launching a new service under a deadline can simply not check the spreadsheet, recreating the exact incident with a different set of services.
+- **Cost:** zero. **Complexity:** none. **Maintainability:** poor — depends entirely on continued diligence with no enforcement. **Scalability:** will recur as the organization grows. **Ops overhead:** low until it isn't.
+
+### Recommendation
+
+**Option A now, as a mandatory, automatically-enforced (not merely spreadsheet-tracked) policy, with Option B as the medium-term target for the organization's highest-concurrency-sensitivity domains** (the trading-platform account specifically, given §12's stringent latency requirements), and Option C rejected outright as procedural governance this course has repeatedly shown to be insufficient on its own. The reasoning: Option A is achievable immediately and, if the "reserved concurrency" declaration is enforced as a CI/CD gate (a Lambda deployment is rejected if it doesn't declare and reserve concurrency, or explicitly opts into the unreserved shared pool with a justification comment) rather than a voluntary spreadsheet entry, it converts the incident's root cause (an untracked shared resource) into a mechanically-enforced, always-current one — directly the "structurally impossible over reviewed" governance-maturity ordering established for IAM policy elsewhere in this domain. Option B is the right eventual architecture for the trading platform specifically, given its 50,000 TPS and sub-second SLA requirements make it worth the multi-account investment, but is not justified as a universal, immediate response to this specific incident for every team in the organization — that would be over-engineering the fix relative to the problem it's solving for teams without comparable scale or latency sensitivity.
+
+---
+
+## 17. Principal Engineer Perspective
+
+**Business impact.** The two incidents in this module (§4's requirements-mismatch migration, §14's slow-onset multi-tenant contention) both cost the business in ways invisible to any single team's own dashboards — a growing reconciliation backlog nobody could initially explain, and a slow latency creep affecting twelve teams' consumers with no team able to individually diagnose it from their own metrics. A Principal Engineer's distinct contribution in this messaging-and-streaming domain is recognizing that **the AWS messaging layer is inherently a shared, cross-team resource** (a shared account's concurrency pool, a shared Kinesis stream's shard capacity, a shared SNS topic's subscriber base) even when no individual team's architecture diagram shows any coupling to another team at all — the coupling is real and consequential regardless of whether it's drawn.
+
+**Engineering trade-offs.** Every service choice in this module trades a specific capability for a specific operational cost: Kinesis's replay/multi-consumer capability for shard-management and partition-key-design discipline; SQS FIFO's exactly-once guarantee for message-group-granularity throughput ceilings; EventBridge's content-based decoupling for schema-stability dependence across every consumer; Enhanced Fan-Out's per-consumer throughput isolation for meaningfully higher per-consumer-hour cost. None of these is a strictly dominant choice — a Principal Engineer's job is matching the specific trade to the specific workload's actual requirements (§4's central lesson) and making that match, and its cost, explicit and defensible in review, not defaulting to the most-familiar or most-capable-sounding option.
+
+**Technical leadership and cross-team communication.** Both incidents share a structure: an individually reasonable, individually reviewed decision (raising an idle timeout for one legitimate use case in Module 61 §4's sibling incident; launching three new services independently in §14) produced harm entirely outside the deciding team's visibility. The recurring leadership lesson is that **reviewing a change for its impact on the system the change lives in is not the same as reviewing it for impact on every system that shares a resource with it** — and the fix is never "review harder," it's making the shared-resource dependency visible and mechanically checked (a CI gate, a derived-capacity calculation, a cross-account audit rule) so the check doesn't depend on any individual reviewer knowing about eleven other teams' concurrency needs.
+
+**Architecture governance and cost optimization.** Governance in this domain is most effective as **derivation, not review** — a shard count computed from measured peak traffic (§Expert Q10), a reserved-concurrency value computed from a declared expected peak (§15), a message-group granularity chosen to satisfy exactly the ordering requirement and no more — each converting what would otherwise be a guessed or copied default into a number with a traceable, auditable basis. Cost optimization is real but secondary here: EFO's cost premium, FIFO's throughput ceiling, and Standard-vs-Express Step Functions pricing are all genuine costs worth evaluating, but none should be traded against the correctness disciplines (idempotency, per-stage DLQs, least-privilege access policies) this module establishes — a messaging architecture that's cheaper but silently loses or duplicates financial events is a false economy no cost dashboard captures until an auditor or a customer does.
+
+**Risk analysis and long-term maintainability.** The most consequential, recurring risk across both this module and Module 61 is **invisibility of shared-resource contention across independently-owned components** — a downstream dependency overwhelmed by Lambda's own fast concurrency scaling, a shard silently hot from key skew, an account's concurrency pool silently exhausted by unrelated services, an IAM policy change silently breaking an external counterparty's callback. In every case, the failure was invisible from inside any single, individually-healthy component, and became visible only by explicitly enumerating and instrumenting the seams between components — the account-wide concurrency metric, the per-shard throughput metric, the DLQ delivery-receipt reconciliation. Long-term maintainability in this domain is substantially a matter of whether an organization has built standing, automated visibility into these specific seams, or is relying on each incident to reveal the next one.
 
 ## 18. Revision
 **Key takeaways**: SQS, SNS, EventBridge, and Kinesis each implement a genuinely distinct point in the ordering/fan-out/replay design space this course established conceptually in Modules 52-56 — service choice must be driven by an explicit match against a workload's actual requirements, not team familiarity or default habit. SNS should fan out to per-consumer SQS queues rather than subscribing consumers directly, to gain durable buffering and processing-rate independence. Kinesis (or Kafka/MSK) is required specifically when multiple independent consumers need ordered replay of the same event history — a structurally different capability than SQS/SNS can provide, and retrofitting this requirement onto SQS after the fact requires a real migration, not a configuration change. EventBridge is the natural AWS-native home for choreography, directly inheriting the decoupling-vs-debuggability trade-off. Every service here defaults to at-least-once delivery, meaning/56/61's idempotent-consumer discipline applies universally. AWS-native managed services should be the default over self-managed/MSK Kafka absent a specific, articulated requirement Kafka's ecosystem uniquely satisfies — directly extending the complexity-matching discipline into messaging-infrastructure choice.
