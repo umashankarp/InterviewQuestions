@@ -561,48 +561,298 @@ private BreakCause Classify(ClientReportedFigure fig, decimal computed) =>
 
 ---
 
-## 12. System Design
+## 12. System Design — Designing a Multi-Tenant Portfolio Analytics Platform
 
-**Functional requirements**
-- Serve performance attribution, exposure decomposition, scenario analysis, and factor risk per tenant.
-- Enforce strict tenant isolation across all data access, caching, and compute.
-- Support per-tenant configuration (models, conventions, report formats) without core forking.
-- Onboard new tenants with verified historical migration.
-- Provide tenant-scoped diagnostics usable without raw-data access.
-
-**Non-functional requirements**
-- Zero cross-tenant data exposure — the platform's existential requirement.
-- Per-tenant performance predictability under contention.
-- Interactive analytics latency within a few seconds for common views.
-- Per-tenant restore and provable deletion (Expert Q7).
-
-**Capacity estimation**
-- 40 tenants; largest ~1000× smallest in portfolio count.
-- Aggregate ~120k portfolios, ~25M positions.
-- Interactive queries ~50/s aggregate, bursty at reporting periods (month-end concentrates load heavily).
-- Heavy scenario jobs: ~200/day, each potentially 10⁴–10⁶ pricing calls (the multiplicative workload).
-- **The sensitivity that matters:** month-end concentration. Every tenant reports on similar cycles, so demand is not smooth — the platform sees its peak simultaneously across tenants, which is precisely when fair-share scheduling matters most and when per-tenant guarantees are hardest to honour.
-
-**Architecture:** — gateway-terminated tenant authentication, ambient fail-closed tenant context, fair-share-scheduled compute over tenant-partitioned stores.
-
-**Components:** Tenant context propagation; per-tenant credentialed data access; fair-share scheduler; analytics engine (the grid disciplines); tenant configuration store; onboarding pipeline with reconciliation; tenant-scoped diagnostic tooling.
-
-**Database selection:** Per-tenant schemas or databases (the connection-level isolation) on shared infrastructure; analytical results in a columnar store partitioned by tenant; configuration in a bitemporal relational store, versioned so a result records the configuration that produced it (the provenance).
-
-**Caching:** Per-tenant namespaced caches with keys derived from authenticated context (Advanced Q3); pre-computed common views per tenant to meet interactive latency.
-
-**Messaging:** Analytics job submission and completion via a queue with per-tenant fair-share consumption; results published to tenant-scoped subscribers.
-
-**Scaling:** Tiered per-tenant capacity reflecting size heterogeneity; largest tenants may warrant dedicated partitions (Intermediate Q5).
-
-**Failure handling:** Fail-closed tenant context; row-attribution assertions converting silent leaks to errors (Advanced Q9); per-tenant restore; quota enforcement preventing one tenant's failure or growth from cascading.
-
-**Monitoring:** Per-tenant latency and throughput (never aggregate-only — the finding); isolation-test results as a continuously-reported signal; quota utilization per tenant as a leading indicator of Expert Q2's commercial conversation.
-
-**Trade-offs:** Connection-level isolation costs operational overhead versus row-level density, justified because it reduces the number of places a leak-causing mistake is possible. Fair-share scheduling costs some throughput versus first-come, justified by per-tenant predictability being the product promise.
+*Authored to the four-step standard (see Module 01 §12 for the method).*
 
 ---
 
+### Step 1 — Understand the Problem and Establish Design Scope
+
+#### The dialogue
+
+> **C:** Who are the tenants, and what happens if one sees another's data?
+> **I:** Institutional asset managers. A cross-tenant leak would likely end the business — several are direct competitors.
+>
+> **C:** So isolation is existential rather than a feature. Are tenants uniform in size?
+> **I:** Not remotely. The largest has about 1,000× the portfolios of the smallest.
+>
+> **C:** That rules out uniform per-tenant provisioning. Do tenants need their own models and conventions?
+> **I:** Yes — different attribution methodologies, different day-count conventions, different report formats.
+>
+> **C:** Without forking the codebase, I assume.
+> **I:** Correct. One codebase, forty tenants.
+>
+> **C:** What's the workload shape? Interactive dashboards and heavy batch analytics are very different.
+> **I:** Both. Interactive exposure and attribution views, plus scenario jobs that can run for hours.
+>
+> **C:** When do tenants use it? If everyone reports at month-end, "average load" is a fiction.
+> **I:** Month-end, almost all of them, within the same few days.
+>
+> **C:** Do we need per-tenant restore and provable deletion?
+> **I:** Yes — contractual, and for some tenants a regulatory requirement.
+>
+> **C:** How do we support them? Debugging a tenant's numbers usually means looking at their data.
+> **I:** That's a real problem for us today. Support can't casually read client holdings.
+>
+> **C:** Out of scope?
+> **I:** The analytics models themselves, the client-facing UI, and billing.
+
+Two answers dominate. **1,000× size skew** means fair-share scheduling is not optional — the largest tenant can trivially consume the platform. And **"support can't read client holdings"** turns diagnostics into a design requirement rather than an operational habit, which is §3.5.
+
+#### Functional requirements
+
+1. Serve performance attribution, exposure decomposition, scenario analysis, and factor risk per tenant.
+2. Enforce strict tenant isolation across data access, caching, compute, and logs.
+3. Support per-tenant configuration (models, conventions, formats) without forking core code.
+4. Onboard new tenants with verified historical migration.
+5. Provide tenant-scoped diagnostics usable **without raw-data access**.
+6. Per-tenant backup, restore, and provable deletion.
+
+#### Non-functional requirements
+
+| Requirement | Target |
+|---|---|
+| Cross-tenant data exposure | **Zero.** The platform's existential requirement |
+| Interactive query latency | p95 < 3 s for common views |
+| Per-tenant performance predictability | A tenant's latency must not depend on another tenant's activity |
+| Scenario job completion | Within the tenant's contracted window, even at month-end |
+| Availability | 99.9% per tenant, measured **per tenant** — a platform-wide average hides a single tenant being down |
+| Deletion | Provable, within contractual window, including backups and caches |
+
+#### Back-of-the-envelope estimation
+
+```
+Tenants                  = 40
+Size skew                = largest ≈ 1,000× smallest
+Aggregate portfolios     ≈ 120,000
+Aggregate positions      ≈ 25,000,000
+Interactive queries      ≈ 50/s aggregate, bursty
+Scenario jobs            ≈ 200/day, each 10^4–10^6 pricing calls
+```
+
+The month-end concentration, which is the number that governs the design:
+
+```
+If 35 of 40 tenants report in the same 3-day window:
+  Effective demand multiplier over a normal day     ≈ 8–10×
+  And it is SIMULTANEOUS — not staggered — because every
+  tenant's reporting cycle is driven by the same calendar.
+
+Sizing for average load:      fails 3 days a month, for everyone, together
+Sizing for the peak:          8–10× the infrastructure, idle 90% of the time
+```
+
+Skew:
+
+```
+Largest tenant   ≈ 40% of aggregate positions
+Smallest 20 tenants combined ≈ 3%
+A single scenario job from the largest tenant can exceed the
+TOTAL daily compute of the smallest thirty tenants.
+```
+
+#### What the numbers tell us
+
+1. **Demand is not smooth and never will be**, because it is calendar-driven, not user-driven. That eliminates statistical multiplexing as a capacity strategy — the usual assumption that tenants' peaks are uncorrelated is *false here*, and saying so is the estimation's most valuable output.
+2. **With 1,000× skew, "fair" cannot mean "equal."** Fair-share scheduling must be weighted by contracted entitlement, or the smallest tenant gets 1/40th of a platform it pays little for while the largest is throttled below what it pays a great deal for.
+3. **The peak is when per-tenant guarantees matter most and are hardest to honour** — precisely at month-end, when every tenant is producing client-facing numbers under their own deadlines. So the scheduler's behaviour under saturation is the design's core, not an edge case.
+
+The hard problem is **isolation that holds under contention**, not isolation in the abstract.
+
+---
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+#### The isolation spectrum, and where to sit
+
+| Model | Isolation | Cost | Operability |
+|---|---|---|---|
+| Shared everything, `tenant_id` column | Weakest — one missing `WHERE` clause is a breach | Lowest | Simple |
+| Shared DB, **schema per tenant** | Strong at the connection level | Low | Good |
+| Database per tenant | Very strong | Moderate | 40 databases to patch |
+| Full stack per tenant | Strongest | Highest | 40 deployments |
+
+**Chosen: schema-per-tenant on shared infrastructure, with connection-level credentials scoped to one schema.** The decisive property is that isolation stops depending on application code being correct. A missing predicate becomes a *permission error* rather than a leak — the difference between a bug and a breach. This is the same "make the bad state unrepresentable" principle this course applies to append-only ledgers and non-suppressible notification categories.
+
+#### Components
+
+**Gateway.** Terminates authentication and establishes **tenant context** from the verified token — never from a request parameter, header, or path segment a client can set.
+
+**Tenant Context Propagation.** Ambient, **fail-closed**: any code path reaching data access without a resolved tenant context throws rather than defaults. A default tenant is a breach waiting for a bug.
+
+**Credentialed Data Access.** Per-tenant database credentials scoped to that tenant's schema. The application cannot query another tenant's data even if it tries.
+
+**Fair-Share Scheduler.** Weighted, entitlement-based admission and preemption for analytics jobs.
+
+**Analytics Engine.** The compute grid (Module 09's disciplines), with per-tenant resource pools.
+
+**Tenant Configuration Store.** Bitemporal, versioned — because a result must record the configuration that produced it.
+
+**Onboarding Pipeline.** Historical migration with reconciliation gates.
+
+**Tenant-Scoped Diagnostics.** Structured, redacted diagnostic surfaces (§3.5).
+
+#### End-to-end walkthrough — an interactive query
+
+1. Request arrives with a bearer token; the gateway verifies it and extracts `tenant_id` **from the token's verified claims**.
+2. Tenant context is established in an ambient scope for the request's lifetime.
+3. The service resolves the tenant's configuration version as-of now.
+4. Cache lookup uses a key **derived from the authenticated context**, not from request parameters: `t:{tenant_id}:v:{config_version}:{query_hash}`. A cache key a caller can influence is a cross-tenant read waiting to happen (§3.4).
+5. On miss, a connection is obtained **from the tenant's own credentialed pool**; the query carries no `tenant_id` predicate because it cannot see anything else.
+6. Results computed with the tenant's configuration; the response records `config_version` so the number is explicable later.
+7. Response written to the tenant-namespaced cache; audit log entry written with tenant, principal, and query shape — **never query values**, which would put holdings in the log.
+
+#### End-to-end walkthrough — a scenario job at month-end
+
+1. Tenant submits a scenario job; it is admitted to the tenant's queue with an entitlement weight.
+2. Scheduler computes each tenant's current share versus entitlement and admits work accordingly.
+3. Large jobs are **decomposed into bounded tasks** so the scheduler can interleave — an indivisible six-hour job cannot be fair-shared, so fair-share depends on decomposition being enforced at submission.
+4. Under saturation the scheduler **preempts tasks** from tenants over their share, requeueing them; because tasks are pure functions of pinned inputs (Module 09 §3.6), preemption costs only the work in flight.
+5. Progress and an honest completion estimate are published to the tenant — under contention, an accurate "this will take 40 minutes" is worth more than an optimistic one.
+
+#### API design
+
+**All endpoints are tenant-scoped implicitly.** There is no `tenant_id` path or query parameter anywhere in the API — this is deliberate. If the tenant were addressable in the URL, then authorisation becomes a check that can be forgotten; when it is derived from the token, there is nothing to forget.
+
+**`POST /v1/analytics/attribution`**
+
+| Field | Type | Description |
+|---|---|---|
+| `portfolio_ids` | string[] | Validated against the tenant's own portfolios |
+| `period` | object | `{ from, to }` |
+| `methodology` | string | Optional override; defaults to the tenant's configured method |
+| `benchmark_id` | string | |
+
+Response: `{ results, config_version, computed_at, cache_hit }`. **`config_version` on every response** is what makes "why is this number different from last month" answerable.
+
+**`POST /v1/jobs/scenarios`** → `202 { job_id, queue_position, estimated_start, estimated_duration }`. Returning queue position and an estimate is a fair-share affordance: a tenant that can see it is queued behind its own entitlement complains less than one that just sees slowness.
+
+**`GET /v1/jobs/{id}`** → `{ status, progress, tasks_completed, tasks_total, estimated_completion, share_state }`.
+
+**`GET /v1/diagnostics/queries/{query_id}`** → §3.5's redacted diagnostic bundle.
+
+**`POST /v1/admin/tenants/{id}/deletion`** (platform-admin only) → initiates provable deletion across primary stores, caches, search indexes, backups, and logs, returning a certificate enumerating what was purged and when.
+
+#### Data model
+
+**Per-tenant schema** — `tenant_{id}.portfolio`, `.position`, `.transaction`, `.benchmark`, `.result`. Identical DDL across tenants, applied by migration tooling; **schema drift between tenants is the operational failure mode to guard against**, and a startup check comparing each tenant's schema hash against the expected version is the cheap defence.
+
+**Shared control-plane schema** (no tenant business data):
+
+| Table | Columns |
+|---|---|
+| `tenant` | `tenant_id`, `name`, `status`, `entitlement_weight`, `contracted_windows`, `onboarded_at` |
+| `tenant_config` | `tenant_id`, `key`, `value`, `valid_from`, `valid_to`, `knowledge_from`, `knowledge_to`, `version` — **bitemporal**, because a result computed last quarter must be explicable under last quarter's configuration |
+| `tenant_credential` | `tenant_id`, `db_role`, `rotated_at` |
+| `job` | `job_id`, `tenant_id`, `type`, `status`, `weight`, `submitted_at`, `admitted_at`, `completed_at`, `tasks_total`, `tasks_done` |
+| `audit_log` | `at`, `tenant_id`, `principal`, `action`, `resource_type`, `resource_count` — **counts and shapes, never values** |
+
+**Results** — columnar store partitioned by `(tenant_id, as_of)`, and physically separated per tenant where the store supports it. Partitioning alone is not isolation; it is an optimisation that looks like isolation, which is worse than neither.
+
+#### Store selection, and why
+
+| Store | Choice | Reason |
+|---|---|---|
+| Tenant business data | **Schema-per-tenant, shared PostgreSQL clusters**, credentials scoped per schema | Isolation enforced by the database's own permission system rather than by application predicates. Shared infrastructure keeps 40 tenants operable |
+| Analytics results | **Columnar, tenant-partitioned** | Large scans over `(tenant, date, measure)` |
+| Configuration | **Bitemporal relational** | Provenance — a result records the config that produced it |
+| Cache | **Redis with per-tenant logical DBs or key prefixes derived from verified context** | See §3.4 for why the key derivation matters more than the mechanism |
+| Job/scheduler state | **PostgreSQL** | Small, transactional |
+
+The decision worth defending: **shared infrastructure with per-tenant credentials**, rather than 40 isolated stacks. Forty stacks would be marginally safer and operationally ruinous — patching, upgrading, and monitoring 40 estates means the *fleet* becomes inconsistent, and an unpatched tenant is its own security problem. Isolation that degrades operability eventually degrades security.
+
+---
+
+### Step 3 — Design Deep Dive
+
+#### 3.1 Defence in depth — five independent layers
+
+No single mechanism is trusted, because the requirement is existential and every single mechanism has a plausible failure:
+
+| Layer | Mechanism | Fails when |
+|---|---|---|
+| Authentication | Tenant from verified token claims only | Token forgery — mitigated by standard JWT/mTLS discipline |
+| Context | Ambient, fail-closed; no default tenant | A code path bypasses the accessor — caught by layer 3 |
+| **Data access** | **Per-tenant DB credentials scoped to one schema** | Credential mix-up — caught by layer 4 |
+| Query-time assertion | Results carry `tenant_id`; a mismatch **throws and alerts** rather than filtering | Both the credential and the assertion are wrong simultaneously |
+| Continuous verification | A scheduled probe authenticates as tenant A and attempts to read tenant B's known resource IDs, expecting failure | Never — this is the layer that detects the others having silently regressed |
+
+The fifth layer is the one most designs omit and the one that matters most over time. **Isolation regresses silently**: a new endpoint, a new cache, a new report export, a new admin tool. Nothing alerts, because a leak looks like a successful response. A continuous negative-test probe is the only mechanism that notices — the same "independent verifier" conclusion this course reaches for ledgers (Module 18 §11) and notification delivery (Module 20 §E2), arriving here from the security direction.
+
+#### 3.2 Fair-share scheduling under correlated peaks
+
+The estimation showed peaks are simultaneous, so the scheduler's saturation behaviour *is* the platform's quality of service.
+
+- **Weighted fair share by entitlement**, not equal share. Weight comes from the contract.
+- **Decomposition enforced at submission.** A job is admitted only if it can be expressed as bounded tasks; otherwise it cannot be interleaved and one tenant monopolises workers for hours.
+- **Preemption over queueing** for tenants over their share. Cheap because tasks are pure functions of pinned inputs.
+- **Reserved floor per tenant.** Every tenant gets a guaranteed minimum, even at peak, so a small tenant is never fully starved by a large one's legitimate work.
+- **Burst credits.** A tenant idle for weeks may exceed its share temporarily — which is what makes weighted fair share feel generous rather than restrictive, and costs nothing when peaks are correlated because there is no idle capacity to lend at month-end anyway.
+
+And an honest admission worth making in an interview: **at a truly correlated peak, someone waits.** The design's job is to make *who waits* a stated, contractual, explicable outcome rather than an emergent property of submission order.
+
+#### 3.3 Per-tenant configuration without forking
+
+Forty tenants each wanting a different attribution methodology is how a codebase becomes forty codebases.
+
+- **Configuration, not code**, for anything expressible as parameters: conventions, calendars, rounding, formats.
+- **A registry of named strategies** for genuinely different algorithms — a tenant selects `attribution_method = "brinson_fachler"`, it does not ship its own code. New methods are added to the registry, available to all, selected by none until configured.
+- **Config is versioned and bitemporal**, and every result records the version that produced it. Without this, "our numbers changed and nothing changed" is unanswerable — and it is the single most common tenant escalation on a platform like this.
+- **Where a tenant needs genuine custom code**, it goes in a sandboxed extension point with a declared interface, resource limits, and no ambient tenant context of its own. That boundary is what keeps a bespoke request from becoming a fork.
+
+#### 3.4 Caching — the most common leak vector
+
+A cache is where tenant isolation quietly dies, because caches sit outside the database whose permissions were doing the work.
+
+- **Cache keys derive from the verified tenant context**, never from request parameters. A key like `attribution:{portfolio_id}:{period}` is a cross-tenant read the moment two tenants share a portfolio identifier — and portfolio IDs are exactly the kind of thing that collides.
+- **Namespace physically** where possible (separate logical databases or separate instances for the largest tenants) so a key-construction bug cannot reach across.
+- **Invalidate per tenant.** A global flush at month-end is a thundering herd concentrated on the busiest day of the quarter.
+- **Deletion must include caches**, or "provable deletion" is provably false. This is a real gap in most implementations, because caches are thought of as ephemeral and TTLs are longer than people remember.
+
+#### 3.5 "Whose bug is it" — diagnostics without raw data
+
+A tenant reports a wrong number. Support cannot open their holdings. Without a designed answer, the practical outcome is that someone gets production data access, and the isolation model is over.
+
+The designed answer is a **structured diagnostic bundle**, generated on request and scoped to one query:
+
+- The **computation graph**: which inputs, which configuration version, which model version, which intermediate steps — by identifier and shape, not by value.
+- **Aggregate statistics** rather than values: position counts, null counts, date ranges, min/max/mean of the inputs — enough to spot "this portfolio has 300 positions and 12 have no price" without reading a single holding.
+- **Deterministic replay**: re-run the same computation with the same pinned inputs and confirm the same output, which distinguishes a data problem from a code problem immediately.
+- **Tenant-side self-service**: the tenant, who *is* entitled to their data, can view the full bundle unredacted. Much of what support would have done, the tenant can do faster.
+
+When raw access is genuinely unavoidable: a **break-glass** flow with tenant notification, dual approval, a time-boxed credential, and a full audit record. Not an exception to the model — a documented, logged, rare, and *visible* operation.
+
+#### 3.6 Onboarding and provable deletion
+
+**Onboarding** is a migration with a reconciliation gate, not a data load. Historical data is loaded, then recomputed, then compared against the tenant's existing numbers from their prior system, and **the tenant signs off on the reconciliation before go-live.** Skipping the gate means every subsequent discrepancy becomes an argument about whether the platform or the migration was wrong.
+
+**Deletion** must cover primary store, replicas, results, caches, search indexes, logs, and **backups** — and backups are the hard one, because a backup that includes tenant data cannot be selectively purged without either per-tenant backups (chosen here, and a further argument for schema-per-tenant) or crypto-shredding: encrypt each tenant's data with a tenant-specific key and destroy the key. Crypto-shredding is the pragmatic answer for archives and is worth naming, along with its caveat — it is deletion under a cryptographic assumption, not physical erasure, and some regulators care about the difference.
+
+---
+
+### Step 4 — Wrap-Up
+
+**What we left out:** the analytics methodologies themselves; the client-facing UI; billing and usage metering, which interacts closely with fair-share and should probably share its accounting; multi-region for data residency, where a tenant's jurisdiction constrains where its schema may live; tenant-managed encryption keys (BYOK), which is a common institutional requirement and changes the deletion design; and disaster recovery with per-tenant RPO/RTO commitments.
+
+**What we would measure:** the **isolation probe's** pass rate and last-run time, with a dead-man's switch — because the probe stopping is indistinguishable from the probe passing; per-tenant latency and job-completion **against entitlement**, since a platform-wide average is exactly the aggregate blindness this folder keeps finding; scheduler share deviation per tenant at peak; **cache key-namespace violations**, which should be structurally impossible and therefore alert loudly if ever counted; config-version distribution across results (a tenant whose results span three config versions in one report is a bug); schema-hash drift across tenants; and break-glass access frequency, which should trend toward zero as the diagnostic bundle improves.
+
+**Summary.** Isolation is enforced by the database's own permission system rather than by application predicates, backed by five independent layers of which the last is a continuous negative-test probe — because isolation regresses silently and a leak looks like a successful response. Fair share is weighted by entitlement and depends on jobs being decomposable, because the estimation shows tenant peaks are calendar-correlated and therefore cannot be statistically multiplexed. And diagnostics are designed as a product surface, because the alternative — support with production data access — quietly ends the isolation model that everything else was built to protect.
+
+---
+
+### References
+
+1. Microsoft — *Multi-tenant SaaS database tenancy patterns*, the canonical comparison behind §2's isolation-spectrum table.
+2. AWS — *SaaS Tenant Isolation Strategies* whitepaper, including credential-scoped and policy-scoped isolation.
+3. PostgreSQL docs — schemas, roles, `SET ROLE`, and Row-Level Security (the weaker alternative rejected in §2).
+4. Google — *Borg* and *Omega* papers, for weighted fair-share scheduling and preemption of decomposable work.
+5. Dominant Resource Fairness (Ghodsi et al., NSDI '11) — fair sharing across multiple resource types, relevant when tenants differ in CPU-versus-memory profile.
+6. NIST SP 800-88 — media sanitisation, and the standing of cryptographic erasure referenced in §3.6.
+7. GDPR Art. 17 and 28 — erasure, and processor obligations that make provable deletion contractual.
+8. Modules 09 and 13 of this folder — the grid disciplines this platform's compute inherits, and the completeness-as-evidence pattern its probe mirrors.
+
+---
 ## 13. Low-Level Design
 
 **Requirements:** Tenant context cannot be absent; data access is credentialed per tenant; scheduling honours weighted shares; configuration is versioned and recorded with results.

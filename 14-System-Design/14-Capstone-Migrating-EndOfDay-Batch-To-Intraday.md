@@ -552,46 +552,330 @@ public async Task<Snapshot> MaterializeAsOfAsync(DateTime cutoff, IReadOnlyList<
 
 ---
 
-## 12. System Design
+## 12. System Design — Migrating an End-of-Day Batch Estate to Intraday
 
-**Functional requirements**
-- Convert batch jobs to intraday incrementally, preserving each output's correctness.
-- Operate a hybrid estate for an extended period with explicit per-value freshness.
-- Serve batch-cadence consumers from intraday sources via point-in-time views (Expert Q4).
-- Retain deliberately-batch jobs without conflating them with un-migrated work.
-
-**Non-functional requirements**
-- No downstream correctness regression at any cutover (the standard, post-incident).
-- Rollback available throughout the shadow period (Expert Q5).
-- Freshness contracts published with breach signalling (Advanced Q4).
-- Migration risk explicitly bounded and reported per cutover (Expert Q9).
-
-**Capacity estimation**
-- ~180 batch jobs; ~40 identified as deliberately-retained, leaving ~140 migration candidates.
-- Dependency DAG depth ~7 layers, constraining parallelism: upstream-first sequencing means roughly 7 sequential phases regardless of team size.
-- Per-job effort: extraction, parallel run, scenario coverage, cutover, shadow period — dominated by the *evidence* phases, not the reimplementation. A job whose code takes 3 weeks to convert typically takes 3–6 months to cut over safely.
-- **The sensitivity that matters:** shadow-period length, not implementation speed. Doubling engineering capacity halves reimplementation time and does not shorten the scenario-coverage wait, so the programme's duration is governed by episodic-event frequency — which is why synthetic injection (Intermediate Q2) is the highest-leverage schedule intervention available.
-
-**Architecture:** — upstream-first DAG traversal, Strangler Fig per job, parallel run with cadence-matched reconciliation, cutover, shadow period, retirement.
-
-**Components:** Batch-sequence mapper (Advanced Q1); parallel-run harness; cadence-matched reconciler with divergence classification; scenario-inventory gate; point-in-time view materializer; freshness-contract publisher.
-
-**Database selection:** Intraday stores per domain as established in Modules 129–133; the batch stores remain during parallel and shadow periods, retired only after.
-
-**Caching:** Dependency-graph-driven invalidation replacing batch's frozen-input caching.
-
-**Messaging:** the trade events and the market data as the intraday triggers — the migration is largely a matter of consuming streams that already exist.
-
-**Scaling:** Per-partition intraday scaling; the programme's constraint is DAG depth and evidence periods, not compute.
-
-**Failure handling:** Shadow running for post-cutover detection and rollback (Advanced Q3, Expert Q5); scenario gates before cutover; freshness-breach signalling for consumers (Advanced Q4).
-
-**Monitoring:** Per-output staleness replacing batch completion; shadow divergence counts by class; scenario-coverage progress per in-flight job; the two batch registers (Intermediate Q9).
-
-**Trade-offs:** Shadow running costs compute and discipline for detection and rollback optionality (Advanced Q3, Expert Q5). Upstream-first sequencing defers visible business value for genuine value. Cadence-then-semantics separation costs a second change for attributable verification (Advanced Q9).
+*Authored to the four-step standard (see Module 01 §12 for the method). The four steps adapt to a migration: Step 1 scopes the **estate** rather than a greenfield system, Step 2 proposes the **migration architecture** rather than the target architecture alone, Step 3 deep-dives the parts that actually go wrong, and Step 4 wraps up. The target architecture itself is Modules 09–13; this section designs how to get there without breaking anything on the way.*
 
 ---
 
+### Step 1 — Understand the Problem and Establish Design Scope
+
+#### The dialogue
+
+> **C:** What's driving this? "Batch is old" isn't a requirement, and the answer determines which jobs matter.
+> **I:** The business wants intraday risk and P&L. Today they see yesterday's numbers.
+>
+> **C:** So the driver is a specific set of *outputs*, not the whole estate. How many batch jobs are there?
+> **I:** About 180.
+>
+> **C:** Do all of them need to become intraday?
+> **I:** That's part of what I want you to determine.
+>
+> **C:** Good — because some genuinely shouldn't. A regulatory report with a T+1 deadline and an official closing price has no intraday meaning. Is that acceptable to leave?
+> **I:** Yes, if it's a deliberate decision rather than an omission.
+>
+> **C:** What's the dependency structure? Batch jobs usually form a DAG and the order constrains everything.
+> **I:** Roughly seven layers deep — position keeping feeds valuation, which feeds risk, which feeds reporting.
+>
+> **C:** Can we run batch and intraday side by side, or is this a cutover?
+> **I:** Side by side is expected. We can't have a big bang.
+>
+> **C:** What's the tolerance for a downstream number changing during the migration?
+> **I:** Zero. We had an incident last year where a "like-for-like" migration silently changed a P&L attribution and it wasn't caught for six weeks.
+>
+> **C:** Then the design centre is evidence, not implementation. Is rollback required after cutover?
+> **I:** Yes, for a period.
+>
+> **C:** Out of scope?
+> **I:** The target intraday architectures themselves — assume the patterns from the risk, market data, OMS, and reporting designs. And the org change.
+
+The seventh answer sets the bar. **"Zero tolerance for a silently changed number", plus a prior incident of exactly that shape**, means the programme is dominated by *proving equivalence*, not by writing intraday code. That reframing is the single most valuable thing to establish in Step 1 here.
+
+#### Functional requirements
+
+1. Convert batch jobs to intraday incrementally, preserving each output's correctness.
+2. Operate a hybrid estate for an extended period, with explicit per-value freshness.
+3. Serve batch-cadence consumers from intraday sources via point-in-time views.
+4. Retain deliberately-batch jobs **without conflating them with un-migrated work**.
+5. Provide rollback for a defined period after each cutover.
+
+#### Non-functional requirements
+
+| Requirement | Target |
+|---|---|
+| Downstream correctness | **No regression at any cutover** — the post-incident standard |
+| Rollback | Available throughout each shadow period |
+| Freshness | Contracts published per output, with breach signalling |
+| Migration risk | Explicitly bounded and reported per cutover |
+| Hybrid coherence | A consumer reading two values must be able to tell whether they are mutually consistent |
+
+That last one is the requirement teams forget: during a hybrid period, a dashboard showing an intraday exposure next to a batch-derived P&L is showing two numbers from two different instants, and **nothing in the data says so** unless the design makes it say so.
+
+#### Back-of-the-envelope estimation
+
+This is a programme estimate, and doing it properly is what separates a plan from a wish.
+
+```
+Total batch jobs                        = 180
+Deliberately-retained (§3.5)            ≈ 40
+Migration candidates                    ≈ 140
+
+Dependency DAG depth                    ≈ 7 layers
+Upstream-first sequencing means ~7 SEQUENTIAL phases
+regardless of team size — a job cannot go intraday while
+its inputs arrive once a day.
+```
+
+Per-job effort, decomposed by phase:
+
+```
+Reimplementation                        ≈ 2–4 weeks
+Parallel-run harness + reconciliation    ≈ 1–2 weeks
+Scenario coverage (waiting for events)  ≈ 2–5 MONTHS   ← dominant
+Cutover                                 ≈ days
+Shadow period                           ≈ 1–3 months
+```
+
+**The sensitivity that matters:**
+
+```
+Doubling engineering capacity:
+  halves reimplementation (4 wks → 2 wks)
+  does NOT shorten scenario coverage at all
+
+Programme duration is governed by EPISODIC EVENT FREQUENCY —
+month-end, quarter-end, corporate actions, holiday calendars,
+a bond default, an index rebalance — not by engineering throughput.
+
+Therefore the highest-leverage schedule intervention available
+is SYNTHETIC EVENT INJECTION (§3.3), not hiring.
+```
+
+Rough programme shape:
+
+```
+7 sequential layers × ~20 jobs per layer, parallelised within a layer
+Layer duration ≈ max(job duration) ≈ 4–7 months (scenario-bound)
+Programme      ≈ 2.5–4 years for the full 140
+...which is why the sequencing decision (§3.1) is the most
+consequential one in the plan: it determines what value arrives
+in year one versus year three.
+```
+
+#### What the numbers tell us
+
+1. **This is not an engineering-capacity problem.** The schedule is bound by calendar events you cannot accelerate, so a plan that promises delivery proportional to headcount is wrong on its face.
+2. **Evidence phases dominate.** A job whose code takes three weeks takes three to six months to cut over *safely* — a 6× ratio. Any plan estimating from implementation time will be wrong by that factor, and it is the estimate executives are usually given.
+3. **DAG depth caps parallelism at about 20 concurrent jobs**, which means the team size beyond that point buys nothing. Naming the ceiling protects the programme from being "accelerated" into incoherence.
+
+The hard problem is **proving that an intraday output equals the batch output it replaces, across scenarios that occur a few times a year.**
+
+---
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+#### The two core flows
+
+- **The per-job migration pipeline** — the repeatable unit: map, reimplement, parallel-run, gate, cut over, shadow, retire.
+- **The hybrid estate's runtime** — how batch and intraday coexist for years, which is the part usually treated as a temporary inconvenience and is in fact the majority of the programme's elapsed time.
+
+Stating that the hybrid period **is** the migration, rather than a phase of it, is the framing that produces a workable design.
+
+#### Components
+
+**Batch-Sequence Mapper.** Extracts the true dependency DAG from the scheduler, plus the implicit dependencies that live in file drops and shared tables and are not in the scheduler at all. **The implicit ones are where migrations fail** — a job that "doesn't depend on anything" but reads a table the previous job wrote.
+
+**Strangler Facade.** Per output, a routing layer that serves from batch or intraday and can flip per consumer. This is the mechanism that makes cutover and rollback a configuration change rather than a deployment.
+
+**Parallel-Run Harness.** Runs the intraday implementation alongside batch, capturing both outputs for comparison.
+
+**Cadence-Matched Reconciler.** Compares intraday output **sampled at the batch instant** against the batch output, classifying divergences (§3.2).
+
+**Scenario Inventory & Gate.** The register of scenarios each job must have survived before cutover, and the gate that blocks cutover until covered.
+
+**Point-in-Time View Materialiser.** Serves batch-cadence consumers from intraday stores by materialising an as-of view — so a consumer that wants "the 22:00 number" still gets exactly one number.
+
+**Freshness Contract Publisher.** Per output: expected cadence, current staleness, and a breach signal.
+
+**Two Batch Registers.** Deliberately-batch, and not-yet-migrated. Kept separate (§3.5).
+
+#### End-to-end walkthrough — migrating one job
+
+1. **Map.** Extract explicit and implicit dependencies; confirm all inputs are already intraday (upstream-first). If not, the job is not eligible yet.
+2. **Characterise.** Record the batch job's true contract: inputs, outputs, the instant it represents, its rounding and convention choices, and its known quirks — the quirks are usually undocumented and are half the divergences later.
+3. **Reimplement** as an event-driven job behind the Strangler Facade, writing to a parallel output location.
+4. **Parallel run.** Both run daily. The reconciler compares **intraday-sampled-at-batch-instant** against batch output.
+5. **Classify divergences** (§3.2) until the only remaining ones are explained and accepted.
+6. **Scenario gate.** Cutover is blocked until the scenario inventory is covered — **by coverage, not by elapsed time** (§3.3).
+7. **Cadence-then-semantics.** Cut over the *cadence* first, keeping the batch semantics exactly. Change semantics only in a **separate, later** change (§3.4).
+8. **Cutover.** Flip the facade, per consumer where possible, starting with the least critical.
+9. **Shadow period.** Batch keeps running, unconsumed, purely as a comparison oracle. Rollback is a facade flip.
+10. **Retire.** Decommission the batch job and remove it from the register — and only now is the job done.
+
+#### Interfaces and contracts
+
+The migration's "API" is the set of contracts that make the hybrid estate legible.
+
+**Freshness contract — published per output:**
+
+| Field | Type | Description |
+|---|---|---|
+| `output_id` | string | |
+| `mode` | enum | `BATCH` \| `INTRADAY` \| `PARALLEL` \| `SHADOW` |
+| `expected_cadence` | duration | `P1D` for batch, `PT60S` for intraday |
+| `as_of` | timestamp | **The instant this value represents** — not when it was computed |
+| `computed_at` | timestamp | |
+| `staleness` | duration | Derived, and **published rather than inferred** |
+| `breach` | bool | Staleness beyond contract |
+| `upstream_as_of` | map | The `as_of` of each input — the coherence mechanism |
+
+`upstream_as_of` is the field that solves the hybrid-coherence requirement: a consumer combining two values can compare their input instants and know whether they are mutually consistent. Without it, the hybrid estate silently mixes instants — which is exactly the class of defect the prior incident belonged to.
+
+**`GET /v1/outputs/{id}?as_of={timestamp}`** — the point-in-time view. A batch-cadence consumer asks for the 22:00 value and gets a single, stable, reproducible number from the intraday store. **This is what allows upstream jobs to go intraday before their downstream consumers do**, and without it the DAG must be migrated strictly bottom-to-top in lockstep, which is impossible in practice.
+
+**`GET /v1/migration/jobs/{id}`** — `{ phase, divergence_summary, scenarios_required, scenarios_covered, shadow_days_elapsed, rollback_available }`. The programme's own status surface, and the artefact that makes "are we ready to cut over?" a data question rather than an opinion.
+
+#### Data model
+
+**`batch_job_register`** — `job_id`, `name`, `scheduler_ref`, `classification` (`MIGRATION_CANDIDATE` \| `DELIBERATELY_BATCH`), `deliberate_reason`, `dag_layer`, `phase`, `owner`, `decided_at`, `decided_by`.
+
+The `classification` field carries the §3.5 requirement, and `deliberate_reason` plus `decided_by` are what stop a deliberate decision from decaying into a forgotten one.
+
+**`dependency`** — `from_job`, `to_job`, `kind` (`SCHEDULER` \| `FILE_DROP` \| `SHARED_TABLE` \| `IMPLICIT_DISCOVERED`), `discovered_at`, `evidence`. Implicit dependencies are recorded with their evidence, because they are the ones people dispute.
+
+**`parallel_run_result`** — `job_id`, `business_date`, `batch_output_hash`, `intraday_output_hash`, `divergence_count`, `divergence_classes`, `max_absolute_diff`, `max_relative_diff`, `sampled_at`.
+
+**`divergence`** — `run_id`, `key`, `batch_value`, `intraday_value`, `class` (§3.2), `explanation`, `accepted_by`, `accepted_at`. **Every accepted divergence has a named accepter** — an unexplained divergence that is quietly tolerated is how the prior incident happened.
+
+**`scenario_inventory`** — `job_id`, `scenario_code` (`MONTH_END`, `QUARTER_END`, `CORPORATE_ACTION_MERGER`, `HOLIDAY_CALENDAR_MISMATCH`, `LATE_TRADE_AMENDMENT`, `INSTRUMENT_DEFAULT`, `DST_BOUNDARY`, …), `required`, `covered_at`, `covered_by` (`NATURAL` \| `SYNTHETIC`).
+
+**Job phase lifecycle:** `IDENTIFIED → MAPPED → REIMPLEMENTED → PARALLEL_RUNNING → GATED → CUTOVER → SHADOW → RETIRED`, with `ROLLED_BACK` reachable from `CUTOVER` and `SHADOW`.
+
+#### Store and infrastructure selection, and why
+
+| Concern | Choice | Reason |
+|---|---|---|
+| Intraday stores | **Per-domain, as designed in Modules 09–13** | The target architecture is already specified; this programme is the route to it |
+| Batch stores | **Retained through parallel and shadow, retired only after** | They are the rollback path and the comparison oracle. Retiring early converts a reversible cutover into an irreversible one |
+| Parallel-run results | **Append-only, retained for the programme's life** | The divergence history is the evidence base for the whole migration and is what an auditor or a post-incident review will ask for |
+| Facade routing config | **Versioned, per-consumer, hot-reloadable** | Cutover and rollback must be a config flip in seconds, not a deployment |
+| Triggers | **The existing trade and market-data event streams** | The migration is largely a matter of consuming streams that already exist — a point worth making, because teams often plan to build infrastructure that Modules 10 and 11 already provide |
+
+---
+
+### Step 3 — Design Deep Dive
+
+#### 3.1 Dependency order is the real constraint
+
+A job cannot be genuinely intraday if its inputs arrive once a day. Attempting it produces the worst outcome available: an intraday-*looking* output whose value changes only at 22:00, which is a lie the consumer cannot detect.
+
+So sequencing is **upstream-first**, and the consequence is uncomfortable and must be said out loud: **the first year of the programme delivers position keeping and reference data — infrastructure with no visible business value — while the intraday risk the business asked for is three layers up.** A programme that reorders to deliver visible value early produces fake intraday, and fake intraday is worse than batch because people trust it.
+
+Two mitigations that are legitimate:
+
+- **Point-in-time views** (§2) let a downstream job stay batch-cadence while its upstream goes intraday, so the DAG does not have to move in lockstep.
+- **Vertical slices** — migrate a narrow path through all seven layers for a single product or desk, delivering real intraday for that slice while the horizontal migration continues. This is how the programme shows value in year one without faking it.
+
+The implicit-dependency discovery matters here too: a job whose scheduler entry shows no dependencies but which reads a table written by an earlier job **will silently read stale or partial data** once that earlier job becomes continuous. Batch's implicit guarantee was *quiescence* — nothing changed while you ran — and intraday removes it everywhere at once.
+
+#### 3.2 Cadence-matched reconciliation and divergence classification
+
+Comparing a continuously-updating value against a once-a-day value requires sampling the intraday output **at the batch job's instant**, using the same input cut. Comparing "intraday now" against "batch last night" produces divergences on every row and tells you nothing.
+
+Divergence classes, and the handling of each:
+
+| Class | Meaning | Handling |
+|---|---|---|
+| **Expected-semantic** | Intraday is *more* correct — e.g. it saw a late amendment batch missed | Explain, accept, **record the accepter**. This class is why the reconciler cannot simply demand equality |
+| **Convention** | Rounding, day-count, tie-breaking differs | Fix the intraday implementation to match batch **exactly**, even where batch is arguably wrong — semantics change later (§3.4) |
+| **Timing** | Different input cut | Fix the harness, not the code — this is a measurement error, not a defect |
+| **Defect** | Genuinely wrong | Fix and re-run |
+| **Unexplained** | Not yet classified | **Blocks cutover, unconditionally.** An unexplained divergence is the prior incident in embryo |
+
+The discipline that makes this work: **an unexplained divergence is never aged out.** Teams under schedule pressure reclassify stubborn divergences as "immaterial" — and the six-week undetected P&L attribution change in the dialogue is precisely what that produces.
+
+#### 3.3 The scenario gate — coverage, not elapsed time
+
+The naive gate is "run in parallel for a month." It is wrong, because a month may contain no quarter-end, no corporate action, and no default — and those are exactly where batch and intraday diverge.
+
+**Cutover is gated on scenario coverage.** The inventory per job lists the scenarios that must have been observed, and each must be covered before the flip.
+
+Because coverage waits on the calendar, and the estimation showed that is the schedule's dominant term, **synthetic injection is the highest-leverage intervention in the whole programme**:
+
+- Replay historical episodic events (a real merger from two years ago, a real default, a real index rebalance) through both implementations in a controlled environment.
+- Construct synthetic events for scenarios with no historical instance.
+- Record coverage as `SYNTHETIC` rather than `NATURAL`, because the two are not equally strong — synthetic coverage proves the code handles the shape, natural coverage proves it handles the shape *plus* everything else that co-occurred in production.
+
+A defensible policy: high-risk scenarios require natural coverage; the rest may be covered synthetically. That policy is itself a stated, reviewable risk decision rather than an implicit one.
+
+#### 3.4 Cadence first, semantics second
+
+The strongest single discipline in the programme, and the one most often violated under pressure.
+
+When migrating, the temptation is to fix the batch job's known flaws at the same time — it uses a stale FX rate, it rounds the wrong way, it excludes a product class it shouldn't. Doing both at once makes every divergence **unattributable**: is this difference because we changed cadence, or because we changed the rule? With both changed, you cannot tell, and the reconciliation loses all diagnostic power.
+
+So: **the intraday implementation reproduces batch's semantics exactly, quirks included.** It divergences to zero (modulo the expected-semantic class). Cut over. Shadow. Retire. *Then*, as a separate, separately-reviewed change with its own before/after comparison, fix the semantics.
+
+This costs a second change per job and it buys attributable verification, which is the only thing that makes the correctness guarantee real.
+
+#### 3.5 The batch that shouldn't be migrated — and the two registers
+
+Roughly 40 of the 180 jobs should stay batch, for genuine reasons:
+
+- **The output is defined at a batch instant.** An official closing price, a NAV struck at a valuation point, a regulatory report as-of close. "Intraday NAV" is not a better NAV; it is a different and mostly meaningless number.
+- **The consumer is batch.** A downstream system, a regulator, or a counterparty that accepts one file a day.
+- **The computation requires a complete set** — a global optimisation, a full reconciliation — and a partial-input intraday version is not an approximation of it but a different calculation.
+- **The economics don't justify it.** A job producing a report three people read monthly.
+
+The design requirement is the **two registers**: `DELIBERATELY_BATCH` and `MIGRATION_CANDIDATE`, kept structurally separate with a recorded reason and decider.
+
+The failure this prevents is subtle and common: with one register, a deliberately-batch job and a not-yet-migrated job look identical, so after two years nobody remembers which is which. The deliberate ones get re-litigated every planning cycle, or — worse — the un-migrated ones get quietly reclassified as deliberate to close out the programme. **A programme that cannot say what it decided not to do cannot say it is finished.**
+
+#### 3.6 The hybrid estate, and correctness semantics that change under intraday
+
+Several guarantees batch provided implicitly must be rebuilt explicitly:
+
+| Batch provided implicitly | Intraday must provide explicitly |
+|---|---|
+| **Quiescence** — inputs frozen during the run | Pinned snapshots / input cuts (Module 09 §3.2) |
+| **A single instant** — everything as-of 22:00 | `as_of` published per value, plus `upstream_as_of` for coherence |
+| **Completion** — "the batch finished" meant everything was done | Per-output freshness contracts and breach signals; there is no global "done" any more |
+| **Ordering** — job N ran after job N−1 | Event ordering and dependency-driven invalidation |
+| **A natural retry point** — rerun the batch | Idempotent, replayable event processing |
+
+The third row is the one that surprises operations teams: **batch's completion signal was the estate's health check, and intraday deletes it.** "Did everything run?" becomes "is every output within its freshness contract?" — a different question, needing a different dashboard, and it must exist *before* the first cutover, not after.
+
+#### 3.7 Failure handling and rollback
+
+- **Divergence appears after cutover** → the shadow period exists exactly for this; batch is still running unconsumed, so rollback is a facade flip and the divergence is diagnosable against a live oracle.
+- **Rollback after shadow retirement** → not available, which is why retirement is a deliberate, reviewed step and not a cleanup task.
+- **An upstream job's cutover destabilises a downstream batch job** → the point-in-time view is the insulation; if the downstream breaks anyway, an implicit dependency was missed and belongs in the dependency register with its evidence.
+- **Intraday job falls behind** → freshness contract breaches and signals. Consumers that cannot tolerate staleness must **fail closed**, exactly as Module 09's limits engine does. Serving a stale value silently is the hybrid estate's characteristic failure.
+- **A scenario occurs during shadow that was never covered** → treat it as a coverage event: compare, classify, and if it diverges, roll back. A scenario arriving late is a gift, not a problem.
+
+---
+
+### Step 4 — Wrap-Up
+
+**What we left out:** the target intraday architectures themselves (Modules 09–13); the organisational change — batch estates come with batch-shaped teams, runbooks, and on-call rotations, and intraday changes all three; cost, since intraday generally costs more in steady-state compute than a nightly window; vendor and third-party systems that only accept or produce daily files and cap what can be migrated at all; and the data-retention implications of continuous versus daily snapshots.
+
+**What we would measure:** per-output **staleness** replacing batch completion as the estate's health signal; **shadow divergence counts by class**, with unexplained held at zero as a hard gate; scenario-coverage progress per in-flight job, split natural versus synthetic; the **two register counts** over time, since `DELIBERATELY_BATCH` growing late in the programme is the signal that un-migrated work is being reclassified rather than done; rollback exercises actually performed (a rollback path never tested is not a rollback path); freshness-contract breach rate per output; and DAG-layer progress, which is the only honest measure of how much of the programme's *value* has arrived rather than how many jobs have been touched.
+
+**Summary.** The programme is bound by evidence, not engineering: a job takes weeks to reimplement and months to prove, so the schedule is governed by episodic-event frequency and synthetic injection is the highest-leverage intervention available. Sequencing is upstream-first because a job whose inputs arrive daily cannot be genuinely intraday, with point-in-time views and vertical slices as the legitimate ways to deliver value early. Cadence changes and semantic changes are strictly separated so every divergence stays attributable. And the hybrid estate is designed as the steady state it will be for years — freshness contracts, `upstream_as_of` for coherence, and two registers so the programme can state what it deliberately did not do.
+
+---
+
+### References
+
+1. Martin Fowler — *StranglerFigApplication*, the incremental-replacement pattern the per-job pipeline implements.
+2. Martin Fowler — *ParallelChange* (expand/contract), the discipline behind cadence-then-semantics.
+3. Michael Feathers — *Working Effectively with Legacy Code*, on characterisation tests: §2's "characterise the batch job's true contract, quirks included".
+4. GitHub Engineering — *Scientist* and the science-of-refactoring pattern: run both implementations, compare, report — the parallel-run harness in miniature.
+5. Kleppmann — *Designing Data-Intensive Applications*, ch. 11 (batch versus stream processing, and the guarantees that change between them — the §3.6 table's grounding).
+6. Google SRE Book, ch. 27 — *Reliable Product Launches at Scale*, for launch gates as coverage rather than elapsed time.
+7. Modules 09–13 of this folder — the target architectures this programme migrates toward, and the pinned-snapshot, freshness, and reconciliation patterns it reuses.
+
+---
 ## 13. Low-Level Design
 
 **Requirements:** Freshness propagates correctly through derivations; cutover is gated on coverage; divergence is classified by cause; batch-cadence consumers are served from intraday sources.

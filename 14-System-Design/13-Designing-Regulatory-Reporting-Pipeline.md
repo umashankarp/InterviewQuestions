@@ -558,47 +558,301 @@ public async Task<Submission> BuildAmendmentAsync(InternalEventId eventId, Trade
 
 ---
 
-## 12. System Design
+## 12. System Design — Designing a Regulatory Reporting Pipeline
 
-**Functional requirements**
-- Identify all reportable events across regimes from source systems.
-- Enrich with reference data; validate in three layers pre-submission.
-- Submit before regime-specific deadlines; process acknowledgements and rejections.
-- Handle amendments and cancellations referencing prior submissions.
-- Retain submissions with full provenance for the statutory period.
-
-**Non-functional requirements**
-- Completeness verifiable against an independent source.
-- Deadline margin sufficient for a full repair-and-resubmit cycle.
-- Archive immutable and tamper-evident for the retention period.
-- Rejection rate approaching zero, treated as a defect signal (Advanced Q2).
-
-**Capacity estimation**
-- ~250k reportable transactions/day across regimes (aligning with the order volumes).
-- Report record ~2–4 KB → ~1 GB/day submitted, ~350 GB/year, ~2.5 TB over a 7-year retention — small, and confirming the archive's challenge is durability and evidentiary integrity rather than size.
-- Processing: trivially parallel, minutes of compute at this volume.
-- **The sensitivity that matters:** the regulator endpoint's rate limit, not the firm's processing capacity (Intermediate Q7). If the endpoint accepts 100 submissions/second, 250k records take ~42 minutes minimum regardless of how fast the pipeline runs — which sets the latest safe start time and is the number that actually governs the deadline.
-
-**Architecture:** — extraction with reportability determination, enrichment, layered validation, deadline-bound submission, repair loop, and independent completeness reconciliation.
-
-**Components:** Reportability classifier; enrichment service over bitemporal reference data; three-layer validator; submission client respecting rate limits; repair queue; completeness reconciler; immutable archive with provenance.
-
-**Database selection:** Archive — append-only, immutable, hash-chained, partitioned by regime and date. Reference data — bitemporal (§Expert Q4), resolved as-of the event. Repair queue — a durable queue with priority support, not in-memory, since a restart must not lose the backlog.
-
-**Caching:** Reference data cached with staleness bounds tied to its own change cadence (Intermediate Q5), never unbounded.
-
-**Messaging:** Subscribe to the event stream via the Outbox pattern — polling current state cannot distinguish amendments from originals (Expert Q4).
-
-**Scaling:** Parallel over records; submission capped externally by endpoint rate limits (Intermediate Q7).
-
-**Failure handling:** Reportable-pending-review default; repair loop with deadline aging; documented regulator-outage procedure with notification windows (Advanced Q9); pre-agreed deadline policy (Intermediate Q3).
-
-**Monitoring:** Independent completeness reconciliation results; deadline margin distribution as a leading indicator (Expert Q9); exclusion-reason counts with new-reason alerting; expected-volume monitoring catching silent zero (Advanced Q8); repair-backlog aging by category.
-
-**Trade-offs:** Reportable-by-default trades some over-reporting for eliminating silent under-reporting — correct given the asymmetry. Early and repeated runs trade some rework for repair margin (Advanced Q3). Shared extraction across regimes trades some coupling for consistency (Expert Q2).
+*Authored to the four-step standard (see Module 01 §12 for the method).*
 
 ---
 
+### Step 1 — Understand the Problem and Establish Design Scope
+
+#### The dialogue
+
+> **C:** Which regimes? EMIR, MiFIR, SFTR, Dodd-Frank, and CFTC reporting all have different deadlines, formats, and reportability rules.
+> **I:** Assume three regimes with different deadlines — one T+1, one intraday, one weekly.
+>
+> **C:** What are the source systems, and do they know an event is reportable?
+> **I:** They don't. Reportability is your determination, from trade, position, and reference data.
+>
+> **C:** That's the crux — if sources don't flag reportable events, how do we know we've found them all?
+> **I:** That's the question I want you to answer.
+>
+> **C:** What happens if we miss a report?
+> **I:** Under-reporting is a regulatory breach with fines and, for repeated failures, senior-manager accountability. It's the worst outcome.
+>
+> **C:** Worse than late?
+> **I:** Late is bad. Missing entirely, discovered by the regulator, is much worse — because it means our controls didn't work.
+>
+> **C:** Do we handle amendments and cancellations?
+> **I:** Yes, referencing prior submissions, and the regulator tracks the chain.
+>
+> **C:** Volume?
+> **I:** Around 250,000 reportable transactions a day across regimes.
+>
+> **C:** What's the regulator's endpoint like — throughput, rate limits, acknowledgement model?
+> **I:** Rate-limited, asynchronous acknowledgements, and rejections can come back hours later.
+>
+> **C:** Retention?
+> **I:** Seven years, tamper-evident, with full provenance.
+>
+> **C:** Out of scope?
+> **I:** The regulatory rules themselves — assume a compliance team supplies the reportability logic as specifications.
+
+The third exchange is the entire module. **Completeness — did we find every reportable event? — is the hard problem, and it is unanswerable from inside the pipeline**, because the pipeline's notion of "reportable" is the very thing under question. Everything in §3.1 follows.
+
+#### Functional requirements
+
+1. Identify all reportable events across regimes from source systems.
+2. Enrich with reference data resolved as-of the event.
+3. Validate in three layers before submission.
+4. Submit before regime-specific deadlines; process asynchronous acknowledgements and rejections.
+5. Handle amendments and cancellations referencing prior submissions.
+6. Retain submissions with full provenance for the statutory period.
+
+#### Non-functional requirements
+
+| Requirement | Target |
+|---|---|
+| **Completeness** | Verifiable against an **independent** source — not against the pipeline's own logic |
+| Deadline margin | Sufficient for a full detect-repair-resubmit cycle, not just for submission |
+| Rejection rate | Approaching zero, and treated as a **defect signal**, not as normal operation |
+| Archive | Immutable, tamper-evident, 7 years |
+| Availability | The pipeline may be down between cycles; it may not be down at a deadline |
+| Auditability | For any submitted field: which source, which reference data version, which rule version |
+
+#### Back-of-the-envelope estimation
+
+```
+Reportable transactions/day  ≈ 250,000 across regimes
+Report record                ≈ 2–4 KB
+Daily submitted volume       ≈ 1 GB/day
+Annual                       ≈ 350 GB
+7-year retention             ≈ 2.5 TB
+```
+
+Processing:
+
+```
+Transformation is trivially parallel and CPU-light.
+250,000 records × ~2 ms                        ≈ 500 CPU-seconds
+On 16 cores                                    ≈ 30 seconds
+```
+
+**The sensitivity that matters — and it is external:**
+
+```
+The regulator's endpoint, not our pipeline, governs the schedule.
+If the endpoint accepts 100 submissions/second:
+  250,000 ÷ 100                                = 2,500 s ≈ 42 minutes MINIMUM
+  ...regardless of how fast we process.
+
+Deadline                    = 23:59
+Submission floor            = 42 min
+Repair cycle (detect → fix → revalidate → resubmit)
+                            ≈ 90 min for a material issue
+Acknowledgement latency     ≈ up to 60 min
+Safety margin               ≈ 60 min
+LATEST SAFE START           = 23:59 − (42 + 90 + 60 + 60) ≈ 19:30
+```
+
+#### What the numbers tell us
+
+1. **This is not a big-data problem.** 2.5 TB over seven years, 30 seconds of compute. Any answer built around scale has missed it entirely.
+2. **The binding constraint is external and the deadline arithmetic runs backwards from it.** The latest safe start time (≈19:30) is derived, not chosen — and it is derived from the *repair* cycle, not the submission. A pipeline that starts at 23:00 and submits perfectly in 42 minutes has **no capacity to be wrong**, which is the same as having no control at all.
+3. **The archive's engineering concern is evidentiary integrity, not size.** 2.5 TB is nothing; proving that what is in it is what was submitted, unaltered, seven years later, is the actual requirement.
+
+The hard problem is **completeness, verified independently, with enough deadline margin to fix what verification finds.**
+
+---
+
+### Step 2 — Propose High-Level Design and Get Buy-In
+
+#### The two core flows
+
+- **The reporting cycle** — extract, classify, enrich, validate, submit, acknowledge. Deadline-bound.
+- **The completeness and repair loop** — reconcile against an independent source, classify breaks, repair, resubmit. This is a *first-class flow*, not exception handling, and designing it as an afterthought is the characteristic failure of these systems.
+
+#### Components
+
+**Event Subscriber.** Consumes source-system events via the **Outbox pattern** — not by polling current state. This matters more than it looks: polling a table for "today's trades" cannot distinguish an amended trade from an original, and cannot see a trade that was booked and cancelled between polls. Both are reportable events.
+
+**Reportability Classifier.** Applies versioned rules to determine which events are reportable under which regimes. **Rule versions are recorded on every determination**, including negative ones.
+
+**Enrichment Service.** Resolves counterparty LEIs, instrument identifiers (ISIN/UPI), and classifications from **bitemporal reference data, as-of the event date** — not as-of now.
+
+**Three-Layer Validator.** Structural, then semantic, then regime-specific business rules (§3.3).
+
+**Submission Client.** Respects the endpoint's rate limit, handles asynchronous acknowledgements, and tracks per-submission state.
+
+**Repair Queue.** Durable, prioritised, with deadline awareness.
+
+**Completeness Reconciler.** Compares reported events against an **independently derived** expected set (§3.1).
+
+**Immutable Archive.** Hash-chained, append-only, with full provenance per field.
+
+#### End-to-end walkthrough — a reporting cycle
+
+1. Cycle starts at the derived latest-safe-start (19:30), or earlier — earlier is free and later is not.
+2. Subscriber has been consuming source events continuously; the cycle draws the day's events from the durable stream with an explicit **cut**: `events with source_sequence <= X`. Recording the cut is what makes the cycle reproducible.
+3. Classifier evaluates each event against each regime's rules, producing `REPORTABLE(regime)` or `NOT_REPORTABLE(reason, rule_version)`. **Negative determinations are recorded**, because "we decided this wasn't reportable" is the artefact a regulator asks about — an absence is not an answer.
+4. Enrichment resolves reference data as-of the event's business date. **A failed enrichment does not drop the record** — it routes to repair with a specific reason (§3.2).
+5. Three-layer validation; failures route to repair with the failing rule identified.
+6. Valid records are batched and submitted, rate-limited to the endpoint's ceiling, each with a client-assigned `submission_id` for idempotency.
+7. Acknowledgements arrive asynchronously; each record moves to `ACKNOWLEDGED` or `REJECTED(code)`.
+8. Rejections route to repair; the loop repeats until the deadline or until clean.
+9. **Independently of all of the above**, the reconciler compares the reported set against the expected set derived from a different source, and raises completeness breaks.
+10. Everything — inputs, determinations, enrichments, submissions, acknowledgements — is archived with provenance.
+
+#### API design
+
+Most of this pipeline is internal, but three surfaces matter and are worth specifying.
+
+**`GET /v1/reports`** — the operational and audit surface.
+
+| Param | Type | Description |
+|---|---|---|
+| `regime`, `business_date` | | |
+| `status` | enum | `PENDING`, `SUBMITTED`, `ACKNOWLEDGED`, `REJECTED`, `REPAIRING`, `SUPERSEDED` |
+| `break_type` | enum | Optional; filters completeness breaks |
+
+**`GET /v1/reports/{report_id}/provenance`** → for every submitted field: the source system and record, the reference-data version used, the rule version applied, and the transformation step. **This endpoint is the audit deliverable**, and building it as a first-class API rather than a query someone writes under pressure is the difference between a two-hour and a two-week regulator response.
+
+**`POST /v1/reports/{report_id}/amend`** — `{ reason_code, corrected_fields, approver }`. Creates a new report **linked to the original**, never an in-place edit.
+
+**`GET /v1/completeness/{business_date}`**
+
+| Field | Type | Description |
+|---|---|---|
+| `expected_count`, `reported_count` | int | From **independent** derivations |
+| `breaks` | array | `{ type, count, sample_ids }` |
+| `expectation_source` | string | Which independent source produced the expected set — recorded because the answer's credibility depends entirely on it |
+
+#### Data model
+
+**`reportable_event`** — the determination record, one per source event per regime:
+
+| Column | Type | Notes |
+|---|---|---|
+| `event_id`, `regime` | | |
+| `source_system`, `source_record_id`, `source_sequence` | | The cut and the lineage |
+| `determination` | enum | `REPORTABLE` \| `NOT_REPORTABLE` |
+| `reason_code`, `rule_version` | | **Recorded for negatives too** |
+| `determined_at` | timestamptz | |
+
+**`report`** — `report_id`, `event_id`, `regime`, `business_date`, `status`, `submission_id`, `submitted_at`, `acknowledged_at`, `rejection_code`, `amends_report_id`, `payload_hash`, `deadline_at`.
+
+Lifecycle: `IDENTIFIED → ENRICHED → VALIDATED → SUBMITTED → ACKNOWLEDGED`, with branches to `REPAIRING` (from any pre-ack state), `REJECTED`, `SUPERSEDED` (by an amendment), and `CANCELLED`.
+
+**`report_field_provenance`** — `report_id`, `field_name`, `value_hash`, `source_ref`, `refdata_version`, `rule_version`, `transform_step`. This is the largest table in the system and it earns its size.
+
+**`archive_entry`** — `sequence`, `report_id`, `payload`, `payload_hash`, `prev_hash`, `written_at`. **Hash-chained**: each entry includes the previous entry's hash, so any retroactive alteration invalidates every subsequent link. Periodically the head hash is notarised externally (a timestamping authority or an append-only external log), which converts "we say it wasn't altered" into "it demonstrably wasn't."
+
+**`completeness_check`** — `business_date`, `regime`, `expected_count`, `reported_count`, `expectation_source`, `breaks`, `run_at`, `run_status`.
+
+#### Store selection, and why
+
+| Store | Choice | Reason |
+|---|---|---|
+| Archive | **Append-only object storage with Object Lock / WORM, hash-chained** | The requirement is tamper-evidence over seven years. Immutability enforced by the platform beats immutability enforced by policy |
+| Operational state | **PostgreSQL** | Small, relational, transactional state machines |
+| Reference data | **Bitemporal relational** | As-of resolution is a correctness requirement (§3.2) |
+| Repair queue | **Durable queue with priority** | A restart must not lose the backlog — an in-memory queue here loses exactly the records that are already late |
+| Event ingest | **Kafka via Outbox** | Amendment/original distinction requires the event stream, not state polling |
+
+---
+
+### Step 3 — Design Deep Dive
+
+#### 3.1 Completeness — why it cannot be checked from the inside
+
+The pipeline reports what it classified as reportable. Asking the pipeline "did you report everything?" asks it to compare its output against its own logic, which it will always pass. **A check whose expected set derives from the logic being checked cannot detect that logic's omissions.**
+
+So the expected set must come from somewhere else. Independent sources, in descending order of strength:
+
+1. **The counterparty's or the regulator's own view.** Some regimes offer reconciliation feeds — pairing rates, or the regulator's record of what it received. Strongest, because the source is genuinely external.
+2. **A different internal system with a different lineage.** Settlement records, the general ledger, or the custodian's statement. A trade that settled must have existed; if it settled and was not reported, that is a break the reporting logic could never have found.
+3. **Financial reconciliation.** Reported notional versus the books' notional, per product and per counterparty. Coarse, but catches whole categories going missing.
+4. **A parallel implementation of reportability**, written by a different team from the same specification. Expensive, and it only catches specification *misreadings*, not specification *gaps* — worth stating the limitation.
+
+The design commitment: **every regime has a named independent expectation source, recorded on every completeness check.** A completeness check with no `expectation_source`, or whose source is the pipeline itself, is a check that always passes, and its green status is worse than no check at all because it creates confidence.
+
+And the reconciler needs a **dead-man's switch**: it is the only external verifier, so its silent failure removes the control with no signal. Heartbeat with input counts, alert on absence and on implausible inputs — zero expected events is not a quiet day.
+
+#### 3.2 Enrichment and its characteristic failure
+
+Enrichment attaches counterparty LEIs, instrument identifiers, and classifications. Its failure mode is specific and dangerous: **a missing or stale enrichment produces a report that is structurally valid and semantically wrong.** It passes validation, it is accepted by the regulator, and it is incorrect — which is worse than a rejection, because a rejection is visible.
+
+Controls:
+
+- **Resolve as-of the event date**, from bitemporal reference data. An instrument reclassified last month must be reported under the classification in force at trade time.
+- **Never default.** A missing LEI must route to repair, never fall back to a placeholder, a parent entity, or an empty string. Defaults are how wrong data gets submitted with full confidence.
+- **Count enrichment fallbacks**, if any are permitted at all. A silent fallback path with no counter is undetectable — this course's most repeated finding.
+- **Bound reference-data staleness** to that data's own change cadence: LEI data changes daily, instrument classifications monthly, so one cache TTL for both is wrong in one direction or the other.
+
+#### 3.3 Validation in three layers, and why regulator rejection is too late
+
+| Layer | Checks | Catches |
+|---|---|---|
+| **Structural** | Schema, types, mandatory fields, enumerations, formats | Malformed output — cheap, fast, first |
+| **Semantic** | Cross-field consistency (settlement after trade date; notional against price × quantity; counterparty valid for the product) | Internally inconsistent reports that are structurally fine |
+| **Regime business rules** | The regulator's own published validation rules, implemented locally | Everything the regulator would reject |
+
+The third layer is the one teams skip, and skipping it is why rejection rates are non-zero. **The regulator's rejection is a validation result that arrives hours late, on the deadline, after your repair budget is spent.** Implementing their published rules locally converts a deadline-threatening event into a pre-submission repair.
+
+Hence the standing posture: **a rejection is a defect in our validation, not a normal outcome.** Every rejection code that appears in production should result in a new local rule, and the rejection-rate trend is a quality metric for the pipeline rather than a measure of the regulator.
+
+#### 3.4 The repair loop as designed infrastructure
+
+The repair loop is where the deadline is won or lost, and the estimation gave it 90 minutes.
+
+- **Durable, prioritised queue.** Priority by deadline proximity, then by regime severity. A restart must not lose it.
+- **Repairs are classified**: reference-data gaps (fix the data, re-enrich, resubmit), source-data errors (needs the source system, slowest path), rule defects (needs a code or rule-version change, needs approval), and transient submission failures (retry).
+- **Bulk repair for systemic issues.** When 4,000 records fail for one missing LEI, the fix is one reference-data correction and a bulk re-enrich, not 4,000 tickets. The queue must support grouping by root cause, or a systemic issue consumes the entire repair budget in triage.
+- **The repair loop has its own deadline awareness**, and surfaces "at current repair rate, N records will miss the deadline" — which is the number the operations team actually needs at 22:00.
+
+#### 3.5 Amendments, cancellations, and reporting what you previously reported
+
+Regulators track the *chain*, so the design must too:
+
+- An amendment is a **new report linked to the original**, carrying a reason code — never an in-place edit. The original stays in the archive exactly as submitted.
+- A cancellation is a distinct action type, not a deletion.
+- **Late amendments to prior periods** are normal (a trade corrected weeks later) and must not disturb the closed period's archive — they add to it.
+- The provenance record must answer "what did we report on date D, and what do we now believe about date D" — the bitemporal question again, and the reason the archive is append-only.
+
+The subtle trap: an amendment must reference the regulator's identifier for the original submission, which arrives in the acknowledgement. **If acknowledgements are not durably stored against the report, amendments become impossible** — a failure discovered weeks after go-live, when the first correction is needed.
+
+#### 3.6 Failure handling
+
+- **Source system unavailable at cycle time** → do not submit a partial set silently. Submit what is complete, and **raise a completeness break for the known-missing source** — an explicit gap is defensible, a silent one is not.
+- **Regulator endpoint down** → retry with backoff within the deadline; past the safe threshold, escalate to a human with the specific unsubmitted set. Most regimes have a documented late-filing procedure, and using it deliberately is better than missing silently.
+- **Endpoint rate-limits harder than expected** → the schedule assumed a rate; if the observed rate drops, the safe start time was wrong. This should alert *during* submission, comparing actual throughput against the plan, not be discovered at the deadline.
+- **Acknowledgement never arrives** → **aging detection**, not rate. A submission with no acknowledgement after 4× the expected latency is a break, even if today's acknowledgement rate looks normal. This is the same detector Module 20 §4 needed.
+- **Validation rule wrong** → over-strict rejects valid reports (visible, annoying); over-lenient submits invalid ones (invisible until the regulator rejects, or never). Rule changes therefore go through the same review as code, with a **shadow run** against a historical period before enforcement.
+
+---
+
+### Step 4 — Wrap-Up
+
+**What we left out:** the reportability rules themselves, which are the compliance team's domain and change constantly; regime-specific formats (ISO 20022, XML schemas, CSV variants) and their versioning; multi-jurisdiction entity structures, where the reporting entity differs from the trading entity; delegated reporting, where you report on a client's behalf and inherit their data-quality problems; the regulator's own reconciliation feeds and pairing/matching processes; and disaster recovery with a deadline that does not move because your data centre did.
+
+**What we would measure:** **completeness break count by type, with the expectation source named** — the pipeline's most important metric by a wide margin; **rejection rate as a defect trend**, targeting zero; deadline margin actually achieved per cycle, which is the leading indicator of the next missed filing and degrades long before it breaches; repair-queue depth and **repair rate versus deadline**; enrichment fallback and failure counts; unacknowledged submissions **by age**; archive hash-chain verification, run continuously with its own dead-man's switch; and reconciler heartbeat — because the verifier's silent failure is the failure with no symptom.
+
+**Summary.** Completeness is the hard problem and it cannot be checked from inside the pipeline, so every regime gets a **named independent expectation source** recorded on every check. The deadline arithmetic runs backwards from the regulator's rate limit through the repair cycle, which is what derives a 19:30 start rather than a 23:00 one — a pipeline with no repair budget has no control. Validation implements the regulator's own rules locally, because their rejection is a validation result that arrives too late to act on. And the archive is hash-chained and externally notarised, because at seven years the requirement is not storage, it is provable integrity.
+
+---
+
+### References
+
+1. ESMA — *EMIR Reporting Technical Standards* and validation rules; *MiFIR Transaction Reporting* (RTS 22) and the ESMA validation-rules spreadsheet that §3.3's third layer implements.
+2. FCA — *Market Watch* newsletters on transaction-reporting failures; the recurring theme is completeness, not formatting.
+3. CFTC — Part 45 swap data reporting, for a contrasting deadline and amendment model.
+4. ISO 20022 — message definitions and versioning practice.
+5. Martin Fowler — *Bitemporal History*, the reference-data model §3.2 depends on.
+6. Haber & Stornetta — *How to Time-Stamp a Digital Document* (1991) — the hash-chaining and notarisation basis for the archive.
+7. RFC 3161 — Time-Stamp Protocol, a practical notarisation mechanism.
+8. Modules 11 and 18 of this folder — the order lifecycle producing the reportable events, and the payment/settlement reconciliation whose break taxonomy this design mirrors.
+
+---
 ## 13. Low-Level Design
 
 **Requirements:** Reportability decisions are explicit and never silently negative; completeness is checked independently; amendments reference archived submissions; repairs are deadline-ordered.
