@@ -368,6 +368,8 @@ Multi-agent orchestrator-worker architectures scale horizontally by parallelizin
 *Common mistakes:* Connecting unvetted community MCP servers; putting tokens in the prompt/context; trusting tool-returned content as commands; no approval gate on write/deploy actions.
 *Follow-up:* "How could a malicious ticket comment redirect an agent connected to a deploy tool, and what stops it?" / "Where do the assistant's credentials for an internal tool actually live if not in its context?"
 
+> **Full treatment:** [[../44-AI-Systems/08-AI-Assisted-Software-Engineering-ClaudeCode-Copilot-AgenticCoding-Governance]] (Module 181) covers Claude Code and GitHub Copilot in full 16-section depth — the autonomy table, the agent loop internals, sandboxing, the governance control plane (§12), and the SOX/PCI/DORA framing. The Q&A above is retained here as the AI-agents-lens summary.
+
 ---
 
 ## 11. Coding Exercises

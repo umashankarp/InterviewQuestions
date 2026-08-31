@@ -343,6 +343,8 @@ The N+M architectural benefit scales an organization's total integration-mainten
 *Common mistakes:* Letting engineers connect arbitrary/community MCP servers; putting tokens in the assistant's config/context; no risk distinction between read-only and code-writing/deploying servers; assuming a published MCP server is trustworthy (A2).
 *Follow-up:* "How does a malicious tool description on a connected server (A5) threaten an engineer's Claude Code session, and what contains it?" / "Where do the credentials for the GitHub MCP server actually live if the assistant only ever sees a placeholder?"
 
+> **Full treatment:** [[../44-AI-Systems/08-AI-Assisted-Software-Engineering-ClaudeCode-Copilot-AgenticCoding-Governance]] (Module 181) covers Claude Code and GitHub Copilot as MCP clients in full — the allowlist gateway, capability-drift detection, vault credential substitution, and risk-tiering — inside the enterprise governance control plane (§12). The Q&A above is retained here as the MCP-lens summary.
+
 ---
 
 ## 11. Coding Exercises
