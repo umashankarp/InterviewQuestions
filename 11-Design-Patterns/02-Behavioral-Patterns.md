@@ -43,7 +43,7 @@ public final class OrderService {
 ## 2. Deep Dive
 
 ### 2.1 Strategy — Already the De Facto C# Idiom for "Swappable Algorithm"
-Strategy encapsulates an interchangeable algorithm/policy behind a shared interface, injected into the context that uses it — this is precisely/12/29's recurring `IDiscountStrategy`/`IAuthorizationHandler`/`IDiscountStrategy` pattern already covered extensively across this course; the GoF's classic Strategy pattern and modern C# DI-based "inject an interface implementation" design are, in practice, the **same pattern**, just described in different vocabularies from different eras — a strong synthesis point worth stating explicitly ("we've been using Strategy throughout this entire course under the name 'inject an interface'") rather than treating Strategy as a separate, newly-introduced concept.
+Strategy encapsulates an interchangeable algorithm/policy behind a shared interface, injected into the context that uses it — the same `IDiscountStrategy` / `IApprovalPolicy` / `IAuthorizationHandler` shape recurring throughout this course (the OOP and SOLID modules especially). The GoF's classic Strategy pattern and the modern "inject an interface implementation" design (C# DI, or a Java `@FunctionalInterface` + lambda) are, in practice, the **same pattern**, described in different vocabularies from different eras — a synthesis point worth stating explicitly ("we've been using Strategy all along under the name 'inject an interface'") rather than treating Strategy as a new concept.
 
 ### 2.2 Observer — C# Events Are a Language-Native Observer Implementation
 The Observer pattern (a subject maintains a list of observers, notifying them of state changes) is, as established, **directly implemented as a first-class language feature** via C# events — `event`/delegate subscription **is** Observer, with the language handling the subscribe/unsubscribe/notify mechanics automatically. The GoF's textbook Observer (an explicit `IObserver` interface with `Attach`/`Detach`/`Notify` methods) predates C# events and represents the *manual*, hand-rolled version of what C# events later made a built-in language construct — worth recognizing that "does this codebase use the Observer pattern" should be answered "yes, via its events" for the overwhelming majority of C# codebases, not "no, we don't have any `IObserver` interfaces."
@@ -55,7 +55,7 @@ Command wraps a request (an action to perform, plus its parameters) as an object
 Chain of Responsibility passes a request along a chain of potential handlers, each deciding to handle it, pass it along, or both — this is, precisely, the ASP.NET Core middleware pipeline and/the `IEndpointFilter` chain, **already covered in full depth** as a concrete, production framework realization of this exact pattern; recognizing "the middleware pipeline is Chain of Responsibility" is a direct, valuable cross-module synthesis rather than new material to learn from scratch.
 
 ### 2.5 State — Behavior Varying by Internal State, and Its Records-Based Alternative
-The classic State pattern models an object whose behavior changes based on its internal state by delegating to a swappable "current state" object (each state implementing a shared interface with state-specific behavior) — the sealed-record-hierarchy-plus-exhaustive-switch design (`OrderState` → `Pending`/`Paid`/`Shipped`/`Cancelled`) is a **modern, idiomatic C# alternative** to the classic State pattern, already covered in depth there, trading State's "each state is a swappable, polymorphic object" mechanism for "each state is an immutable record, transitions are pure functions with compiler-enforced exhaustiveness" — both solve the same underlying problem; which is preferable depends on whether compile-time exhaustiveness (records) or genuine polymorphic extensibility (classic State pattern, if new states must be pluggable by external code without recompiling the core logic) is the more valuable property for a given domain, directly echoing the own discussion of this exact trade-off.
+The classic State pattern models an object whose behavior changes based on its internal state by delegating to a swappable "current state" object (each state implementing a shared interface with state-specific behavior) — the sealed-record-hierarchy-plus-exhaustive-switch design (`OrderState` → `Pending`/`Paid`/`Shipped`/`Cancelled`) is a **modern, idiomatic C# alternative** to the classic State pattern, already covered in depth there, trading State's "each state is a swappable, polymorphic object" mechanism for "each state is an immutable record, transitions are pure functions with compiler-enforced exhaustiveness" — both solve the same underlying problem; which is preferable depends on whether compile-time exhaustiveness (records / `sealed`) or genuine polymorphic extensibility (classic State pattern, when new states must be pluggable by external code without recompiling the core logic) is the more valuable property for a given domain — the same discriminated-union trade-off this course revisits wherever a closed-vs-open case set is in play (Advanced Q6; the SOLID module's Intermediate Q3).
 
 ### 2.6 Behavioral Patterns in C# and Java — Where the Idioms Genuinely Diverge
 
@@ -102,12 +102,12 @@ sequenceDiagram
 
 ## 5. Best Practices
 - Recognize and name existing C# idioms (`event`, DI-injected interfaces, middleware pipelines) as their corresponding GoF patterns explicitly, rather than treating patterns as separate, unapplied theory.
-- Use Chain of Responsibility (an ordered list of handler objects) for growing, ordered conditional logic instead of a deeply-nested if/else chain (the incident).
+- Use Chain of Responsibility (an ordered list of handler objects) for growing, ordered conditional logic instead of a deeply-nested if/else chain (the �4 approval-bypass incident).
 - Choose between the records-based State alternative and the classic polymorphic State pattern based on whether compile-time exhaustiveness or genuine external extensibility matters more for the specific domain.
 - Use Command objects for any action needing to be queued, logged, retried, or undone as data, not for simple, immediate, one-off method calls.
 
 ## 6. Anti-patterns
-- A deeply-nested if/else chain for a growing, ordered set of conditional cases instead of Chain of Responsibility (the incident).
+- A deeply-nested if/else chain for a growing, ordered set of conditional cases instead of Chain of Responsibility (the �4 approval-bypass incident).
 - Treating GoF patterns as separate, must-be-explicitly-implemented constructs when the language/framework already provides an idiomatic equivalent (hand-rolling an `IObserver` interface instead of using C# events).
 - Using Command objects for simple, immediate, non-queued/non-undoable actions, adding unnecessary indirection with no corresponding benefit.
 - Forcing an exhaustive, records-based State design onto a domain genuinely requiring third-party-pluggable state extensibility the sealed hierarchy structurally prevents.
@@ -163,84 +163,213 @@ sequenceDiagram
 ## 10. Interview Questions
 
 ### Basic (10)
-1. **Q: What does the Strategy pattern do?** **A:** Encapsulates an interchangeable algorithm/policy behind a shared interface, injected into the context that uses it.
-2. **Q: What C# language feature is a native implementation of the Observer pattern?** **A:** Events (`event`/delegate subscription).
-3. **Q: What does the Command pattern do?** **A:** Encapsulates a request/action as an object, decoupling the invoker from the implementation, enabling queuing/logging/undo.
-4. **Q: What ASP.NET Core mechanism is a concrete realization of Chain of Responsibility?** **A:** The middleware pipeline (and `IEndpointFilter` chains).
-5. **Q: What does the State pattern address?** **A:** An object whose behavior changes based on its internal state, via a swappable "current state" object.
-6. **Q: What is the records-based alternative to the classic State pattern?** **A:** A sealed record hierarchy with exhaustive pattern matching.
-7. **Q: What does the Iterator pattern provide?** **A:** Uniform traversal over a collection, realized in C# via `IEnumerable`/`foreach`.
-8. **Q: What does Mediator do?** **A:** Centralizes complex many-to-many inter-object communication into one coordinating object.
-9. **Q: Is "inject an interface implementation via DI" the same as the Strategy pattern?** **A:** Yes, in practice — the same underlying pattern, described in different vocabularies.
-10. **Q: What's the relationship between GoF's classic Observer and C# events?** **A:** C# events are a built-in, language-native implementation of the same Observer pattern GoF describes manually via `IObserver`-style interfaces.
+
+**B1. Q: What does the Strategy pattern do?**
+*Ideal answer:* Encapsulates an interchangeable algorithm/policy behind a shared interface, injected into the context that uses it — so the *choice* of algorithm is decoupled from the *usage site*.
+*Common mistake:* Treating it as a distinct heavyweight construct rather than recognizing that "inject an interface implementation" *is* Strategy.
+*Follow-up:* "How does Strategy look in Java 8+?" (a `@FunctionalInterface` satisfied by a lambda — `Comparator`, `Function`, `Predicate` are Strategy — §2.6).
+
+**B2. Q: How is the Observer pattern realized natively in C#, and what's the Java equivalent?**
+*Ideal answer:* C#: the `event` keyword + delegate subscription (`+=`/`-=`/`Invoke`) — a first-class language feature. Java has **no** language events: options are a hand-rolled `List<Listener>` + notify loop, `java.beans.PropertyChangeSupport`/`PropertyChangeListener`, or, for volume/ordering/backpressure, `java.util.concurrent.Flow` (`SubmissionPublisher` + `Flow.Subscriber`) / Reactor / RxJava. `java.util.Observable`/`Observer` were **deprecated in Java 9**.
+*Common mistake:* Answering "use `java.util.Observable`" in a Java context — deprecated, no generics, `setChanged()` foot-gun.
+*Follow-up:* "When does the hand-rolled listener list stop being adequate?" (when you need backpressure, ordering guarantees, or async delivery — move to `Flow`/Reactor).
+
+**B3. Q: What does the Command pattern do?**
+*Ideal answer:* Encapsulates a request/action (plus its parameters) as an object implementing a common interface, decoupling the *invoker* from the *implementation* — which lets the action be queued, logged, retried, or undone as data.
+*Common mistake:* Confusing it with Strategy — Command represents *a request to do something*; Strategy represents *how to compute something*.
+*Follow-up:* "When is a bare `Runnable`/`Callable` enough, and when do you need an explicit `Command` interface?" (bare functional interface for fire-and-forget; explicit interface when you need `undo()` or metadata like an idempotency key).
+
+**B4. Q: What mechanism in ASP.NET Core (or the Servlet world) realizes Chain of Responsibility?**
+*Ideal answer:* C#: the middleware pipeline (`RequestDelegate` chain) and `IEndpointFilter` chains. Java: the Servlet `Filter` chain, or Spring `HandlerInterceptor` — each element handles, passes on, or both.
+*Common mistake:* Not recognizing the middleware pipeline as this pattern at all ("it's just framework plumbing").
+*Follow-up:* "What decision does each element in the chain make?" (handle-and-stop, pass-through, or handle-and-continue — Intermediate Q9).
+
+**B5. Q: What does the State pattern address?**
+*Ideal answer:* An object whose behavior changes with its internal state, modelled by delegating to a swappable "current state" object — each state implementing a shared interface with state-specific behavior and transition logic.
+*Common mistake:* Implementing it as a big `switch (this.status)` in every method (that's the thing State replaces); or using it where an `enum` + a couple of guards would do.
+*Follow-up:* "What's the modern alternative and its trade-off?" (a `sealed`/`sealed record` hierarchy + exhaustive `switch` — compile-time exhaustiveness vs the classic pattern's open extensibility — B6, Intermediate Q4).
+
+**B6. Q: What is the records-based alternative to the classic State pattern?**
+*Ideal answer:* A `sealed` hierarchy of immutable state types (`sealed record OrderState` + `Pending`/`Paid`/`Shipped`/`Cancelled` in C#; `sealed interface OrderState permits ...` in Java 17+) with transitions as pure functions and an **exhaustive `switch`** the compiler checks — a missed case is a compile error.
+*Common mistake:* Assuming it's strictly better than the classic pattern — it deliberately forecloses external extensibility (Intermediate Q4).
+*Follow-up:* "Which do you pick if plugins must add states without recompiling the core?" (the classic polymorphic pattern — Advanced Q6).
+
+**B7. Q: What does the Iterator pattern provide, and how is it expressed in each language?**
+*Ideal answer:* Uniform traversal over a collection without exposing its internal structure. C#: `IEnumerable<T>`/`IEnumerator<T>` + `foreach`, with `yield return` generators. Java: `Iterable<T>`/`Iterator<T>` + the enhanced `for` loop — but **no `yield`**, so a generator is a hand-written `Iterator`, a `Stream` (`Stream.iterate`/`generate`), or a `Spliterator`.
+*Common mistake:* Assuming Java has a `yield`-style generator (it doesn't for iterators; `yield` in Java is only the `switch`-expression keyword).
+*Follow-up:* "How would you lazily produce an infinite sequence in each?" (C#: `yield return` in a loop; Java: `Stream.iterate(seed, next)`).
+
+**B8. Q: What does Mediator do?**
+*Ideal answer:* Centralizes complex many-to-many communication between peer objects into one coordinating object, so peers reference the mediator instead of each other.
+*Common mistake:* Confusing it with Facade — Facade simplifies a *client-facing* interface to a subsystem; Mediator coordinates *peers* internally (Intermediate Q6).
+*Follow-up:* "What's the risk if the mediator's scope grows?" (it becomes a god object — Advanced Q5).
+
+**B9. Q: Is "inject an interface implementation via DI" the same as the Strategy pattern?**
+*Ideal answer:* Yes, in practice — the same underlying pattern (a swappable algorithm behind an interface), described in the vocabulary of a different era. The whole course has used Strategy under the name "inject an interface."
+*Common mistake:* Insisting they're different because one uses a container — the container is just the wiring mechanism.
+*Follow-up:* "So is there ever a reason to write a named `class XStrategy` instead of passing a lambda?" (when the strategy carries state, needs DI of its own dependencies, or benefits from a name in stack traces/logs).
+
+**B10. Q: What's the relationship between GoF's classic Observer and C# events / a Java listener list?**
+*Ideal answer:* C# `event` is a built-in, language-native implementation of exactly the Observer pattern GoF describes manually (a subject with `Attach`/`Detach`/`Notify` and an `IObserver` interface). In Java, the hand-rolled listener list (or `PropertyChangeSupport`, or `Flow`) *is* that manual GoF form, because the language provides no event keyword.
+*Common mistake:* Answering "we don't use Observer" for a C# codebase that's full of events; or proposing to hand-roll `IObserver` in C# "to follow the pattern" (Intermediate Q7).
+*Follow-up:* "Name a limitation of C# events that pushes teams to a different mechanism." (no async-aware delivery, no per-subscriber error isolation, no delivery guarantee — Expert Q1).
 
 ### Intermediate (10)
-1. **Q: Why is recognizing "our DI-injected interfaces are Strategy" valuable beyond terminology?** **A:** It connects a team's everyday practice to the broader design-pattern vocabulary and literature, making it easier to communicate design intent concisely and to recognize when a different, less-familiar pattern might better fit a related problem.
-2. **Q: Why does Command's "encapsulate as an object" property enable undo functionality that a direct method call can't?** **A:** A Command object can store the state needed to reverse its own effect (e.g., the previous value before a change) as part of the object itself — a direct, ephemeral method call has no persistent representation to later "undo" once it returns.
-3. **Q: Why is a deeply-nested if/else chain for approval tiers structurally the same risk as the notification-switch-statement incident?** **A:** Both are a growing, ordered set of conditional cases sharing one modification-requiring structure — inserting a new case risks disturbing adjacent cases' boundary conditions in either shape (a switch statement or a nested if/else chain), exactly the OCP-violation risk pattern recurring across both incidents.
-4. **Q: Why might a team choose the classic, polymorphic State pattern over the records-based alternative despite the latter's compile-time exhaustiveness benefit?** **A:** If the domain genuinely requires third-party/plugin code to introduce new states without recompiling the core state-machine logic (true open extensibility), a sealed record hierarchy structurally prevents this (the deliberate sealed-hierarchy trade-off) — the classic State pattern's polymorphic, non-sealed design permits genuine external extensibility the records-based alternative deliberately forecloses.
-5. **Q: Why does Chain of Responsibility's list-based handler ordering make boundary conditions more visually obvious than a nested if/else chain?** **A:** Each handler's own threshold check is self-contained within its own class, and the chain's ordering is an explicit, visible list (or DI registration order) rather than implicit nesting depth — a reviewer can see the full ordered sequence of handlers at a glance, rather than needing to trace through nested indentation levels to understand the full conditional structure.
-6. **Q: Why is Mediator's centralization benefit conceptually similar to, but distinct from, Facade's?** **A:** Both reduce direct coupling between many components by introducing a central coordinating point — Facade specifically simplifies a *client-facing* interface to an existing complex subsystem; Mediator specifically manages *communication/coordination between peer objects* that would otherwise need direct references to each other, a subtly different concern (external simplification vs. internal coordination).
-7. **Q: Why would hand-rolling a classic `IObserver`/`Attach`/`Detach` interface in modern C# generally be considered an anti-pattern rather than "correctly implementing Observer"?** **A:** It reimplements, less efficiently and with more code, exactly what C# events already provide natively (subscribe/unsubscribe/notify,-) — using the language's built-in mechanism is both less code and better-understood by other C# engineers than a hand-rolled equivalent, unless a genuine, specific reason exists to deviate (e.g., needing async-aware notification semantics events don't natively support well).
-8. **Q: How does the DI-mediator pattern (an alternative to raw C# events for cross-module communication) relate to both Observer and Command?** **A:** It has properties of both — like Observer, multiple handlers can independently react to one published notification; like Command, the notification itself is an encapsulated, dispatched object (not a direct method call) — illustrating that real-world designs often blend multiple GoF patterns' properties rather than fitting one pattern's textbook description in isolation.
-9. **Q: Why might a Chain of Responsibility handler need to explicitly decide "handle and stop" versus "handle and continue to the next handler," and what determines the right choice per use case?**
- **A:** Some use cases (a single, definitive "this handler owns this request" decision, like the approval-tier example) need exactly one handler to claim and fully process the request, stopping the chain; others (a logging/auditing chain where every applicable handler should observe the request, like a validation pipeline collecting all applicable errors) need every matching handler to process it and continue — the choice depends on whether the domain's semantics are "first matching handler wins" or "every matching handler contributes," and must be an explicit, deliberate design decision per chain, not assumed uniformly.
-10. **Q: Why does recognizing existing framework/language features as "already implementing pattern X" matter for interview performance specifically?** **A:** It demonstrates genuine, applied design-pattern literacy (connecting abstract pattern theory to concrete, familiar framework behavior) rather than only being able to recite textbook pattern definitions in isolation — a strong differentiator between candidates who've memorized GoF pattern names and those who genuinely understand the underlying coordination problems these patterns solve, wherever they appear.
+
+**I1. Q: Why is recognizing "our DI-injected interfaces are Strategy" valuable beyond terminology?**
+*Ideal answer:* It connects everyday practice to the pattern literature, so a team can communicate design intent in one word ("use Strategy here") and, more importantly, recognize when an *adjacent* less-familiar pattern (State, Chain of Responsibility) fits a related problem better than reflexively reaching for another injected interface.
+*Why correct:* It names the concrete payoff — shared vocabulary + pattern-adjacency awareness — rather than "it's good to know theory."
+*Common mistakes:* Treating pattern names as trivia; over-formalizing ("we must call it StrategyImpl").
+*Follow-up:* "Give a case where the problem looks like Strategy but State fits better." (behavior varies by the object's own lifecycle stage and transitions between behaviors matter — that's State, not a stateless injected policy).
+
+**I2. Q: Why does Command's "encapsulate as an object" property enable undo that a direct method call can't?**
+*Ideal answer:* A Command object persists — it can store the exact state needed to reverse its effect (the prior value, the insertion position + text) as fields, and a stack of executed commands is a durable history. A direct method call is ephemeral: once it returns there's no representation left to invert.
+*Why correct:* It ties undo to the Command's *persistence and captured reversal state*, contrasted with a call's ephemerality.
+*Common mistakes:* Storing a reference to "the document before" (whole-object snapshots don't scale — capture the *delta*); assuming every action is invertible (some need an inverse command, some need a snapshot).
+*Follow-up:* "What does the Command capture for `InsertText` vs `DeleteSelection`?" (insert: position + text; delete: position + the removed text, so undo can re-insert it).
+
+**I3. Q: Why is a deeply-nested if/else chain for approval tiers structurally the same risk as the §4 notification-switch incident?**
+*Ideal answer:* Both are a growing, ordered set of conditional cases sharing one modification-requiring structure. Inserting a new tier means editing shared code and risks disturbing an adjacent case's boundary condition — the same OCP-violation shape whether it's a `switch` or nested `if`s. Nesting arguably makes it worse because the boundary conditions are spread across indentation levels.
+*Why correct:* It identifies the shared structural property (one edited-to-extend conditional) and notes nesting's added hazard (dispersed boundaries).
+*Common mistakes:* Thinking `if`/`else` is safer than `switch` (it's the same risk); blaming the specific off-by-one rather than the structure that invited it.
+*Follow-up:* "Chain of Responsibility fixes the structure — what new failure does it introduce?" (independently-correct handlers can still compose wrongly, and boundary bugs move to *ordering* — Advanced Q1's boundary test addresses exactly this).
+
+**I4. Q: Why might a team choose the classic polymorphic State pattern over the records-based alternative despite the latter's compile-time exhaustiveness?**
+*Ideal answer:* If the domain genuinely needs third-party/plugin code to add new states *without recompiling the core*, a `sealed` hierarchy structurally forbids that. The classic pattern's open, non-sealed `IState` interface any assembly can implement is the right tool when the extensibility trade must go that way.
+*Why correct:* It states the exact property being traded (external extensibility vs compile-time exhaustiveness) and when each wins.
+*Common mistakes:* Assuming the records approach is always the modern-correct choice; using the open pattern when the state set is actually fixed (then you've lost exhaustiveness for nothing).
+*Follow-up:* "How common is genuine plugin-added-state in practice?" (rare — most state machines are closed; default to the sealed/exhaustive form unless plugin extensibility is a real, named requirement).
+
+**I5. Q: Why does Chain of Responsibility's list-based ordering make boundary conditions more visually obvious than a nested if/else chain?**
+*Ideal answer:* Each handler's threshold check is self-contained in its own class, and the chain order is an explicit list (or DI registration order) a reviewer sees at a glance — versus tracing nested indentation to reconstruct the full conditional structure and where each boundary sits.
+*Why correct:* It contrasts "one visible ordered list of small, independently-reviewable units" with "one large method whose structure is implicit in nesting."
+*Common mistakes:* Assuming the chain removes boundary bugs (it relocates them to handler ordering and per-handler thresholds — still test them, Advanced Q1); building the chain order implicitly and undocumented.
+*Follow-up:* "Where does the chain's order get defined, and how do you test it's right?" (one composition point; a parameterized boundary test across the whole assembled chain).
+
+**I6. Q: Why is Mediator's centralization benefit similar to, but distinct from, Facade's?**
+*Ideal answer:* Both cut direct coupling by introducing a central point. Facade simplifies a *client-facing* interface to an existing complex subsystem (outward simplification). Mediator manages *communication between peer objects* that would otherwise hold references to each other (inward coordination). Different direction, different problem.
+*Why correct:* It distinguishes them by direction of concern (client-facing simplification vs peer coordination), not by "both are central objects."
+*Common mistakes:* Treating them as interchangeable; using a Mediator where a Facade (or just direct calls) would be simpler.
+*Follow-up:* "You have five services that each call the other four — Facade or Mediator?" (Mediator — the problem is peer-to-peer coupling, not a hard-to-use subsystem interface).
+
+**I7. Q: Why is hand-rolling a classic `IObserver`/`Attach`/`Detach` interface in modern C# an anti-pattern rather than "correctly implementing Observer"?**
+*Ideal answer:* It reimplements, with more code and worse tooling, exactly what the `event` keyword already provides (subscribe/unsubscribe/notify, compiler-checked, understood by every C# engineer). Use the native mechanism unless you have a specific, named reason to deviate — e.g. async-aware notification, per-subscriber error isolation, or delivery ordering that events don't give you. *(In Java the calculus is reversed — there is no native event, so the hand-rolled listener list or `Flow` is the correct implementation.)*
+*Why correct:* It weighs "reinvent a language feature" against "no benefit" and carves out the genuine exceptions, and notes the Java difference.
+*Common mistakes:* Doing it "to follow the GoF pattern" (Advanced Q8); or the reverse — assuming C# events are always sufficient (Expert Q1 shows a case they aren't).
+*Follow-up:* "Name a real limitation of C# events." (all handlers run synchronously on the publisher's thread; one throwing can abort the rest; no built-in async or backpressure).
+
+**I8. Q: How does the DI-mediator pattern (an alternative to raw events for cross-module communication) relate to both Observer and Command?**
+*Ideal answer:* It blends both — like Observer, multiple handlers independently react to one published notification; like Command, the notification is an encapsulated, dispatched *object* rather than a direct call, so it can be logged, validated, or routed. Real designs often combine pattern properties rather than matching one textbook shape.
+*Why correct:* It maps the mediator's two salient properties onto the two patterns precisely (fan-out = Observer; request-as-object = Command).
+*Common mistakes:* Insisting it "is" one pattern; using a mediator library where a plain event or direct call suffices.
+*Follow-up:* "What does the mediator buy over a raw event for cross-module notification?" (a typed request object, pipeline behaviors — validation/logging/transactions — and testability of the dispatch; Expert Q2).
+
+**I9. Q: Why might a Chain of Responsibility handler need to explicitly choose "handle and stop" vs "handle and continue," and what determines the right choice?**
+*Ideal answer:* Some chains have "first matching handler owns it" semantics (approval tiers — exactly one tier claims the request and stops the chain); others have "every matching handler contributes" semantics (a validation pipeline collecting all errors; an audit chain where every applicable handler must observe). The domain's semantics decide, and it must be a deliberate per-chain design decision, not an assumed default.
+*Why correct:* It names the two semantic models and states the deciding criterion (does the domain want one winner or all contributors).
+*Common mistakes:* Assuming all chains are "first wins"; mixing both semantics in one chain without a clear rule.
+*Follow-up:* "A validation chain where one failure should abort the rest — which semantics, and how do you express it?" (handle-and-continue normally, but a handler can signal 'fatal' to stop — a third, explicit outcome).
+
+**I10. Q: Why does recognizing framework/language features as "already implementing pattern X" matter for interview performance specifically?**
+*Ideal answer:* It demonstrates *applied* design-pattern literacy — connecting abstract theory to concrete, familiar behavior — rather than only reciting definitions. It's a strong differentiator between a candidate who memorized GoF names and one who understands the coordination problems the patterns solve and can spot them anywhere.
+*Why correct:* It frames the skill as "recognize the mechanism in the wild," which is what a Staff/Principal interviewer is actually probing.
+*Common mistakes:* Reciting the pattern catalog; being unable to name a real framework instance of a pattern you can define.
+*Follow-up:* "Which behavioral pattern does an ORM's unit-of-work / change tracker most resemble?" (Command — deferred, batched, encapsulated operations — and loosely Memento for the original-values snapshot; Advanced Q9).
 
 ### Advanced (10)
-1. **Q: Diagnose the approval-bypass production incident from first principles, and design the testing strategy specifically preventing recurrence for any future Chain of Responsibility refactor.**
- **A:** Root cause: a deeply-nested conditional structure making a boundary-condition error both easy to introduce and hard to catch in review, directly the OCP-violation risk shape. Testing strategy: write a **parameterized boundary test** (directly §Advanced Q4's contract-test pattern, applied here) asserting the correct handler is selected for values at and immediately adjacent to every tier boundary (e.g., $999, $1000, $1001 for the auto-approve/manager-approval boundary) across the **entire** chain, run as a single, comprehensive test suite that must pass whenever a new handler is inserted — directly, mechanically catching an off-by-one boundary error at the exact class of value that caused the original incident, rather than relying on manual code review alone to spot it.
-2. **Q: Design a Command-based implementation of an undo/redo stack for a document-editing application, explaining what state each Command must capture.**
- **A:**
+
+**A1. Q: Diagnose the approval-bypass production incident from first principles, and design the testing strategy that specifically prevents recurrence for any future Chain of Responsibility refactor.**
+*Ideal answer:* Root cause: a deeply-nested conditional structure that made a boundary-condition error easy to introduce and hard to catch in review — the OCP-violation risk shape. Testing strategy: a **parameterized boundary test** asserting the correct handler is selected for values *at and immediately adjacent to every tier boundary* ($999 / $1000 / $1001, etc.) across the *entire assembled chain*, run as one suite that must pass whenever a handler is inserted or reordered. It mechanically catches an off-by-one at the exact value class that caused the �4 incident, instead of relying on review.
+*Why correct:* It ties the fix to a mechanical test at the specific failure class (boundary values across the whole chain), re-run on every structural change.
+*Common mistakes:* Testing each handler's threshold in isolation only (misses ordering/gap bugs between handlers); testing round numbers but not the ±1 neighbours where off-by-one lives.
+*Follow-up:* "A new tier is inserted between two existing ones — what must the test already cover for the insertion to be safe?" (the boundaries on *both* sides of the new tier, which the every-boundary parameterization already includes once the new boundary values are added).
+
+**A2. Q: Design a Command-based undo/redo stack for a document editor, explaining what state each Command must capture.**
+*Ideal answer:*
  ```csharp
-public interface ICommand { void Execute; void Undo; }
-public class InsertTextCommand: ICommand
+public interface ICommand { void Execute(); void Undo(); }
+
+public sealed class InsertTextCommand : ICommand
 {
     private readonly Document _document;
     private readonly int _position;
     private readonly string _text;
     public InsertTextCommand(Document document, int position, string text)
-    {
-        _document = document; _position = position; _text = text;
-    }
-    public void Execute => _document.InsertAt(_position, _text);
-    public void Undo => _document.RemoveAt(_position, _text.Length); // reverses using the SAME captured state
+        => (_document, _position, _text) = (document, position, text);
+
+    public void Execute() => _document.InsertAt(_position, _text);
+    public void Undo()    => _document.RemoveAt(_position, _text.Length); // reverses using the SAME captured state
 }
  ```
- Each Command must capture **exactly the state needed to both perform and reverse its specific action** (the insertion position and text, sufficient to compute the exact removal needed to undo it) — a `Stack<ICommand>` of executed commands supports undo (pop and call `Undo`); a parallel redo stack supports redo (push undone commands there, allowing `Execute` to be replayed) — directly demonstrating Command's defining "encapsulate enough state to make the action reversible/replayable as data" property.
-3. **Q: Explain a scenario where combining Chain of Responsibility with Strategy produces a more flexible design than either pattern alone.**
- **A:** An approval-chain handler (Chain of Responsibility, deciding *whether* this tier applies) that delegates its actual approval-decision *logic* to an injected `IApprovalPolicy` (Strategy, deciding *how* to evaluate approval for this tier, e.g., a configurable multi-approver requirement) separates "which tier handles this request" (the chain's structural concern) from "what does approval actually require at this tier" (the strategy's configurable-policy concern) — allowing the approval *policy* for a given tier to change (e.g., requiring two approvers instead of one) without touching the chain's structure at all, and vice versa, a genuine example of two patterns composing to address two independently-varying concerns (directly the SRP "independently-varying stakeholders" reasoning, now expressed via two composed behavioral patterns).
-4. **Q: How would you decide whether a growing, ordered set of business rules is better modeled as Chain of Responsibility or as the sealed-hierarchy-plus-exhaustive-switch pattern?**
- **A:** Chain of Responsibility fits when handlers genuinely need to be **added/removed/reordered dynamically at runtime** (e.g., a configurable pipeline where tiers can be enabled/disabled per deployment) or when third-party/plugin code needs to contribute new handlers without recompiling the core logic; the records-based exhaustive-switch approach fits when the complete set of cases is **known and fixed at compile time**, and the primary value is the compiler catching a missed case when the set changes — the deciding question is the same "genuine runtime/external extensibility versus a fixed, compile-time-verifiable set" trade-off and this module's Intermediate Q4 already establish for State specifically, generalized here to any ordered-rule-set design decision.
-5. **Q: Explain why a Mediator-based design (the DI-mediator, Expert exercise) can itself become a "god object" anti-pattern if not carefully scoped, despite solving the direct-coupling problem it's meant to address.**
- **A:** If a single Mediator ends up coordinating an ever-growing number of unrelated concerns (order processing, user notifications, inventory management, all funneled through one central dispatcher), it can accumulate the same "too many independently-varying responsibilities" SRP violation the pattern was meant to prevent at the *object-coupling* level, just relocated to the *mediator* itself — the fix is the same SRP discipline applied to the Mediator's own scope: multiple, smaller, domain-scoped mediators (an order-domain mediator, a notification-domain mediator) rather than one universal, all-encompassing coordinator.
-6. **Q: Design a State-pattern-based (not records-based) implementation for a scenario genuinely requiring third-party pluggable states, and explain the key structural difference from the approach.**
- **A:**
+ Each Command captures **exactly the state needed to both perform and reverse its specific action** — insert captures position + text (enough to compute the removal that undoes it); a delete command captures position + the *removed* text (so undo can re-insert it). A `Stack<ICommand>` of executed commands drives undo (pop, call `Undo`); a parallel redo stack drives redo (push undone commands, replay `Execute`). A new action clears the redo stack. *(Java: an explicit `Command` interface — not a bare `Runnable`, because you need `undo()` — with `Deque` as the stack.)*
+*Why correct:* It states the capture rule (delta, not whole-object snapshot) with a per-command-type example, and the two-stack mechanics including the redo-invalidation rule.
+*Common mistakes:* Snapshotting the whole document per command (doesn't scale); forgetting to clear redo on a new action; assuming every action has a trivial inverse (some need the removed data stored, some need a full inverse command).
+*Follow-up:* "How do you make a group of edits one undo step?" (a `CompositeCommand` holding a list, whose `Undo` reverses them in reverse order).
+
+**A3. Q: Explain a scenario where combining Chain of Responsibility with Strategy produces a more flexible design than either alone.**
+*Ideal answer:* An approval-chain handler (Chain of Responsibility — decides *whether this tier applies*) delegates its actual approval-decision *logic* to an injected `IApprovalPolicy` (Strategy — decides *what approval requires at this tier*, e.g. one approver vs a configurable multi-approver rule). This separates "which tier handles this request" (structural, the chain's concern) from "what does approval mean here" (configurable, the policy's concern), so a tier's policy can change without touching chain structure, and vice versa — two patterns composing to isolate two independently-varying concerns (the SRP "independently-varying stakeholders" reasoning, via composed patterns).
+*Why correct:* It maps each pattern to a distinct axis of variation (tier selection vs policy) and shows changing one doesn't touch the other.
+*Common mistakes:* Putting the configurable policy logic *in* the handler (re-couples the two concerns); adding the Strategy layer when tier policies are actually fixed (needless indirection).
+*Follow-up:* "How do you migrate an existing hardcoded chain to this without a rewrite?" (add `IApprovalPolicy` as an optional ctor dep defaulting to the current hardcoded behavior; migrate tiers one at a time — Advanced Q7).
+
+**A4. Q: How would you decide whether a growing, ordered set of business rules is better modeled as Chain of Responsibility or as a sealed-hierarchy-plus-exhaustive-`switch`?**
+*Ideal answer:* Chain of Responsibility when handlers genuinely need to be added/removed/reordered at *runtime* (a configurable pipeline, per-deployment enable/disable) or when plugins must contribute handlers without recompiling the core. The sealed-hierarchy + exhaustive-`switch` when the case set is *known and fixed at compile time* and the value is the compiler forcing you to handle a new case everywhere. Same "runtime/external extensibility vs fixed compile-time-verifiable set" trade-off this module's Intermediate Q4 establishes for State, generalized to any ordered-rule-set decision.
+*Why correct:* It gives the deciding criterion (runtime/plugin extensibility need vs compile-time exhaustiveness value) and connects it to the recurring State trade-off.
+*Common mistakes:* Choosing the chain for its "flexibility" when the rule set is actually fixed (you gave up exhaustiveness checking for nothing); choosing the sealed switch when plugins really do need to add rules.
+*Follow-up:* "The rule set is fixed but you want per-deployment enable/disable of specific rules — which, and how?" (still the exhaustive switch for the logic; a config flag consulted per rule for enable/disable — you don't need a runtime-reorderable chain for a boolean toggle).
+
+**A5. Q: Explain why a Mediator-based design can itself become a "god object" anti-pattern if not carefully scoped, despite solving the direct-coupling problem it's meant to address.**
+*Ideal answer:* If one Mediator ends up coordinating an ever-growing set of unrelated concerns — order processing, notifications, inventory, all through one central dispatcher — it accumulates the same "too many independently-varying responsibilities" SRP violation the pattern was meant to prevent, just relocated from the peers to the mediator. Fix: apply SRP to the mediator's own scope — several smaller domain-scoped mediators (order, notification), not one universal coordinator.
+*Why correct:* It identifies that the pattern relocates coupling to the mediator and that SRP applies to the mediator too, with the concrete fix (domain-scoped mediators).
+*Common mistakes:* Assuming "we have a mediator, so coupling is solved"; one mediator per application as a default.
+*Follow-up:* "How do you draw the boundary between mediators?" (by bounded context / domain — the same reason-to-change seams as any SRP split).
+
+**A6. Q: Design a classic (not records-based) State-pattern implementation for a scenario genuinely requiring third-party pluggable states, and explain the key structural difference from the sealed-hierarchy approach.**
+*Ideal answer:*
  ```csharp
 public interface IOrderState
 {
     IOrderState Pay(Order order, string transactionId);
     IOrderState Ship(Order order, string trackingNumber);
 }
-public class PendingState: IOrderState
+public sealed class PendingState : IOrderState
 {
     public IOrderState Pay(Order order, string transactionId) => new PaidState(transactionId);
-    public IOrderState Ship(Order order, string trackingNumber) =>
-        throw new InvalidOperationException("Cannot ship an unpaid order.");
+    public IOrderState Ship(Order order, string trackingNumber)
+        => throw new InvalidOperationException("Cannot ship an unpaid order.");
 }
-// A third-party plugin can implement IOrderState with an entirely NEW state (e.g., PartiallyRefundedState)
-// WITHOUT modifying OrderService or any existing state class -- true OCP-compliant extensibility
-// the exact property the SEALED record hierarchy deliberately forecloses.
+// A third-party plugin can implement IOrderState with an entirely NEW state (PartiallyRefundedState)
+// WITHOUT modifying OrderService or any existing state class -- OCP-compliant "add a state"
+// extensibility, the exact property a SEALED hierarchy + exhaustive switch deliberately forecloses.
  ```
- The key structural difference: `IOrderState` is a **non-sealed, open interface** any external assembly can implement, genuinely satisfying OCP for the "add a new state" case — the sealed-record approach deliberately trades this openness for compile-time exhaustiveness checking, and this classic State-pattern version is precisely the right tool when that trade must go the other way.
-7. **Q: Explain how you would refactor the incident's fix (Chain of Responsibility) to also support Advanced Q3's Strategy-based configurable-policy composition, incrementally, without a risky rewrite.**
- **A:** Introduce `IApprovalPolicy` as an **additional**, optional constructor dependency on each existing `IApprovalHandler` implementation, defaulting to each handler's current, hardcoded behavior wrapped as a default policy implementation (preserving existing behavior unchanged) — then incrementally migrate specific tiers' hardcoded logic into genuinely configurable policy implementations one at a time, only once each migration is validated, directly the same incremental "expand, don't break" pattern recurring throughout this course, now applied to composing two behavioral patterns together.
-8. **Q: A team proposes replacing all of their codebase's C# events with a hand-rolled, custom `IObserver<T>`-based Observer implementation "to be more explicitly following the GoF pattern." Evaluate this as a Principal Engineer.**
- **A:** Push back firmly — this is a regression, not an improvement: C# events already provide the Observer pattern's benefits (subscribe/unsubscribe/notify) as a well-understood, well-tooled, compiler-checked language feature (the entire treatment), and replacing them with a hand-rolled equivalent reintroduces exactly the kind of unnecessary reimplementation Intermediate Q7 warns against, adding code and cognitive overhead for zero corresponding benefit — "more explicitly following the GoF pattern" is not itself a valuable goal when the language already provides an idiomatic, native realization of the same pattern; recommend keeping events, and instead invest any "more explicit pattern adherence" effort into areas where a genuine gap exists (e.g., §Expert Q2's DI-mediator migration for cross-module communication, which addresses real, demonstrated limitations of raw events for that specific use case).
-9. **Q: Explain how you would apply this module's "recognize the pattern in existing code/frameworks" skill to identify which behavioral pattern(s) EF Core's `SaveChanges`/change-tracking mechanism most resembles.**
- **A:** EF Core's change tracker, which detects modified entities and generates the appropriate SQL on `SaveChanges`, has properties resembling both **Command** (each tracked change is effectively a deferred, encapsulated "operation to perform," executed as a batch when `SaveChanges` is called, rather than immediately) and, more loosely, **Memento** (a GoF pattern not covered in depth in this module, capturing an object's prior state to support rollback — the change tracker's "original values" snapshot per entity serves a similar "remember prior state for comparison/potential reversal" role) — recognizing these structural resemblances, even for patterns not explicitly named in a framework's own documentation, is exactly the transferable design-pattern literacy this module aims to build.
-10. **Q: As a Principal Engineer, how would you use this module's cross-referencing approach (connecting patterns to already-covered course material) as a teaching technique for a team learning design patterns for the first time?**
- **A:** Introduce each pattern by first asking "where have you already seen this in code you use every day?" (C# events for Observer, the middleware pipeline for Chain of Responsibility, DI-injected interfaces for Strategy) **before** presenting the formal GoF definition/UML diagram — this reverses the typical "learn the abstract pattern, then try to spot it in the wild" teaching order into "recognize you already understand the underlying mechanism, then learn its name and formal shape," which research on learning transfer suggests is generally more effective for retention and genuine understanding than memorizing abstract definitions first — directly the pedagogical approach this entire module has modeled throughout.
+ *(Java: identical — a plain `interface OrderState`, not `sealed`, so any module can `implements` it.)*
+*Why correct:* It shows the open, non-`sealed` interface as the enabler of plugin-added states and names precisely what the sealed approach trades away (that openness, in exchange for compile-time exhaustiveness).
+*Common mistakes:* Sealing the interface "for safety" and then wondering why plugins can't extend it; using this open form when the state set is actually closed (you lost exhaustiveness for no gain).
+*Follow-up:* "With the open form, how do you catch a state that forgot to handle a transition?" (you can't at compile time — you need a contract test per state asserting every transition method either transitions or throws a defined exception).
+
+**A7. Q: Explain how you'd refactor the §4 chain fix to also support Advanced Q3's Strategy-based configurable-policy composition, incrementally, without a risky rewrite.**
+*Ideal answer:* Add `IApprovalPolicy` as an *additional, optional* constructor dependency on each existing `IApprovalHandler`, defaulting to each handler's current hardcoded behavior wrapped as a default policy — so existing behavior is unchanged. Then migrate specific tiers' hardcoded logic into genuinely configurable policy implementations one at a time, validating each. The same "expand, don't break" migration, applied to composing two behavioral patterns.
+*Why correct:* Both behaviors coexist (default policy preserves current behavior), each tier migrates independently, and nothing is a big-bang change.
+*Common mistakes:* Making the policy dependency required (forces every handler to change at once); migrating all tiers in one PR.
+*Follow-up:* "How do you know a tier's default-policy wrapper is behavior-equivalent to its old hardcoded logic before you swap in a configurable one?" (the Advanced Q1 boundary test suite must still pass with the default policy in place).
+
+**A8. Q: A team proposes replacing all of their C# events with a hand-rolled `IObserver<T>`-based implementation "to more explicitly follow the GoF pattern." Evaluate this as a Principal.**
+*Ideal answer:* Push back — it's a regression. C# `event` already *is* the Observer pattern, as a compiler-checked, well-tooled, universally-understood language feature; replacing it with a hand-rolled equivalent adds code and cognitive load for zero benefit (Intermediate Q7's reimplementation anti-pattern). "More explicitly following GoF" is not a goal when the language provides an idiomatic native realization. Keep events; spend any "pattern rigor" effort where there's a *real* gap — e.g. migrating cross-module communication to a DI-mediator (Expert Q2), which addresses demonstrated limitations of raw events (no async delivery, no per-subscriber error isolation, no delivery guarantee — Expert Q1).
+*Why correct:* It names the cost (reimplementing a language feature), rejects "GoF-explicitness" as a value in itself, and redirects effort to a genuine gap.
+*Common mistakes:* Agreeing because "explicit patterns are good practice"; or dismissing all custom event infrastructure (Expert Q1/Q2 show cases where events genuinely fall short).
+*Follow-up:* "What specific event limitation would justify a custom mechanism?" (need for async/ordered delivery, per-handler failure isolation, or a delivery/subscription guarantee — none of which `event` provides).
+
+**A9. Q: Apply this module's "recognize the pattern in existing code" skill: which behavioral pattern(s) does an ORM's change-tracker / `SaveChanges` most resemble?**
+*Ideal answer:* Mostly **Command** — each tracked change is a deferred, encapsulated "operation to perform," executed as a batch when `SaveChanges`/`commit` is called rather than immediately. Loosely **Memento** — the change tracker's per-entity "original values" snapshot plays the "remember prior state for comparison / potential reversal" role. Recognizing these resemblances even when the framework's own docs don't name them is the transferable literacy this module builds.
+*Why correct:* It maps the two salient behaviors (deferred batched operations; original-values snapshot) onto Command and Memento correctly, with appropriate confidence ("mostly", "loosely").
+*Common mistakes:* Forcing it to be exactly one pattern; missing the deferred-execution (Command) aspect entirely.
+*Follow-up:* "Where does the Unit of Work pattern fit relative to those?" (Unit of Work is the container that *collects* the commands and coordinates the single commit — a structural wrapper around the Command-like change set).
+
+**A10. Q: As a Principal, how would you use this module's cross-referencing approach as a teaching technique for a team learning design patterns for the first time?**
+*Ideal answer:* Introduce each pattern by first asking "where have you already seen this in code you use every day?" — C# events / a listener list for Observer, the middleware or Servlet-filter pipeline for Chain of Responsibility, DI-injected interfaces for Strategy — *before* the formal GoF definition and UML. This reverses the usual "learn the abstraction, then spot it in the wild" order into "recognize you already understand the mechanism, then learn its name and shape," which transfers and retains better than memorizing definitions first.
+*Why correct:* It gives a concrete pedagogical order (familiar instance → name → formal shape) with the rationale (recognition before abstraction aids transfer).
+*Common mistakes:* Teaching the GoF catalog cover-to-cover with toy examples; not pairing each pattern with a real codebase instance the team already relies on.
+*Follow-up:* "How do you check the team internalized it rather than memorized 23 names?" (in design review, do they say "this is Chain of Responsibility, and here's why it fits / doesn't" — pattern reasoning, not pattern labeling).
 
 ### Expert (10)
 1. **Q: A settlement-notification service using a C# event (`OrderSettled`) to notify five downstream subscribers (ledger update, client notification, regulatory reporting, risk recalculation, audit log) is found, months after a new subscriber was added, to occasionally miss the regulatory-reporting subscriber's write entirely under load, with no exception thrown anywhere. Diagnose the root cause and the fix.**
@@ -272,7 +401,7 @@ public class DurableCommandDispatcher
     }
 }
  ```
- The Command's `CommandId` doubles as an **idempotency key** (directly the exactly-once discipline) — persisting the Command *before* executing it means a crash between persist and mark-executed leaves a durable, recoverable record a restart process can detect and safely re-drive (re-checking `HasBeenExecutedAsync` before re-executing, never blindly re-running), while persisting *after* execution would risk losing the record of an action that already had real, external effect if a crash occurred in that gap.
+ The Command's `CommandId` doubles as an **idempotency key** (the same idempotency-key discipline as at-least-once messaging) — persisting the Command *before* executing it means a crash between persist and mark-executed leaves a durable, recoverable record a restart process can detect and safely re-drive (re-checking `HasBeenExecutedAsync` before re-executing, never blindly re-running), while persisting *after* execution would risk losing the record of an action that already had real, external effect if a crash occurred in that gap.
  **Why this answer is correct:** It correctly orders persist-before-execute (durability precedes effect) and ties the Command's own identity directly to idempotency-key semantics rather than treating persistence and idempotency as separate concerns.
  **Common mistakes:** Persisting the Command only *after* successful execution (for a false sense of "only save what worked"), which loses exactly the crash-recovery guarantee durable Commands are meant to provide, since a crash mid-execution then leaves no record the action was ever attempted.
  **Follow-ups:** "How would this recover after a process crash mid-execution?" (A recovery sweep at startup querying for persisted-but-not-marked-executed commands, re-checking each against the trading engine's own authoritative state — not blindly re-executing — before deciding whether to complete or discard.)
@@ -308,7 +437,7 @@ public class DurableCommandDispatcher
  **Follow-ups:** "How would you detect this leak in production before it causes an OOM?" (A memory-dump analysis, or `dotnet-gcdump`/`dotnet-trace`, showing an unexpectedly large object count of a type that should be short-lived, with a retention path tracing back through a long-lived publisher's event invocation list — a specific, recognizable signature this course's OOM-debugging discussions treat as a standard diagnostic pattern.)
 
 8. **Q: A Principal Engineer is asked to evaluate whether a proposed "generic, fully data-driven rules engine" (rules and their ordering stored entirely in a database table, evaluated by one generic interpreter) should replace the existing Chain-of-Responsibility-based approval system. Evaluate the trade-off.**
- **A:** The generic, data-driven rules engine offers genuine configurability-without-deployment (business users could theoretically adjust tier thresholds without a code change) — but it trades away the Chain of Responsibility's compile-time-verified, individually-unit-testable handler classes (§10 Advanced Q1's boundary-test suite) for interpreted, generic rule logic that's substantially harder to unit-test exhaustively, harder to code-review for correctness (reviewing a database row's rule definition is a fundamentally weaker review than reviewing typed C# code), and reintroduces a version of the exact untrusted-instantiation risk class if rule logic can reference arbitrary code paths dynamically. For a financially consequential approval workflow (the incident's own domain), the loss of compile-time verification and strong, typed unit-testability is a significant regression in exactly the dimension (silent, boundary-condition correctness) that caused the original incident — recommend against the wholesale replacement; if genuine business-user-configurable thresholds are a real requirement, extract *only the threshold values* (not the handler logic or ordering) into configuration, keeping the handler chain's structure and logic in compiled, tested, reviewed code.
+ **A:** The generic, data-driven rules engine offers genuine configurability-without-deployment (business users could theoretically adjust tier thresholds without a code change) — but it trades away the Chain of Responsibility's compile-time-verified, individually-unit-testable handler classes (§10 Advanced Q1's boundary-test suite) for interpreted, generic rule logic that's substantially harder to unit-test exhaustively, harder to code-review for correctness (reviewing a database row's rule definition is a fundamentally weaker review than reviewing typed C# code), and reintroduces a version of the exact untrusted-instantiation risk class if rule logic can reference arbitrary code paths dynamically. For a financially consequential approval workflow (the �4 incident.s own domain), the loss of compile-time verification and strong, typed unit-testability is a significant regression in exactly the dimension (silent, boundary-condition correctness) that caused the original incident — recommend against the wholesale replacement; if genuine business-user-configurable thresholds are a real requirement, extract *only the threshold values* (not the handler logic or ordering) into configuration, keeping the handler chain's structure and logic in compiled, tested, reviewed code.
  **Why this answer is correct:** It weighs the configurability benefit against a concrete, demonstrated cost (loss of the exact correctness properties that fixed the original incident) rather than treating "more configurable" as an unqualified improvement, and proposes a scoped middle ground (configurable thresholds, fixed logic) instead of an all-or-nothing choice.
  **Common mistakes:** Evaluating "configurability" as an intrinsically positive property without weighing what specific, already-hard-won correctness guarantees (typed code, unit tests, code review) it would trade away for a system in a domain where those guarantees have already prevented a real incident.
  **Follow-ups:** "Under what conditions would the fully data-driven rules engine be the right call?" (A domain with very high rule-change frequency, lower per-mistake financial consequence, and a genuine business need for non-engineer rule authorship — none of which apply to the approval-tier chain's actual profile.)
@@ -675,7 +804,7 @@ sequenceDiagram
 *Cost:* Moderate upfront; low ongoing (additive tier changes).
 *Complexity:* Moderate — requires understanding chain composition and construction-order semantics.
 *Maintainability:* High, once the boundary-test suite (§10 Advanced Q1) is in place and kept current with every tier addition.
-*Scalability (team):* High — the incident's own resolution.
+*Scalability (team):* High — the �4 incident.s own resolution.
 
 **Option B — A data-driven rules engine (tier thresholds and ordering stored in configuration, evaluated by one generic interpreter, §10 Expert Q8):**
 *Advantages:* Business-user-configurable thresholds without a code deployment.
@@ -686,7 +815,7 @@ sequenceDiagram
 *Scalability (team):* Moderate — avoids code-change coordination for threshold tweaks but introduces configuration-governance coordination instead.
 
 **Option C — the original, deeply-nested if/else chain (retained, unrefactored):**
-*Advantages:* None beyond initial-authorship familiarity; explicitly the incident's own root cause.
+*Advantages:* None beyond initial-authorship familiarity; explicitly the �4 incident.s own root cause.
 *Disadvantages:* Directly caused the production approval-bypass bug (§4); every tier addition risks silently disturbing adjacent tiers' boundary conditions.
 *Cost:* Deceptively low upfront, arbitrarily high on the next boundary-condition incident.
 *Complexity:* Low-looking, high actual (implicit, nesting-depth-encoded structure).
