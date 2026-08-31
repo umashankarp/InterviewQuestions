@@ -87,23 +87,6 @@ graph LR
 **Trade-offs:** The team's instruction-per-concern Dockerfile style, generally a reasonable readability practice, directly caused this incident by placing the secret-write and secret-removal in separate layers rather than a single, combined `RUN` instruction — a case where a stylistic best practice for one concern (readability) directly undermined a different, more important concern (secret hygiene) without the team realizing the two were in tension.
 
 **Lessons learned:** Months later, a security researcher with legitimate registry-pull access to the (internally-shared, but broader-than-strictly-necessary) image repository ran `docker history --no-trunc` against the image, identified the layer that wrote `.npmrc`, extracted that specific layer's tarball directly (`docker save`, then inspecting the individual layer archives), and recovered the still-valid npm token — the token had been permanently, silently present and extractable the entire time, exactly as predicts, despite the container's own runtime filesystem view correctly showing no `.npmrc` file present. The fix was twofold: (1) rotate the exposed token immediately, and (2) rebuild the image using BuildKit's `RUN --mount=type=secret`, which never writes the secret into any layer at all, closing the gap structurally rather than relying on a "write then delete" pattern that this incident demonstrated doesn't actually work. **This is this module's defining lesson**: a container's own runtime filesystem view (what `docker exec`/`ls` shows) and an image's actual, permanently-stored layer contents are two different things — verifying the former provides zero evidence about the latter, directly analogous in spirit (though a genuinely distinct, image-layer-specific mechanism) to the Kubernetes domain's own repeated "declared/visible state ≠ actual underlying reality" finding — a Principal Engineer must verify secret non-persistence by inspecting the actual image layers (`docker history`, or a dedicated image-scanning tool), never by checking only a running container's visible filesystem.
-
-## 5. Best Practices
-- Combine secret-writing and secret-removal into a single `RUN` instruction if a "write then delete" pattern is unavoidable — but prefer BuildKit's `RUN --mount=type=secret` entirely, which never writes the secret to any layer.
-- Order Dockerfile instructions from least-frequently-changing to most-frequently-changing to maximize build-cache reuse.
-- Avoid baking large, frequently-modified files into an image; use a mounted volume instead, avoiding OverlayFS's whole-file copy-on-write cost.
-- Scan an image's actual layer history (`docker history --no-trunc`, or a dedicated scanner) as part of any security review — never trust a running container's visible filesystem as evidence of what the image actually contains.
-- Use multi-arch manifest lists for any image that must run across heterogeneous platforms (e.g., `linux/amd64` CI runners and `linux/arm64` production Nodes), rather than maintaining separate, differently-tagged images per architecture.
-
-## 6. Anti-patterns
-- Believing a later `RUN rm` instruction removes a file's bytes from the image, rather than merely hiding it behind a whiteout marker.
-- Placing frequently-changing instructions (`COPY..`) before rarely-changing ones (dependency installation) in a Dockerfile, needlessly invalidating the build cache on every source change.
-- Verifying secret non-persistence only by inspecting a running container's filesystem, rather than the image's actual layer history.
-- Baking a large, frequently-mutated file into an image instead of mounting it as a volume, incurring repeated whole-file copy-on-write cost.
-- Assuming image size reduction from "cleanup" instructions without verifying via `docker history` that the relevant bytes were actually removed, not merely hidden.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

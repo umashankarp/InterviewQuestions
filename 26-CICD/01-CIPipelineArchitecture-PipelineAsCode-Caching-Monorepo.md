@@ -109,25 +109,6 @@ Change to SharedLibX:
 **Fix**: (1) Immediately audited every service in the monorepo for reflection/dynamic-loading-based dependencies on shared libraries, manually annotating each with an explicit, non-static "declared dependency" marker the build-graph tool could additionally honor (a supplementary, manually-maintained edge list covering exactly the blind spot static analysis couldn't see); (2) as a structural backstop, added a much lower-frequency (nightly, not per-commit) **full-suite run across every project regardless of the affected-project computation**, specifically designed to catch exactly this class of dependency-graph-blind-spot gap within at most 24 hours rather than three weeks; (3) established a policy requiring any new reflection/dynamic-loading pattern introduced against a shared library to be accompanied by an explicit dependency-graph annotation in the same PR, treated as a required review item.
 
 **Lesson**: A build-graph tool's affected-project computation is, in the exact sense this course has established repeatedly, a *declared* claim about what's affected — and like every other declared state examined across this entire curriculum, it requires either comprehensive coverage of every genuine dependency mechanism (impossible to guarantee for dynamically-established dependencies via static analysis alone) or an independent, periodic verification backstop (the nightly full-suite run) catching what the primary mechanism structurally cannot see — the identical "cover every path, and verify rather than merely trust a declared computation" principle the capstone distilled, now applied to CI's own core optimization technique.
-
----
-
-## 5. Best Practices
-- Order pipeline stages by cost/speed, cheapest and fastest first, so a failing change fails in seconds rather than after expensive, ultimately-wasted work.
-- Build cache keys as a *complete* fingerprint of every input that affects the cached output — an incomplete key produces silent, hard-to-diagnose correctness failures on cache hits, not merely safe slowdowns on cache misses.
-- Treat pipeline definitions as reviewed, versioned code with shared, centrally-maintained templates for common stages (security scanning, deployment) — never per-team copy-pasted, independently-diverging definitions.
-- For monorepo affected-project detection, add a periodic, lower-frequency full-suite run as a structural backstop against any dependency class the primary detection mechanism can't see (reflection, dynamic loading, code generation) — never trust a single computation as complete.
-- Isolate untrusted PR-triggered pipeline runs from the secret access and permissions trusted, merged-branch pipelines hold — a malicious or compromised PR should never be able to read production credentials.
-
-## 6. Anti-patterns
-- Running expensive integration tests or security scans before cheap linting/compilation checks, wasting compute and developer feedback-loop time on changes that would have failed instantly at an earlier stage.
-- A build/dependency cache keyed on an incomplete set of inputs (e.g., source hash alone, ignoring compiler flags or tool version), producing silent stale-artifact reuse rather than a safe, visible cache miss.
-- Trusting a monorepo build-graph tool's affected-project computation as structurally complete with no independent verification backstop for dependency classes it can't statically detect.
-- A pipeline that reports overall success the moment the first parallel test shard passes, without waiting for and aggregating every shard's result.
-- Granting untrusted, externally-triggered PR pipeline runs the same secret access and permissions as trusted, merged-branch deployment pipelines.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

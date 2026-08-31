@@ -266,39 +266,6 @@ Method scope:
 1. The lapsed-listener leak's heap-dump signature is distinctive: the *subscriber* type count grows, but the reference-path analysis always leads back through the *publisher's* event field — train the team to recognize this shape immediately rather than treating each occurrence as a novel mystery.
 2. `IDisposable` classes that subscribe to external events without a paired unsubscribe are the single highest-value pattern to catch in code review or via static analysis for this bug class.
 3. Weak references are a valid but non-default tool — reach for them only when deterministic unsubscription is provably unavailable, not as a blanket "safer" default (they add real overhead and complexity).
-
----
-
-## 5. Best Practices
-
-- **Always pair event subscription with unsubscription in `Dispose`** for any subscriber whose lifetime is shorter than the publisher's. Why: this is the single highest-leverage rule preventing the lapsed-listener leak.
-- **Prefer `Action<T>`/`Func<T,TResult>` over custom `delegate` declarations** for ordinary callback signatures — reduces API surface/cognitive load; reserve custom delegate types for cases needing named parameters for clarity in public APIs or `ref`/`out`/`in` parameter support (which `Action`/`Func` support since C# 13's expanded generic capabilities, but custom delegates remain clearer for complex signatures).
-- **Avoid non-`void` return types on multicast-invoked delegates/events.** Why: only the last subscriber's return value survives `Invoke` — a near-guaranteed source of silent bugs once a second subscriber is ever added. If you need every subscriber's result, iterate `GetInvocationList` manually and collect results yourself.
-- **Be deliberate about closure allocation in hot loops.** If a lambda inside a loop doesn't need to capture a per-iteration value, hoist it outside the loop (or make it a non-capturing lambda/local static method) so it's allocated once instead of per-iteration.
-- **Use `static` lambdas (`static (x) =>...`, C# 9+) wherever the lambda genuinely doesn't need to capture anything**, including `this`. The compiler enforces the "no capture" guarantee at compile time and reliably takes the zero-allocation cached-delegate path — an explicit, self-documenting signal of intent, not just an optimization hint.
-- **Reserve the weak-event pattern for cases where deterministic `Dispose`-based unsubscription genuinely can't be guaranteed** — it's a valid tool, not a default; it adds real per-raise overhead and complexity that most subscriptions don't need.
-- **Raise events defensively with the `?.Invoke(...)` null-conditional pattern** (or capture the delegate into a local first in multi-threaded contexts: `var handler = SomethingHappened; handler?.Invoke(...)`) to avoid a race where the field becomes `null` between a null-check and the call in older patterns — the local-variable-capture idiom is a genuine thread-safety fix, not just style.
-
----
-
-## 6. Anti-patterns
-
-- **Subscribing to a long-lived publisher's event without ever unsubscribing.** Why it fails: the lapsed-listener leak — invisible until a heap dump under memory pressure. Fix: `Dispose`-paired unsubscription, or the weak-event pattern where that's not possible.
-- **Using events/delegates with non-`void` return types expecting to aggregate every subscriber's result.** Why it fails: `Invoke` on a multicast delegate discards every return value except the last subscriber's — silent, no compiler warning. Fix: `GetInvocationList` + manual iteration if all results matter; or redesign as a method returning `IEnumerable<TResult>` computed by iterating a `List<Func<...>>` explicitly instead of a delegate/event.
-- **Assuming all subscribers run even if one throws.** Why it fails: an exception from subscriber N aborts subscribers N+1 onward silently (from the raiser's perspective, it just looks like "the event threw"). Fix: if isolation between subscribers matters, iterate `GetInvocationList` and wrap each call in its own `try`/`catch`.
-- **Capturing a mutable loop variable across iterations in a `for` loop when each iteration needs its own captured value** (the classic "closure captures the loop variable, not its value" bug — still live for `for` loops, though fixed for `foreach` since C# 5). Fix: declare a fresh local inside the loop body (`for (int i = 0; i < n; i++) { int local = i; action = => Use(local); }`) to force a per-iteration capture.
-- **Subscribing/unsubscribing inside a hot loop or per-request code path** instead of once at initialization. Why it fails: each `+=`/`-=` is O(N) in current subscriber count — a real, avoidable cost multiplied by call frequency. Fix: subscribe once at a natural lifecycle boundary (constructor/startup), not per-operation.
-- **Using `public` plain delegate fields instead of `event`** on any type exposed outside its own assembly/module. Why it fails: removes the encapsulation guarantee entirely — any external caller can wipe all subscribers or raise the event itself. Fix: always use `event` for any externally-observable notification API.
-- **Treating a captured `this` in an instance-method-group lambda as "no allocation" without checking.** While it avoids the *display-class* allocation, the delegate object itself is still a heap allocation per assignment — don't assume "captures only `this`" is entirely free; it's cheaper, not free.
-
----
-
----
-
----
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

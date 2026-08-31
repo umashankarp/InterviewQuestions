@@ -109,25 +109,6 @@ graph LR
 **Fix**: (1) Deploy an admission-controller-level policy enforcement (Gatekeeper/Kyverno) evaluating the *identical* Rego policies already used in CI, ensuring any change reaching the cluster — regardless of path — is checked at the point of actual application, not merely at the point of the standard pipeline's review; (2) establish a documented, audited break-glass procedure for genuine emergencies that still passes through *some* policy evaluation (even a deliberately fast-tracked one) rather than bypassing enforcement entirely; (3) add scheduled runtime posture scanning (the final layer) as a backstop catching any violation that somehow evaded both CI and admission-control enforcement.
 
 **Lesson**: This course's now-thoroughly-established "declared/enforced-at-one-point ≠ enforced-everywhere-that-matters" theme (Modules 74/75/76/78/79/85/86, now recurring identically in policy-as-code enforcement) has a precise, actionable corollary for security governance specifically: **a policy engine's technical sophistication is irrelevant if it's wired to only one of several available write paths** — the fix is never a better policy, but a more complete map of every path that needs the same policy applied.
-
----
-
-## 5. Best Practices
-- Shift security scanning to the earliest pipeline stage where it can meaningfully act (pre-commit for secrets, PR-time for SAST/SCA/IaC scanning) — earlier detection is exponentially cheaper to remediate.
-- Enforce policy-as-code at every genuine write path to a resource, not just the standard CI pipeline — admission control as a backstop for anything bypassing CI, exactly closing the gap.
-- Treat Rego/policy-as-code rules as real code requiring tests, versioning, and code review — an untested policy is this course's recurring "declared capability, unverified" pattern applied to governance itself.
-- Generate and retain SBOMs for every build, enabling rapid CVE-impact assessment across the entire estate rather than manual dependency archaeology during an active disclosure.
-- Design the platform's golden path so the secure, compliant, well-governed option is also the fastest and least-friction option — adoption follows ease, not mandate alone.
-
-## 6. Anti-patterns
-- Policy-as-code enforcement wired to only one pipeline stage or write path, leaving any alternate path (direct console/CLI access, an emergency procedure) structurally unchecked.
-- Treating shift-left security scanning as a late-CI gate rather than genuinely early (pre-commit/PR-time) feedback, losing most of the cost advantage the practice exists to provide.
-- A break-glass/emergency-change procedure with no audit trail and no eventual policy re-evaluation, becoming a permanent, undetected bypass rather than a rare, tracked exception.
-- Building platform engineering tooling that adds friction atop existing workflows rather than replacing them with something genuinely easier — mandatory tools nobody wants to use get worked around, not adopted.
-- Treating SBOM generation as a compliance checkbox rather than an operationally-consulted artifact during actual CVE-response incidents.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

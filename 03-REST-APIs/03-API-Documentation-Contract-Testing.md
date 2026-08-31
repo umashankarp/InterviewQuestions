@@ -54,68 +54,6 @@ graph LR
 
 ## 4. Production Example
 **Scenario**: A provider team removed a field from a response DTO that their own OpenAPI spec marked as present in every documented example but not formally required in the schema (`required: []` omitted it) — schema validation passed (the field was technically optional per the spec), but a partner's consumer code deserialized it into a non-nullable property and crashed on every response, since it had always been present in practice and the consumer's team had never treated it as truly optional. **Investigation**: the provider's own contract tests (schema-only) passed; only the partner's own downstream monitoring caught the crash, hours after deployment. **Fix**: adopted consumer-driven contract testing — the partner's actual Pact contract (asserting the field's presence, since their integration genuinely depended on it) now runs in the provider's CI, so this exact class of change fails the *provider's own build* before deployment, not after. **Lesson**: schema compliance and "won't break real consumers" are different guarantees — a field being technically optional in a spec doesn't mean removing it is actually safe if every real consumer treats it as effectively required.
-
-## 5. Best Practices
-- Prefer code-first OpenAPI generation (`TypedResults`) to eliminate documentation drift by construction.
-- Adopt consumer-driven contract testing for any API with external or cross-team consumers with independent deploy cadences.
-- Run API design review before implementation for any new public/cross-team endpoint.
-- Treat "is this change breaking" as a question about real consumer behavior, not just spec technicalities.
-
-## 6. Anti-patterns
-- Hand-maintained documentation (a wiki page, a Word doc) disconnected from the actual implementation — guaranteed to drift.
-- Relying solely on provider-side schema validation as proof that a change is safe for consumers.
-- Treating every field as effectively required in practice while marking it optional in the spec, then being surprised when removing it breaks consumers.
-
----
-
-## 7. Performance Engineering
-
-**CPU/Memory:** Code-first OpenAPI generation (`AddSwaggerGen`/`WithOpenApi`) reflects over every mapped endpoint at startup — for a service with thousands of endpoints (a large gateway aggregating many downstream APIs), this can add measurable seconds to cold-start time; cache the generated `OpenApiDocument` in memory after first generation rather than regenerating it per request to `/swagger/v1/swagger.json`.
-
-**Contract-test suite runtime at scale:** A provider's CI cost for consumer-driven contract testing grows with the **N×M matrix** — N currently-published consumer contracts × M provider-build verification runs — not with the provider's own endpoint count. A provider with 40 consumers, each publishing a new Pact on every deploy, can accumulate hundreds of contract-verification runs per provider CI build if every historical contract version is naively re-verified; the standard mitigation is verifying only each consumer's **currently-deployed** contract version (tracked via the Pact Broker's "deployed/released" tagging, not every historical version ever published), keeping the matrix bounded by active consumers, not cumulative contract history.
-
-**Spec-diff computation cost:** An OpenAPI breaking-change diff (oasdiff/openapi-diff) over a large (thousands-of-path) spec is O(paths × schema-depth) — for most real APIs this completes in low single-digit seconds, but a monolithic, un-versioned spec covering an entire platform can push this into the tens of seconds; splitting the spec per bounded context/service (rather than one platform-wide document) keeps each individual diff fast and keeps a change in one service from triggering a full-platform-wide diff recomputation.
-
-**Latency:** None of this is on the request-serving hot path — spec generation, diffing, and contract verification are all build-time/CI-time costs, not runtime costs; the only runtime cost is serving the (cached) generated spec document itself, which is negligible.
-
-**Throughput/Scalability:** Parallelize consumer-contract verification across the N consumers (they're independent) rather than running them sequentially in CI — this is the dominant lever for keeping contract-test suite wall-clock time acceptable as the consumer count grows; a sequential N-consumer verification step is the most common cause of contract testing "getting too slow" complaints that lead teams to (wrongly) abandon it rather than parallelize it.
-
-**Benchmarking:** Track contract-verification-step CI duration as its own dashboarded metric, trending it against consumer count — a linearly growing (not flat) trend confirms the matrix-growth cost is real and warrants the "verify only currently-deployed contract" and parallelization mitigations before the step becomes a CI bottleneck teams route around.
-
----
-
-## 8. Security
-
-**Threats:** The dominant, topic-specific threat is **information disclosure via the generated spec itself** — code-first generation reflects *everything* the code exposes, including internal-only endpoints, debug/admin routes, and DTO fields never intended for external consumers, and a spec published publicly (or even just accessible to any authenticated internal user, in a large organization) becomes a reconnaissance map of the provider's internal structure, naming conventions, and potentially even implementation details (a field like `internalLedgerShardId` leaking sharding strategy) that a well-designed public API surface would never intentionally document.
-
-**Mitigations:** Maintain **two spec documents** — an internal, complete spec (used for internal tooling, SDK generation, and consumer-driven contract verification) and a curated, explicitly-filtered public spec (using `.ExcludeFromDescription` or a dedicated `DocumentFilter` to strip internal-only paths/fields before the document is ever served externally); never assume "not linked from the docs portal" is sufficient obscurity — an OpenAPI JSON document is trivially discoverable at its conventional URL path (`/swagger/v1/swagger.json`, `/openapi.json`) by anyone who tries it.
-
-**OWASP mapping:** This is a direct instance of **OWASP API Security Top 10 — API9:2023 Improper Inventory Management** (undocumented/shadow endpoints and unmanaged API versions expanding attack surface) combined with excessive data exposure risk when a schema's `example` values are populated with real (not synthetic) production data during development and never scrubbed before the spec is published.
-
-**AuthN/AuthZ:** Never assume documenting an endpoint's `securitySchemes` requirement in the spec is equivalent to *enforcing* it in code — a spec is descriptive, not enforcing; the classic gap is an endpoint whose OpenAPI annotation correctly declares a bearer-token requirement while the actual route registration is missing the corresponding `[Authorize]`/middleware, a documentation/implementation drift risk structurally identical to this module's central field-drift incident, now applied to security metadata specifically.
-
-**Secrets:** Pact Broker credentials and any CI-embedded API tokens used to publish/pull contracts must be scoped least-privilege (publish-only for consumer CI, verify-only-read for provider CI) and rotated on the organization's standard secrets-rotation cadence — a leaked Pact Broker write credential would let an attacker publish a forged consumer contract, potentially either unblocking a change that should have failed verification or, conversely, blocking a legitimate provider deploy via a spurious contract failure (a denial-of-service against the release pipeline itself).
-
-**Encryption:** Standard TLS-in-transit for spec/contract retrieval; specs and contracts at rest (in the Pact Broker or a spec registry) should be treated as sensitive-adjacent internal artifacts, not public-readable-by-default storage, given the reconnaissance value described above.
-
----
-
-## 9. Scalability
-
-**Horizontal scaling:** Contract verification parallelizes cleanly across consumers (each an independent Pact-replay run) — the standard scaling lever as an organization's consumer count grows into the dozens or hundreds.
-
-**The N×M consumer-provider matrix:** In a large microservices estate (hundreds of services, each both a provider to some and a consumer of others), the number of distinct contract relationships grows combinatorially, not linearly, with service count — a Pact Broker's **"can I deploy?"** matrix query (checking whether a specific service version is compatible with every currently-deployed version of every service it has a contract relationship with) becomes the practical scaling bottleneck; the mitigation is scoping contract verification to only a service's *actual, currently-registered* consumer/provider relationships (which the broker already tracks), never attempting to naively verify against every service in the estate.
-
-**Spec versioning at scale:** Supporting N concurrently-live API versions multiplies both the spec-maintenance burden and the breaking-change-diff surface by N; the standard scaling discipline is capping the number of concurrently-supported live versions (e.g., N-1, deprecating the oldest once a new version ships) via an enforced `Sunset`-header deprecation policy, rather than allowing an unbounded number of historical versions to remain live indefinitely.
-
-**Caching:** Generated OpenAPI documents and Pact-verification results are both cacheable — a spec doesn't need regeneration on every request (cache until the next deploy invalidates it), and a contract-verification result for a given (consumer-version, provider-version) pair is immutable once computed and can be cached/skipped on repeat CI runs against the same pair.
-
-**Replication/Partitioning:** Split a platform-wide spec into per-bounded-context specs (Performance Engineering) — this is simultaneously a performance optimization and a scalability one, since it lets each service's spec/contract-verification pipeline scale independently rather than all services sharing one increasingly large, slow, monolithic document.
-
-**High Availability:** A Pact Broker (or spec registry) outage should **fail CI closed but not block production traffic** — the broker is a build-time dependency, not a runtime one, so its unavailability delays deploys (a build/release-velocity impact) rather than causing a production incident, an important distinction to design and communicate correctly to avoid over-provisioning the broker for runtime-grade availability it doesn't actually need.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

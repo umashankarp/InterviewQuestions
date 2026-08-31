@@ -66,62 +66,6 @@ graph LR
 
 ## 4. Production Example
 **Scenario**: A partner API experienced a BOLA (Broken Object Level Authorization) vulnerability — an endpoint `GET /invoices/{id}` checked only that the caller was *authenticated* (any valid API key), never that the requested invoice actually belonged to *that specific* caller's account, allowing any partner to enumerate and read every other partner's invoices by simply incrementing the ID. **Investigation**: found via a routine security audit (not an incident) specifically testing this exact pattern across every resource-ID-accepting endpoint. **Fix**: added resource-based authorization (the exact pattern) verifying `invoice.PartnerId == currentPartnerId` before returning data, across every affected endpoint, plus a systemic audit of the entire API surface for the same gap. **Lesson**: BOLA is the single most common real-world API vulnerability precisely because "the endpoint requires authentication" is trivially confused with "the endpoint enforces authorization" — they are not the same, and this module's OWASP-API-Top-10 framing exists specifically to keep that distinction front-of-mind.
-
-## 5. Best Practices
-- Enforce resource-based (per-object) authorization on every endpoint accepting a resource identifier — never rely on authentication alone.
-- Return narrowly-scoped response DTOs, never full internal entities, closing the excessive-data-exposure gap.
-- Use token-bucket rate limiting backed by a shared store (Redis) for genuine fleet-wide enforcement.
-- Always return `429` with `Retry-After` for rate-limited requests.
-- Validate and cap request body size at the edge, before any business logic executes.
-
-## 6. Anti-patterns
-- Checking authentication but not per-object authorization (BOLA, the incident).
-- Returning full domain entities directly from API endpoints (mass assignment on the way in, excessive exposure on the way out — both the concerns).
-- Per-replica-only (in-memory) rate limiting in a horizontally-scaled deployment, trivially bypassed by load-balanced traffic spreading.
-- Omitting `Retry-After` on 429 responses, forcing clients into guessed, potentially-synchronized backoff.
-
----
-
-## 7. Performance Engineering
-
-**CPU:** A Redis-backed distributed rate limiter adds a network round-trip (and Lua-script execution cost on the Redis side) to every rate-limited request — at scale, this is real, additive latency on the hot path; a common mitigation is a **local, short-TTL cache of "definitely under limit"** results (e.g., cache a "not yet at 80% of limit" verdict for a few hundred milliseconds per client key) to avoid a Redis round-trip on every single request when a client is nowhere near its limit, falling back to the authoritative Redis check only as usage approaches the threshold.
-
-**Memory:** A sliding-window-log rate limiter (storing every request timestamp per client) has memory cost proportional to request volume within the window — at high QPS per client this can be substantial; a counter-based sliding window (blending two adjacent fixed-window counts) trades exactness for O(1) memory per client key, the standard production compromise.
-
-**Latency:** JWT signature verification (RS256/ES256 asymmetric) is meaningfully more CPU-expensive per request than HS256 symmetric verification — at very high request volume, this becomes a measurable per-request cost; caching the verified-token result (keyed by token hash, bounded by the token's own expiry) for the remainder of a short-lived token's validity window avoids re-verifying the same token's signature on every request within a burst.
-
-**Throughput:** Token-bucket rate limiting's burst allowance is itself a throughput-shaping decision — sizing the bucket capacity too small forces legitimate bursty clients (a batch job, a UI page loading 10 resources concurrently) into artificial 429s; sizing it too large defeats the limiter's abuse-prevention purpose. This is a genuine tuning exercise informed by real traffic-pattern data, not a one-size-fits-all default.
-
-**Benchmarking:** Load-test rate-limiting and authorization checks under realistic **concurrent multi-client** traffic, not single-client sequential requests — the fleet-scale correctness property (§2.3) and any lock-contention behavior in the shared Redis store only surface under genuine concurrency, mirroring this course's recurring "test at representative scale" theme.
-
-**Caching:** Authorization decisions that are expensive to compute (a multi-hop entitlement lookup) but change infrequently are candidates for a short-TTL cache — but cache invalidation must be explicit and immediate for security-sensitive authorization changes (a revoked entitlement must not remain effective for the cache's TTL), making authorization caching a narrower, more carefully-scoped optimization than general-purpose response caching.
-
-## 8. Security — Beyond §1–§6: Token Replay, Distributed Bypass, and Credential Stuffing
-
-This section goes past the module's core BOLA/rate-limiting/OWASP-API-Top-10 coverage in §1–§6 into three additional, frequently-tested threat classes.
-
-**OAuth2 token replay:** A stolen bearer access token (leaked via logging, a compromised proxy, or a browser-extension exfiltration) is fully usable by an attacker until it expires — bearer tokens carry no built-in binding to the legitimate holder. Mitigations: (1) **short-lived access tokens** (minutes, not hours) with refresh-token rotation, bounding the replay window; (2) **sender-constrained tokens** — DPoP (Demonstrating Proof-of-Possession) or mTLS-bound tokens, where the token is cryptographically bound to a client-held key, so a stolen token alone is useless without the corresponding private key; (3) **audience and `jti` (JWT ID) tracking** to detect and reject a token being replayed against an unexpected audience or replayed after a legitimate one-time-use scenario has already consumed it; (4) refresh-token **reuse detection** — if a rotated-away refresh token is ever presented again, that's a strong signal of token theft, and the correct response is to revoke the entire token family, not just reject the single replayed token.
-
-**Distributed rate-limit bypass:** Beyond the fleet-scale (per-replica-state) bypass already covered in §2.3, attackers actively exploit **key-selection gaps**: rotating through many API keys/accounts (if self-service signup is cheap), distributing requests across a botnet's IP pool, or exploiting a rate limiter keyed only on IP when the API is behind a shared corporate NAT/CDN edge (making the limiter's effective granularity far coarser than intended, in both directions — see Advanced Q6). A further, subtler bypass: **rate-limiting inconsistency across a heterogeneous edge** — if some traffic reaches the API via a CDN/WAF layer that itself enforces a *different* limit than the origin's application-level limiter, the two layers' disagreement can be probed and exploited to find the more permissive path. Mitigation is a **single source of truth for rate-limit state** (the Redis-backed shared store) consulted identically regardless of which edge path a request took, plus layered velocity controls keyed on multiple dimensions simultaneously (identity, IP, device fingerprint) so no single dimension's bypass fully defeats the control.
-
-**Credential stuffing:** Attackers replay large lists of previously-breached username/password pairs (sourced from unrelated third-party breaches) against a login endpoint, relying on password reuse across services. Generic rate limiting on the login endpoint helps but is insufficient alone — the same distributed-bypass techniques above apply, and a determined attacker paces requests below any single-IP/single-account threshold while trying many accounts. Defenses layer: (1) **per-account** *and* **per-IP** velocity limits on login attempts, tuned independently; (2) **breached-credential screening** at signup/login time (checking submitted passwords against a known-breached-password corpus, e.g., via a k-anonymity API pattern, and forcing a reset if matched); (3) **anomaly-based detection** — a spike in distinct-account login attempts from one IP/device, or a spike in failed logins with high password-list diversity, is the actual signal, exactly mirroring the card-testing detection logic (Expert Q1) applied here to the authentication surface instead of the payment-authorization surface; (4) **CAPTCHA/step-up authentication** triggered adaptively once anomaly signals fire, rather than imposed unconditionally on every login (which degrades legitimate-user experience for no benefit against a determined, distributed attacker); (5) **MFA** as the durable structural defense — even a successful credential-stuffing match is insufficient to authenticate if a second factor is required.
-
-## 9. Scalability
-
-**Horizontal scaling:** Every rate-limiting and authorization mechanism in this module must work correctly when the API is scaled to N replicas — the fleet-scale requirement (§2.3) is the central scalability constraint, and any design that implicitly assumes single-instance state (an in-memory `Dictionary` counter) breaks silently, not loudly, the moment a second replica is added.
-
-**Caching/replication:** The shared Redis rate-limit store itself needs its own HA posture — a Redis primary/replica setup with automatic failover (Redis Sentinel or a managed equivalent) so the rate limiter's own infrastructure isn't a single point of failure for the entire API (directly Advanced Q8's fail-open/fail-closed design question).
-
-**Partitioning:** For very high request volume, the shared rate-limit store can itself be partitioned/sharded by client-key hash across multiple Redis instances, avoiding a single Redis instance becoming the throughput bottleneck for the entire fleet's rate-limit checks.
-
-**Load balancing:** Rate-limit and authorization checks should be **stateless from the load balancer's perspective** — any replica can serve any request, since the authoritative state lives in the shared store, not on a specific replica — preserving the load balancer's freedom to route without sticky-session constraints.
-
-**High availability:** The fail-open-vs-fail-closed decision (Advanced Q8) is fundamentally an availability-vs-security trade-off decision made explicit at the architecture level — for a money-movement API, this is a business-risk decision requiring sign-off, not a default an infrastructure team should make silently.
-
-**Disaster recovery:** A regional failover for a multi-region API must carry rate-limit and token-revocation state with it (or accept a defined, bounded window of degraded enforcement during failover) — an unaddressed gap here means a DR failover silently resets every client's rate-limit counters or, worse, temporarily fails to enforce a just-revoked token's revocation.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

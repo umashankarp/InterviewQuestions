@@ -114,27 +114,6 @@ C1 XOR C2 = P1 XOR P2 -- an attacker recovers the XOR of both plaintexts
 **Fix**: (1) Replaced the fragile, restart-vulnerable counter-based nonce scheme with a **fully random, sufficiently large nonce** (a 96-bit random value, whose birthday-bound collision probability is acceptably low for the system's actual, realistic message volume) requiring no persisted state at all and structurally immune to a restart resetting any counter. (2) Established **mandatory key rotation on a regular schedule**, independent of and in addition to any specific triggering event, directly reapplying the dual-secret-overlap rotation discipline to encryption keys specifically. (3) Implemented a **scheduled, automated cryptographic-liveness check** — periodically scanning ciphertext metadata for any nonce value repeated under the same key across the system's actual operational history — converting a property that had been silently assumed rather than ever verified into a continuously, actively re-checked one, directly extending this domain's now-established "verify the verifier" audit pattern into cryptographic implementation correctness specifically. (4) Where the underlying library supported it, migrated toward a **nonce-misuse-resistant AEAD construction** (such as AES-GCM-SIV), which degrades far more gracefully — though still not perfectly — under accidental nonce reuse, as an additional defense-in-depth layer rather than a substitute for correct nonce generation.
 
 **Lesson**: This incident is this course's sharpest, most technically precise instance yet of the "declared/assumed ≠ actual" theme: a cryptographic algorithm correctly *chosen* (AES-GCM is an excellent, standard, appropriately-selected scheme) can still catastrophically fail — not degrade, *fail* — because one small, easily-overlooked implementation precondition (nonce uniqueness under a given key) that the algorithm's actual security proof depends on was silently violated, with **zero functional symptom** distinguishing the compromised state from perfectly correct operation throughout. Unlike most of this course's prior findings, where a partial gap retains partial value (a partially-stale runbook, a partially-fragmented trace), a cryptographic guarantee is frequently binary: the precondition holds and the guarantee is genuinely, mathematically present, or it doesn't and the guarantee — for the specific affected data — is not degraded, it is simply gone.
-
----
-
-## 5. Best Practices
-- Use established, vetted cryptographic libraries and standard, well-reviewed algorithms (AES, RSA/ECC, bcrypt/scrypt/Argon2) — never invent a custom cipher or hashing scheme; "don't roll your own crypto" is a load-bearing, not merely conventional, principle.
-- Use a slow, adaptive, salted hash (bcrypt/scrypt/Argon2) specifically for password storage — never encryption (recoverability is an unnecessary exposure) and never a fast general-purpose hash alone.
-- Prefer cipher suites providing perfect forward secrecy for TLS, so a future long-term-key compromise cannot retroactively decrypt previously-recorded traffic.
-- Treat key management as a full lifecycle — generation, distribution, rotation, revocation, destruction — not merely an initial creation event, applying the dual-secret-overlap rotation discipline to cryptographic keys specifically.
-- Generate nonces/IVs using a scheme structurally immune to reuse (sufficiently large random values, or a properly-persisted, restart-surviving counter) rather than fragile, volatile in-memory state.
-- Periodically, actively verify cryptographic implementation correctness (nonce-uniqueness scans, key-rotation compliance checks) rather than assuming a correctly-designed scheme remains correctly operating indefinitely, unverified.
-
-## 6. Anti-patterns
-- Encrypting passwords (making them recoverable) or hashing them with a fast, general-purpose algorithm (MD5/SHA-256 alone) rather than a slow, adaptive, salted hash.
-- Using ECB mode for block-cipher encryption, leaking structural patterns in the plaintext despite "successfully" encrypting and decrypting.
-- Hardcoding or embedding cryptographic keys directly in source code rather than a managed secret store/KMS.
-- A nonce/IV-generation scheme relying on volatile, unpersisted in-memory state with no protection against reuse across a restart or redeploy.
-- Never rotating an encryption or signing key, allowing a single key's blast radius to remain unbounded indefinitely and making any implementation flaw depending on key freshness (like nonce-reuse exploitability) permanently, rather than transiently, dangerous.
-- Assuming a correctly-chosen cryptographic algorithm remains correctly implemented indefinitely without any periodic, active verification of its actual operational preconditions.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

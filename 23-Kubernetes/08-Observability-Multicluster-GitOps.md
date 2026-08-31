@@ -89,23 +89,6 @@ graph LR
 **Trade-offs:** The team's confidence in this namespace's mTLS posture *increased* after the GitOps migration, not decreased — the ArgoCD dashboard's clean, "fully synced" status was treated as stronger evidence of correctness than the pre-GitOps state had ever provided, precisely because the team's mental model equated "no drift" with "correctly configured," conflating two genuinely different properties.
 
 **Lessons learned:** A security audit eighteen months later discovered the payments namespace had never actually been in STRICT mode at all during this entire period — the GitOps migration hadn't introduced the gap (it existed before, structurally identical to the original finding), but it had **entrenched** it more deeply, since the pre-migration team had at least known the STRICT-transition was an open, tracked task, while post-migration, ArgoCD's clean sync status had caused that same open task to be dropped from tracking entirely, since "the policy is deployed and synced, so it's done" became the team's new, incorrect mental model. The fix required the same synthetic-verification discipline §Advanced Q1 established — a scheduled, automated negative test explicitly attempting a plaintext connection into the payments namespace and asserting rejection — run **independently of, and with no regard to, ArgoCD's own sync-status dashboard**, specifically because that dashboard had been demonstrated to provide zero signal about whether the *declared* configuration was itself correct. **This is the capstone's defining lesson**: GitOps adoption is a genuine, necessary improvement (it did correctly eliminate the-style drift-from-a-correct-declaration risk), but it must be **paired with**, never treated as a **substitute for**, the runtime-behavior-verification discipline this domain established across Modules 74–79 — a lesson a Principal Engineer must proactively communicate when leading any GitOps adoption, since the natural, intuitive (and incorrect) inference from "we adopted GitOps" is "our configuration drift problems are now solved," when only one of this domain's two distinct failure categories was actually addressed.
-
-## 5. Best Practices
-- Adopt GitOps specifically to eliminate drift-from-a-correct-declaration risk (the exact incident category) — but explicitly communicate, when leading the adoption, that it does not validate the declared configuration's own correctness.
-- Run synthetic, runtime-behavior verification tests (/76/79's negative-test pattern) on a schedule **independent of** GitOps sync status, specifically because sync status provides zero evidence about declaration correctness.
-- Use the Prometheus Operator's `ServiceMonitor` CRD (the pattern in production use) rather than manual Prometheus config-file edits, for the same declarative-consistency benefit this course has established throughout.
-- Choose multi-cluster boundaries deliberately around genuine isolation requirements (regulatory scope, blast-radius containment) rather than defaulting to either "always one giant cluster" or "always many small clusters" without an articulated driver.
-- Instrument with OpenTelemetry rather than a cloud-specific SDK when genuine multi-cloud/multi-cluster portability is a real, current requirement — not a speculative future one (directly §Advanced Q2's "match investment to a real, current requirement" discipline).
-
-## 6. Anti-patterns
-- Treating GitOps adoption as having fully resolved this domain's recurring "presence/sync ≠ enforced reality" pattern, rather than recognizing it addresses only the drift half of that pattern.
-- Allowing a GitOps tool's clean sync-status dashboard to displace, rather than complement, independent synthetic verification of actual runtime behavior.
-- Migrating configuration into a GitOps repository from an outdated or unverified source (a stale wiki page, an assumed-correct prior state) without first confirming the *live*, current cluster state is what's actually being captured (the root cause).
-- Manually editing a GitOps-managed resource directly in the cluster, expecting the change to persist, when the GitOps controller's own reconciliation loop will revert it on its next pass.
-- Defaulting to a single, monolithic cluster for an organization with genuine regulatory-isolation requirements, purely to avoid multi-cluster operational overhead, without weighing the isolation trade-off explicitly.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

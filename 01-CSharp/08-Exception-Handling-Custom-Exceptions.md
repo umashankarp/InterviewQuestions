@@ -209,39 +209,6 @@ classDiagram
 1. A broad `catch (Exception)` that treats every failure identically actively destroys the information needed to distinguish "expected domain outcome" from "unexpected bug" — precisely the distinction that matters most for triage and alerting.
 2. Logging the exception (even correctly) is not sufficient if nothing is actively monitoring/alerting on the *type* distribution of caught exceptions — the information being present in logs didn't prevent months of the bug going unrecognized, because no one was looking at exception-type breakdowns as a metric.
 3. A well-designed custom exception hierarchy (/) is precisely what makes granular, type-specific `catch` handling practical and maintainable — this incident's root cause and its fix are two sides of the same underlying principle.
-
----
-
-## 5. Best Practices
-
-- **Catch the most specific exception type your code can actually handle meaningfully** — never `catch (Exception)` except at a small number of deliberate, well-justified top-level boundaries (global handlers, background-job isolation). Why: broad catches conflate "expected domain outcome" with "unexpected bug", destroying triage/alerting signal.
-- **Use `throw;` (not `throw ex;`) to rethrow** — preserves the original stack trace; `throw ex;` resets it to the rethrow location, destroying debugging context.
-- **Design custom exceptions with strongly-typed properties for structured data** (error codes, relevant IDs, validation details), not just a formatted `Message` string — lets calling code react programmatically without fragile string parsing.
-- **Reserve exceptions for genuinely exceptional conditions; use `TryX`/`Result<T>`-style returns for expected, common failure paths** (the `Either<TLeft,TRight>` pattern is directly applicable here) — e.g., "user not found" during a lookup is often better modeled as a `null`/`TryGetUser(out user)`/`Result<User>` return than an exception, reserving exceptions for genuinely unexpected failures (a database connection failure during that same lookup, by contrast, is a legitimate exception).
-- **Differentiate "expected domain failure" from "unexpected bug" explicitly in both logging severity and downstream alerting** (the fix) — never let both categories look identical in your observability stack.
-- **Always include the original exception as `InnerException` when wrapping/rethrowing a different exception type** (`throw new OrderProcessingException("...", ex);`) — preserves the full causal chain for diagnosis; discarding the original exception when wrapping is a common, easily-avoided loss of diagnostic information.
-- **Use exception filters (`when`) for conditional handling instead of catching broadly and rethrowing conditionally** (`catch (T ex) { if (!cond) throw;... }`) — filters are both cheaper (no unnecessary catch-then-rethrow unwind/rethrow cost when the filter doesn't match) and clearer about intent.
-
----
-
-## 6. Anti-patterns
-
-- **Using exceptions for ordinary, expected control flow** (e.g., catching `FormatException` from `int.Parse` instead of using `int.TryParse`, or catching `KeyNotFoundException` instead of `TryGetValue`). Why it fails: measurably expensive for a genuinely common code path, and obscures intent (a reader has to recognize "oh, this exception is actually expected here" rather than seeing an explicit `if (!TryGetValue(...))`). Fix: always prefer the `TryX` API when one exists for exactly this reason.
-- **`catch (Exception ex) { }` — swallowing exceptions entirely, with no logging, no rethrow.** Why it fails: silently discards all information about a failure, including genuinely critical bugs — the single most dangerous exception-handling anti-pattern, since it actively hides problems rather than merely mishandling them. Fix: never swallow silently; at minimum, log with full context; strongly prefer letting genuinely unexpected exceptions propagate to a well-instrumented top-level handler.
-- **`throw ex;` instead of `throw;`** (the correction) — destroys the original stack trace, making production debugging significantly harder. Fix: always use bare `throw;` for rethrowing the currently-caught exception unchanged.
-- **Catching `Exception` broadly throughout ordinary business logic**, not just at designated top-level boundaries (the incident). Fix: catch specific types; reserve broad catches for the few deliberate boundaries where "ensure this operation always returns cleanly, whatever happens" is a genuine architectural requirement (and even there, differentiate expected vs. unexpected exceptions in logging/alerting).
-- **Putting substantial business logic or heavy side effects inside exception filters (`when` clauses).** Why it fails: makes control flow significantly harder to trace/reason about (a filter can execute and have side effects even for exceptions it decides not to handle), and filters aren't an obvious place a code reader expects to find meaningful logic. Fix: keep filters to simple, clearly-side-effect-free conditions (property checks, type checks); if logging within a filter is genuinely needed, keep it narrowly scoped and clearly commented as an intentional pattern.
-- **Defining custom exceptions without the conventional constructor overloads** (message-only, message + inner exception) — breaks common exception-wrapping patterns (`throw new MyException("context", innerEx);`) and standard serialization/framework expectations. Fix: always provide at least the standard constructor set, even if your application code doesn't (yet) use all of them directly.
-- **Throwing exceptions across an API boundary without documenting which exception types callers should expect and handle** (undocumented `throws`-equivalent, since C# has no checked-exceptions mechanism,-adjacent design-contract concern). Fix: document expected exception types in XML doc comments (`<exception cref="...">`) for any public API, treating this as part of the method's actual contract, not an afterthought.
-
----
-
----
-
----
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

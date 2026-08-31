@@ -46,21 +46,6 @@ POST /payments (retry, same Idempotency-Key) -> 201 Created (SAME result, no dup
 
 ## 4. Production Example
 **Scenario**: A payments API without idempotency-key support experienced duplicate charges during a mobile-network flakiness period — clients retrying a timed-out POST created genuine duplicate payment records, since POST is non-idempotent by HTTP semantics and no application-level deduplication existed. **Fix**: implemented `Idempotency-Key` header support — the server persists (key → result) mappings with a TTL, returning the cached original result for a repeated key instead of re-processing. **Lesson**: idempotency isn't automatic for POST — it must be deliberately engineered for any operation that must tolerate client retries, exactly the retry-safety discipline applied at the API-contract level.
-
-## 5. Best Practices
-- Use idempotency keys for any POST that triggers a real-world side effect a client might need to safely retry.
-- Distinguish 400 (malformed) from 422 (semantically invalid) consistently.
-- Use ETags/conditional requests for any resource subject to concurrent updates.
-- Choose a versioning strategy deliberately and document the trade-off, rather than defaulting without consideration.
-
-## 6. Anti-patterns
-- RPC-style endpoints (`/getUserById`, `/doUpdateStatus`) instead of resource-oriented URIs with proper HTTP methods.
-- Using GET for state-changing operations (breaks caching/prefetching assumptions, a genuine correctness hazard).
-- Returning 200 for everything (including errors) with an in-body "success: false" flag instead of using HTTP status codes correctly.
-- Treating PATCH as automatically idempotent without verifying the actual patch semantics used.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

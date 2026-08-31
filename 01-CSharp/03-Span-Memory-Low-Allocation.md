@@ -183,38 +183,6 @@ sequenceDiagram
 2. `Span<T>`-based numeric parsing (`int.Parse(ReadOnlySpan<char>)`) is a direct drop-in replacement with zero API-shape cost once you already have a span — there's rarely a reason not to use it once you're already in span-based code.
 3. Optimize surgically: only the fields that must become long-lived `string`s should ever pay that allocation — everything else can stay a transient view.
 4. Contain the complexity: low-allocation code is real complexity debt — isolate it behind clear interfaces so it doesn't spread as a "style" into code that doesn't need it.
-
----
-
-## 5. Best Practices
-
-- **Reach for `Span<T>`/`ReadOnlySpan<T>` only after profiling identifies allocation as a real bottleneck** (the `dotnet-counters`/BenchmarkDotNet discipline applies directly). Why: it's a genuine readability/complexity cost — don't pay it speculatively.
-- **Use `Memory<T>`/`ReadOnlyMemory<T>` for any buffer that must survive an `await` or be stored as a field**; use `Span<T>`/`ReadOnlySpan<T>` only for the synchronous, local, "in and out within this method call" portion of the work.
-- **Prefer the `Span<char>`/`ReadOnlySpan<char>` `Parse`/`TryParse` overloads** (`int.Parse(ReadOnlySpan<char>)`, `Utf8Parser`, etc.) over allocating an intermediate `string` purely to parse it — a strict, free win whenever you already have a span in hand.
-- **Pool scratch buffers with `ArrayPool<T>.Shared`** for temporary work buffers in hot paths; always `Return` in a `finally` block, and pass `clearArray: true` when the buffer may have held sensitive data.
-- **Cap `stackalloc` sizes to a small, compile-time-bounded constant** (or validate any input-derived size against a hard maximum before using it) — never `stackalloc` directly sized by untrusted input.
-- **Use `"literal"u8` UTF-8 string literals** (C# 11+) when comparing/matching against known ASCII/UTF-8 byte sequences in parsing code (e.g., HTTP method/header names) — genuinely free at runtime.
-- **Keep low-allocation/span-based code isolated behind clear interfaces** in a small number of well-tested files, rather than letting the style bleed into ordinary business logic where it buys nothing but costs readability.
-
----
-
-## 6. Anti-patterns
-
-- **Sprinkling `Span<T>` through ordinary CRUD/business-logic code "because it's more efficient."** Why it fails: adds real cognitive overhead and compiler-restriction friction (can't use in async methods, can't store as fields, can't use in iterators) for code where the allocation was never actually a measured problem. Fix: keep `Span<T>` scoped to profiled hot paths.
-- **`stackalloc` sized directly by user/network input without a bounds check.** Why it fails: a large enough requested size overflows the thread stack, crashing the process — a trivially triggerable DoS if the size comes from an external request. Fix: clamp to a maximum, or use `ArrayPool<T>` (heap, GC-managed, no stack-overflow risk) above a small threshold.
-- **Storing a `Span<T>` across an `await` by "working around" the compiler error** (e.g., converting to `Memory<T>`, awaiting, then converting back — done carelessly without understanding *why* the restriction exists in the first place, sometimes via `unsafe`/pointer tricks to defeat the compiler). Why it fails: reintroduces the exact dangling-reference risk the `ref struct` restriction exists to prevent. Fix: genuinely restructure around `Memory<T>` for the async-spanning portion, materializing `.Span` only for the synchronous sub-operations.
-- **Forgetting to `Return` rented `ArrayPool<T>` buffers**, or returning them without `clearArray: true` when they held sensitive data. Fix: `try`/`finally` discipline; explicit review for any pooled buffer touching secrets/PII.
-- **Assuming `Span<T>` slicing "copies" and mutating it "to be safe," accidentally corrupting the original array.** Why it fails: the opposite mistake — not realizing a `Span<T>` (mutable) IS a view, so writes propagate back, causing surprising bugs when a caller didn't expect their original array to change. Fix: use `ReadOnlySpan<T>` by default for any API that only needs to read, reserving mutable `Span<T>` for APIs that are explicitly documented to write through.
-- **Using `Span<T>` where `ReadOnlySpan<T>` would communicate intent correctly.** Fix: default to `ReadOnlySpan<T>` parameters unless the method genuinely needs to mutate the caller's buffer — this is the `Span<T>`-world equivalent of preferring `IReadOnlyList<T>` over `List<T>` in public API signatures.
-
----
-
----
-
----
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

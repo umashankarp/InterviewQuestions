@@ -63,60 +63,6 @@ graph TB
 
 ## 4. Production Example
 **Scenario**: An order-history API endpoint (`GET /customers/{id}/orders`) degraded from ~50ms to over 8 seconds as customers' order histories grew, with no code changes to the endpoint itself. **Investigation**: EF Core query logging revealed the endpoint executed 1 query to fetch orders, plus **one additional query per order** to lazily load each order's `LineItems` navigation property (accessed in a response-mapping loop) — for a customer with 200 orders, this meant 201 total round-trips; the degradation tracked customers' order-count growth exactly, confirming the N+1 shape. **Fix**: added `.Include(o => o.LineItems)` to the original query (with `.AsSplitQuery` given `LineItems` is a potentially-large one-to-many collection), collapsing 201 round-trips into 2; latency returned to ~60ms regardless of order-history size. **Lesson**: N+1 is invisible in the C# code itself (`order.LineItems` looks like ordinary, free property access) — it must be caught either via EF Core's SQL logging in code review/testing, or via a standing analyzer/query-count assertion in integration tests, not by reading the LINQ code alone.
-
-## 5. Best Practices
-- Enable EF Core SQL logging during development/testing to visually confirm query count matches expectations for any collection-processing endpoint.
-- Use eager loading (`.Include`) for navigation properties genuinely needed for every row in a result set; explicit loading for conditionally-needed data.
-- Use `.AsSplitQuery` for multiple one-to-many `Include`s to avoid cartesian-explosion row duplication.
-- Use keyset/cursor pagination for any large, frequently-paginated dataset, especially one with concurrent inserts/deletes.
-- Use projection (`.Select`) plus `.AsNoTracking` for read-only, DTO-shaped API responses.
-
-## 6. Anti-patterns
-- Accessing a lazy-loaded navigation property inside a loop over a collection (the canonical N+1 shape).
-- Deep offset pagination (`OFFSET 50000 ROWS`) on a large, frequently-paginated table without considering keyset pagination's constant-cost alternative.
-- Calling `SaveChanges` inside a loop, one entity at a time, instead of batching.
-- Loading full entity graphs (with tracking) for read-only, projection-shaped API responses.
-
----
-
-## 7. Performance Engineering
-
-**CPU:** Each additional round-trip in an N+1 pattern isn't free even when the query itself is trivial — SQL Server must re-parse (or look up in the plan cache), re-authenticate the TDS session context, and re-acquire a worker thread from `sys.dm_os_schedulers` for every single-row `SELECT`. At 200 round-trips per request and even a conservative ~0.3ms of pure server-side CPU/parse overhead per round-trip, that's 60ms of *server* CPU spent on protocol overhead alone, before counting actual data access — on a busy OLTP box serving thousands of requests/sec, this overhead multiplies directly into SQLOS scheduler contention (`SOS_SCHEDULER_YIELD` waits climbing in `sys.dm_os_wait_stats`).
-
-**Memory:** EF Core's change tracker retains a snapshot of every tracked entity for change detection; an N+1-shaped endpoint that lazy-loads 200 child entities per request, across concurrent requests, drives up managed-heap allocations (Gen0 collection pressure) purely from tracked-entity graph objects that a projection-based query would never have materialized. On the SQL Server side, offset pagination's `OFFSET n ROWS` still requires the engine to materialize and discard the skipped rows in a memory grant sized for the *full* candidate set when no covering index supports the sort — deep-page requests can trigger `RESOURCE_SEMAPHORE` waits under memory pressure that keyset pagination (bounded, index-seek-driven) never provokes.
-
-**Latency:** Round-trip network latency dominates N+1's user-perceived cost far more than server CPU — even at a generous 2ms RTT (same-AZ), 200 round-trips is 400ms of pure network wait stacked serially, which is exactly the 8-second-endpoint incident's shape once you add real per-query execution time and connection-pool queueing under concurrent load.
-
-**Throughput:** N+1 multiplies connection-pool checkout/release churn — a pool sized for steady-state traffic assuming ~2 round-trips/request can be driven to exhaustion (`InvalidOperationException: Timeout expired. The timeout period elapsed prior to obtaining a connection from the pool`) by the same request volume once each request needs 200. This is the connection-pool-exhaustion failure mode most SQL Server-backed APIs eventually hit under load, and it's frequently misdiagnosed as "we need a bigger pool" when the actual fix is collapsing round-trip count.
-
-**Benchmarking:** Benchmark query *count* per logical operation, not just individual query latency (Intermediate Q10's central point) — use SQL Server Extended Events (`rpc_completed`/`sql_batch_completed`) or `SqlClient`'s `EventCounters` (`System.Data.SqlClient` or `Microsoft.Data.SqlClient` diagnostic source) to capture round-trip count per request under representative (not toy) data volume, per Advanced Q7's finding that small seed data hides the scaling bug entirely.
-
-**Caching:** Plan-cache reuse depends on parameterized queries — dynamically-built SQL for pagination/sort (string-concatenated `ORDER BY` column names, common in ad-hoc reporting endpoints) produces a fresh, non-reusable plan per distinct literal value, bloating the plan cache and forcing repeated compilation CPU cost; this is the same underlying mechanism as §8's plan-cache-pollution DoS vector, viewed from a performance rather than security angle.
-
-## 8. Security
-
-**Threats:** Dynamic SQL built by string-concatenating pagination/sort parameters (`"ORDER BY " + userSuppliedColumn`) is a classic SQL injection vector distinct from parameterized `WHERE` clauses — because column/table identifiers can't be parameterized via `SqlParameter` the way values can, developers are tempted to concatenate them directly, and an unvalidated `sort=Name; DROP TABLE Orders--` reaches the server as literal T-SQL. A second, less obvious threat: **plan-cache pollution as a denial-of-service vector** — an attacker (or a poorly-designed client) that sends many structurally-identical queries differing only in inlined literal values (rather than using `sp_executesql` parameters) forces SQL Server to compile and cache a fresh plan per distinct literal, exhausting plan-cache memory and CPU on the OLTP primary; this is a genuine, documented attack pattern against systems with dynamic SQL or ORMs misconfigured to inline constants.
-
-**Mitigations:** Always parameterize *values* via `SqlParameter`/`sp_executesql`; for identifiers (column names, table names) that must vary, validate against a strict allow-list of known-safe column names before concatenating — never accept a raw client-supplied identifier string. For plan-cache pollution, ensure the data-access layer (EF Core, Dapper with explicit parameters) always uses parameterized queries so semantically-identical queries produce one reusable, parameterized plan regardless of literal value — and monitor `sys.dm_exec_cached_plans` for `usecounts = 1` plans accumulating rapidly, a direct signal of unparameterized query flooding.
-
-**Least privilege:** A batch-import service account performing bulk writes (`SqlBulkCopy`) should hold `INSERT`/`SELECT` on the specific staging tables only, never `db_owner` — a compromised import pipeline with excessive permissions is a lateral-movement risk into the broader ledger schema, disproportionate to what the import task actually needs.
-
-**Auditability:** For financial-ledger tables, batched writes should preserve the same audit-trail requirements as row-by-row writes — a bulk import must still attribute each inserted row to a traceable batch/job ID and timestamp, since "we batched it for performance" is never a justification for losing per-row provenance in a regulated ledger.
-
-## 9. Scalability
-
-**Horizontal scaling:** Reporting/pagination-heavy read traffic (order history, trade blotters) is the textbook candidate for offloading to an **Always On readable secondary** or a dedicated read replica — isolating scan-heavy, potentially-deep-pagination workloads from the latency-critical OLTP primary, directly the workload-isolation principle Expert Q2 develops for reconciliation/reporting generally, applied here specifically to paginated read endpoints.
-
-**Partitioning:** A high-volume ledger/order table partitioned by date (e.g., monthly partitions) lets keyset pagination scoped to a recent date range hit only the relevant, typically much smaller partition, and lets old, settled partitions be excluded from indexes/statistics maintenance entirely — directly supporting Expert Q3's "don't re-read settled history" principle at the storage-engine level.
-
-**Connection pooling:** N+1's connection-pool-exhaustion failure mode (§7) is the direct scalability limiter for collection-processing endpoints under concurrent load — sizing the pool correctly only papers over the underlying round-trip-count problem; the durable scalability fix is eliminating N+1, not growing the pool indefinitely.
-
-**HA/DR:** Bulk-import batching (Expert coding exercise) must be resumable/idempotent per batch so a mid-import failover (Always On automatic failover to a secondary) doesn't require restarting the entire import from row zero — checkpoint the last successfully-committed batch boundary, not just rely on transaction rollback of the in-flight batch.
-
-**Caching:** A read-heavy, rarely-changing reporting aggregate (Expert Q3's checkpoint balances) is a strong candidate for an application-tier cache (Redis) fronting the materialized checkpoint, further reducing load on the primary for repeated identical reporting queries within a business day.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

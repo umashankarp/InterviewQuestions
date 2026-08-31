@@ -116,63 +116,6 @@ sequenceDiagram
 **Trade-offs:** Resizing the connection pool and adding horizontal fraud-scoring capacity increased steady-state infrastructure cost by roughly 15% for a six-hour promotional window's benefit — an explicitly accepted cost given the alternative (authorization failures during a high-visibility national promotion) carried far greater reputational and revenue risk.
 
 **Lessons learned:** Years of "passing" load-test results had been systematically misleading due to a single methodological choice — closed-loop generation — that nobody on the team had questioned, because the results always looked plausible and never contradicted production experience at *normal* (non-extreme) load, where the self-throttling effect's understatement was small enough not to matter. The gap only became consequential at 4x scale, precisely the scenario the historically-passing methodology was never actually validated for. This is a direct instance of this course's recurring theme: a declared "we load test this system" claim is only as trustworthy as the specific methodology behind it, and a methodology can produce consistently green, plausible-looking results while systematically failing to measure the one dynamic (compounding degradation under genuinely independent load) that matters most.
-
----
-
-## 5. Best Practices
-- Use open-loop, fixed-rate load generation with corrected-latency measurement for any test meant to validate real-world degradation behavior, not merely closed-loop "does it complete."
-- Model traffic profile (request-type mix, burstiness, think time) from real historical production data, not an assumed uniform/steady pattern.
-- Define pass/fail criteria explicitly against the service's SLO thresholds before running the test, not as a post-hoc subjective judgment.
-- Run both fixed-capacity and autoscaling-enabled test configurations — they validate genuinely different things (raw ceiling vs. autoscaling policy correctness).
-- Re-run load tests periodically as code, data volume, and traffic patterns evolve; treat a historical "passing" result as time-bound, not permanent.
-- Integrate load testing into CI/CD as an automated, baseline-comparing release gate, not a manual, occasional exercise.
-
-## 6. Anti-patterns
-- Relying on a closed-loop tool's results to validate behavior under genuinely independent, open-loop real-world traffic (§4's incident).
-- Treating a load test's absolute breaking point alone as sufficient, without also validating expected-load behavior and the *quality* of degradation as the limit approaches.
-- Load-testing only the cheapest, most common request type, ignoring a production request-mix that includes materially more expensive operations.
-- Assuming a small-percentage canary rollout validates full-scale capacity readiness.
-- Capacity-planning via pure linear extrapolation from historical trend data, with no allowance for a discontinuous, planned business event or a non-linear resource-pool cliff.
-- Trusting a single load-test run's numbers without checking whether the load generator itself was the bottleneck.
-
----
-
-## 7. Performance Engineering
-
-**Throughput/latency trade-off measurement:** Report percentile latency (p50/p95/p99), not only average, at every tested concurrency level — a 4x peak test that reports only average latency can hide a p99 tail that has already crossed an unacceptable threshold well before the average does.
-
-**Benchmark hygiene:** Use BenchmarkDotNet for micro-benchmarks — it automates JIT warm-up exclusion (§2.4), runs multiple iterations, and reports confidence intervals, avoiding the systematic bias a hand-rolled `Stopwatch`-around-a-loop benchmark introduces from cold-path cost and single-sample noise.
-
-**Connection/thread-pool sizing via load data:** Size connection pools by the concurrency level at which the load test first shows connection-wait queueing (§2.5), with explicit headroom above expected peak, while respecting the downstream resource's (e.g., the database server's) own maximum-connection ceiling — an oversized pool can degrade the shared downstream resource rather than improving the calling service's own throughput.
-
-**Amdahl's Law as an investment filter:** Before investing engineering effort in parallelizing a specific hot path, use load-test data to establish what fraction of total request time that path actually represents — parallelizing a component responsible for 20% of total time caps the achievable overall speedup at roughly 1.25x regardless of how well the parallel portion itself is optimized, a calculation that should gate the investment decision, not follow it.
-
----
-
-## 8. Security
-
-**Load testing as a DoS-shaped activity requiring authorization:** A load or stress test that pushes a system to its breaking point is, mechanically, indistinguishable from a denial-of-service attack — running one against shared infrastructure, a third-party dependency, or a production environment without explicit authorization and scoping (rate limits, time windows, an agreed-upon abort threshold) risks real customer impact and, against a third party's systems, can violate terms of service or trigger their own automated defenses. Every load test against a shared or external target requires documented sign-off and a pre-agreed circuit-breaker/abort condition.
-
-**Secrets and PII in test data:** Production-traffic replay/shadowing (used to close the synthetic-data realism gap, §2.6) risks replaying real customer PII and payment data into a test environment with weaker access controls than production — replayed traffic must be sanitized/tokenized (replacing real card numbers, account IDs with synthetic equivalents that preserve realistic data-skew characteristics) before use, and the shadow/replay environment itself must carry the same access controls as production if any real fields survive sanitization.
-
-**Side-effect isolation:** Replaying real, captured production requests risks triggering genuine side effects — a replayed payment-authorization request could trigger a real charge, a replayed notification request could send a real customer email — unless side-effect-producing calls are explicitly stubbed or redirected at the environment boundary before replay begins; treating "replay for load realism" and "avoid duplicate real-world side effects" as two separate, both-mandatory requirements is essential, not merely a nice-to-have.
-
-**Rate-limit/quota testing as a security control validator:** A load test deliberately targeting per-tenant or per-API-key rate limits validates that those limits actually contain a misbehaving or compromised client, rather than merely being declared in configuration — directly the same "declared ≠ enforced" verification this course applies to every other control category, applied here to abuse-prevention/rate-limiting specifically.
-
----
-
-## 9. Scalability
-
-**Horizontal vs. vertical capacity levers revealed by testing:** A cliff caused by a stateless service's own CPU/thread-pool ceiling is a genuine candidate for horizontal scaling (more instances); a cliff caused by a shared, non-partitionable resource (a single database's connection limit, a downstream third-party API's rate limit) is not resolved by scaling the calling service horizontally at all — it requires either vertical scaling of the shared resource, partitioning/sharding it, or architecting queuing/backpressure to operate within its fixed ceiling.
-
-**Multi-tenant noisy-neighbor capacity planning:** A capacity plan for a multi-tenant system must explicitly load-test a scenario where one or a few tenants generate disproportionately heavy load concurrently with normal-load tenants, verifying that per-tenant quotas/rate limits or resource-pool isolation actually contain the impact — aggregate, blended-load capacity planning alone can hide a real isolation failure that only manifests with a genuinely skewed, per-tenant load distribution.
-
-**HA/DR and multi-region capacity:** Capacity plans for an active-active, multi-region deployment must account for the *reduced* effective capacity available during a regional failover, when one region's traffic must be absorbed by the remaining region(s) — a capacity plan validated only against each region's independent, steady-state peak understates the true peak each surviving region must handle during a real failover event.
-
-**Autoscaling reaction-latency chain:** Kubernetes HPA-then-Cluster-Autoscaler scaling is a multi-stage chain, each stage with its own reaction latency (metric-scrape interval, pod-scheduling time, node-provisioning time if a new node is required) — a spike test specifically (not a gradual-ramp load test) is needed to validate whether the full chain's real, measured reaction latency is fast enough for the actual ramp rate a genuine traffic spike would present, since a threshold validated against a gentle test ramp can still be too slow for a sharper real-world spike.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

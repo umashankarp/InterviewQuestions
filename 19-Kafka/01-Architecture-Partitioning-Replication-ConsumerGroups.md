@@ -233,67 +233,6 @@ This is the whole model on one page, and it is worth reading bottom-up: the thre
 
 ## 4. Production Example
 **Scenario**: An analytics pipeline's Kafka consumer group processed high-volume clickstream events, with each batch triggering a moderately expensive enrichment call to an external geolocation API before committing offsets. During a period of elevated latency on that external geolocation API (unrelated to Kafka itself), individual batch-processing times occasionally exceeded the consumer's configured `max.poll.interval.ms` — Kafka, receiving no poll from that consumer instance within the expected window, presumed it dead and triggered a rebalance, reassigning its partitions to other group members; the "dead" instance, still alive and simply slow, eventually finished its poll cycle and rejoined the group moments later, triggering **another** rebalance. This repeated in a cascading loop for nearly 20 minutes, during which the "stop-the-world" rebalancing protocol in use (the older, non-cooperative version) paused consumption across **the entire consumer group**, not just the affected partitions, causing consumer lag to spike dramatically across the whole pipeline, well beyond what the original, isolated external-API slowness alone would have caused. **Investigation**: monitoring showed the classic rebalancing-storm signature — a rapid sequence of "member joined/member left" group-coordinator log events correlating precisely with the lag spike, rather than a single, sustained processing slowdown; correlating against the external geolocation API's own latency metrics (the distributed-tracing/correlation discipline, now applied to root-causing a Kafka-specific incident) revealed the true root cause several layers removed from Kafka itself. **Fix**: (1) increased `max.poll.interval.ms` to a value comfortably exceeding the geolocation API's worst-case observed latency plus enrichment processing time, preventing premature dead-consumer presumption during transient external slowness; (2) migrated to the incremental cooperative rebalancing protocol, so that even if a rebalance did trigger, only the specific reassigned partitions would pause, not the entire group; (3) separately, added a circuit breaker around the geolocation API call itself, so a genuinely degraded external dependency would fail fast with a fallback rather than risk exceeding the poll interval at all. **Lesson**: this incident illustrates the compounding nature of insufficiently-tuned Kafka configuration interacting with an external dependency's transient degradation (the resilience-pattern territory) — the geolocation API's slowness was the trigger, but Kafka's overly-aggressive `max.poll.interval.ms` and the older, non-cooperative rebalancing protocol were what turned a contained, external-dependency slowdown into a full consumer-group-wide outage; a Principal Engineer must reason about Kafka configuration and application-level resilience patterns together, not as independent concerns.
-
-## 5. Best Practices
-- Choose partition count based on required consumer parallelism, but choose the partition **key** based on which entities require relative ordering — these are coupled decisions, not independent.
-- Use `acks=all` for business-critical data where durability matters more than the added latency; reserve `acks=0`/`acks=1` for genuinely loss-tolerant, high-throughput use cases (metrics, logs) where the latency savings justify the risk.
-- Tune `max.poll.interval.ms` to comfortably exceed the consumer's realistic worst-case batch-processing time (including any external dependency calls), and pair this with the resilience patterns (timeouts, circuit breakers) around those external calls rather than relying on Kafka's timeout alone.
-- Use incremental cooperative rebalancing rather than the older, stop-the-world protocol wherever available, to minimize the blast radius of any rebalance that does occur.
-- Commit offsets only after processing completes (never before), accepting the resulting at-least-once semantics and designing consumers to be idempotent accordingly.
-
-## 6. Anti-patterns
-- Choosing a partition key that doesn't align with actual ordering requirements, silently breaking per-entity ordering guarantees (the incident, now understood via Kafka's specific partition mechanics).
-- Using `acks=0` or `acks=1` for genuinely business-critical events where message loss on leader failure is unacceptable.
-- Leaving `max.poll.interval.ms` at an aggressive default while consumer processing logic includes slow, unbounded external calls, inviting rebalancing storms.
-- Committing offsets before processing completes, risking silent under-processing (records skipped) rather than the generally-preferred at-least-once over-processing risk.
-- Ignoring under-replicated-partition alerts (partitions whose ISR has shrunk below the desired replication factor), which silently erodes the durability guarantee `acks=all` is meant to provide until an actual leader failure exposes the gap.
-
----
-
-## 7. Performance Engineering
-
-**CPU/Memory**: each partition costs a broker real, non-zero overhead regardless of throughput — an open file handle per log segment, in-memory index structures, and replication-fetcher thread state — so a cluster with tens of thousands of partitions spread across only a handful of brokers pays a fixed per-partition tax before a single extra message is produced; Confluent's own operational guidance treats a few thousand partitions per broker as a practical ceiling for this reason, not an arbitrary round number.
-
-**Latency**: `acks=all` (2.3) adds the round-trip to the slowest ISR member as a hard floor on producer-perceived latency — typically single-digit milliseconds within one availability zone, but materially higher across zones or regions, which is why `min.insync.replicas` and replica placement (§9) are latency decisions as much as durability ones. Enabling the idempotent/transactional producer (Module 55 §2.1–2.2) adds further, smaller overhead — sequence-number bookkeeping and, for transactions, coordinator round-trips to begin/commit — that must be weighed against the correctness it buys.
-
-**Throughput**: producer-side batching (`linger.ms`, `batch.size`) is the primary throughput lever, trading a small, bounded added latency for materially fewer, larger network round-trips and more efficient broker-side I/O (§Advanced Q7 of Module 55 develops this for transactional producers specifically); consumer-side, `fetch.min.bytes`/`fetch.max.wait.ms` provide the mirror-image lever on the read path.
-
-**Scalability**: partition count is the throughput ceiling for both producers (parallel writes across leaders spread over brokers) and consumer groups (§2.4), but scaling partition count is a one-way, largely irreversible decision in practice — Kafka doesn't support reducing partition count on an existing topic without recreating it, so under-provisioning is easier to fix (add partitions) than over-provisioning (the broker-overhead cost of §7's opening point is now permanent for that topic).
-
-**Benchmarking**: benchmark with `kafka-producer-perf-test`/`kafka-consumer-perf-test` under the target `acks` and replication-factor configuration, not the default — a benchmark run with `acks=1` materially overstates the throughput a production topic running `acks=all` will actually sustain, exactly the kind of configuration-mismatched benchmark that produces a false sense of headroom.
-
-**Caching**: Kafka relies on the OS page cache, not an application-level cache, for its read performance — sequential, append-only writes and reads mean a broker serving mostly-recent data benefits enormously from page cache hits, which is why running brokers with insufficient free memory for page caching (over-provisioning the JVM heap instead) is a common, avoidable performance regression.
-
-## 8. Security
-
-**Threats**: an unauthenticated, unencrypted broker listener is a direct data-exfiltration and data-injection risk — any host with network access can produce forged trade events or consume every message on every topic, including regulated financial data, with zero audit trail of who did so.
-
-**Mitigations**: SASL (SASL/SCRAM or SASL/GSSAPI-Kerberos) or mutual TLS (mTLS) for broker authentication, terminated at the broker listener itself, not delegated to a perimeter firewall alone — directly the "never assume internal network traffic is trusted" principle (§Intermediate Q10) applied to Kafka specifically. TLS in transit for all producer/broker/consumer/inter-broker traffic, and encryption at rest for the underlying log segments where the topic carries regulated financial data.
-
-**AuthN/AuthZ**: per-topic, per-operation ACLs (`kafka-acls.sh`) scoping exactly which authenticated principal may `Write`/`Read`/`Describe` a given topic or consumer group — a payments-processing service's producer credential should be authorized to write to `payment-events` and nothing else, following least-privilege rather than a single, cluster-wide credential shared across every service, which turns any one compromised service into a compromise of the entire event backbone.
-
-**OWASP mapping**: broken access control (missing or overly broad ACLs); security misconfiguration (an unauthenticated `PLAINTEXT` listener left enabled alongside a properly secured one, still reachable); insufficient logging (no audit trail of which principal produced/consumed which topic, hampering incident investigation).
-
-**Secrets/Key management**: SASL credentials and TLS private keys belong in a managed secrets store (AWS Secrets Manager, Azure Key Vault, HashiCorp Vault), rotated on a schedule, never embedded in application configuration files checked into source control — the same discipline this course applies to every other credential class.
-
-**PCI/PII considerations**: a topic carrying cardholder data or PII should additionally apply field-level tokenization/encryption before the record ever reaches Kafka, since broker-level encryption at rest protects against physical disk compromise but not against an over-broadly-authorized consumer simply reading the plaintext payload it was never meant to see in full.
-
-## 9. Scalability
-
-**Horizontal scaling**: adding brokers to a cluster does not automatically rebalance existing topics' partitions onto them (§Intermediate Q9) — horizontal scaling requires an explicit partition-reassignment operation (`kafka-reassign-partitions.sh` or a tool like Cruise Control for automated, load-aware reassignment) to actually realize the added capacity for already-existing topics.
-
-**Partitioning/rebalancing at scale**: a cluster running thousands of partitions across dozens of brokers makes manual partition-reassignment impractical — production-scale operations typically adopt an automated rebalancer (Cruise Control) that continuously moves partitions to correct broker-level CPU/disk/network skew, since even a well-chosen initial partition assignment drifts out of balance as topics grow at different rates.
-
-**Cross-cluster replication**: MirrorMaker 2 (or a managed equivalent) replicates topics across clusters for multi-region disaster recovery or geo-local read/write patterns — critically, MirrorMaker 2 replication is **asynchronous and eventually consistent across clusters**, so a DR cluster's data lags the primary by a measurable replication delay; a failover runbook must account for this lag explicitly (how many seconds/minutes of trade events might not yet be replicated at failover time) rather than assuming the DR cluster is a perfect, real-time mirror.
-
-**Load balancing**: producer traffic is inherently load-balanced across partition leaders (spread across brokers) by the partitioning scheme itself; consumer load balancing is the consumer-group rebalance mechanism (2.4/2.5) — both mechanisms depend on the partition count and key distribution actually being well-chosen (§14's hot-partition incident is exactly a load-balancing failure at the partition-key layer, not a broker-capacity failure).
-
-**High availability**: `min.insync.replicas=2` with replication factor 3 tolerates one broker failure with zero data loss and continued availability (a second failure would either block writes, if `min.insync.replicas` can no longer be satisfied, or risk data loss if writes are allowed to proceed anyway — an explicit availability-vs-durability choice that must be made deliberately, not left as an emergent property of default settings).
-
-**Disaster recovery**: RPO for a Kafka-based system is bounded below by MirrorMaker 2's replication lag (never zero for an async cross-cluster setup); RTO depends on the failover runbook's automation maturity — a manual DNS/config cutover to the DR cluster measured in tens of minutes versus an automated, tested failover measured in single-digit minutes are very different operational postures for the same underlying topology, and the difference is entirely in operational investment, not Kafka capability.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

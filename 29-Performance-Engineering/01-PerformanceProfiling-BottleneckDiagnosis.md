@@ -104,59 +104,6 @@ sequenceDiagram
 **Trade-offs:** Smaller batched transactions in the reconciliation job increased its own total runtime by roughly 12% (more transaction-commit overhead) in exchange for eliminating cross-service lock contention — an explicitly accepted trade-off given the reconciliation job's overnight time budget was not latency-sensitive, while the authorization API's was.
 
 **Lessons learned:** Profiling the *symptomatic* service alone (the authorization API) would never have found the root cause, since none of its own code was slow — the bottleneck lived in a shared resource contended by an entirely different, seemingly-unrelated service. Distributed tracing that correlates spans against the same downstream dependency (the database), not just within one service's own call graph, was the tool that actually localized this. This is a direct instance of this course's recurring theme: a service's own health metrics can look entirely normal while it is, in fact, the victim of a resource-contention bottleneck imposed by a neighbor sharing the same infrastructure.
-
----
-
-## 5. Best Practices
-- Always measure before proposing a fix; state the specific metric a fix is expected to move and by how much, then re-measure the same way afterward.
-- Prefer low-overhead sampling profilers for production and for any concurrency-sensitive investigation; reserve instrumenting profilers for reproducible, isolated staging sessions.
-- Check `dotnet-counters`' CPU%, GC allocation rate, and ThreadPool queue length together as a first-pass triage before reaching for a full flame graph — each has a distinct signature.
-- Correlate application-level tracing with database-level lock/wait diagnostics for any bottleneck that traces show concentrated in a single downstream-dependency span.
-- Run multiple profiling/benchmark iterations and compare distributions, not single samples, before declaring a fix confirmed.
-- Instrument proactively (tracing spans around every meaningfully expensive operation) before an incident, not retroactively during one.
-
-## 6. Anti-patterns
-- Optimizing the first plausible-looking hot function in a flame graph without checking whether it's actually application logic, JIT warm-up, or GC noise.
-- Diagnosing any latency spike as "probably GC" without checking GC counters first.
-- Assuming a service's own clean CPU/memory metrics rule it out as the cause when a shared downstream resource (DB, cache, message broker) may be the actual, externally-imposed bottleneck.
-- Profiling only in staging with synthetic, evenly-distributed data that hides production-specific skew.
-- Trusting a single before/after benchmark run as proof a fix worked, without accounting for run-to-run variance.
-- Adding threads to a workload that profiling has already shown to be I/O-bound rather than CPU-bound.
-
----
-
-## 7. Performance Engineering
-
-**CPU:** Flame-graph width is the primary CPU-time signal; always distinguish self-time (time in the function's own code) from total-time (including callees) — a wide bar in total-time view can be entirely attributable to one callee, misleading the fix target if self-time isn't checked separately.
-
-**Memory/GC:** Track allocation rate (bytes/sec) as the leading indicator, not steady-state heap size. Object pooling (`ArrayPool<T>`, `ObjectPool<T>`) and `Span<T>`/`ReadOnlySpan<T>` for stack-allocated slicing reduce Gen-0 churn directly. Server GC (concurrent, background collection) reduces pause *frequency* for throughput-oriented services at the cost of larger per-pause duration variance; Workstation GC with concurrent mode favors lower, more predictable pause times for latency-sensitive, low-throughput services (e.g., a trading order-entry path).
-
-**Latency vs. throughput benchmarking:** BenchmarkDotNet handles JIT warm-up, multiple iterations, and statistical outlier rejection automatically for micro-benchmarks — hand-rolled `Stopwatch` loops without warm-up phases systematically overstate cold-path cost.
-
-**Allocations as a first-class cost:** A hot path allocating 50 bytes per call at 10,000 calls/sec generates 500KB/sec of garbage — seemingly trivial per-call but enough to double Gen-0 collection frequency under sustained load; profiling allocation *call sites* (not just aggregate rate) via an allocation profiler (e.g., `dotnet-trace` with the `gc-collect` provider) localizes exactly which code path to fix.
-
----
-
-## 8. Security
-
-**Secrets in traces/profiles:** A full-instrumentation profiler or a verbose distributed trace can capture method arguments, SQL query text with embedded parameter values, or HTTP request/response bodies — in a payments or KYC context, this can mean card numbers, SSNs, or auth tokens land in a profiler's captured data or a trace-storage backend that wasn't designed or access-controlled for PII/PCI-scoped data. Profiling and tracing configuration must explicitly scrub or exclude sensitive fields (parameterized query capture without literal values, PII redaction at the span-attribute layer) before data leaves the process, not as an afterthought at the storage layer.
-
-**Access to production profiling tools:** Continuous production profilers and their captured flame-graph/trace data are themselves a sensitive asset — they can reveal internal architecture, third-party integration endpoints, and (if not scrubbed) customer data, so access must be scoped via the same least-privilege/audit-trail discipline as any other production diagnostic tool, with captured profiling data retained under the same data-retention policy as logs.
-
-**DoS-shaped risk from profiling overhead itself:** Enabling a heavy, fully-instrumenting profiler against a live, latency-sensitive production path (rather than a low-overhead sampler) can itself degrade the service enough to constitute a self-inflicted denial-of-service — a real operational risk during an active incident when the temptation to "just turn on full tracing" is highest.
-
----
-
-## 9. Scalability
-
-**Horizontal implications of profiling findings:** A CPU-bound bottleneck found via profiling is a candidate for horizontal scaling (more instances sharing the parallelizable load) only if the workload is genuinely stateless/partitionable; a lock-contention or shared-database bottleneck (as in §4's production example) is *not* resolved by adding more instances of the contending service — it requires addressing the shared resource itself (finer-grained locking, connection-pool/isolation separation, or partitioning the shared data).
-
-**Profiling at scale — sampling a representative fleet subset:** Running a full instrumenting profiler against every production instance is prohibitively expensive; continuous, low-overhead sampling profilers run against a representative subset of the fleet (e.g., 5–10% of instances) provide statistically sufficient flame-graph coverage without materially impacting aggregate fleet capacity.
-
-**HA/DR relevance:** A bottleneck diagnosis performed only against a single-region deployment may miss cross-region replication lag or multi-region lock-contention patterns that only manifest under active-active topology — profiling methodology should explicitly account for whether the finding generalizes across the full deployment topology or is specific to the region/instance profiled.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

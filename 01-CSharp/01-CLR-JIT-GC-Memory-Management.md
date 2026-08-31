@@ -235,39 +235,6 @@ Small Object Heap (SOH)                        Large Object Heap (LOH)  Pinned O
 2. `% Time in GC` above ~10-15% sustained is an actionable signal, not noise.
 3. Server GC's default "heap count = core count" is wrong for many small pods — DATAS (.NET 8+) or explicit `GCHeapCount` tuning is mandatory in Kubernetes.
 4. Buffering entire payloads "just for logging" is an anti-pattern that principal-level review should catch before merge.
-
----
-
-## 5. Best Practices
-
-- **Use `Server GC` for backend services, `Workstation GC` for desktop/CLI tools.** Why: Server GC parallelizes collection across cores for throughput; Workstation minimizes latency/footprint for single-user apps. Don't flip this — Server GC on a desktop app wastes memory (one heap per core) for no benefit.
-- **Enable Concurrent (Background) GC** (default) unless you have a very specific reason to disable it (rare embedded/real-time scenarios) — it dramatically cuts pause times for Gen 2 collections.
-- **Pool large/frequent allocations**: `ArrayPool<T>.Shared`, `ObjectPool<T>` (Microsoft.Extensions.ObjectPool), ASP.NET Core's built-in buffer pooling. Use when allocation rate is provably a bottleneck (measure first!) — don't pool everything reflexively, pooling adds complexity and can leak state between reuses if not reset correctly.
-- **Use `Span<T>`/`Memory<T>`/`ReadOnlySpan<T>`** for parsing/slicing without allocating substrings/subarrays. Use when writing hot-path parsing code (e.g., custom protocol parsers); avoid over-using in ordinary CRUD code where clarity matters more than micro-optimization.
-- **Set container memory limits AND `DOTNET_GCHeapHardLimit`/`DOTNET_gcServer` explicitly** in Kubernetes — never rely on defaults detecting cgroup limits correctly across all K8s/cloud-provider quirks; verify with `dotnet-counters`.
-- **Prefer `IDisposable` + `using` over finalizers.** Only add a finalizer when directly holding an unmanaged handle, and always pair it with the Dispose pattern (`GC.SuppressFinalize`) so the fast path avoids finalization overhead entirely.
-- **Use ReadyToRun/NativeAOT for latency-sensitive cold-start scenarios** (Lambda, Azure Functions, CLI tools) — don't bother for long-running services where steady-state throughput matters more than startup.
-
----
-
-## 6. Anti-patterns
-
-- **Calling `GC.Collect` manually in app code.** Why it fails: forces a full blocking Gen 2 collection, undoing generational optimization; almost always makes things *worse* under load. Fix: trust the GC; if you must (e.g., after a huge one-time batch job frees gigabytes), use `GC.Collect(2, GCCollectionMode.Optimized, blocking:false)` sparingly and only with measurement proving it helps.
-- **Catching `OutOfMemoryException` and continuing.** Why it fails: OOM often leaves the process in a corrupted/unpredictable state; recovery is rarely safe. Fix: let the process crash/restart (in K8s, let the liveness probe restart the pod) and fix the root allocation cause.
-- **Excessive boxing via non-generic collections (`ArrayList`, `Hashtable`) or `object`-typed APIs.** Fix: use generic collections (`List<T>`, `Dictionary<K,V>`) exclusively in modern code.
-- **String concatenation in loops (`s += x`).** Why it fails: each `+=` allocates a brand-new string (strings are immutable) — O(n²) total allocation/copy. Fix: `StringBuilder`, or `string.Create`/`string.Join` for known patterns.
-- **Large object graphs pinned via long-lived static caches with no eviction.** Why it fails: promotes everything to Gen 2, grows the working set indefinitely — a "logical" (not literal) memory leak. Fix: bounded caches (`MemoryCache` with size limits, LRU eviction, or `Microsoft.Extensions.Caching` with expiration).
-- **Ignoring `IDisposable` on `DbContext`/`HttpClient`-like objects.** Fix: `using`/`await using`, or DI-managed lifetimes (scoped/singleton as appropriate — note: don't `new HttpClient` per request either, use `IHttpClientFactory` — a different but related resource-lifetime anti-pattern).
-- **Assuming struct = "always cheap, always stack, always fast."** Large structs copied by value repeatedly (passed by value into multiple method calls, stored in arrays/collections) can be *slower* than a class reference due to copy costs. Fix: pass large structs by `in`/`ref readonly`; benchmark before assuming.
-
----
-
----
-
----
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

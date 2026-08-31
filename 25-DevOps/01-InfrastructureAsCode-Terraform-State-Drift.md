@@ -96,23 +96,6 @@ graph TB
 **Trade-offs:** Making the emergency change directly via the console, rather than a fast-tracked HCL pull request plus expedited `apply`, was a reasonable, defensible choice under genuine outage time-pressure — but it created exactly the kind of undocumented, driftable state this module's entire framework exists to prevent, and the team had no explicit, bounded process requiring the change to be backported into HCL afterward.
 
 **Lessons learned:** A subsequent, entirely unrelated infrastructure change (a routine `terraform apply` adding a new subnet, run via the team's standard CI pipeline) triggered a full `plan` against the whole module — including the drifted security group. The plan's output correctly showed the manual rule as a difference **to be removed**, since Terraform's model treats the declared HCL as authoritative and any real-world attribute not present in it is, by definition, something to revert on the next apply. The diff was one of several dozen lines in an otherwise routine, low-risk-looking plan output for an unrelated subnet addition — nobody flagged the security-group removal line during review, the pipeline's automatic-apply-on-approval policy proceeded, and the emergency access rule was silently reverted, reintroducing the exact condition that had caused the original outage, discovered only when the partner's monitoring service failed again and a second incident was opened. **This is this module's defining lesson**: Terraform's plan-time-only reconciliation model means an out-of-band change doesn't just risk *eventual* correction like a continuously-reconciling Kubernetes controller would provide (predictably, within seconds, and visibly) — it risks **silent, indefinite persistence followed by an unpredictable, badly-timed, and easily-overlooked reversal**, buried inside whatever unrelated change happens to trigger the next plan. The structural fix requires two independent layers: (1) a bounded-time process mandating any emergency out-of-band change be backported into HCL and reconciled via a proper, reviewed `apply` within a defined window (e.g., same business day), and (2) a scheduled, proactive drift-detection job that would have surfaced this specific drift within hours rather than weeks, and in complete isolation from an unrelated subnet change — making the review far more likely to actually catch it.
-
-## 5. Best Practices
-- Review the **full** `plan` diff before every `apply` — including every "will be destroyed"/"in-place update" line for resources the change wasn't intended to touch, especially in an automated, approval-gated pipeline where a human reviewer's attention is the last line of defense.
-- Use a remote backend with locking (S3+DynamoDB, Terraform Cloud, Azure Storage+lease) for any team environment — never a local state file shared via a network drive or committed to git.
-- Mandate a bounded-time backport process for any emergency, out-of-band infrastructure change — the change must be reflected in HCL and reconciled the same day, not "eventually".
-- Run scheduled, proactive drift-detection (`plan -refresh-only`) rather than relying on the next routine `apply` to surface out-of-band changes.
-- Treat any resource attribute that could contain a secret (database passwords, API keys) as requiring an encrypted, access-restricted remote backend at minimum, and prefer a secrets-manager reference over a literal value wherever the provider supports it.
-
-## 6. Anti-patterns
-- Assuming Terraform behaves like a Kubernetes controller or Argo CD — continuously watching and correcting drift — when it only ever reconciles at an explicit `plan`/`apply`.
-- Making manual, out-of-band infrastructure changes without a bounded, mandatory backport-to-HCL process.
-- Storing a local state file without a remote, locked backend in any environment with more than one contributor.
-- Approving an automated pipeline's `plan` output without actually reading every destroy/update line, on the assumption that "the pipeline wouldn't propose anything dangerous".
-- Applying against the wrong Terraform workspace due to an unverified `workspace select`, with no automated guard against it.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

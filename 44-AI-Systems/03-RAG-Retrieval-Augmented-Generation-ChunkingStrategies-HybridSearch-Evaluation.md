@@ -101,47 +101,6 @@ graph TB
 **Trade-offs:** Fixed-size chunking was chosen for its implementation simplicity and uniform applicability across the corpus's varied document types — a reasonable default for prose-heavy documents, but silently unsuited to structured, tabular content where the boundary between "which chunk" and "which chunk" carries load-bearing semantic meaning the chunker had no awareness of.
 
 **Lessons learned:** **RAG's grounding guarantee only holds if the retrieved chunk itself contains sufficient context to answer correctly — chunking that severs a piece of information from the surrounding context it depends on (a table's headers, a clause's governing conditions) produces a response that is technically "grounded" in retrieved content while being substantively wrong**, a sharper, more insidious version of the hallucination risk specifically because it passes any naive citation/grounding check. This directly recurs this course's now-thoroughly-established finding that a mechanism's declared guarantee (grounding prevents hallucination) is only as strong as a specific, easily-overlooked configuration detail (chunking strategy) actually, verifiably supporting it for the specific content type it's applied to.
-
----
-
-## 5. Best Practices
-
-- **Use structure-aware chunking for structured content types** (tables, forms, code) rather than uniform fixed-size chunking across an entire heterogeneous corpus — a table's rows should never be separated from their governing column headers by a chunk boundary.
-- **Include chunk overlap for prose content** to mitigate boundary-splitting information loss, calibrated against the storage/redundancy cost it introduces.
-- **Evaluate embedding model quality specifically against the platform's own domain vocabulary**, not only general-purpose benchmarks — financial/regulatory terminology may embed measurably less reliably in a general-purpose model.
-- **Implement hybrid (semantic-plus-keyword) search for any corpus containing exact identifiers, codes, or account-specific values** — pure semantic search systematically underperforms for exact-match retrieval needs.
-- **Explicitly instruct the model to decline answering, rather than fall back to ungrounded general knowledge, when retrieval returns weak or irrelevant results** — closing the exact gap that defeats RAG's purpose if the model silently reverts to unguarded generation.
-
----
-
-## 6. Anti-patterns
-
-- **Uniform fixed-size chunking applied indiscriminately to structured/tabular content** — the exact incident; severs load-bearing context (headers, governing conditions) from the values that depend on it.
-- **Treating "the response cites a retrieved source" as sufficient evidence of correctness** — as demonstrates, a response can be faithfully grounded in a retrieved chunk while that chunk itself is insufficient or misleading in isolation.
-- **Relying on pure semantic search for a corpus with exact-match retrieval needs** (account numbers, regulatory codes, SKUs) — systematically underperforms relative to hybrid search for exactly the queries where precision matters most.
-- **Skipping retrieval-quality evaluation because ground-truth labeling seems too expensive** — produces a RAG system whose actual retrieval precision/recall is genuinely unknown, undermining every downstream claim about the system's grounding quality.
-- **Allowing the model to fall back to ungrounded general knowledge when retrieval is weak, with no explicit instruction against doing so** — silently defeats RAG's entire structural purpose for exactly the queries where retrieval quality is poorest.
-
----
-
-## 7. Performance Engineering
-
-ANN index parameters (HNSW's `ef_search`, IVF's cluster-probe count) directly trade recall against query latency — a higher `ef_search` value examines more of the graph per query, improving recall at real, measurable latency cost, requiring the same empirical, workload-specific tuning discipline established for storage-engine configuration generally. Retrieval latency adds directly to the prefill-phase cost (the retrieved chunks become part of the LLM's input context), meaning an ANN index's own query latency and the number of chunks retrieved (top-K) both compound into the overall request's TTFT — a genuinely multi-stage latency budget (retrieval latency plus LLM prefill plus LLM decode) requiring end-to-end, not component-isolated, latency monitoring.
-
----
-
-## 8. Security
-
-Retrieved content is, an indirect-prompt-injection surface requiring the trust-tier classification and defense-in-depth stack that module established — RAG's retrieval corpus is precisely the "retrieved content" category that module's framework addresses, meaning every RAG corpus source should be explicitly classified by trust tier and defended proportionally. RAG additionally introduces an **access-control propagation** concern this course's Elite FinTech lens treats as consequential: if the underlying document corpus has per-document or per-client access restrictions (a client's own confidential account documents, restricted internal policy material), the retrieval index must enforce the *identical* access-control boundary at query time — a RAG system that indexes documents from multiple clients/permission levels into one shared, undifferentiated vector index and retrieves without access-control filtering can produce exactly the cross-account/cross-client data-exposure incident this course has now examined at the backend, frontend, and now retrieval-pipeline layer.
-
----
-
-## 9. Scalability
-
-ANN index build and query cost both scale with corpus size, requiring the same capacity-planning discipline established — a corpus growing from thousands to millions of documents needs index-structure re-evaluation (HNSW's memory footprint grows substantially with corpus size; IVF's cluster count needs re-tuning as data volume grows) rather than assuming a configuration validated at a smaller scale remains adequate indefinitely. Incremental indexing (adding new documents without full index rebuild) versus periodic batch re-indexing is a genuine architectural trade-off — real-time-relevant corpora (breaking news, live regulatory updates) need incremental indexing support; slowly-changing reference corpora can tolerate periodic batch rebuilds at lower operational complexity.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

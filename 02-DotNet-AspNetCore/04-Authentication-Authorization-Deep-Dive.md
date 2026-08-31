@@ -196,32 +196,6 @@ Policy succeeds ONLY IF: (RequireRoleRequirement satisfied by ANY of its handler
 1. `IClaimsTransformation` runs on **every authenticated request across the entire application**, not scoped to specific endpoints by default — any expensive operation placed inside it has a platform-wide blast radius, not a feature-scoped one, making it a uniquely high-leverage (and high-risk) extension point.
 2. A seemingly-reasonable, well-intentioned feature addition ("enrich the principal so policies don't each need their own lookup") can silently become a platform-wide performance bottleneck if the actual, universal-execution semantics of the extension point aren't fully understood before use.
 3. Caching and, even better, endpoint-scoped conditional execution are both valid, complementary mitigations — caching reduces the cost of necessary work; scoping eliminates unnecessary work entirely, and combining both gives the strongest protection.
-
----
-
-## 5. Best Practices
-
-- **Understand that `IClaimsTransformation` runs on every authenticated request platform-wide** — never place expensive, unconditional work inside it without caching and/or endpoint-scoping (the dual fix).
-- **Use resource-based authorization (`IAuthorizationService.AuthorizeAsync(user, resource, policy)`) for any "does this user own/have rights to this specific resource" check** — never attempt to force this into a declarative `[Authorize]` attribute, which has no access to the loaded resource instance.
-- **Register custom `AuthorizationHandler<TRequirement>` implementations for genuine business-logic-driven access rules**, rather than trying to encode complex logic into `RequireClaim`/`RequireRole`'s simpler built-in convenience methods — custom handlers are the intended, fully-general extensibility point.
-- **Explicitly specify `AuthenticationSchemes` on `[Authorize]`/`.RequireAuthorization(...)` for any endpoint in a multi-scheme application**, rather than relying on the default scheme — makes the intended authentication mechanism for that specific endpoint unambiguous and self-documenting.
-- **Return `401` for authentication failures and `403` for authorization failures**, consistently — and make a deliberate, documented choice (not an accident) if your API intentionally deviates from this (e.g., returning `401` universally to avoid confirming resource existence to unauthenticated callers).
-- **Cache expensive claims-enrichment lookups** with an appropriately short TTL reflecting how quickly the underlying data can legitimately change and how much staleness is acceptable for your specific authorization decisions.
-- **Test authorization policies with dedicated unit tests directly against `AuthorizationHandler<T>` implementations** (constructing a test `ClaimsPrincipal`/resource and asserting `context.HasSucceeded`), not solely through full end-to-end HTTP integration tests — faster, more precise feedback for the actual business-logic correctness of a policy's decision rules.
-
----
-
-## 6. Anti-patterns
-
-- **Placing expensive, unconditional work inside `IClaimsTransformation` without caching or endpoint-scoping** (the incident). Fix: cache with an appropriate TTL; scope execution to only the endpoints that actually need the enriched claim.
-- **Attempting to express resource-based/ownership authorization via `[Authorize(Policy = "...")]` alone**, without realizing the policy has no access to the specific resource instance unless explicitly passed via `IAuthorizationService.AuthorizeAsync(user, resource, policy)`. Fix: use the imperative resource-based authorization call from within the handler/action, after loading the resource.
-- **Relying on the default authentication scheme in a multi-scheme application without explicit per-endpoint scheme specification**, leading to confusing, hard-to-predict behavior about which scheme actually authenticates a given request. Fix: explicit `AuthenticationSchemes` specification per endpoint/policy.
-- **Conflating authentication and authorization failures**, returning the wrong status code (`401` when authorization actually failed, or vice versa) — beyond a pure correctness/HTTP-semantics concern, this can confuse legitimate API consumers trying to distinguish "I need to re-authenticate" from "I'm logged in but not allowed to do this."
-- **Encoding complex, multi-condition business authorization logic directly inline in a controller action/endpoint handler** (`if (user.IsInRole("Admin") || (user.HasClaim(...) && order.Status ==...)) {... }`) rather than expressing it as a named, reusable, independently-testable `AuthorizationHandler`. Why it fails: duplicates logic across multiple endpoints needing the same rule, and makes the authorization rule itself harder to locate/audit/test in isolation from the endpoint's other logic. Fix: extract into a named policy/handler, referenced declaratively or via `IAuthorizationService` as appropriate.
-- **Assuming a single principal can only ever have one `ClaimsIdentity`/come from one scheme**, breaking in multi-scheme scenarios where a request might legitimately carry credentials recognized by more than one registered scheme simultaneously.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

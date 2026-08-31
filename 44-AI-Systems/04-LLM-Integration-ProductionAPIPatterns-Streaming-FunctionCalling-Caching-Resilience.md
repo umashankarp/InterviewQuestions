@@ -102,47 +102,6 @@ sequenceDiagram
 **Trade-offs:** The caching approach correctly identified that the *question phrasing* varied enormously while the *underlying query type* was genuinely reusable — the specific defect was applying that genuine insight without also including the two dimensions (client identity, data currency) the *answer* actually depends on, exactly the "cache key scope must match the answer's actual variance dimensions, not merely the question's surface phrasing" finding established.
 
 **Lessons learned:** **Semantic caching's similarity threshold operates on the *question's* meaning — it says nothing about whether the *correct answer* to that question is actually stable across the dimensions (which client is asking, when they're asking) the cache key omits.** This is this module's own, third instance in this course's now-repeated cache/identity-scoping finding (the `trackBy`, the cache keys, this module's semantic-cache key) — a configuration mechanism's declared scope (question-similarity) must be verified to actually match every dimension the underlying, correct answer genuinely varies by, never assumed sufficient because the question-similarity dimension alone was reasoned about carefully.
-
----
-
-## 5. Best Practices
-
-- **Scope semantic-cache keys to every dimension the correct answer actually varies by**, not merely question-text similarity — client identity, data currency/freshness requirements, and any other context-dependent variable must be included in the cache key, never inferred solely from question phrasing.
-- **Verify streaming is preserved end-to-end through every hop of a multi-service integration**, measured at the client's actual vantage point (time-to-first-byte), not merely assumed correct because the final response content is functionally accurate.
-- **Track and archive which specific provider served each response**, extending the audit-archival discipline to include provider identity as a first-class field — essential for any compliance review needing to attribute a specific historical response to its actual generating system.
-- **Budget and monitor cost/latency at the interaction level, not the individual-API-call level**, for any function-calling or multi-step agent workflow — a per-request cost ceiling and step-count monitoring catch runaway multi-call chains before they compound into a significant, unexpected cost event.
-- **Never let the model itself execute a function call directly** — the function-call response is always a *request* the calling application's own, independent authorization layer evaluates and executes.
-
----
-
-## 6. Anti-patterns
-
-- **Semantic cache keys scoped to question-text similarity alone, omitting client identity or data-currency dimensions** — the exact incident; a genuine, severe cross-client data-exposure risk.
-- **A backend service buffering a provider's streamed response fully before forwarding it to its own client** — silently discards streaming's entire latency benefit while appearing functionally correct.
-- **Treating a provider fallback event as a purely mechanical, invisible substitution** with no tracking of which provider actually served a given response — undermines any future audit or compliance review needing to attribute historical output to its actual source.
-- **Reasoning about LLM integration cost per individual API call** rather than per full interaction/tool-call chain — systematically underestimates the true cost of any function-calling or multi-step workflow.
-- **Allowing a model's function-call request to trigger direct execution with no independent, application-side authorization check** — the exact security anti-pattern develops fully, reusing the "never trust the model's own generated intent" principle.
-
----
-
-## 7. Performance Engineering
-
-Function calling's minimum-two-round-trip structure means its latency floor is at least double a single-turn response's, before accounting for the function-execution time itself — a genuinely different latency budget category from simple text generation, requiring separate SLA/monitoring targets (the TTFT/TPS framework, now applied per-round-trip within a multi-step interaction). Semantic caching's cost/latency benefit is directly proportional to cache-hit rate for genuinely cacheable query patterns — a system should track hit rate as a first-class metric distinguishing genuinely effective caching from a poorly-tuned similarity threshold providing negligible actual benefit. Streaming's client-perceived-latency benefit is entirely orthogonal to total-completion-time/cost — a system optimizing only for streaming correctness without also addressing the underlying token-cost/decode-time factors has improved perceived responsiveness without improving actual throughput or cost efficiency.
-
----
-
-## 8. Security
-
-**This module's central, non-negotiable security principle, extending Module 163 §8's foundation directly: a function-call request from the model is untrusted input, exactly like any user-submitted request, and must be independently, structurally authorized by the calling application before execution — regardless of how the request was generated (a legitimate user's genuine intent, or a successfully-injected, adversarial instruction).** This means every function/tool a model can request must have its own, explicit least-privilege authorization scope (never a blanket "the AI system can do anything the underlying service account can do"), and any function whose execution has genuine, consequential real-world effect (a funds transfer, an account modification, an external communication) should require an additional confirmation layer — either a human-in-the-loop approval step or a structurally-narrower, pre-authorized action scope — before execution, directly extending Module 152's PAM/least-privilege discipline to this domain's own action-triggering mechanism.
-
----
-
-## 9. Scalability
-
-Multi-provider routing provides the identical availability benefit established for backend service circuit-breaking, with the added complication that provider substitution isn't a purely mechanical, output-equivalent failover the way a load-balanced backend replica swap is — production systems at genuine scale should track per-provider success rate, latency, and (where feasible) output-quality metrics independently, routing traffic proportionally rather than treating every configured provider as fully interchangeable. Semantic-cache hit rate directly reduces the *effective* request volume reaching the underlying LLM provider, a genuine, measurable capacity-planning lever at scale — but one that, must never be tuned purely for hit-rate maximization without equally weighting the correctness-scoping discipline establishes.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

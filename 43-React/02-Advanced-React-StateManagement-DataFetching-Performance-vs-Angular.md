@@ -128,47 +128,6 @@ Error Boundary catch scope — NARROWER than intuition suggests:
 **Trade-offs:** The query *function* was implemented correctly from the very first day — it always fetched the right account's data given the right account ID — meaning the bug was entirely invisible to any test asserting "does this hook fetch the correct data for a given account," since it did. The defect lived entirely in the *cache key*, a configuration detail entirely separate from the fetching logic's own correctness, and easy to overlook specifically because it required no obviously-wrong code to write — merely an omission of one array element.
 
 **Lessons learned:** **A React Query cache key's scope must include every parameter the underlying data actually varies by — omitting one produces a cache-identity collision indistinguishable, from the query function's own perspective, from correct behavior**, directly reproducing this course's cache-key-scoping finding (a cache key must be scoped to match the actual dimensions data varies along, or it silently serves the wrong tenant's/account's/user's cached data to the wrong context) at the frontend data-fetching layer specifically, and simultaneously reproducing the `trackBy`-identity-mismatch shape a second time in this domain, now via an entirely different mechanism (cache-entry identity rather than DOM-row identity).
-
----
-
-## 5. Best Practices
-
-- **Include every parameter the underlying server data actually varies by in the React Query cache key** — `['positions', accountId]`, never a static, under-scoped key for any query whose result genuinely depends on more than the query function's own hardcoded logic.
-- **Treat server-derived state and client-local state as architecturally distinct**, using React Query (or an equivalent) for the former and Redux/Zustand for the latter — resist the temptation to manually copy fetched server data into a Redux store "for consistency," which discards React Query's automatic staleness/synchronization behavior and reintroduces the manual-invalidation burden it exists to eliminate.
-- **Never assume an Error Boundary catches an event-handler or async error** — wrap consequential async operations (an order-submission API call) in explicit `try`/`catch` with their own, deliberate error-state handling, rather than relying on an Error Boundary to catch a failure it structurally cannot.
-- **Establish one, organization-wide-governed state-management stack** (Redux/RTK or Zustand for client state, React Query for server state) rather than letting individual teams independently choose among React's many competing options — directly reusing A7's governance recommendation, now applied concretely to state-management-library selection specifically.
-- **Use Suspense's declarative boundary model for genuinely coordinated, multi-component loading states** — where several independently-suspending components should show one unified loading state, rather than each maintaining its own manually-tracked `isLoading` flag.
-
----
-
-## 6. Anti-patterns
-
-- **A React Query cache key that omits a parameter the query's actual result depends on** — the exact incident; the single most consequential, easy-to-overlook React Query mistake.
-- **Manually copying React Query's fetched data into a Redux/Zustand store** — discards the caching library's own staleness/synchronization guarantees and reintroduces exactly the manual-invalidation burden it was adopted to eliminate, while now maintaining two, potentially-diverging copies of the same server data.
-- **Relying on an Error Boundary to catch an error thrown inside an `onClick` handler or an `async` function** — structurally impossible; produces an unhandled promise rejection or an uncaught exception with no fallback UI shown at all, often a worse user experience than no Error Boundary at all, since the failure mode is silent rather than gracefully degraded.
-- **Each team independently choosing its own state-management library** (Redux here, Zustand there, MobX in a third remote) across a multi-team micro-frontend platform — reproduces React's ecosystem-fragmentation risk (I10/A7) concretely, multiplying the cross-team-consistency burden with every additional library choice.
-- **Treating Module Federation's shared-dependency risk as somehow reduced or different because the platform uses React instead of Angular** — the risk is identical, per the explicit restatement; assuming otherwise is itself a "declared framework difference ≠ actual risk difference" instance.
-
----
-
-## 7. Performance Engineering
-
-React Query's cache directly reduces network request volume and redundant loading states for data multiple components need simultaneously — a component-tree-wide caching benefit with no manual `shareReplay`-equivalent wiring required (contrast the manual RxJS `shareReplay` configuration, where the sharing behavior's specific `refCount` semantics were themselves a production-incident source). Suspense's coordinated-loading-boundary model can reduce perceived loading-state flicker (avoiding several independent, staggered spinners appearing and disappearing at slightly different times) by coordinating multiple components' loading states under one boundary — a UX-performance benefit distinct from, and complementary to, the `memo`/Fiber-scheduling performance levers. Redux/RTK's memoized selectors (near-parity with) provide the identical performance benefit via the identical mechanism as NgRx's Selectors.
-
----
-
-## 8. Security
-
-React Query's cache — like NgRx's Store — is client-side, inspectable state, never itself a security boundary; the same defense-in-depth discipline applies verbatim: authorization decisions cached client-side (via React Query or otherwise) are a UX convenience only, always re-verified server-side at consequential action points. **the incident additionally demonstrates a security-adjacent risk distinct from the authorization question**: even where the *authorization* to view an account's data is genuinely, correctly granted (the relationship manager is authorized to view both Client A's and Client B's accounts), a cache-scoping defect can still produce an incorrect *data-attribution* exposure — displaying the wrong client's data under the wrong client's context — a distinct failure mode from an authorization bypass, but one carrying comparable regulatory/confidentiality consequence in a financial-services context specifically, since client data segregation is often itself a compliance requirement independent of whether the viewing party happens to be broadly authorized across multiple accounts.
-
----
-
-## 9. Scalability
-
-React Query's automatic background refetching, deduplication of simultaneous identical requests, and configurable staleness windows scale a platform's actual backend request volume down significantly relative to a naive, manually-triggered-fetch-per-component approach — directly comparable in benefit shape to the `shareReplay` sharing, but provided as React Query's own first-party, well-tested default behavior rather than requiring each team to correctly hand-roll the equivalent RxJS operator chain independently (reducing exactly the per-team-implementation-variance risk this course has repeatedly flagged, A2). Module Federation's team-independence scaling benefit applies identically regardless of framework.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

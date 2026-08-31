@@ -110,47 +110,6 @@ Composition-risk recurrence, capstone-level (/):
 **Trade-offs:** No individual engineering decision in this incident's causal chain was unreasonable — the semantic-cache team correctly fixed the original incident for its known trigger path; the agent-loop team correctly implemented the plan-act-observe mechanics; the specific omission (threading case ID through the new, agent-internal cache-lookup call path) is exactly the kind of cross-team, cross-module integration detail this course has repeatedly found falls through organizational cracks even among individually-diligent teams.
 
 **Lessons learned:** **A fix verified against one specific trigger path does not automatically, structurally extend to a new trigger path a later module introduces to the same underlying mechanism — closing this gap requires an explicit, ongoing practice of re-verifying every existing safety/scoping mechanism against every new caller introduced anywhere in the system, not a one-time fix assumed permanent.** This is this capstone's own, sharpest demonstration A10's meta-principle: the risk here lived entirely in a governance gap — the absence of a cross-module "does every existing correctness mechanism still hold against this new integration" review practice — not in any individual module's own, already-substantial technical discipline.
-
----
-
-## 5. Best Practices
-
-- **Require every new integration point touching an existing, previously-hardened mechanism (a cache, an authorization gate, a drift detector) to explicitly, formally re-verify that mechanism's original scoping/correctness requirement against the new call path** — never assume a prior fix automatically, structurally covers a caller that didn't exist when the fix was made.
-- **Calibrate safety-mechanism sensitivity (progress detection, drift detection, anomaly scoring) against the system's full, actual usage diversity, not merely the single incident that originally motivated the mechanism** — a mechanism tuned narrowly against one past incident risks producing false positives across the system's broader, more varied real usage.
-- **Extend audit-archival schemas to capture full cross-module composition context**, not merely the final input/output pair — a future investigation's root cause may live at any seam between any two of the system's constituent disciplines.
-- **Treat governance-investment allocation across a multi-discipline system as itself an empirically-measured, continuously-recalibrated decision**, never a fixed, one-time allocation made at initial design time.
-- **Establish a standing, cross-team integration-review practice specifically checking new code paths against existing safety mechanisms' original scoping assumptions** — the single most directly actionable organizational fix this capstone's own incident demonstrates as necessary.
-
----
-
-## 6. Anti-patterns
-
-- **Assuming a mechanism's prior, verified fix automatically extends to every future caller/integration path without explicit re-verification** — the exact incident; the capstone's own sharpest instance of this domain's recurring composition-risk finding.
-- **Calibrating a safety mechanism's sensitivity against a single, narrow incident and never re-validating that calibration against the system's full, actual production diversity** — the alert-fatigue risk.
-- **An audit schema capturing only final input/output**, omitting the full cross-module composition context a genuine, multi-discipline system's own incidents require for root-cause investigation.
-- **A fixed, one-time governance-investment allocation across a multi-discipline system**, never revisited as the system's own, actual incident distribution across its six constituent disciplines becomes empirically known.
-- **Treating each module's discipline as a permanently, independently "solved" concern once its own module's specific incident is fixed** — the precise, generalized mistake underlying both this capstone's own production example and debugging incident.
-
----
-
-## 7. Performance Engineering
-
-ComplianceIQ's full request latency composes every prior module's own latency contribution: the cache-check latency (fast on hit, negligible on miss); the multi-step agent loop latency (the per-step, compounding cost); the retrieval latency (the ANN-index query cost); the MCP connection/tool-invocation latency (the connection-management cost); and the underlying prefill/decode latency at every LLM call within this chain — meaning this capstone's own end-to-end latency budget must be reasoned about as the *composition* of six independently-established latency models, not any single one in isolation, directly extending the own step-count-percentile-monitoring discipline to cover the full, cross-discipline request lifecycle.
-
----
-
-## 8. Security
-
-This capstone's security posture is the union of every prior module's own defense-in-depth layer — the injection defense, the independent action-authorization backstop, the amplified-blast-radius authorization emphasis, and the third-party trust-boundary governance — composed into one system whose actual, aggregate security posture is only as strong as its weakest individually-verified layer *combined with* the correctness of every seam between them, exactly this capstone's own incident's demonstrated failure mode (every individual layer correct; the seam between two of them was not). **The capstone's own, generalized security finding: a multi-discipline AI system's security review must explicitly examine not only each constituent discipline's own defenses in isolation, but every pairwise (and, in principle, higher-order) combination of disciplines for emergent, composition-level gaps neither discipline's own isolated review would surface** — directly extending A2's SoD-composition-risk finding from a single-agent's tool-sequence level to this capstone's full, six-discipline architectural level.
-
----
-
-## 9. Scalability
-
-Each of this domain's six disciplines carries its own, independently-established scaling lever (the ANN-index capacity planning, the multi-provider routing, the parallel orchestrator-worker delegation, the N+M integration-effort savings) — this capstone's own scaling consideration is ensuring these six independently-scaled subsystems' *combined* resource consumption (LLM call volume across RAG retrieval-grounding calls, agent-loop steps, and MCP sampling requests, all drawing from the same underlying provider capacity and rate limits) is capacity-planned holistically, not as six independently-sized subsystems whose combined peak demand was never jointly modeled — directly recurring the peak-versus-average capacity-planning finding, now applied to the aggregate demand six composed AI-systems disciplines jointly place on shared, underlying LLM-provider capacity.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

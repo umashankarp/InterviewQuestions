@@ -101,23 +101,6 @@ graph LR
 **Trade-offs:** PERMISSIVE mode was the correct initial choice (a hard STRICT cutover from day one would have broken any traffic source not yet mesh-injected, a far worse outage risk) — but the team's tracking mechanism (a spreadsheet, not an automated, continuously-verified check) meant "PERMISSIVE" silently became the de facto permanent state for a meaningful fraction of namespaces, not a genuinely temporary migration stage.
 
 **Lessons learned:** A subsequent PCI audit discovered that 9 of the 40+ namespaces were still in PERMISSIVE mode more than a year after the mesh rollout began, meaning plaintext, unencrypted intra-cluster traffic remained silently possible in exactly the namespaces the mesh adoption was meant to protect — a direct, confirmed recurrence of this domain's now-repeated "object presence ≠ enforced reality" pattern (Modules 74/75/76/78), this time for PeerAuthentication specifically. The fix mirrored §Advanced Q1's structural remedy exactly: an automated, recurring scan flagging any namespace still in PERMISSIVE mode past a declared migration deadline, plus a synthetic negative test (deliberately attempting a plaintext connection into a namespace that should be STRICT, asserting it's actually rejected) — never trusting the PeerAuthentication object's declared mode alone as evidence of genuine enforcement.
-
-## 5. Best Practices
-- Track every PERMISSIVE-to-STRICT mTLS migration with an explicit, monitored deadline and automated verification — never an open-ended spreadsheet task.
-- Default to the narrowest mesh (or no mesh) satisfying an articulated requirement — Linkerd or no mesh for "just mTLS and basic routing," Istio only when its fuller feature set is genuinely needed.
-- Use VirtualService/DestinationRule for canary/resilience patterns instead of duplicating retry/circuit-breaker logic in every service's own codebase.
-- Layer mesh-level telemetry with application-level APM — they observe different layers and neither substitutes for the other.
-- Evaluate Ambient mode's reduced-isolation trade-off explicitly against a workload's actual security requirements before adopting it purely for resource savings.
-
-## 6. Anti-patterns
-- Treating a PERMISSIVE PeerAuthentication policy as equivalent to "mTLS is enforced," without a tracked, verified path to STRICT.
-- Adopting Istio's full feature set by default without evaluating whether Linkerd's simpler model already satisfies the actual requirement.
-- Assuming a Pod's own manifest reflects its full runtime behavior, without accounting for mutating-webhook-injected sidecars changing that behavior invisibly.
-- Re-implementing retry/circuit-breaker logic in every service's own language-specific library when the mesh already provides it declaratively.
-- Relying solely on mesh-level telemetry and assuming it substitutes for application-level tracing of business logic.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

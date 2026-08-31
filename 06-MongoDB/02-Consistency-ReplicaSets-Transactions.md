@@ -59,57 +59,6 @@ graph TB
 
 ## 4. Production Example
 **Scenario**: A financial-transaction-adjacent service used the default write concern (`w: 1`) for all writes — during an unplanned primary failover (a hardware failure), several recently-written transactions that had been acknowledged to clients as successful were **lost**, since they had never replicated to any secondary before the primary crashed, and the newly-elected primary (promoted from a secondary lacking those writes) had no record of them; worse, when the old primary later recovered and rejoined the replica set as a secondary, its un-replicated writes were explicitly rolled back (written to a rollback file) to bring it in sync with the new primary's now-authoritative oplog. **Investigation**: confirmed via the rollback files' contents that the lost writes were genuinely acknowledged to clients (the client received a success response) before the crash. **Fix**: changed write concern to `{ w: "majority", j: true }` for all financially-significant writes, accepting the added latency (waiting for a majority acknowledgment plus journal durability) in exchange for eliminating this exact data-loss class going forward. **Lesson**: MongoDB's default write concern (`w: 1`) is optimized for throughput/latency, not durability — any operation where "acknowledged but later lost" is unacceptable must explicitly opt into `"majority"` write concern; this is not a rare edge case but the default, ordinary behavior of an unconfigured write, directly analogous to PostgreSQL's asynchronous-replication data-loss window — the exact same availability-vs-durability trade-off, expressed as a different but conceptually identical per-operation knob.
-
-## 5. Best Practices
-- Use `{ w: "majority", j: true }` write concern for any operation where post-acknowledgment data loss is unacceptable.
-- Understand read preference (which node) and read concern (what data visibility guarantee) as two independent settings — never conflate them.
-- Prefer correct embedding over reaching for multi-document transactions to paper over a data-modeling mismatch.
-- Use change streams for event-driven reactions to MongoDB data changes, tracking resume tokens for resilient reconnection.
-
-## 6. Anti-patterns
-- Relying on the default `w: 1` write concern for financially/business-critical writes without evaluating the failover data-loss risk (the incident).
-- Assuming routing a read to a secondary (read preference) implies any particular consistency guarantee (read concern) about the data returned.
-- Reaching for multi-document transactions to compensate for a schema that should have embedded the related data instead (the central lesson, recurring here).
-- Ignoring oplog size/retention when relying on change streams for a consumer that might disconnect for an extended period.
-
----
-
-## 7. Performance Engineering
-
-**Write-concern latency cost.** Every step up in write concern is a real, measurable latency cost, not a free correctness dial: `w: 1` acknowledges after the primary's in-memory apply (fastest); `w: "majority"` waits for a round trip to a majority of voting members (adds roughly one network round-trip's worth of latency to the slowest required acknowledging secondary, which in a cross-region replica set can be tens of milliseconds); `j: true` adds the acknowledging node's journal-flush time on top. For a high-throughput write path, benchmark actual p99 write latency under each concern level against real replica-set topology (not a single-node test deployment, which hides the cross-region round-trip cost entirely) before committing to a blanket `{ w: "majority", j: true }" default — the Module 23 incident argues for majority write concern on financially-critical writes, but a Principal Engineer still prices that cost explicitly rather than treating it as free.
-
-**Transaction overhead.** Multi-document transactions (§2.3) hold locks and buffer changes for the transaction's duration, and — critically — MongoDB imposes a default transaction lifetime limit (`transactionLifetimeLimitSeconds`, default 60s) after which an in-flight transaction is aborted; a transaction spanning a slow external call (never do this) or an unexpectedly large batch of operations risks hitting this limit. Keep transactions **short and narrowly scoped** — exactly the same discipline as minimizing a SQL Server transaction's duration to avoid lock contention/blocking, now with an additional hard timeout enforcing it.
-
-**Oplog sizing.** The oplog is a fixed-size capped collection (`oplogSizeMB`) — sized too small relative to write volume and the maximum tolerable secondary-catch-up/change-stream-consumer-disconnection window (§2.5), a lagging secondary or reconnecting change-stream consumer can fall off the back of the oplog before catching up, forcing a full resync. Size the oplog against **write volume × maximum tolerable lag window**, not a default value chosen without reference to actual workload.
-
-**Read preference/read concern latency-throughput trade-offs.** Routing reads to secondaries (`secondaryPreferred`/`nearest`) increases read throughput and can reduce latency for geographically-distributed clients, but `"majority"`/`"linearizable"` read concerns add their own coordination cost (§Expert Q2) — the four settings (write concern, read preference, read concern, and which node) form a genuine multi-dimensional trade-off space that should be tuned per operation category (§Advanced Q10's decision matrix), not set once globally for the whole application.
-
-## 8. Security
-
-**Authentication mechanisms.** Production replica sets require `--auth`/`security.authorization: enabled`, with **SCRAM-SHA-256** as the default credential-based mechanism, **x.509 certificate authentication** for service-to-service auth (preferred in a FinTech deployment for consistency with existing mTLS/certificate-rotation infrastructure), and LDAP/Kerberos for enterprise directory integration. Intra-replica-set traffic (primary-to-secondary replication, and inter-node heartbeats) should itself be authenticated via a shared **keyfile** or x.509 at minimum — an unauthenticated replica-set member is a direct route for an attacker to inject arbitrary oplog entries into the replication stream.
-
-**TLS for replication and client traffic.** All client-to-cluster and intra-cluster replication traffic should run over TLS (`net.tls.mode: requireTLS`) — replication traffic carries the full content of every write, unencrypted-in-transit replication is a direct data-exposure risk on any network path an attacker could observe, and is a standard PCI-DSS/regulatory expectation for any FinTech data path.
-
-**RBAC for replica-set/cluster administration.** Beyond application-level RBAC (Module 23 §8), cluster administration itself should be role-scoped — `clusterAdmin`/`clusterManager` roles (able to trigger elections, modify replica-set configuration) should be restricted to a small operations group, separate from application service accounts, since a compromised application credential with cluster-admin rights could force a failover or reconfigure write concern requirements as an attack vector, not just read/write application data.
-
-**Encryption at rest.** WiredTiger's native encryption-at-rest (Enterprise) or filesystem/volume-level encryption (Community, e.g., via encrypted EBS/Azure Disk) protects data on disk; this is a distinct, complementary control to Module 23 §8's field-level encryption — at-rest encryption protects against physical disk/backup theft, while field-level encryption protects specific fields even from a database operator with legitimate disk access, and regulated FinTech deployments generally need both, not either alone.
-
-**Change-stream resume-token handling.** A change stream's resume token, if persisted insecurely (§Advanced Q7's durable-persistence recommendation) alongside insufficient access control on the token-storage collection, could let an unauthorized actor resume a change stream and observe the full change history a legitimate consumer was authorized for — apply the same RBAC discipline to the resume-token store as to the underlying data it grants continued access to.
-
-## 9. Scalability
-
-**Read scaling via secondaries.** Routing read-heavy, staleness-tolerant workloads to secondaries (`secondaryPreferred`) scales read throughput horizontally without adding write capacity — but every secondary still absorbs the full replication write stream, so this scales *read* capacity, not *write* capacity; a write-bound workload needs sharding (Module 23 §2.5/§9), not more secondaries.
-
-**Zone sharding for multi-region replica sets.** Combining sharding (Module 23 §9) with a replica set per shard, and pinning shards to regions via zone sharding, gives both horizontal write scaling and data-residency control simultaneously — each shard's own replica set can additionally have region-local secondaries for local read latency and a DR-designated member in a second region.
-
-**HA/DR — RTO/RPO in concrete terms.** A replica set's automatic election typically completes within seconds (`electionTimeoutMillis`, default 10s, plus the time for a majority of remaining voters to agree) — this is the RTO for a primary failure. RPO depends entirely on write concern: with `w: "majority"` universally enforced, RPO approaches zero (no acknowledged write is lost, by construction); with `w: 1` in use anywhere, RPO for those writes equals "however much unreplicated data existed on the primary at the moment of failure" — directly, concretely, the Module 24 production incident's mechanism, now expressed as a formal RPO number a Principal Engineer would state in a DR runbook rather than leave implicit.
-
-**Arbiter nodes.** An arbiter (a replica-set member holding no data, voting only) can restore odd-numbered voting membership cheaply after a member is removed, but arbiters cannot be counted toward `w: "majority"` data-durability guarantees (they hold no data to actually durably store the write) — using an arbiter to "save cost" on what should be a genuine data-bearing member is a common, real mistake that silently weakens the majority-durability guarantee's practical strength (fewer *data-bearing* members needed to reach majority once an arbiter is added to the voting count).
-
-**Multi-region write latency vs. consistency.** A replica set with voting members spread across regions pays every `w: "majority"` write the cross-region round-trip cost (§7); the common mitigation is keeping majority-eligible voting members concentrated in the primary write region, with DR-region members as non-voting or lower-priority — trading slower DR failover for normal-operation write latency, a deliberate, documented architecture choice (§15) rather than a default nobody examined.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

@@ -109,27 +109,6 @@ Explanation B (silently broken alerting): the alert rule's underlying metric
 **Fix**: (1) Reconfigured the alerting system to treat "no data for longer than an expected reporting interval" as an explicit, distinct **stale-data alert** — firing a (lower-urgency, but real) notification whenever an SLO's underlying metric query goes unexpectedly quiet, rather than silently defaulting to the same non-firing state as genuine health. (2) Implemented a scheduled **alert-liveness canary**: a synthetic process periodically injects a deliberate, controlled threshold breach (in a way isolated from real production impact) and verifies the expected alert actually fires within its expected latency — directly the mechanism §Advanced Q7 explicitly foreshadowed, now formalized as this module's central fix. (3) Added a mandatory change-management step requiring any metric name/label rename to include an explicit, automated audit of every alert rule and dashboard referencing the old name, converting a manual, easy-to-forget cross-reference into an enforced, pre-change gate.
 
 **Lesson**: "No alert has fired" is not, by itself, evidence of genuine health — it is equally consistent with the alerting path itself having silently broken, and a dashboard or on-call rotation has no way to distinguish the two states from the outside. This is the observability domain's single sharpest instance yet of this course's central "declared/present ≠ actual/complete" theme, precisely because alerting is the mechanism an organization relies on to be actively *told* when something else has already gone wrong — a silent failure here doesn't just hide one incident, it removes the organization's ability to be notified of an entire category of future incidents until each one is independently, manually rediscovered.
-
----
-
-## 5. Best Practices
-- Choose SLIs measured as close to genuine user experience as the architecture allows, not merely whichever server-internal signal is easiest to compute.
-- Set SLO targets that are both achievable under normal conditions and deliberately short of 100%, preserving a genuine, usable error budget for routine operational risk-taking.
-- Alert on burn rate (a leading indicator of trajectory) using multi-window, multi-burn-rate rules — a single short window alone produces false pages from noise; a single long window alone reacts too slowly to severe, fast-developing incidents.
-- Route symptom-based signals to paging and cause-based signals to lower-urgency notification/dashboards, to avoid the alert-fatigue dynamic that makes a genuinely critical page easy to miss.
-- Explicitly distinguish "no data" from "condition not met" in every alert rule's configuration, and periodically, actively verify each critical alert would genuinely fire via a scheduled liveness canary — never trust an alert's silence as self-evidently meaning "everything is fine".
-- Set a service's own SLO with explicit awareness of its full dependency chain's compounding failure effect, not in isolation as if it were the only variable.
-
-## 6. Anti-patterns
-- An SLI chosen purely for measurement convenience (a server-internal metric) that structurally cannot see client-side/network failures real users actually experience.
-- A 100% (or effectively zero-budget) SLO target, removing all room for routine, healthy operational risk-taking and creating a change-averse, paralyzing incentive structure.
-- Alerting on a single-window threshold with no burn-rate/multi-window design, producing either constant false pages from short-term noise or dangerously slow detection of a genuine, severe incident.
-- Routing every cause-based, internal signal directly to a paging channel, producing alert fatigue that makes a genuinely critical page easy to dismiss or miss.
-- Treating "no alert has fired" as proof of genuine health without a distinct stale-data/unknown state and a periodic, active liveness-verification check.
-- Setting a service's SLO in isolation, ignoring how failures compound across its actual dependency chain.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

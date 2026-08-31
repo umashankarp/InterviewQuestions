@@ -168,31 +168,6 @@ flowchart TD
 1. Minimal APIs and Controllers' model-binding **inference conventions are genuinely different**, not just syntactically different expressions of the same rules — assuming behavioral equivalence during a migration is a real, demonstrated risk, not a theoretical concern.
 2. This class of bug is especially dangerous because it's **silent** — no exception, no error, just a quietly wrong default value, exactly the "invisible until someone notices business logic behaving wrong" pattern this course has repeatedly flagged as the most dangerous bug category (directly echoing the client-side-evaluation trap and the masked-exception incident in shape, if not mechanism).
 3. Integration tests exercising actual HTTP request/response behavior (not just unit tests of isolated handler logic) are specifically necessary to catch model-binding-inference regressions, since a unit test calling the handler method directly with manually-constructed parameters would never exercise the binding-inference layer at all.
-
----
-
-## 5. Best Practices
-
-- **Choose Minimal APIs for new, simple, high-throughput JSON APIs without complex, convention-heavy requirements**; choose Controllers for large applications benefiting from the MVC filter pipeline's fine-grained extensibility, view-rendering needs, or teams with deep existing MVC convention investment. Treat this as a genuine, evidence-based architectural decision, not a default "always use the newer one" reflex.
-- **Use explicit binding-source attributes (`[FromQuery]`, `[FromBody]`, `[FromRoute]`) rather than relying purely on inference** for any parameter where the binding source isn't immediately, unambiguously obvious to a future reader — especially valuable during any Controller ↔ Minimal API migration, directly preventing the incident class.
-- **Use `[AsParameters]` (Minimal APIs) explicitly when binding a complex type's properties individually from route/query values** rather than assuming it will be inferred correctly — be explicit about intent rather than relying on convention-based inference matching your expectations.
-- **Leverage `TypedResults` (not plain `Results`) for Minimal API endpoints** where compile-time-checked return types and automatic OpenAPI metadata population are valuable — directly improves both correctness (a typo in a status-code-returning method name is now a compile error) and API-documentation accuracy with no extra annotation burden.
-- **Write integration tests (via `WebApplicationFactory<T>`) covering real HTTP request/response round-trips for model-binding-sensitive endpoints**, not just unit tests of isolated handler logic — the binding-inference layer itself is exactly what unit tests bypass entirely.
-- **Understand and use `[ApiController]`'s automatic-400 behavior deliberately** — don't duplicate manual `if (!ModelState.IsValid) return BadRequest(...)` checks in every action when `[ApiController]` already handles this uniformly; but be aware this convention exists specifically for Controllers, not Minimal APIs (which require an explicit validation approach, e.g., a validation `IEndpointFilter` or a library like FluentValidation's Minimal API integration).
-
----
-
-## 6. Anti-patterns
-
-- **Assuming Controller and Minimal API model-binding inference behave identically during a migration**, without explicit verification (the incident). Fix: explicit binding attributes, integration tests, a documented migration checklist.
-- **Putting substantial business logic directly inline in a Minimal API lambda**, growing it into an unreadable, untestable, deeply-nested delegate. Why it fails: defeats the separation-of-concerns benefit DI/service-layer architecture provides — a large inline lambda is harder to unit-test in isolation than an injected service method. Fix: keep the endpoint delegate thin, delegating to an injected service for actual logic — precisely the same "keep middleware thin" guidance, applied here to endpoint handlers.
-- **Choosing Minimal APIs purely because they're "newer"/"faster" without validating that the performance difference actually matters for the specific service** (directly extending this course's recurring measure-first discipline) — for most CRUD APIs at typical traffic volumes, the performance delta between Controllers and Minimal APIs is immaterial relative to database/network latency; the more consequential trade-offs are usually about filter-pipeline richness and team familiarity, not raw throughput.
-- **Duplicating `[ApiController]`'s automatic model-validation behavior manually** in every action, unaware it's already handled globally. Fix: trust the convention; remove redundant manual `ModelState.IsValid` checks.
-- **Registering many `IEndpointFilter`s on every single Minimal API endpoint individually**, rather than using route groups (`app.MapGroup("/orders").AddEndpointFilter(...)`) to apply shared filters once across a whole group of related endpoints — repetitive, error-prone (easy to forget on a newly-added endpoint) registration. Fix: use `MapGroup` for cross-cutting Minimal API filters shared across a logical group of endpoints, directly analogous to applying an MVC filter at the controller level instead of repeating it on every action.
-- **Ignoring the ambiguity/complexity difference in filter ordering when a team is more comfortable with Controllers' MVC filter pipeline but adopts Minimal APIs' simpler model without adjusting their mental model** — assuming Minimal API endpoint filters have the same six-stage semantics as MVC filters (they don't) can lead to incorrect assumptions about exactly when a given filter's logic runs relative to model binding/validation.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

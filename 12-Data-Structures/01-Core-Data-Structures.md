@@ -64,65 +64,6 @@ graph TB
 
 ## 4. Production Example
 **Scenario**: A service processing incoming webhook payloads used a `List<string>` of already-processed webhook IDs, checked via `.Contains(id)` before processing each new webhook to prevent duplicate processing — this worked fine during initial testing (a few dozen webhooks) but degraded severely in production as the list grew into the tens of thousands, since `List<T>.Contains` is an O(n) linear scan, meaning each new webhook's duplicate check got progressively slower as the processed-ID list grew, eventually dominating the entire request-handling latency. **Investigation**: `dotnet-trace` CPU profiling showed the vast majority of request-handling time spent inside `List<string>.Contains`'s internal linear-scan loop, scaling directly with the accumulated list size — confirmed via correlating latency growth precisely with the processed-webhook count over time. **Fix**: replaced `List<string>` with `HashSet<string>` for the processed-ID tracking, converting the duplicate check from O(n) to O(1) average-case — latency immediately flattened, no longer growing with accumulated history size. **Lesson**: choosing `List<T>` reflexively for "a collection of things" without considering the actual access pattern (here, frequent membership testing, not ordered iteration or index access) is one of the most common, most easily-fixed real-world performance bugs — directly this course's recurring "test at representative scale" theme, since the O(n) cost was invisible at small testing scale and only became dominant once accumulated data volume grew past what testing had exercised.
-
-## 5. Best Practices
-- Choose the collection type based on the **actual dominant operation** (lookup by key → `Dictionary`/`HashSet`; ordered iteration with occasional insertion → `List<T>`; frequent min/max extraction → a heap/`PriorityQueue`), not a reflexive default.
-- Use `HashSet<T>`/`Dictionary<K,V>` for any membership-testing or key-based-lookup access pattern, never `List<T>.Contains`/linear search, once the collection could plausibly grow beyond a handful of elements.
-- Prefer `List<T>` over `LinkedList<T>` for the overwhelming majority of realistic workloads, given cache-locality's practical dominance over Big-O-only reasoning.
-- Trust.NET's built-in balanced-tree/hash-table implementations (`SortedDictionary`, `Dictionary`) rather than hand-rolling a custom tree/hash structure without a specific, demonstrated need the built-in types don't meet.
-
-## 6. Anti-patterns
-- Using `List<T>.Contains`/linear search for a frequently-checked membership test on a growing collection (the incident).
-- Choosing `LinkedList<T>` based purely on its O(1) insertion Big-O characteristic without accounting for cache-locality's practical dominance for most realistic workloads.
-- Building a naive, non-self-balancing binary search tree for data with a non-random insertion order (e.g., already-sorted input), risking O(n) degeneration.
-- Hand-rolling a custom hash table/priority queue when.NET's built-in `Dictionary`/`PriorityQueue` already meets the actual requirement.
-
----
-
-## 7. Performance Engineering
-
-**CPU/cache locality in practice:** Big-O tells you the growth rate, not the constant factor — and for data structures, the constant factor is dominated by cache behavior more than by instruction count. A `List<T>` scan touching 10,000 sequential `int`s (40KB, fitting comfortably in L1/L2 cache) can outperform a `Dictionary<K,V>` lookup on cold-cache data by a meaningful margin for very small collections, because a single cache miss (~100-300 CPU cycles waiting on main memory) can dwarf several array-index arithmetic operations; this crossover point — where `Dictionary`'s O(1) genuinely starts winning over `List<T>`'s O(n) — is real but is a *specific size threshold to measure*, not an assumption to make from Big-O alone. This is precisely why the module's incident used "grew into the tens of thousands" as the threshold where `List<T>.Contains` became dominant, not "any nonzero size."
-
-**Allocation cost per structure:** `List<T>`/array — one contiguous allocation, amortized growth (§2.1); `LinkedList<T>`/tree nodes/hash-table buckets — one heap allocation *per element/node*, each carrying .NET's object-header overhead (16-24 bytes on a 64-bit runtime, on top of the payload) — for a collection of a million small elements, node-based structures can consume multiples of the raw data's own size in pure per-object overhead, a cost invisible in Big-O analysis but very visible in a memory profiler.
-
-**GC pressure:** Node-based structures (linked lists, tree nodes, hash-table collision chains) generate many small, independently-collectible objects — under sustained high-throughput mutation, this measurably increases Gen0 GC frequency versus an array-backed structure's few, larger allocations; a `Dictionary<K,V>` under heavy insert/remove churn without `TrimExcess` can also retain an oversized backing array long after most entries are removed, a memory-retention cost distinct from, but related to, the resizing-cost discussion in §2.3.
-
-**Benchmarking discipline:** Never trust Big-O alone to predict a real production win — benchmark at the *actual expected production scale* (BenchmarkDotNet, not a stopwatch around a debug-build loop) before switching structures; the crossover point between "the simpler structure is fine" and "the asymptotically-better structure now matters" is empirical, not theoretical, and varies by workload shape (read-heavy vs. write-heavy, hit rate for a cache, key distribution for a hash table).
-
-**Throughput/latency:** For latency-sensitive hot paths, prefer structures with predictable worst-case behavior (a self-balancing tree's guaranteed O(log n)) over ones with merely good average-case behavior (a hash table's O(1) average, O(n) pathological worst case) when a rare, high-cost outlier (a p99.9 latency spike from a resize-and-rehash coinciding with peak load) is unacceptable for the specific use case — the trade-off between "usually faster" and "predictably bounded" is itself a production-relevant design decision, not merely an academic one.
-
----
-
-## 8. Security
-
-**Threats — algorithmic-complexity/hash-flooding DoS:** §2.3 named the core threat: an attacker who can influence which keys get inserted into a `Dictionary<K,V>`/`HashSet<T>` (any endpoint that lets external input become a dictionary key — a form-field name, a JSON object's keys, a query-string parameter set) can, with a non-randomized or predictable hash function, craft a set of keys that all collide into the same bucket, degrading that structure's O(1) average-case lookup toward O(n) per operation — for a large enough crafted payload, this alone can consume disproportionate CPU relative to the payload's size, a classic **algorithmic-complexity denial-of-service** attack (historically demonstrated against multiple language runtimes' default hash-table implementations before per-process hash randomization became standard practice).
-
-**Mitigations:** .NET's `string.GetHashCode()` is randomized per process by default specifically to defeat precomputed collision attacks (§2.3) — never call `.GetHashCode()` with `StringComparer.Ordinal`'s *non-randomized* legacy behavior or a custom, attacker-predictable hash function for any dictionary keyed by untrusted external input; where a custom `IEqualityComparer<T>`/custom hash is genuinely required, ensure it incorporates a per-process or per-instance random seed rather than a fixed, reverse-engineerable algorithm. For endpoints accepting attacker-controlled *counts* of items destined for a hash table or set (e.g., a bulk-upload endpoint populating a `Dictionary` per uploaded row), apply a request-size/item-count limit independent of hash-quality concerns — bounding the attack surface's raw scale is a complementary, not alternative, mitigation.
-
-**OWASP mapping:** This is a direct instance of **OWASP API4:2023 Unrestricted Resource Consumption** — an attacker achieving disproportionate CPU consumption relative to a small, cheap-looking payload, precisely the same resource-exhaustion category as an unbounded pagination request or a deeply-nested JSON payload exhausting parser recursion.
-
-**Trie-specific threat:** A trie accepting arbitrary-length, attacker-controlled strings as keys (e.g., a search-autocomplete feature indexing user-submitted text) is vulnerable to a **depth-based resource-exhaustion attack** — a single, extremely long crafted string creates a correspondingly long chain of trie nodes, and many such strings submitted in bulk can allocate a disproportionate number of node objects (§7's per-node allocation cost) relative to the request's apparent size; mitigate with an explicit maximum-key-length limit enforced *before* trie insertion, not merely at the API's general payload-size limit, since a length well within a generic payload-size cap can still be pathological for a trie's per-character node-allocation cost.
-
-**AuthN/AuthZ:** Not typically a direct concern for the data structures themselves, but any endpoint accepting external input that becomes a collection key/index (an object property name used as a dictionary key, an array index derived from user input) must validate that input the same way any other untrusted input is validated — a data structure's internal complexity guarantees say nothing about whether the *key itself* was safe to accept in the first place.
-
-**Secrets/Encryption:** Not directly implicated by the structures themselves; standard handling applies if a structure happens to hold sensitive data in memory (e.g., ensure a `Dictionary` caching decrypted values doesn't outlive its intended scope, consistent with general secrets-handling discipline).
-
----
-
-## 9. Scalability
-
-**Horizontal scaling:** In-process data structures (everything in this module) are inherently single-node/single-process constructs — "scaling" a `Dictionary<K,V>` horizontally means moving the responsibility to a distributed structure entirely (a distributed hash table like DynamoDB/Redis, a distributed B+-tree-backed index like a SQL Server clustered index) — the module's structures are the *building blocks* that distributed systems' own internal implementations are built from (a database's index is a B+-tree; a distributed cache's shard-lookup is a hash table), not directly horizontally scalable themselves.
-
-**Vertical scaling:** More memory directly raises the ceiling on how large an in-process structure can grow before triggering GC pressure (§7) or exhausting available heap; more CPU cache raises the effective size threshold at which a cache-unfriendly structure (`LinkedList<T>`) starts meaningfully losing to a cache-friendly one (`List<T>`) for a given workload.
-
-**Replication/Partitioning:** The *concepts* generalize directly even though the structures themselves don't scale horizontally: hash-table bucket partitioning (§2.3) is structurally identical to a distributed hash table's shard assignment (`hash(key) mod N` becomes `hash(key) mod shardCount`); a B+-tree's balanced, high-branching-factor structure (§2.4) is exactly what a database's own partitioned index range-splitting logic is built on.
-
-**Load distribution:** A poorly-distributed hash function causing bucket imbalance within a single `Dictionary` (§2.3's collision concern) is the single-process analog of a poorly-chosen partition key causing a "hot partition" in a distributed system (DynamoDB, Kafka) — the same underlying principle (even key distribution across available buckets/partitions) recurs at both the in-process and distributed-systems scale, just with vastly different consequences for an imbalance (slower `Dictionary` lookups locally versus a hot-partition throughput ceiling and potential throttling in a distributed store).
-
-**High Availability/consistency:** Not directly applicable to in-process structures, which have no independent availability profile from the process hosting them — a `Dictionary`'s "availability" is simply the hosting process's own availability; this is precisely why production systems needing HA/durability guarantees layer a genuinely distributed, replicated store *on top of* these in-process building blocks rather than relying on process-local structures alone for anything requiring durability across a process restart.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

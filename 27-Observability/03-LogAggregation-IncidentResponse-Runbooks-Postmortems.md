@@ -120,27 +120,6 @@ The loop's whole purpose is the **"last verified" date**, because that is the on
 **Fix**: (1) Established a mandatory, scheduled **runbook-drill program** — every critical, SEV-1/SEV-2-relevant runbook is actually executed, step by step, in a safe, non-production-impacting environment (a staging replica, a dedicated game-day exercise) on a recurring cadence, with any deviation from the expected outcome immediately flagging the runbook stale and blocking its "verified current" status until corrected and re-drilled. (2) Extended the organization's infrastructure change-management process to require an explicit, automated cross-reference audit — any tool, command, or system a migration replaces or modifies must be checked against every runbook referencing it, directly mirroring §Advanced Q1's alert-rule audit gate applied to runbooks specifically. (3) Added an explicit **"last verified" date and owning-team field** to every runbook, with a runbook exceeding its staleness threshold displaying a prominent warning during an actual incident rather than presenting identically to a recently-verified one — converting an invisible staleness risk into a visible, actionable signal at exactly the moment it matters most.
 
 **Lesson**: A runbook — like a rollback procedure, a build's reproducibility, a trace's propagation coverage, and an alert's liveness — is a declared capability that silently decays absent active, periodic verification, and every one of this course's prior instances of that pattern generalizes here with a specifically elevated stakes profile: a runbook is executed by a human, under genuine time pressure, during an actual crisis, trusting the document precisely *because* it is documented — meaning a stale runbook doesn't merely fail to help, it can actively make an incident meaningfully worse, and the engineer following it has structurally no way to detect the staleness themselves in the moment, since nothing about the runbook's own presentation changes when the world underneath it has quietly shifted.
-
----
-
-## 5. Best Practices
-- Design log shippers' backpressure behavior explicitly, and monitor the shipper/buffer's own health and drop rate as a first-class signal — never assume "no errors in the aggregated logs" is equivalent to "no errors occurred" without ruling out silent ingestion-layer drops (the identical meta-observability principle).
-- Redact sensitive data at the point of log emission, inside application code, never as a downstream, post-ingestion filtering step.
-- Apply dynamic log-level control and tiered retention (the three-constraint model, reapplied to logs) rather than treating "log everything, forever, at maximum verbosity" as a free default.
-- Define severity levels, the incident-commander role, and a fixed communication cadence in advance of any actual incident — never improvise incident-response structure mid-crisis.
-- Run postmortems as blameless, systemic-fix-producing exercises — a culture that attributes failure to individual error predictably suppresses the honest reporting the practice depends on.
-- Periodically, actually drill every critical runbook in a safe environment, and tie infrastructure change-management to an explicit cross-reference audit against every runbook referencing the changed system — never assume a runbook remains accurate because it reads plausibly and has never yet been proven wrong.
-
-## 6. Anti-patterns
-- Treating a log-aggregation query returning "no errors" as proof no errors occurred, without ruling out silent, backpressure-driven drops at the shipper layer.
-- Filtering or redacting sensitive data only after ingestion, leaving a real (if brief) exposure window during transit and initial storage.
-- Uniform, maximum-verbosity logging with no dynamic level control or tiered retention, driving unnecessary aggregation-pipeline cost with no corresponding investigative benefit.
-- Assigning the incident-commander role to whoever has the deepest technical knowledge of the failing system by default, conflating coordination/communication with deep technical debugging as if they were the same skill.
-- A postmortem culture that names or implicitly blames an individual, suppressing the honest, detailed reporting the entire practice depends on.
-- A runbook that has never been drilled since it was written, trusted as current during a genuine incident with no verification that the tools/commands it references still behave as documented.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

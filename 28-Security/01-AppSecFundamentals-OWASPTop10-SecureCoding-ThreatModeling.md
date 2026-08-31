@@ -109,27 +109,6 @@ SAFE (parameterization -- untrusted input is ALWAYS data, never syntax):
 **Fix**: (1) Added an explicit, mandatory **object-level authorization check** to every resource-fetching endpoint in the codebase — verifying the requested resource's owning entity matches the authenticated principal's entity, not merely that some valid principal is authenticated, implemented as a reusable authorization-handler component applied consistently rather than re-implemented ad hoc per endpoint. (2) Established a new, mandatory **negative security-test class**: for every resource-scoped endpoint, an automated test specifically attempts cross-tenant/cross-user access to a resource the test's own authenticated principal does *not* own, asserting the attempt is rejected — closing the exact blind spot conventional, happy-path-only functional testing had left invisible. (3) Added this specific check — "does every resource-fetching endpoint verify object-level ownership, not merely authentication" — as a standing, named item in the organization's threat-modeling template for every future endpoint design, rather than relying on each engineer independently remembering to implement it.
 
 **Lesson**: Functional testing proves the happy path works; it says nothing about whether the adversarial path is blocked — and broken object-level access control is specifically dangerous because it is invisible to exactly the kind of testing an organization is most naturally inclined to write by default. This is the security domain's own, well-grounded instance of this course's central, recurring "declared control ≠ actually enforced" theme: an endpoint that "has authorization" (a valid-session check exists) is not the same claim as an endpoint that "enforces authorization" (a per-resource ownership check exists) — and the gap between the two is invisible until a test, an auditor, or an attacker specifically, deliberately probes for it.
-
----
-
-## 5. Best Practices
-- Parameterize every query/command construction touching untrusted input — never rely on sanitization or blocklisting alone as the primary defense against injection.
-- Treat authentication and authorization as two distinct, both-required checks for every resource-scoped operation — verify not just that a principal is authenticated, but that the specific principal is authorized for the specific requested resource instance.
-- Apply context-appropriate output encoding (HTML/JS/URL-specific) at every point untrusted data is rendered, backed by a Content-Security-Policy as defense-in-depth.
-- Keep dependencies patched against known CVEs (SCA scanning) and harden default configurations before production — verbose errors, default credentials, and unused exposed services are all avoidable, common gaps.
-- Conduct threat modeling (STRIDE, trust-boundary analysis) at design time, before architecture is locked in — not solely as a late-stage penetration test applied to an already-built system.
-- Write explicit, negative security tests (deliberately attempting adversarial, unauthorized access and asserting rejection) for every resource-scoped endpoint — never rely on happy-path functional tests alone to reveal an authorization gap.
-
-## 6. Anti-patterns
-- Relying on sanitization/blocklisting as the primary or sole defense against injection, rather than structural parameterization.
-- An endpoint that checks only "is this request authenticated" without also checking "is this specific authenticated principal authorized for this specific requested resource" — the exact IDOR gap.
-- Encoding output generically or inconsistently, rather than applying the specific encoding appropriate to each distinct rendering context (HTML vs. JS vs. URL).
-- Leaving default credentials unchanged, verbose error/stack-trace details exposed to end users, or known-vulnerable dependencies unpatched in production.
-- Treating a late-stage penetration test as the organization's only threat-modeling activity, rather than conducting structured trust-boundary analysis at design time.
-- Writing only happy-path functional tests for resource-scoped endpoints, with no adversarial, cross-principal negative test ever exercising the unauthorized-access path.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

@@ -59,63 +59,6 @@ graph TB
 
 ## 4. Production Example
 **Scenario**: A session-storage Redis instance, configured with `allkeys-lru` eviction (copied from a "cache best practices" template without considering this instance's actual purpose), began silently evicting active user sessions under memory pressure during a traffic spike — users were unexpectedly logged out mid-session, with no error surfaced anywhere (eviction is silent by design), making the symptom ("random users report being logged out") very difficult to initially connect to a Redis configuration setting. **Investigation**: correlating logout reports with Redis's `evicted_keys` metric (via `INFO stats`) during the same time window confirmed active session keys were being evicted, not expiring naturally. **Fix**: switched to `noeviction` (rejecting new writes instead of silently discarding active session data once memory pressure hit) combined with proper capacity planning (sizing `maxmemory` and monitoring proactively) and a dedicated, separate Redis instance for genuine cache data using `allkeys-lru` appropriately. **Lesson**: eviction-policy choice must match the actual *purpose* of the data stored in a given Redis instance — a template/default setting copied without considering "is this data safe to silently discard under pressure" can convert a capacity problem into a silent, hard-to-diagnose correctness bug.
-
-## 5. Best Practices
-- Choose the eviction policy based on the actual data's tolerance for silent loss — `noeviction` for must-not-lose data, `allkeys-lru`/`lfu` for pure cache data.
-- Use Lua scripts (`EVAL`) for any multi-step operation requiring atomicity across multiple keys/conditional logic.
-- Choose the correct data structure per access pattern (sorted sets for leaderboards/rankings, hashes for object-like data, lists for simple queues) rather than defaulting to plain string blobs for everything.
-- Use hash tags deliberately in Redis Cluster deployments for any multi-key operation on logically-related data.
-
-## 6. Anti-patterns
-- Using `allkeys-lru`/`lfu` eviction for data that must not be silently discarded (session state, distributed lock state) — the incident.
-- Storing complex objects as a single serialized string blob when a native hash structure would allow efficient single-field access/updates.
-- Treating Redis purely as "safe to lose" without evaluating whether it's actually holding functionally-important state (sessions, locks) requiring a deliberate persistence strategy.
-- Performing multi-key operations across different hash slots in Redis Cluster without hash tags, causing cross-slot operation errors.
-
----
-
-## 7. Performance Engineering
-
-**CPU — the single-threaded command loop.** Redis executes commands on a single thread (I/O threading, added in Redis 6+, only parallelizes socket reads/writes and protocol parsing — command *execution* remains single-threaded), so total throughput is bounded by how fast one core can process the command stream. A single expensive command (`KEYS *` on a multi-million-key database, an unbounded `SMEMBERS` on a set with millions of members, a large Lua script) blocks every other client for its full duration — the same class of risk as the incident's silent eviction, except manifesting as a latency spike visible in `INFO commandstats`/`latency history` rather than a silent data-loss event. Use `SCAN`/`SSCAN`/`HSCAN`/`ZSCAN` (cursor-based, bounded per-call cost) instead of the unbounded `KEYS`/`SMEMBERS`/`HGETALL` variants against large collections, and budget Lua scripts for microsecond-scale execution, not bulk data processing.
-
-**Memory — fragmentation and `OBJECT ENCODING`.** Redis's allocator (`jemalloc` by default on Linux) can fragment over time, particularly under a workload of frequent small allocations/deallocations at varying sizes (session churn, TTL expiry) — `used_memory_rss` growing meaningfully faster than `used_memory` (visible in `INFO memory`'s `mem_fragmentation_ratio`) indicates fragmentation eating usable capacity without any corresponding increase in actual stored data. `activedefrag yes` (Redis 4+) reclaims this incrementally, at a small ongoing CPU cost, rather than requiring a full restart. Separately, small collections use compact encodings automatically — a hash under `hash-max-listpack-entries`/`-value` thresholds stores as a `listpack` (contiguous, cache-friendly, memory-efficient); crossing the threshold silently converts it to a full hash table, meaningfully larger per-entry — `OBJECT ENCODING <key>` reveals which representation is in play, and sizing a session hash to deliberately stay under the listpack threshold is a real, measurable memory-efficiency lever many teams never check.
-
-**Latency — pipelining.** Each round-trip to Redis costs network RTT regardless of the command's own execution cost (sub-microsecond for most commands) — issuing N independent commands sequentially pays N round-trips, while **pipelining** (batching multiple commands into one network write, reading all responses after) pays one round-trip for all N, a frequently 10-100x throughput improvement for bulk operations (populating a cache after a cold start, batch session lookups) at zero server-side cost, since pipelining is purely a client-side/protocol-level batching technique, not a different execution model.
-
-**Throughput — eviction's hidden cost under memory pressure.** LRU/LFU eviction under `maxmemory` doesn't do a perfect global scan for the least-recently/frequently-used key (too expensive) — it samples a small, configurable number of random keys (`maxmemory-samples`, default 5) and evicts the best candidate among the sample, trading eviction-decision accuracy for speed; a higher sample count improves eviction quality at a small additional CPU cost per eviction, relevant when tuning a genuinely eviction-heavy pure-cache instance (§2.3/§4) for better hit-rate behavior.
-
-**Benchmarking:** `redis-benchmark` and `MEMORY USAGE <key>` are the concrete tools — benchmark against realistic key-size/collection-size distributions (a synthetic all-small-string benchmark will not surface the listpack-threshold or big-key latency risks that dominate real production behavior), and always benchmark pipelined vs. unpipelined for any bulk-access pattern before assuming either is "fast enough."
-
----
-
-## 8. Security
-
-**Threats:** An unauthenticated, internet-exposed Redis instance is one of the most exploited misconfigurations in cloud infrastructure — attackers routinely scan for open port 6379, then use `CONFIG SET dir`/`CONFIG SET dbfilename` combined with `SET`/`SAVE` to write an attacker-controlled file (an SSH authorized_keys entry, a cron job, a webshell) to disk via Redis's own persistence mechanism, achieving remote code execution with no authentication bypass required at all — this is not a theoretical risk; it's a well-documented, mass-exploited attack pattern (cryptomining botnets, ransomware) against exactly this misconfiguration. A second, subtler threat is **command injection via unsanitized key construction** — building a key name by concatenating unsanitized user input (`$"user:{userInput}:profile"`) without validating that `userInput` can't itself contain a colon or other key-namespace-relevant character lets an attacker construct a key that collides with or overwrites an unrelated key/namespace.
-
-**Mitigations:** Never expose Redis directly to the public internet — bind to internal/private networks only, behind a security group/firewall permitting only known application hosts. Always set `requirepass` (or, better, use ACLs) — Redis's `protected-mode` (default `yes` since Redis 3.2) refuses non-localhost connections without a password configured, a safety net that has prevented a meaningful fraction of these incidents but must not be relied on as the *only* control, since it's trivially disabled by misconfiguration. Sanitize/validate any user-supplied input used to construct a key name (reject or escape delimiter characters) exactly as SQL-injection defenses validate input used to construct a query.
-
-**ACLs (Redis 6+):** Replace the single shared `requirepass` password with per-application, per-purpose **ACL users** (`ACL SETUSER app-readonly on >password ~app:* +get +mget -@write`), scoping each credential to only the commands and key patterns that application genuinely needs — a reporting service given a read-only, namespace-scoped credential cannot accidentally (or maliciously, if compromised) issue `FLUSHALL` or read another application's keyspace, directly the least-privilege discipline applied at the Redis-credential layer rather than left to a single shared, all-powerful password.
-
-**TLS:** Redis 6+ supports native TLS for client-server and replication traffic — required for any deployment where the network path between application and Redis (or between Redis nodes/replicas) isn't provably trusted end-to-end (a multi-AZ/cross-VPC deployment, any path crossing infrastructure a compliance framework doesn't already treat as trusted); prior to Redis 6, TLS required a `stunnel`/proxy sidecar, since the protocol had no native TLS support.
-
-**OWASP mapping:** Misconfiguration (A05:2021) is the dominant real-world Redis risk — the unauthenticated-exposure RCE pattern above is a textbook instance; injection (A03:2021) via unsanitized key construction is the second most relevant category.
-
----
-
-## 9. Scalability
-
-**Horizontal scaling — Redis Cluster.** §2.5's fixed 16,384 hash slots is the mechanism; operationally, horizontal scaling means adding a new primary node and **migrating a subset of slots** to it (`CLUSTER SETSLOT ... MIGRATING`/`IMPORTING`, or a higher-level tool like `redis-cli --cluster reshard`) — a live, incremental operation that doesn't require full-dataset downtime, though individual keys being actively migrated experience a brief `ASK`-redirect window.
-
-**Vertical scaling and read replicas.** Before reaching for Cluster's sharding complexity, a single primary with **read replicas** (asynchronous replication, §2.5 of Module 26) scales *read* throughput horizontally while keeping writes on a single node — appropriate when the workload is read-heavy and the working set fits comfortably on one node's memory; Cluster's sharding is the correct next step specifically when the dataset itself no longer fits on one node's available RAM, not merely as a default "scale by sharding" reflex.
-
-**Replication lag.** Since replication is asynchronous by default (Module 26 §2.5), a read replica can lag behind its primary by a variable amount under write load — a read-scaling strategy that routes reads to replicas must accept eventually-consistent reads (a replica's `GET` can return a slightly stale value) unless the specific read path genuinely requires primary-fresh data, in which case it must be explicitly routed to the primary, not load-balanced across replicas by default.
-
-**High Availability:** Sentinel (single primary-replica set) or Cluster's built-in per-shard failover (Module 26 §2.3/§2.4) — the correct mechanism depends on whether sharding is already in use; the two are not combined.
-
-**CAP-adjacent trade-off:** Redis Cluster, during a network partition isolating a minority of nodes from the majority, has the minority-side nodes stop accepting writes (assuming `cluster-require-full-coverage`/quorum-appropriate configuration) rather than risk a split-brain divergence — favoring consistency over availability for the isolated minority, the same quorum-based reasoning as any majority-based distributed system, applied here to Redis Cluster's own failure-detection gossip protocol.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

@@ -109,48 +109,6 @@ sequenceDiagram
 **Trade-offs:** No trade-off was actually being made here — this was a pure implementation defect, not a deliberate simplification, which is precisely why it went undetected: nothing about the system's behavior under normal use looked wrong, since legitimate ID tokens for the dashboard's own users also validated correctly by the same over-permissive check.
 
 **Lessons learned:** **A resource server must validate not merely that a JWT is well-formed and correctly signed by a trusted issuer, but that it is the specific token *type* and *audience* intended for that resource server** — signature validity proves the issuer's endorsement of the claims, not that the claims authorize this particular use. This is the token-layer instance A9's recurring pattern: a control (JWT signature validation) correct and effective for its designed scope (proving issuer endorsement) silently provides no protection for a distinct, adjacent question (is this the right token type/audience for this specific use) that a naive implementation assumes is covered by the same check.
-
----
-
-## 5. Best Practices
-
-- **Always use authorization-code-with-PKCE, for every client type** — including confidential clients (RFC 8252/OAuth 2.1's current baseline), not merely public clients, since PKCE's origin-binding provides defense-in-depth even where a client secret also exists.
-- **Enforce an explicit, out-of-band algorithm allow-list per issuer** on every JWT validator — never trust the token's own `alg` header to select validation behavior.
-- **Scope access tokens to the narrowest audience** (ideally a single resource server) rather than issuing one broad token valid across an entire estate.
-- **Never accept an ID token as a resource-server bearer credential** — validate `aud`/token-type explicitly, not merely signature and expiry.
-- **Keep token lifetimes short**, consistent with the Zero Trust duration-limitation principle — long-lived access tokens reintroduce the same standing-exposure risk eliminated for privileged credentials, now at the API-access layer.
-- **Validate every claim the specification requires** (`iss`, `aud`, `exp`, `nbf`, signature) on every request — never cache a "this token was valid once" result past its own stated expiry.
-
----
-
-## 6. Anti-patterns
-
-- **Implicit grant, or any flow exposing tokens in a browser redirect fragment**, for any new design — deprecated for a specific, structural exposure reason, not merely stylistic preference.
-- **Dynamic algorithm selection based on the token's own `alg` header** — the direct enabler of the algorithm-confusion attack.
-- **Treating "the JWT signature validated" as sufficient authorization** — skips the `aud`/`iss`/token-type checks that actually scope what the token proves.
-- **Long-lived, broadly-scoped access tokens "for convenience"** — reintroduces the standing-privilege risk at the token layer; a compromised token's blast radius should be bounded by both scope and time.
-- **Storing tokens in `localStorage` for browser-based clients**, exposing them to any injected script (XSS) on the page — tokens should be held in memory or an `HttpOnly` cookie where the flow allows, minimizing the exfiltration surface.
-
----
-
-## 7. Performance Engineering
-
-JWT validation is CPU-bound (signature verification), not I/O-bound, for self-contained tokens — this is precisely the property that makes JWTs attractive at high request-throughput resource servers, since no network round-trip to the authorization server is required per request (contrast the opaque-token introspection cost). Signature verification cost is dominated by the algorithm choice: RSA signature verification is meaningfully more expensive per-operation than ECDSA at comparable security levels, a real consideration at trading-system request rates. Public-key caching (fetching the issuer's JWKS endpoint once and caching keyed by `kid`, refreshed on a TTL or on a cache-miss against an unrecognized `kid`) avoids a network round-trip per validation while still picking up key rotation within a bounded staleness window.
-
----
-
-## 8. Security
-
-PKCE closes the authorization-code-interception vulnerability for public clients. The algorithm-confusion defense is a structural control, not a token-content check, and must be enforced at the validator-configuration level. Audience restriction is the primary defense against token replay across resource servers — a token stolen from or leaked by one resource server should not be usable against another. Redirect URI validation at the authorization server (exact-match against a pre-registered allow-list, never wildcard or prefix matching) closes a separate open-redirect-style vulnerability where an attacker registers a malicious redirect URI to capture the authorization code. State parameter (a random, per-request value echoed back by the authorization server) defends against CSRF on the redirect callback specifically, a distinct concern from PKCE's code-verifier binding.
-
----
-
-## 9. Scalability
-
-Self-contained JWT validation scales horizontally with zero authorization-server load per validation — the defining scalability advantage over opaque, introspection-requiring tokens. The trade-off this defers to: self-contained tokens cannot be synchronously revoked (a resource server has no way to know a token was revoked before its stated `exp` without an additional mechanism), which is precisely why token lifetime, not merely token format, is the primary lever bounding a compromised token's usable window at scale — directly recurring the duration-vs-existence risk framing at the token layer.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

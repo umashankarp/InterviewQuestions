@@ -110,25 +110,6 @@ IF digest(A)!= digest(B): a non-determinism source exists (Sec2.3) -- must be
 **Fix**: (1) Redesigned the retention policy per the three-constraint model — before any age-based deletion, the policy now queries the organization's deployment-history and documented-rollback-candidate registry, retaining any image referenced by either regardless of age; (2) fixed the build process's specific non-determinism sources — removed embedded timestamps (normalizing them to a fixed, deterministic value), and pinned the full transitive dependency graph via a committed lockfile, strictly consumed (not silently re-resolved) by the build; (3) established a periodic (not one-time) reproducibility verification — rebuilding a sample of recent releases from source and confirming digest-identical output — converting "we assume our builds are reproducible" into a continuously, actively verified property.
 
 **Lesson**: This incident is a precise, compounding instance of this course's recurring theme occurring at *two* independent layers simultaneously: a retention policy's declared cleanup rule (age-based) silently diverged from the actual safety requirement (reference-aware) it needed to satisfy, and a build process's assumed reproducibility (an unverified, declared property) turned out, under the one specific circumstance that actually tested it — an emergency, time-pressured rebuild — to be false. Neither gap alone was disastrous in isolation until they compounded at exactly the worst possible moment: precisely when the organization most needed both the artifact's continued availability and, failing that, its verified regenerability.
-
----
-
-## 5. Best Practices
-- Promote and deploy by immutable content digest, never by a mutable tag alone — treat any tag as a convenience label pointing at a digest, never as the artifact's true identity.
-- Design retention/garbage-collection policy around three independent constraints (age, reference/rollback-candidate status, compliance requirement) evaluated simultaneously — never a single age-based rule alone.
-- Eliminate every known non-determinism source (embedded timestamps, unordered file iteration, unpinned toolchain versions) from build processes, and periodically, actively verify reproducibility by rebuilding and diffing output — never assume it holds because no known issue was left unaddressed.
-- Commit lockfiles pinning the complete transitive dependency graph, and configure builds to fail rather than silently re-resolve if the lockfile and manifest have drifted out of sync.
-- Treat reproducible builds as the safety net for every scenario where promoting an already-built artifact isn't possible (lost artifact, security backport, independent audit) — and verify that safety net actually works before an emergency is the first time it's exercised.
-
-## 6. Anti-patterns
-- Deploying or promoting by a mutable tag (`latest`, or a reused version tag) rather than an immutable digest, allowing the same reference to silently point at different artifacts over time.
-- An artifact retention policy based solely on age, with no awareness of current deployment or documented-rollback-candidate status.
-- Assuming a build is reproducible because it was designed with reproducibility in mind, without periodically, actively verifying it via an actual rebuild-and-diff check.
-- Declaring dependencies via version ranges with no committed lockfile, or a build process that silently re-resolves dependencies rather than failing when the lockfile has drifted from the manifest.
-- Treating "we can always just rebuild from source" as an unverified assumption rather than a periodically-tested, genuinely relied-upon capability.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

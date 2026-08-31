@@ -118,47 +118,6 @@ Module Federation — shared-dependency negotiation:
 **Trade-offs:** The shared-dependency declaration was correctly configured by every team involved, and every individual build succeeded — there was no code-level defect in any single micro-frontend's own codebase; the incident lived entirely in the *runtime negotiation* between independently-built, independently-versioned bundles, invisible to any single team's own testing since each team's remote worked perfectly correctly in isolation.
 
 **Lessons learned:** **Module Federation's shared-dependency singleton guarantee is a runtime negotiation outcome, not a build-time contract enforced by any individual team's own tooling** — this is the exact composition-risk shape the closing synthesis named at the identity-federation layer, now recurring precisely at the frontend micro-frontend layer: five individually-correct, independently-deployed bundles produced an incident that lived entirely in the *assumption linking them* (that "shared: true" guarantees one instance) rather than in any single bundle's own code. The fix required pinning shared dependencies to *exact*, not range-based, versions across every micro-frontend team, plus a CI check failing any deployment whose shared-dependency versions drifted from the shell's pinned baseline — converting an implicit, runtime-negotiated assumption into an explicitly, mechanically verified one.
-
----
-
-## 5. Best Practices
-
-- **Keep NgRx reducers strictly pure** — no side effects, no mutation, no non-deterministic behavior — and push every side effect into Effects, keeping the state-transition logic itself trivially, deterministically testable.
-- **Build small, focused, composed Selectors** rather than having components read and recompute from raw Store state independently — memoization only provides its benefit when selectors are actually reused and composed consistently.
-- **Default new reactive state to Signals** where the application's Angular version supports them, given their precise, structurally-narrower change-detection cost model relative to Zone.js's blanket triggering (/A3).
-- **Use Reactive Forms, not template-driven forms, for any form with non-trivial validation, dynamic fields, or a need for thorough automated testing** — the explicit object-graph model is what makes complex financial-services forms (KYC, order entry) tractable and testable.
-- **Pin shared Module Federation dependencies to exact versions across every micro-frontend team**, with a CI check enforcing it (the fix) — never rely on semver-range-based "compatible enough" negotiation for a dependency whose shared-singleton correctness genuinely matters, such as RxJS or the Angular framework itself.
-
----
-
-## 6. Anti-patterns
-
-- **An NgRx Effect that dispatches an Action which, directly or indirectly, re-triggers the same Effect** without an explicit termination condition — the module's own incident develops this concretely as a silent, CPU-spinning infinite-dispatch loop.
-- **Reading and independently recomputing derived state in multiple components instead of composing shared, memoized Selectors** — defeats memoization's benefit and multiplies redundant computation across the component tree.
-- **Relying on Module Federation's semver-range-based shared-dependency negotiation for a dependency whose singleton correctness genuinely matters** — a technically-compatible version range is not the same guarantee as an actually-shared runtime instance.
-- **Mixing Reactive and template-driven forms within the same form** — produces two, partially-overlapping sources of truth for the same form's state, a direct frontend-layer instance of this course's recurring "which system is authoritative" confusion.
-- **Adopting NgRx (or any structured state library) for an application without genuinely cross-cutting, complex shared state** — imposes the pattern's real cognitive and boilerplate cost without the corresponding traceability benefit that justifies it.
-
----
-
-## 7. Performance Engineering
-
-Signals' precise dependency tracking directly narrows the change-detection cost model — a `computed` signal recomputes only when a dependency it actually read last time changes, and (under zoneless Angular) a component reading only signals triggers re-checks scoped precisely to itself and its dependents, not the "any async event anywhere" tree-wide cost Zone.js imposes. NgRx's memoized Selectors provide an analogous, coarser-grained benefit for Redux-pattern state specifically. Module Federation's runtime-loaded remotes add a real, first-load latency cost (fetching a remote's bundle over the network at the moment it's first needed) that should be weighed against a shell's overall initial-load budget — lazy-loading remotes only when actually navigated to (mirroring the lazy-loaded-module reasoning) keeps this cost bounded rather than front-loaded into the shell's own initial payload.
-
----
-
-## 8. Security
-
-NgRx's centralized, single-source-of-truth Store is a natural place to concentrate authorization-relevant client-side state (the current user's permitted actions, feature flags) — but client-side state of this kind is never a substitute for server-side enforcement (directly recurring the gateway-auth-as-defense-in-depth-first-layer finding): a component conditionally hiding an action based on Store state provides UX guidance, not a security boundary, since any client-side state is inspectable and modifiable by the end user's own browser tooling. Module Federation's dynamically-loaded remotes introduce a supply-chain-adjacent trust question distinct from a conventional, single-build application's dependency risk: a shell loading a remote from a URL it doesn't fully control (a third-party-hosted or separately-deployed-by-another-team remote) is trusting that remote's runtime code to the same degree as its own first-party code, making the deployment pipeline and hosting integrity of every federated remote a security-relevant dependency of the shell as a whole.
-
----
-
-## 9. Scalability
-
-Micro-frontend decomposition via Module Federation is this module's primary organizational-scalability lever — directly mirroring the finding that decomposition value comes from enabling genuinely independent teams to deploy independently, not from the technical splitting itself. NgRx's centralization of shared state trades a real cognitive/boilerplate cost for making cross-cutting state changes traceable at scale — the same centralization-versus-variance trade-off this course has found repeatedly, calibrated below specifically for state management. Signals' fine-grained reactivity scales the change-detection cost model independent of total application size, the frontend-layer parallel to the storage-engine finding that a system's actual scaling behavior comes from its underlying physical/computational structure, not its category label.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

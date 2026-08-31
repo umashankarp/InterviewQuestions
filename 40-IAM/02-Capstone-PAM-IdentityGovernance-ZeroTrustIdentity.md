@@ -132,48 +132,6 @@ Login ──► Session established (initial trust score)
 **Trade-offs:** Break-glass cannot be eliminated (a system must be recoverable when its own access-control dependencies fail) but its very design — bypassing the normal path — guarantees it also bypasses whatever monitoring was scoped to the normal path, unless monitoring is explicitly, separately built to cover it.
 
 **Lessons learned:** **An exception path evades exactly the scrutiny the normal path receives, by construction — and un-audited exceptions become the norm precisely because nothing is watching them.** The fix was not to remove break-glass (operationally necessary) but to (1) hold it to *equal-or-greater* audit rigor than the normal path — every use triggers a mandatory, non-optional post-use review within 24 hours, independent of and stricter than JIT's own review cadence, and (2) treat break-glass usage frequency itself as a first-class health signal: rising break-glass usage is evidence the "correct" path is failing users, not evidence of legitimate emergencies, and should trigger investigation of the JIT path's own reliability — which is precisely what the recurring directory-service flakiness should have surfaced months earlier had anyone been watching that signal.
-
----
-
-## 5. Best Practices
-
-- **JIT by default; standing privilege only by documented, periodically-re-justified exception.** Every remaining standing credential should have an explicit, dated business justification on file, re-reviewed at least as often as certification cadence.
-- **Hold break-glass to stricter audit than the normal path, not looser** —, the exemption from approval must not become an exemption from review.
-- **Separate "certified" from "currently correct."** Run continuous entitlement-drift detection independent of the certification cadence — certification is a point-in-time attestation, not a durable guarantee.
-- **Model SoD as a graph over composed roles, not a static pairwise table** — role composition is exactly where pairwise conflict tables silently miss conflicts.
-- **Score Zero Trust identity risk per request for sensitive operations, not merely at login** — session-long trust from a single authentication event is a-style "declared once, assumed true throughout" gap.
-- **Record privileged sessions specifically**, not all access uniformly — session recording is expensive enough (storage, review burden) that it should be concentrated exactly where standing-privilege elimination couldn't fully apply.
-
----
-
-## 6. Anti-patterns
-
-- **"We removed standing admin access" as an unqualified, permanent claim.** As shows, an unmonitored alternate path silently recreates the same risk under a different name — the claim is only ever true for the specific path it was verified against.
-- **Certification as the only governance control.** Point-in-time attestation without continuous drift detection leaves the exact gap between "certified correct" and "durably correct" permanently unmonitored.
-- **Pairwise SoD tables applied to a system with role composition.** Silently misses conflicts that only emerge from a principal's *union* of roles — exactly the failure Coding Exercise (Hard) below is built to catch.
-- **Zero Trust "in name only":** re-branding a conventional session-cookie architecture as "Zero Trust" without actually re-evaluating context per request provides none of the model's actual risk reduction — the label is not the control.
-- **Treating break-glass usage as inherently low-risk because it's rare.** the lesson: rarity is not the same as low-risk when the usage pattern itself is unmonitored; rising frequency is a signal, not noise, and should be tracked as a metric with an alert threshold, not dismissed as expected exceptional-path noise.
-
----
-
-## 7. Performance Engineering
-
-JIT elevation's approval-latency budget directly trades against incident-response speed: a human-approval step adds tens of seconds to minutes exactly when an on-call engineer is under the most time pressure (the proximate cause) — the correct mitigation is tiered auto-approval policy (low-risk, narrowly-scoped elevation auto-approved against a pre-defined policy; only genuinely high-risk elevation requires human approval), not removing the approval step. Continuous entitlement-drift detection is a diffing workload against the full entitlement graph and should run incrementally against a change-event stream (entitlement-change events, the idempotent-consumer pattern applies directly) rather than as a full periodic recomputation, which does not scale past a few thousand principals without becoming itself a lagging, stale signal — recurring the lag-monitoring discipline. Zero Trust per-request risk scoring must complete within the request's own latency budget (single-digit milliseconds for synchronous paths) — it is evaluated against cached, incrementally-updated risk signals, never a synchronous full re-authentication, or it reintroduces-style latency amplification at every request.
-
----
-
-## 8. Security
-
-PAM and vaulted-credential rotation directly close the "credential existed and was stolen at rest" attack class; JIT elevation closes the "credential existed and was usable long after legitimate need ended" class; session recording provides forensic evidence for the residual "credential was legitimately elevated and then misused" class that neither prevention control eliminates. SoD enforcement is a control against a specific, distinct threat model — not external compromise, but insider risk from a single authorized principal completing an entire sensitive workflow unsupervised — and is a hard, non-negotiable regulatory requirement (SOX) for financial transaction workflows specifically. Zero Trust identity's continuous re-scoring is the direct mitigation for session hijacking and credential-replay attacks that occur *after* a legitimate authentication event — a threat class session-only, login-time authentication structurally cannot detect. Break-glass credentials, given their elevated, approval-bypassing power, should individually be the most tightly scoped, most short-lived, and most heavily alerted-upon credentials in the entire estate — precisely the opposite of the failure mode, where their exceptional status was treated as a reason for *less* scrutiny rather than more.
-
----
-
-## 9. Scalability
-
-Access certification campaigns do not scale linearly with headcount if resource owners are asked to review every entitlement uniformly — risk-tiered certification (high-risk systems reviewed quarterly, low-risk systems annually, informed by the per-resource authorization-model complexity classification) keeps the reviewer burden proportional to actual risk rather than raw entitlement count. SoD graph evaluation must be incremental (evaluate only the affected subgraph on each entitlement change) rather than full-graph recomputation to remain tractable at enterprise scale — full recomputation on every change is the same anti-pattern as recomputing an entire cache on every write. JIT elevation services themselves must be highly available and horizontally scaled specifically because their *unavailability* is what drove the break-glass overuse — an access-control system that is itself a single point of failure defeats its own purpose by forcing legitimate users toward less-monitored bypass paths.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

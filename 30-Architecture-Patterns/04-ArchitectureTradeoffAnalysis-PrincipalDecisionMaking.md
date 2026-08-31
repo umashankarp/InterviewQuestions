@@ -114,69 +114,6 @@ sequenceDiagram
 **Trade-offs:** The hybrid option was chosen and documented in an ADR listing all three candidates, the disqualification reason for the vendor-only option, the explicit quality-attribute weights (reviewed and signed off by all four stakeholder groups before any candidate was scored, specifically to avoid the reverse-engineered-matrix risk), and two falsifiable predictions: "hybrid TCO will be within 15% of the modeled five-year estimate" and "the anti-corruption-layer exit path will genuinely allow vendor replacement within six months if needed."
 
 **Lessons learned:** Eighteen months later, a scheduled ADR review (triggered by the desk's addition of the HFT strategy the second historical failure had been caused by) found the vendor's core matching latency, which had not been a binding constraint at decision time, was now a real gap — exactly the kind of context change the original analysis had explicitly anticipated and pre-registered a re-evaluation trigger for, rather than the earlier desks' undocumented, ad hoc "we didn't think of that" surprise. Because the hybrid's anti-corruption layer had been built and tested (not just planned) as part of the original decision, the desk was able to evaluate a matching-core swap as a bounded, already-scoped migration rather than a fresh crisis — the direct payoff of pricing migration cost/risk into the original decision rather than treating it as a later afterthought.
-
----
-
-## 5. Best Practices
-- Gather and write down explicit, stakeholder-sourced quality-attribute priorities before comparing any candidates — never assume shared, unstated priorities.
-- Treat a hard regulatory/correctness constraint as a disqualifying gate applied before scoring, not one more weighted attribute a strong showing elsewhere can outweigh.
-- Set decision-matrix weights from stated business drivers alone, before any candidate is scored, to avoid laundering a predetermined conclusion into an apparently objective number.
-- Price migration cost/risk (using this domain's own migration-decision axes: scope, data involvement, reversibility, organizational span) as a first-class input to the comparison, not a deferred implementation detail.
-- Calibrate analysis rigor (Board review vs. lightweight team ADR) to the decision's actual reversibility and consequence, not uniformly.
-- Record rejected alternatives and *why* they lost, and record explicit, falsifiable predictions with a scheduled or automated trigger to check them later.
-
-## 6. Anti-patterns
-- Comparing candidates by general reputation/popularity instead of each candidate's actual characteristics against this specific system's stated priorities.
-- Building a decision matrix after the preferred answer is already known, then reverse-engineering weights and scores to justify it.
-- Treating migration cost/risk as "an implementation detail to figure out later" once the "better" steady-state architecture is chosen.
-- Applying uniform, heavyweight analysis rigor to every decision regardless of its actual reversibility — over-analyzing trivial decisions, under-analyzing consequential ones.
-- Standardizing a fixed, universal quality-attribute weighting template across every future decision, systematically biasing every decision toward whatever the template happened to weight highly.
-- Treating a rigorously-conducted analysis as itself proof the resulting decision was correct, without ever checking its predictions against what actually happened.
-
----
-
-## 7. Performance Engineering
-
-**CPU/Memory:** Not directly applicable to the analysis process itself; the relevant performance concern is ensuring each candidate's *actual* performance characteristics (not vendor marketing numbers or informal impressions) are benchmarked against the system's real, expected workload before being scored.
-
-**Latency:** Where latency is a stated quality attribute (as in the §4 example), demand a concrete, current benchmark under representative load from each candidate rather than accepting a specification-sheet number — the same "verify, don't assume" discipline applied to the analysis's own inputs.
-
-**Throughput:** Back-of-the-envelope capacity estimation belongs inside the analysis itself for any candidate whose scalability is a stated priority — an architecture that "should scale" without an actual capacity calculation is an unverified claim, not a finding.
-
-**Scalability:** A trade-off analysis's own process must itself scale with organizational size — a lightweight, informal version at small scale, more rigorous ATAM facilitation and a searchable ADR repository at large scale, with the underlying principles (explicit priorities, honest comparison) constant across both.
-
-**Benchmarking:** Where genuinely comparable, run a proof-of-concept or bake-off under representative load for the highest-uncertainty candidates rather than relying purely on paper analysis — particularly valuable exactly where quantitative historical data is scarce (a genuinely novel system).
-
-**Caching:** Not directly applicable to the analysis process; where caching strategy is itself the subject of the trade-off (e.g., cache-aside vs. write-through), evaluate each against the system's actual read/write ratio and staleness tolerance, not a generic preference.
-
----
-
-## 8. Security
-
-**Threats:** The most consequential threat to a trade-off analysis's own integrity is not external — it's an unstated, unexamined bias (resume-driven development, organizational politics, a HiPPO decision) silently determining the outcome while the analysis's structure creates an appearance of objectivity that makes that bias harder, not easier, to detect.
-
-**Mitigations:** Require every quality-attribute score and every identified trade-off/sensitivity point to be explicitly stated and defended with concrete reasoning, not merely asserted; deliberately invite dissenting views before the group converges; record disagreement, not just the final decision, in the ADR — structural countermeasures that make an unexamined HiPPO or fashion-driven decision visibly indefensible.
-
-**Because this module's subject is a decision-making process, not a running system**, the OWASP/AuthN-AuthZ/Secrets/Encryption categories don't apply in their usual technical sense; the closest analogue is treating security itself as a first-class, explicitly-named quality attribute in every trade-off analysis rather than assumed handled by a separate, disconnected security-review process — because a missing security control typically produces zero functional symptom, it is uniquely at risk of being silently omitted from an analysis that only scores what's visibly, functionally different between candidates.
-
-**Governance security:** Access to modify or approve an ADR, and visibility into the full decision-history repository, should itself be access-controlled and audited — an ADR repository anyone can silently edit after the fact undermines the entire "durable, honest record" value this discipline depends on.
-
----
-
-## 9. Scalability
-
-**Horizontal scaling (of the practice itself):** As an organization grows from one team to hundreds of engineers across many teams, the trade-off-analysis *structure* should scale (more facilitation rigor for genuinely significant cross-team decisions, a searchable organization-wide ADR repository, Board review scoped to high-consequence decisions), while the underlying *principles* remain identical at every scale.
-
-**Vertical scaling:** For a single, large, highly consequential decision, scaling up rigor means more stakeholders explicitly consulted, more candidates seriously evaluated, and a formal ATAM facilitation rather than an informal team discussion — not a fundamentally different method.
-
-**High Availability / Disaster Recovery (as quality attributes under evaluation):** When comparing candidate architectures, HA/DR posture should be evaluated with the same rigor as any other quality attribute — an explicit RTO/RPO target stated by stakeholders, each candidate's actual (not assumed) ability to meet it, and the cost of closing any gap priced into the comparison.
-
-**Replication/Partitioning (as quality attributes under evaluation):** Where partitioning strategy is itself part of the decision, evaluate each candidate's partitioning approach against the system's actual access patterns and hot-key risk, not a generic "it partitions" checkbox.
-
-**CAP theorem (as a quality-attribute framing device):** CAP is frequently the concrete vocabulary stakeholders need to understand *why* consistency and availability genuinely trade off rather than one simply being "better" — using it to translate an abstract disagreement ("we want it fast and we want it always right") into an explicit, resolvable priority statement is one of the most practically useful applications of this module's "make the trade-off explicit" principle.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

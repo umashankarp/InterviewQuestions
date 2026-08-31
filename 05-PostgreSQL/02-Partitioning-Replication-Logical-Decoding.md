@@ -57,65 +57,6 @@ graph LR
 
 ## 4. Production Example
 **Scenario**: A production PostgreSQL primary's disk usage grew steadily over several weeks despite stable data volume and properly-tuned autovacuum (the lesson already applied), eventually triggering an out-of-disk-space alert. **Investigation**: `pg_replication_slots` revealed an **inactive** logical replication slot from a decommissioned CDC pipeline (a Debezium connector removed months earlier during an architecture change) — the slot itself was never dropped, so the primary had been retaining every WAL segment generated since that connector's last activity, for months, waiting for a consumer that would never return. **Fix**: dropped the orphaned slot (`SELECT pg_drop_replication_slot('old_cdc_slot');`), immediately reclaiming the retained WAL space; added a standing monitoring check specifically for replication-slot `restart_lsn` lag (how far behind the slot's confirmed position is from the current WAL position) as a distinct, proactive alert. **Lesson**: replication slots are a "silent until catastrophic" resource-retention risk with no natural expiration — any consumer decommissioning process must explicitly include dropping its associated replication slot as a mandatory step, and slot-lag monitoring deserves the same proactive attention as vacuum-bloat monitoring.
-
-## 5. Best Practices
-- Monitor replication-slot lag/retained-WAL-size proactively, not just as an incident-response step.
-- Explicitly drop a replication slot as a mandatory step of decommissioning any consumer, never leaving an orphaned slot.
-- Use range partitioning with instant partition-drop for time-series/log-style data needing efficient archival/retention.
-- Verify partition pruning is actually occurring (via `EXPLAIN`) for partitioned-table queries, not just assuming partitioning alone guarantees the performance benefit.
-
-## 6. Anti-patterns
-- Leaving an orphaned replication slot after decommissioning its consumer (the incident).
-- Partitioning a table without verifying queries actually prune to relevant partitions, silently scanning every partition and gaining none of partitioning's performance benefit.
-- Assuming physical replication supports cross-version upgrades (it doesn't) when planning a major-version migration.
-- Relying solely on asynchronous replication for a system with zero tolerance for any committed-data loss on failover, without evaluating synchronous replication's trade-offs explicitly.
-
----
-
-## 7. Performance Engineering
-
-**WAL cost of partitioning:** Partitioning itself doesn't reduce total WAL volume for a given write rate — every insert still generates the same WAL record whichever partition it lands in — but it bounds the **cost of maintenance operations** (vacuum, index rebuild) to individual partitions, which is where partitioning's real operational performance win lives, not in reducing per-write cost.
-
-**Vacuum per partition:** Each partition is vacuumed independently, which is a genuine advantage for a large range-partitioned table — a hot, recent-data partition can be vacuumed aggressively (tuned per-partition exactly as Module 21 §7's per-table tuning) while an old, append-only-then-frozen partition needs almost no ongoing vacuum attention at all, versus a single monolithic table where one global vacuum policy must serve both access patterns simultaneously.
-
-**pgbouncer with many replicas:** A read-heavy reporting workload spread across several replicas benefits from a pgbouncer instance (or pool) per replica, since pooling is inherently per-backend-server — routing/load-balancing across replicas is a separate concern (handled by the application, a proxy like PgCat, or a service-discovery layer), not something pgbouncer itself provides across multiple target servers.
-
-**Planner and partition pruning cost:** Partition pruning happens either at **planning time** (static pruning, when the predicate's bounds are known at plan time — a literal date range) or at **execution time** (dynamic pruning, when the bound is a parameter or subquery result) — a prepared statement reused across many executions with different parameter values relies on execution-time pruning to remain efficient per-call; verify via `EXPLAIN (ANALYZE)` (not just `EXPLAIN`) that dynamic pruning is actually engaging for parameterized queries, since a plan-time-only check can misleadingly show all partitions "considered" even though most are pruned at execution.
-
-**Replication throughput:** Logical replication's decode-and-apply pipeline is meaningfully more CPU-expensive per change than physical replication's raw byte-stream copy — a subscriber applying changes via ordinary SQL (logical) versus replaying raw WAL (physical) means logical replication throughput ceilings are lower, a real capacity-planning input for a high-TPS primary with several logical subscribers.
-
----
-
-## 8. Security
-
-**Replication user privileges:** A physical-replication standby connects using a role granted the `REPLICATION` attribute (`ALTER ROLE replicator WITH REPLICATION LOGIN;`) — deliberately narrower than a superuser or general application role, since a compromised replication credential should be able to stream WAL, not run arbitrary DML against the primary's tables. A logical-replication subscriber additionally needs `SELECT` on the specific published tables, scoped no more broadly than the actual publication requires.
-
-**`pg_hba.conf` for replication connections:** Requires a distinct `replication` entry (`hostssl replication replicator 10.0.1.0/24 scram-sha-256`) separate from ordinary database-connection entries — an operator who adds a broad `host all all` rule without realizing it also implicitly covers replication connections (unless explicitly scoped) can unintentionally widen the replication attack surface alongside the general one.
-
-**TLS for streaming replication:** Replication traffic carries the *entire* logical content of every change in the database — enabling `ssl = on` and `hostssl`-only rules for replication connections (Module 21 §8) is not optional hardening but a direct extension of the same in-transit-encryption requirement covering ordinary client traffic, since replication traffic is, in effect, a full copy of the primary's data in motion.
-
-**Securing replication slots/logical decoding:** A replication slot with a permissive logical-decoding output plugin can expose full row-level change content (including sensitive fields) to any client with `REPLICATION` privilege and network access — grant `REPLICATION` and slot access only to the specific, known consumer service accounts (Debezium's connector credential, a specific subscriber), never as a broadly-granted role attribute, and audit `pg_replication_slots`/`pg_stat_replication` periodically for any slot whose owning role or connecting client isn't a recognized, currently-expected consumer (directly extending the orphaned-slot detection query from §11's Hard exercise to a security-audit use, not just a disk-space one).
-
-**Encryption of WAL/backups:** WAL archives (feeding both replication and PITR, Module 21 Expert Q9) and physical/logical backups carry the same sensitive content as the live database — encrypt WAL archive storage and backup storage at rest with the same rigor as the primary's own data files, since a leaked WAL archive is functionally equivalent to a leaked database snapshot.
-
----
-
-## 9. Scalability
-
-**Horizontal read scaling:** Streaming physical replicas scale read throughput linearly for read-only query traffic, bounded ultimately by replication lag tolerance for the specific read use case (§10 Advanced Q6's staleness-aware routing).
-
-**Logical replication fan-out:** A single primary can support multiple independent logical-replication subscribers (a reporting warehouse, a fraud pipeline, a cross-region read copy with a different schema) without each subscriber's query load reaching the primary directly — though each subscriber does add decode/apply overhead on the primary side (§7), a real, bounded scaling ceiling distinct from physical replication's near-zero primary-side marginal cost per additional physical replica.
-
-**Partitioning recap:** Partitioning (§2.1) bounds per-operation maintenance cost as data volume grows but doesn't itself distribute write load across multiple physical nodes — it's an availability/maintainability scaling lever, not a write-throughput horizontal-scaling lever.
-
-**Sharding (Citus, etc.):** For write throughput genuinely exceeding a single primary's vertical ceiling, **Citus** distributes sharded tables across multiple worker nodes with a coordinator routing/parallelizing queries — a materially larger operational commitment (distributed query planning, cross-shard transaction semantics, rebalancing) than partitioning alone, and the right tool specifically once vertical scaling and partitioning have been exhausted, not adopted preemptively.
-
-**HA/DR:** Automated, fenced failover (Patroni/etcd-based consensus for leader election, or a managed service's built-in equivalent) promotes a caught-up standby without risking split-brain (Expert Q1) — the standing operational requirement beneath any HA claim, not merely "a standby exists."
-
-**Multi-region:** Logical replication enables selective, potentially bidirectional multi-region replication, but native logical replication has no built-in conflict resolution for concurrent writes to the same row in two regions (Expert Q10) — true active-active multi-region write support requires either single-writer-per-key routing (avoiding the conflict entirely) or a purpose-built extension (BDR/pglogical) with explicit conflict-resolution policy, not a default logical-replication assumption.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

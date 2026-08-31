@@ -118,47 +118,6 @@ Ivy compiled template — NOT virtual-DOM diffing:
 **Trade-offs:** Manual `.subscribe` calls were originally chosen over the `async` pipe specifically because the widget needed to perform imperative side effects (triggering a toast notification, updating a non-template internal cache) on each message — a legitimate reason the `async` pipe alone doesn't cover, but one that required manually replicating the exact lifecycle discipline (`ngOnDestroy` cleanup) the `async` pipe provides automatically, and that discipline was inconsistently applied across the widget's several open/close code paths.
 
 **Lessons learned:** **A manually-managed RxJS subscription's lifetime is a fact about the code, not the framework — nothing enforces it is torn down correctly, unlike the `async` pipe's automatic, structurally-guaranteed cleanup.** And separately, independent of the leak itself: **any component using Angular's default change-detection strategy pays the cost of every async event firing anywhere in the application, not just events relevant to that component** — the two defects compounded because the leak kept adding new trigger sources, and the default strategy kept charging their full cost against the entire tree on every single one.
-
----
-
-## 5. Best Practices
-
-- **Prefer the `async` pipe over manual `.subscribe` in components wherever the subscription's only purpose is populating template state** — its automatic unsubscribe-on-destroy eliminates an entire class of manual-lifecycle-discipline bugs by construction.
-- **Adopt `OnPush` as the default change-detection strategy for any component tree with meaningful size**, especially subtrees receiving high-frequency data — narrows the check-cycle cost from "the whole app, every async event" to "only what has a structural reason to have changed."
-- **Scope DI providers deliberately** — understand whether a service should be a true singleton (`providedIn: 'root'`) or intentionally per-component-subtree-scoped (a component-level `providers` array), and treat an unexpected "why do I have two instances of this service" bug as a scoping question first, not a code defect in the service itself.
-- **Keep `ngDoCheck`/`ngAfterViewChecked` bodies trivially cheap or empty** — anything non-trivial here runs on every single change-detection cycle app-wide, not just this component's own updates.
-- **Treat every manually-created `Subscription` as requiring an explicit, auditable teardown path** — accumulate them in a single `Subscription` (via `.add`) or use the `takeUntilDestroyed` operator (Angular's structural, first-party fix for exactly the pattern) rather than scattering ad hoc unsubscribe logic across multiple lifecycle branches.
-
----
-
-## 6. Anti-patterns
-
-- **Manual `.subscribe` calls with no corresponding, verified `ngOnDestroy` cleanup** — the exact incident; the single most common Angular memory-leak source.
-- **Mutating an `@Input`-bound object in place under `OnPush`** — since `OnPush` checks reference identity, an in-place mutation produces no new reference and the component silently fails to re-render, a bug that looks like "the data updated but the UI didn't."
-- **Heavy computation inside `ngDoCheck` or `ngAfterViewChecked`** — directly multiplies the cost of every change-detection pass across the entire component subtree beneath it.
-- **Assuming a service is a singleton without checking its `providedIn` configuration and where it's referenced in a `providers` array** — the component-scoping behavior is easy to introduce accidentally via a copy-pasted module/component declaration.
-- **High-frequency data sources (WebSockets, `setInterval` polling) feeding directly into default-strategy component trees** without `OnPush` or explicit change-detection scoping — the direct cause of the tree-wide check-cost multiplication.
-
----
-
-## 7. Performance Engineering
-
-Change-detection cost is fundamentally a function of **(check-cycle frequency) × (tree size subject to Default-strategy checking)** — the incident is the concrete demonstration of both factors compounding simultaneously. `OnPush` is the primary lever on the second factor; reducing the *frequency* of triggering events is the primary lever on the first — batching high-frequency updates (e.g., buffering WebSocket messages over a short interval via RxJS's `bufferTime`/`throttleTime` operators before they reach component state) trades a small, deliberate latency cost for a large reduction in check-cycle count, directly analogous to the hedged-request-budgeting reasoning (bound the cost of a mitigation rather than applying it unconditionally). Angular's newer **zoneless change detection** (running without Zone.js, relying instead on Signals — for fine-grained, explicit change notification) removes the "any async event anywhere triggers a full-tree check" cost model entirely, at the cost of requiring every reactive data source in the app to explicitly participate in the Signals model rather than being implicitly covered by Zone.js's blanket monkey-patching.
-
----
-
-## 8. Security
-
-Angular's template binding is **sanitized by default** — interpolation (`{{ }}`) and property binding (`[innerHTML]`, etc.) automatically escape or sanitize values to prevent XSS, and the framework explicitly requires an opt-in (`bypassSecurityTrustHtml` and similar `DomSanitizer` methods) to render raw, unsanitized content — a structural default-safe posture directly analogous to this course's parameterization-over-sanitization finding for SQL injection, now applied to DOM injection. **`bypassSecurityTrustHtml` and its siblings are the single highest-risk API surface in Angular's security model** — every use is an explicit, auditable assertion that a specific value is safe despite bypassing the framework's own default protection, and should be treated with the same governance rigor as any other explicitly-declared trust boundary this course has examined (the pathway-coverage discipline applies directly: every `bypassSecurityTrust*` call site should be inventoried and periodically re-justified, not merely present in code review history once). Content Security Policy (CSP) headers, served independently of Angular's own sanitization, provide defense-in-depth against exactly the residual risk a sanitization bypass or a third-party dependency vulnerability introduces.
-
----
-
-## 9. Scalability
-
-The injector-tree model scales cleanly to large applications specifically because it allows genuinely independent feature areas to provide their own component-scoped service instances without any risk of state leaking across unrelated parts of the tree — the same encapsulation benefit the Clean Architecture and the Hexagonal Architecture provide at the backend service layer, now expressed through Angular's own DI hierarchy at the frontend component layer. Lazy-loaded feature modules (loaded on-demand via the Router rather than bundled into the initial payload) keep initial load time bounded independent of total application size — directly analogous to the monorepo affected-project computation, both solving "don't pay the cost of code you don't need for this specific navigation/build."
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

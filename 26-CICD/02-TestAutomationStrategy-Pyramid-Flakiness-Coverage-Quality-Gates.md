@@ -109,25 +109,6 @@ Balanced (duration-aware, same 9 tests, historical timing data):
 **Fix**: (1) Introduced mutation testing as a complementary, non-gameable-by-the-same-mechanism quality signal — a mutant introduced into the payment-reconciliation function's calculation logic was confirmed, in retrospect, to survive against the existing (assertion-free) test suite, precisely revealing the exact gap coverage alone couldn't; (2) revised the quality-gate policy to require a minimum mutation-testing "kill rate" (the percentage of introduced mutants actually caught by the test suite) alongside, not instead of, the coverage threshold, since the two metrics measure genuinely different, complementary properties; (3) added assertion-quality review as an explicit PR-review checklist item for any new test, specifically flagging tests whose only assertion is "did not throw" as requiring justification or a stronger assertion.
 
 **Lesson**: A coverage percentage is a *declared* signal about test execution, not a *verified* signal about test quality — treating it as the latter, especially under the pressure of a mandatory blocking threshold that incentivizes the metric's satisfaction over its underlying purpose, reproduces exactly the failure mode this course has examined across infrastructure drift, configuration parity, deployment validation, and CI's own affected-project computation: **a metric or check, once it becomes the thing directly optimized against rather than a proxy for what actually matters, tends to diverge from what it was originally meant to measure** — a specific instance of Goodhart's Law this course's cross-domain findings independently, repeatedly rediscover.
-
----
-
-## 5. Best Practices
-- Design the test suite's shape deliberately toward the pyramid (many fast unit tests, fewer integration tests, fewest E2E tests) rather than letting it drift toward whatever's easiest to write in the moment.
-- Handle flaky tests via data-driven correlation with recent code changes, quarantining genuine flakiness with a mandatory remediation ticket rather than either permanent blocking or permanent silent tolerance.
-- Balance test shards using historical, per-test duration data, recalibrated periodically as suite composition evolves, rather than a naive one-time count-based or alphabetical split.
-- Treat code coverage as one input among several, never the sole quality gate — pair it with mutation testing or explicit assertion-quality review to verify tests meaningfully check behavior, not merely execute code.
-- Reset test data to a known state before each test runs (not merely relying on cleanup after), ensuring a prior test's failure can't pollute a subsequent test's isolated starting state.
-
-## 6. Anti-patterns
-- An inverted "ice cream cone" test suite shape, with most verification effort in slow, brittle E2E tests that cheaper, more reliable unit tests could have provided instead.
-- Treating every intermittent test failure identically — either always blocking (training engineers to distrust CI) or always silently retrying/ignoring (masking genuine intermittent regressions) — rather than correlating against recent code changes.
-- A mandatory, blocking coverage threshold with no complementary assertion-quality signal, creating a direct incentive to game the metric's letter rather than its intended purpose.
-- Naive, non-duration-aware test sharding that leaves pipeline wall-clock time bottlenecked by one imbalanced shard despite high parallelism.
-- Tests relying on "clean up after yourself" data hygiene rather than "reset to known state before," leaving shared state vulnerable to pollution from any test that fails before its own cleanup runs.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

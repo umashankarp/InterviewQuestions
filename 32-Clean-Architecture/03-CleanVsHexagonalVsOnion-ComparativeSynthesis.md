@@ -120,58 +120,6 @@ The three ring/hexagon diagrams above differ in labels and count of named layers
 **Trade-offs:** Standardizing on one named vocabulary cost the team roughly a day of documentation work (an ADR — per Expert Q5 — recording the choice, plus the equivalence table so the Spring- and Onion-background engineers had a written reference) against the alternative of letting three engineers use three different names informally in code review and design docs indefinitely, which the Principal judged as guaranteed, low-grade, recurring friction versus a one-time, bounded documentation cost.
 
 **Lessons learned:** The forty minutes initially spent on what felt like a genuine architectural disagreement was, in retrospect, entirely a vocabulary-recognition failure, not a substantive technical one — precisely the scenario Expert Q2's engineering-merger incident describes at larger scale. The concrete fix that prevented recurrence was not a design decision at all; it was a five-line glossary entry in the team's ADR stating explicitly that "Clean Architecture," "Hexagonal Architecture," and "Onion Architecture," as used anywhere in this codebase's documentation or by any new hire, refer to the same pattern and are not competing alternatives.
-
----
-
-## 5. Best Practices
-- **Default to whichever of the three vocabularies your organization already uses consistently elsewhere** — consistency with existing internal convention is worth more, in practice, than any claimed technical merit of one name over another (there is none, per §2.2).
-- **Pick Clean Architecture's more prescriptive four-ring split when the domain's business-rule/orchestration distinction is genuinely non-trivial** (multi-state lifecycles, complex invariants worth naming and isolating, per §2.1/§4) — the extra structure earns its cost here.
-- **Pick Hexagonal Architecture's flatter, less-subdivided core for a small team or a genuinely simple domain** (§2.4) — don't pay the four-ring ceremony tax for logic that doesn't need it.
-- **Write a short, explicit equivalence glossary into an ADR the first time more than one vocabulary appears in the same organization** (§4, Expert Q5) — this is cheap insurance against Expert Q2's merger-scale friction.
-- **When an interviewer or colleague uses an unfamiliar name for this pattern, translate first, then engage** — recognize the equivalence (§2.3's table) before assuming a genuinely different system is being described.
-- **Verify the Dependency Rule with a fitness function (`NetArchTest` or equivalent) regardless of which vocabulary's folder names the codebase uses** — the check is identical in substance; only the namespace names referenced in the assertion change.
-- **Never let a terminology debate consume design-review time that should be spent on the actual technical question** ("is the domain provably independent of infrastructure?") — the Principal Engineer's job in §4's scenario was reframing the question, not adjudicating a naming preference.
-
-## 6. Anti-patterns
-- **Cargo-culting one of the three styles' exact folder structure without understanding *why* the Dependency Rule requires it** — a team that copies Clean Architecture's `Entities/UseCases/InterfaceAdapters/Frameworks` folder names onto a codebase that still lets `UseCases` reference `Microsoft.EntityFrameworkCore` directly has adopted the vocabulary with none of the substance (Advanced Q3's "declared ≠ actual" verification failure, recurring here).
-- **Renaming an existing, working codebase's folders and classes purely to match a new hire's preferred vocabulary, with no other functional change** — pure low-value churn, real merge-conflict and review-cycle cost, zero durable technical benefit (Advanced Q2).
-- **Mixing vocabulary inconsistently within the same codebase** — some folders named `Entities`/`UseCases` (Clean), others named `DomainServices`/`ApplicationServices` (Onion), with no glossary explaining the inconsistency to a new reader — creates exactly the onboarding confusion Advanced Q6 documents, at the codebase-internal-consistency level rather than the cross-team level.
-- **Treating a debate about which of the three names is "correct" as a genuine architectural decision requiring a formal RFC and multiple stakeholders' sign-off** — this materially overweights a question with essentially zero technical stakes (§2.2) relative to the organizational cost of the debate itself.
-- **Assuming the presence of Port/Adapter-style folder names is itself proof the Dependency Rule is enforced** — a label is not a verification; only a passing fitness function is (Advanced Q3, Expert Q4).
-- **Applying Onion Architecture's or Clean Architecture's full four/five-layer prescriptiveness reflexively to every new service regardless of domain complexity**, without the §2.1/§2.4 calibration judgment.
-
----
-
-## 7. Performance Engineering
-
-**Indirection cost — identical across all three, because the number of boundary crossings is identical.** Every one of the three styles inserts exactly one interface dispatch at each Port/boundary a request crosses: Controller → Use Case interface → Use Case implementation → Repository interface → Repository implementation. In .NET, this is a virtual/interface method call resolved through the DI container's already-constructed object graph — on modern .NET (8/9), an interface dispatch costs low single-digit nanoseconds, and the DI container's constructor-injection resolution happens once per request scope (or once at startup for singletons), not per call. For any I/O-bound service — and a settlement-instruction, payment, or trade-processing service is I/O-bound by definition, dominated by database round-trips and custodian/payment-rail network calls measured in single-digit-to-double-digit milliseconds — the interface-dispatch overhead from any of the three styles is immeasurably small relative to the I/O it wraps; benchmarking it in isolation (a micro-benchmark showing "1.2ns per interface call") is a real number that has never once been the actual bottleneck in a production incident across any of the three styles.
-
-**Where a real cost *can* appear:** over-abstraction independent of which style's name is used — wrapping a single, never-substituted implementation behind a Port purely for ideological purity (an `IClock` interface around `DateTime.UtcNow` is defensible for testability; a `IStringFormatter` wrapping `string.Format` typically is not) adds a mapping/DTO-translation cost at every boundary crossing (Entity ↔ Use-Case-layer DTO ↔ Adapter-layer request/response model) that, at high-throughput, high-allocation-rate paths (a market-data-adjacent hot path processing thousands of ticks/second, unlike settlement instructions), can show up as measurable GC pressure from the extra mapping allocations — but this cost is a function of *how many boundaries a given team chooses to erect*, which correlates with domain complexity and team discipline, not with which of the three named styles is in use.
-
-**Verdict:** No performance basis exists for preferring one of the three names over another; any performance conversation belongs at the "how many Ports/boundaries does this specific hot path actually need" level, which is orthogonal to naming.
-
----
-
-## 8. Security
-
-**Honest answer: there is no genuine security-boundary difference between Clean, Hexagonal, and Onion Architecture.** All three define the identical mechanism — a Port/interface the domain owns, an Adapter that implements it — and security-relevant boundary decisions (where does PCI-DSS card-data scope begin and end, which Adapter is the only component permitted to hold a raw card number, which boundary is the audit-log injection point) attach to *specific Ports*, not to which of the three names labels the overall style.
-
-**Where the pattern (any of the three) genuinely helps security, structurally:** a well-enforced Dependency Rule means the domain/Entities/Domain-Model layer has zero compile-time reference to any specific external SDK — including the payment-rail or card-vault SDK. This makes it straightforward to *prove*, via the same fitness function used to verify the Dependency Rule generally, that card data or other regulated PII never touches business-rule code directly; it flows only through a named, auditable Secondary/Driven Adapter (a `IPaymentTokenizer` Port implemented by a Stripe- or Adyen-specific Adapter), which is exactly the kind of concrete, demonstrable evidence a PCI-DSS assessor or internal security-architecture review actually wants to see — a single, named class list of "everything with I/O access to raw card data," rather than an audit of the entire codebase.
-
-**What doesn't change:** authentication, authorization, encryption-at-rest/in-transit, secrets management, and audit-trail requirements are identical regardless of which of the three vocabularies a codebase uses — none of these concerns are addressed differently by Entities-vs-Domain-Model naming. Be direct with an interviewer who probes for a "security difference between Hexagonal and Clean Architecture": the honest, correctly-calibrated answer is that there isn't one, and volunteering a fabricated distinction to sound more thorough is a worse answer than saying so plainly.
-
----
-
-## 9. Scalability
-
-**Codebase scalability (does the style hold up as the codebase grows):** Clean Architecture's more prescriptive four-ring split scales better to large, complex domains specifically because it gives large teams an explicit, named convention preventing the drift described in §2.5 — new engineers have a named place ("is this an Entity invariant or a Use-Case orchestration concern?") to put new logic, reducing the informal, inconsistent core-folder sprawl a looser Hexagonal-style core risks at scale. Hexagonal's flatter core scales *down* better — a two- or three-engineer team building a genuinely simple service pays less ceremony tax (§2.4) for the same guarantee.
-
-**Team scalability / Conway's Law:** None of the three styles' naming affects how cleanly a monolith's core can later be extracted into an independent microservice — that property comes entirely from the Dependency Rule being genuinely enforced (a domain module with zero infrastructure references extracts cleanly regardless of whether its folders were called `Entities` or `DomainModel`), not from which name labeled the extraction candidate. What *does* matter for team scaling is the same vocabulary-consistency argument from §5/Best Practices: a large, multi-team organization where every team uses a different one of the three names for the identical pattern pays a real, recurring cross-team communication tax (Expert Q2's merger scenario is this cost at its most acute), which an org-wide ADR-and-glossary (Expert Q1/Q5) is the correct, low-cost fix for — not a mandated rename of every existing team's working code.
-
-**High availability / DR:** Entirely orthogonal to which of the three vocabularies a service's internal folder structure uses — HA/DR is a deployment-topology and data-replication concern, unaffected by whether the innermost layer is named Entities, Domain Model, or simply "the core."
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

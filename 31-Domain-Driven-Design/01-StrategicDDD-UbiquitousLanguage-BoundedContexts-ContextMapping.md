@@ -135,53 +135,6 @@ Reading this map: Trade Capture and Risk are both **core** domains (this firm's 
 **Trade-offs.** The firm accepted eventual consistency between Risk's view of a position and Trade Capture's view of the trade that produced it (previously, the shared-table model gave an illusion of instant consistency that was, on inspection, never actually relied upon correctly — Risk's batch job already ran on a delay). They also accepted real integration cost: three separate schemas, an event contract to version, and an ACL to maintain against the legacy mainframe — meaningfully more code than the original single shared table.
 
 **Lessons learned.** The single-`Trade`-table design hadn't actually been simpler — it had been *deceptively* simple, hiding the coordination cost inside release-planning meetings instead of inside explicit architecture. Once each team could evolve its own bounded context's model independently behind a stable published contract, release coordination incidents attributable to cross-team `Trade` schema changes dropped to near zero within two quarters. The Reference Data context (instrument static data, counterparty master) was correctly classified as **generic** and left as a single shared, Conformist-consumed service — strategic DDD does not mean "split everything"; it means split along the seams the Ubiquitous Language actually reveals, and consciously *not* split what's genuinely shared and non-differentiating.
-
-## 5. Best Practices
-
-- Run collaborative Event Storming with actual domain experts before drawing any context boundary — a boundary drawn by engineers alone, without domain-expert validation, is a guess wearing DDD's vocabulary.
-- Classify every subdomain as core / supporting / generic explicitly, and calibrate engineering investment (rich modeling vs. buy-vs-build) to that classification, not to enthusiasm.
-- Keep a living Context Map as a first-class, reviewed architecture artifact, not a one-time onboarding diagram.
-- Encode the Ubiquitous Language directly in code (class/method names a domain expert would recognize), not as a separate glossary translated at the door of every conversation.
-- Default new cross-team integrations to Open Host Service + Published Language (a stable, versioned contract) rather than ad hoc point-to-point calls that recreate bespoke Customer-Supplier negotiation for every new consumer.
-- Put an Anti-Corruption Layer at every boundary to a legacy or externally-controlled system whose model doesn't match your own — treat this as a permanent fixture where the upstream system itself is permanent, not merely a migration scaffold.
-- Re-validate the Ubiquitous Language periodically with current domain experts — a business's own vocabulary drifts, and a glossary frozen at project kickoff silently goes stale.
-
-## 6. Anti-patterns
-
-- **Big Ball of Mud** — no discernible bounded-context boundaries at all; models, terminology, and responsibilities bleed together, and every change risks breaking an unrelated part of the system.
-- **One shared `DbContext`/schema spanning multiple contexts** — EF Core navigation properties make it trivial to silently recreate a unified model across contexts that were supposed to be separate (§2.5).
-- **Anemic domain model dressed as DDD** — bounded contexts drawn correctly, but each context's internals are pure data-transfer objects with all logic externalized to "service" classes; strategic-level correctness with no tactical-level substance (Module 110 develops this fully).
-- **Context boundary drawn along the org chart, not the domain** — accepting existing, accidental team boundaries as if they were genuine domain insight (Conway's Law observed rather than deliberately used), without ever revisiting the boundary once teams reorganize.
-- **Forcing a single, "enterprise-canonical" schema** across contexts that genuinely need different models (§2.6) — the unified-model temptation reappearing as an enterprise-architecture initiative.
-- **Treating the Context Map as a one-time diagram** — drawn once at a kickoff workshop, never updated, and silently diverging from the system's actual, current dependencies.
-- **Over-applying strategic-DDD ceremony to a generic subdomain** — full Event Storming, a dedicated context, and a formal Context Map entry for something that should simply be bought or Conformed to (e.g., authentication).
-
-## 7. Performance Engineering
-
-Strategic DDD's performance implications are mostly about **where synchronous vs. asynchronous boundaries fall**, not raw CPU/memory cost:
-
-- **Cross-context calls are a network hop, not a method call.** Once Trade Capture and Risk are separate Bounded Contexts (§4), a call between them that used to be an in-process method call becomes an HTTP/gRPC call or an asynchronous event — latency and failure-mode budgets must be planned for explicitly (timeouts, retries, circuit breakers), and a chain of several synchronous cross-context calls in one user-facing request path can turn a sub-millisecond in-process call chain into a multi-hundred-millisecond one.
-- **Prefer Published Language events over synchronous request/response between contexts on the hot path.** Risk consuming `TradeConfirmed` asynchronously (§4) means Trade Capture's confirmation latency is never coupled to Risk's processing time; a synchronous "call Risk and wait" design would make Trade Capture's SLA hostage to Risk's.
-- **EF Core `DbContext`-per-context (§2.5) reduces change-tracker scope**, which directly reduces per-request change-tracking overhead — a `DbContext` scoped to one context's tables tracks materially fewer entities per unit of work than one giant, shared context spanning the whole schema.
-- **ACL translation cost is real but usually small relative to the network hop it wraps** — budget for it in a legacy-integration ACL's latency envelope, but it is rarely the dominant cost compared to the mainframe/vendor round-trip itself.
-- **Context Map fan-out** — an Open Host Service with many downstream consumers (§2.4) must be capacity-planned for aggregate downstream load, not just its own context's internal throughput; a Published Language contract with 12 consumers means a schema or behavior change is effectively a 12-consumer compatibility problem, which is a scalability-of-change concern as much as a runtime one.
-
-## 8. Security
-
-- **A Bounded Context boundary is a natural authorization boundary.** Access control policy (who can view a `Position`, who can confirm a `Trade`) belongs to the context that owns that concept's invariants — do not let a shared, cross-context database make row-level security the *only* enforcement point; enforce authorization in each context's own Application layer, at the boundary, not just at the shared data store.
-- **An ACL is also a security control, not just a translation control** — when wrapping a legacy or third-party system, the ACL is the natural place to strip or redact fields the downstream context has no legitimate need to see (data minimization), and to validate/sanitize anything crossing the trust boundary from a system you don't fully control.
-- **Information barriers (compliance "Chinese walls") map naturally onto bounded-context boundaries** — research and trading desks that must not share certain information are a strong, real-world argument *for* separate contexts with no direct model sharing, not merely an application-level permission check bolted onto a shared model. Getting the context boundary right is itself a compliance control.
-- **Published Language contracts are also the audit surface** — because a domain event like `TradeConfirmed` is the one explicit, versioned artifact crossing a context boundary, it is a natural place to attach audit/provenance metadata (who initiated it, correlation ID) once, rather than re-deriving audit trails independently inside every consuming context.
-- **Conformist relationships to an external/vendor context inherit that vendor's security posture** — Conforming to an upstream model without an ACL means any data-shape or validation gap in the vendor's API becomes your own context's gap too; this is a reason to prefer ACL over Conformist specifically for security-sensitive external integrations even where the pure translation-cost argument (Intermediate Q3, §10) might favor Conformist.
-
-## 9. Scalability
-
-- **A Bounded Context is the natural unit of independent scaling.** Once Trade Capture, Risk, and Settlement (§4) are separate contexts with their own schemas and services, each can be scaled (more instances, a bigger database tier, a dedicated cache) according to its own load profile — Risk's batch-heavy, read-intensive workload and Trade Capture's low-latency write-heavy workload no longer have to share one database's capacity plan.
-- **Context-per-service is also a team-scaling mechanism**, not just a runtime one — the Production Example's core lesson: three teams coordinating releases on one shared schema was itself a scalability bottleneck (organizational throughput, not request throughput), solved by giving each team an independently-deployable, independently-scalable context.
-- **Open Host Service fan-out changes the scaling unit's shape** — a Reference Data context serving many Conformist consumers must scale for aggregate read fan-out across the whole firm, likely via caching/CDN-style read replicas at the published-language boundary, rather than assuming each consumer's load is independent and small.
-- **Eventual consistency between contexts (§4) is what makes independent scaling possible** — insisting on synchronous, strongly-consistent cross-context reads (Risk always seeing Trade Capture's absolute latest state instantly) reintroduces tight coupling that caps each context's independent scalability at the slowest, most conservative partner in the chain.
-- **HA/DR must be planned per context, and the Context Map records the resulting dependency graph** — if Settlement depends on Trade Capture's event stream, Trade Capture's disaster-recovery RTO/RPO indirectly bounds Settlement's own; the Context Map (§2.3) is the right place to make this dependency, and its scaling/availability implications, explicit rather than discovered during an incident.
-
 ## 10. Interview Questions
 
 ### Basic (10)

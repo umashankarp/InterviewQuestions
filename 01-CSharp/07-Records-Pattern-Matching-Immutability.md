@@ -240,39 +240,6 @@ classDiagram
 1. `with` expressions' shallow-copy semantics are a genuine, non-obvious gotcha that undermines the "records are immutable" mental model the moment a mutable reference-type member is involved — this must be explicitly taught, not assumed obvious from the `record` keyword alone.
 2. Immutable collection types (`System.Collections.Immutable`) are the correct pairing for record-based domain models specifically because they close this gap structurally, not just by convention/discipline.
 3. A systematic audit (and an enforcing analyzer rule) is more reliable than trusting every future record author to independently remember this specific gotcha.
-
----
-
-## 5. Best Practices
-
-- **Use `record` (or `record struct` for small, frequently-copied value types) for any type whose primary purpose is carrying data compared by value** — DTOs, domain events, value objects, message payloads. Why: eliminates the substantial, error-prone boilerplate of hand-written value equality.
-- **Pair records with immutable collection types (`ImmutableList<T>`, `ImmutableArray<T>`, `ImmutableDictionary<K,V>`) for any reference-type member**, never `List<T>`/arrays/mutable custom classes, unless you've deliberately decided the record is only "shallowly immutable" and documented that trade-off explicitly. Why: closes the `with`-shallow-copy gotcha structurally.
-- **Seal discriminated-union-style record hierarchies** (`Shape` → `Circle`/`Rectangle`/`Triangle`) so the compiler's switch-expression exhaustiveness checking remains meaningful — an open hierarchy can always be extended by a future derived type the exhaustiveness check never anticipated.
-- **Enable `TreatWarningsAsErrors` for `CS8509`** (non-exhaustive switch expression) specifically, if your team wants genuine compile-time-enforced exhaustiveness rather than the default warning-only behavior — a small, high-leverage build-configuration decision for any codebase leaning on the discriminated-union idiom.
-- **Prefer `is` type-pattern matching over `as` + separate null-check** (`if (obj is Customer c)` instead of `var c = obj as Customer; if (c!= null)`) — more concise, and eliminates the class of bug where the null-check is forgotten after an `as` cast.
-- **Use positional records/patterns for simple, small, self-evidently-ordered data** (`Point(int X, int Y)`); prefer property patterns (`{ Name: "x", Age: > 18 }`) for larger or less positionally-obvious types, where naming each matched member improves readability over positional order alone.
-- **Use `record struct` (not plain `record`/`record class`) for small, high-frequency, short-lived value types** (e.g., a coordinate, a small money/currency pair) where avoiding heap allocation matters — directly applying the stack-vs-heap and the low-allocation guidance to the record-design decision.
-
----
-
-## 6. Anti-patterns
-
-- **Adding a mutable reference-type property (`List<T>`, a mutable custom class) to a record without recognizing the `with`-shallow-copy hazard** (the root cause). Fix: use immutable collection types, or a nested immutable/record type for any complex member.
-- **Treating `record`'s value equality as automatically deep/recursive-correct for all member types without verifying.** `Equals` compares each member using *that member's own* `Equals` — if a member is a mutable reference type without its own value-equality override (a plain `List<T>`, for instance, which compares by reference, not by element content), two records containing "the same data" in such a member will **not** compare equal via the record's generated `Equals`, since `List<T>.Equals` is reference equality by default. Fix: for records containing collections, use `ImmutableArray<T>`/`ImmutableList<T>` (many of which *do* implement structural/sequence equality appropriately) or be explicit that such members are excluded from/handled specially in equality semantics.
-- **Leaving a discriminated-union-style record hierarchy unsealed**, silently defeating exhaustiveness checking (/). Fix: `sealed` (or `abstract` for the base with only sealed leaves) by default for this modeling style, unless genuine open extensibility is a deliberate design goal (rare for this specific pattern).
-- **Relying on switch-expression exhaustiveness as a hard guarantee without enabling warnings-as-errors for `CS8509`.** Why it fails: it's a warning by default — code can ship with an unhandled case, only failing at runtime (`SwitchExpressionException`) when that case is actually hit, possibly in production. Fix: `TreatWarningsAsErrors` for this specific diagnostic, at minimum.
-- **Using `record class` reflexively for every data type without considering `record struct`** for small, high-frequency value types — inheriting/3's general stack-vs-heap-allocation guidance; a record's heap-vs-stack placement is still governed by whether it's a `class` or `struct` under the hood, `record` alone doesn't change that fundamental trade-off.
-- **Pattern-matching against a base type where a property pattern silently changes behavior after a derived type adds a new property with an unexpected default**, without an exhaustiveness check catching the gap — e.g., adding a new derived record to a hierarchy that an *unsealed* switch elsewhere in the codebase falls through to a `_ => throw new NotSupportedException` default arm for, silently breaking a previously-working feature at runtime instead of the compiler flagging every affected switch at compile time. Fix: sealed hierarchies + enabled exhaustiveness warnings (again) are what actually protect against this.
-- **Overusing deeply nested positional patterns/complex `when` clauses in a single `switch` arm**, producing unreadable, hard-to-review pattern-matching code that defeats the entire "declarative clarity" purpose pattern matching exists for. Fix: extract complex sub-conditions into well-named helper methods/properties referenced from simpler patterns, exactly as you would refactor an overly complex `if` chain.
-
----
-
----
-
----
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

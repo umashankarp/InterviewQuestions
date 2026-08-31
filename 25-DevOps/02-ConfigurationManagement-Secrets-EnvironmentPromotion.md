@@ -85,27 +85,6 @@ Rotation fails in production not at the store but at the *consumers*: the store 
 ## 4. Production Example
 
 **Scenario**: A payments platform promoted release v2.9 from staging (two weeks of successful soak testing) to production. Within minutes, production began rejecting a specific card-network's transactions. Staging had processed the identical build flawlessly. **Investigation**: The card-network integration required a TLS client certificate and a gateway endpoint override. Three months earlier, during an urgent staging test, an engineer had set the endpoint override *directly as an environment variable in staging's deployment* via `kubectl set env` — an out-of-band change that existed in no values file. Staging "worked" because it carried invisible hand-applied configuration; the promotion PR faithfully promoted everything *declared* — and the override wasn't declared. **Root cause**: environment parity existed in the declared configuration but not in the *actual* configuration; staging validated a configuration state production would never receive. The out-of-band change also survived every intervening deploy because that deployment's Helm chart didn't manage that env var at all (the one-shot, non-reconciling gap — nothing ever reverted it, so nothing ever *surfaced* it either). **Fix**: (1) the override was added to the base values file (it was needed in *all* environments — the delta wasn't even legitimately environmental); (2) production-namespace RBAC was tightened to remove human `patch/update` on Deployments/ConfigMaps, making the pipeline the only writer; (3) a scheduled parity audit was added diffing each environment's *running* pod spec/env against its declared rendering, alerting on any unmanaged variable. **Lesson**: this course's cross-domain "declared ≠ actual" pattern (Modules 74/75/76/78/79/81/82/84/85) has a promotion-specific corollary — **staging only validates production if staging's *actual* state is its *declared* state**; every out-of-band convenience change silently converts your staging environment from a validator into a liar.
-
----
-
-## 5. Best Practices
-- Keep the artifact environment-agnostic and promote by **digest**; every environment-specific value enters via declared, per-env configuration.
-- Enforce **reference-not-value** for secrets everywhere a human or git can see: repos, values files, pipeline variables, ConfigMaps — backed by pre-commit/CI secret scanning as the safety net for the rule's violations.
-- Structure per-env config as **base + minimal explicit deltas**, and treat any growth in the delta files as an architecture smell to review.
-- Remove human write access to production config objects; the pipeline/GitOps controller is the sole writer, making out-of-band drift structurally impossible rather than merely detectable.
-- Design every secret for rotation from day one: dual-secret overlap support, consumer re-resolve-on-auth-failure, and a *scheduled rotation drill* per credential class.
-- Give runtime-changeable configuration (feature flags, reloadable options) its own audit trail, staged rollout, and rollback path — it bypasses the deploy pipeline's gates, so it must replicate their guarantees.
-
-## 6. Anti-patterns
-- Hand-applied environment changes (`kubectl set env`, portal edits, SSH-and-edit) that exist in no declaration — the incident's root cause, and the drift problem re-created one layer up.
-- Rebuilding "the same" artifact per environment instead of promoting one digest — the staging-validated artifact and the production artifact are then merely *probably* identical.
-- Secrets in git history, pipeline variable *values*, Helm values files, or baked into images (Modules 81/82's leak mechanisms) instead of references to a store.
-- Per-environment config forks (full copied files per env) instead of base+delta — divergence accumulates silently until staging validates nothing.
-- A "rotation procedure" that has never been executed against production — a declared capability with unverified actual behavior, this course's recurring failure shape applied to credentials.
-- One shared credential used by every service and environment ("the DB password") — unrotatable in practice because its blast radius is everything, and unattributable in audit because everyone is the same principal.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

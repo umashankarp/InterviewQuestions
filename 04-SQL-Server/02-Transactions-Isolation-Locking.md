@@ -63,59 +63,6 @@ graph LR
 
 ## 4. Production Example
 **Scenario**: An order-processing service experienced periodic, severe latency spikes (all order-related endpoints stalling for 10–30 seconds) correlated with a nightly batch report job. **Investigation**: `sys.dm_exec_requests`/blocking-chain analysis (`sp_WhoIsActive`) showed the batch report (a single, long-running `SELECT` under the default Read Committed isolation, holding shared locks row-by-row as it scanned) was blocking a chain of dozens of order-update transactions waiting to acquire exclusive locks on rows the report's scan happened to pass through, one at a time, over its multi-minute runtime — every order update queued up behind the report's slow-moving scan. **Fix**: switched the database to **Read Committed Snapshot Isolation (RCSI)**, so the report's reads use row-versioning instead of shared locks, never blocking the concurrent order-update writers at all — order-processing latency returned to normal immediately, with no change to either the report or the order-update code. **Lesson**: a long-running read query under a locking isolation level can silently degrade an entire OLTP system's write throughput — RCSI is frequently the single highest-leverage fix for exactly this "reporting query blocks transactional writes" pattern, since it changes the concurrency *model* itself rather than requiring every query to be individually optimized.
-
-## 5. Best Practices
-- Enforce a consistent lock-acquisition order across all transactions touching overlapping resources to prevent deadlocks structurally.
-- Keep transactions as short as possible — never hold a transaction open across a network round-trip, user interaction, or slow external call.
-- Consider RCSI/Snapshot Isolation for OLTP systems with concurrent long-running reporting queries, to eliminate reader-writer blocking entirely.
-- Implement automatic retry logic for deadlock victims (error 1205) and snapshot write-write conflicts — both are expected, recoverable conditions, not fatal errors.
-
-## 6. Anti-patterns
-- Holding a transaction open while waiting on user input or an external API call — a classic, severe blocking-chain cause.
-- Inconsistent lock-acquisition order across different code paths touching the same tables, a direct deadlock cause.
-- Assuming a deadlock indicates a bug requiring a code fix rather than an expected, retryable condition under concurrent load.
-- Running large batch updates/deletes without considering lock escalation's potential to block unrelated concurrent operations.
-
----
-
-## 7. Performance Engineering
-
-**CPU**: The lock manager's per-lock bookkeeping (acquire, track, release) is genuine, non-trivial CPU overhead at scale — a heavily-locking workload at very high concurrency can exhibit measurable **spinlock contention** on the lock manager's internal hash tables (visible as `SOS_SUSPEND_QUEUE`/spinlock waits in `sys.dm_os_spinlock_stats`) even before any query-level blocking is visible, a genuinely advanced diagnostic scenario distinct from ordinary `LCK_*` waits. RCSI/Snapshot Isolation trade this away for a different CPU cost: maintaining row versions in tempdb on every write adds CPU overhead to the writer, in exchange for eliminating reader-side lock-acquisition overhead entirely.
-
-**Memory**: Every held lock consumes lock-manager memory (roughly 64-128 bytes per lock depending on version/edition) — a single statement holding millions of row locks is itself a meaningful memory consumer, which is part of *why* lock escalation exists (trading granularity for memory-management overhead, §2.2), not purely a blocking-avoidance mechanism. Under RCSI/Snapshot Isolation, the **tempdb version store** is the analogous memory/disk cost center — sized by total concurrent version volume, directly proportional to write rate × longest-running open snapshot transaction's age (§Advanced Q7).
-
-**Latency**: A blocking chain's latency cost compounds linearly with chain depth — each waiter's total latency includes every transaction ahead of it in the queue, which is why a single long-running transaction can produce order-of-magnitude latency degradation for dozens of unrelated, individually-fast transactions queued behind it (§4's production incident). The background deadlock monitor's detection interval is dynamic (starts around 5 seconds, shortens automatically as deadlocks are found more frequently) — meaning a *sustained* deadlock storm is detected faster than an isolated, rare one, a genuinely useful fact when explaining why deadlock-frequency metrics (not just presence/absence) matter for triage.
-
-**Throughput**: Pessimistic locking (Read Committed through Serializable) imposes a hard throughput ceiling under high write contention on the same rows — RCSI/Snapshot Isolation removes reader-writer contention specifically but not writer-writer contention, so throughput under heavy *concurrent-write* contention on the same rows is bounded by row-level locking regardless of isolation level chosen; only genuine data-model changes (finer-grained keys, optimistic retry with backoff, or in-memory OLTP's lock-free MVCC, Expert Q2) address writer-writer throughput ceilings.
-
-**Benchmarking**: Diagnose via `sys.dm_os_wait_stats` (aggregate `LCK_*`/`PAGELATCH_*` wait time as a first triage signal), `sys.dm_exec_requests`/`sp_WhoIsActive` for live blocking-chain snapshots, and Extended Events' `xml_deadlock_report` for full deadlock-graph capture — never benchmark concurrency-sensitive behavior (locking, deadlock frequency) against a single-session test harness, since the entire class of bug only manifests under genuine concurrent load.
-
-**Caching**: An application-tier read cache (Redis) in front of frequently-read, rarely-changing reference data (instrument static data, account metadata) removes that read traffic from the lock manager's scope entirely — a structurally different, often higher-leverage lever than any isolation-level tuning, since data that's never read from SQL Server never contends for a SQL Server lock at all.
-
-## 8. Security
-
-**SQL injection**: Never build `SET TRANSACTION ISOLATION LEVEL` or any transaction-control statement from unsanitized user input — while a less common injection vector than a `WHERE` clause, a dynamically-constructed isolation-level or lock-hint statement from untrusted input is exactly as exploitable as any other string-concatenated SQL, and there's no legitimate reason a request-level input should ever directly select a session's isolation level.
-
-**Least privilege**: `VIEW SERVER STATE` (required to query blocking/lock DMVs for diagnostics) should be granted narrowly to an operations/diagnostics role, not bundled with broader `sysadmin` rights an on-call engineer doesn't otherwise need — a common over-provisioning pattern where "give them what they need to debug blocking" turns into "give them full admin," a genuine least-privilege violation worth catching in access review.
-
-**Audit logging**: Changes to database-level concurrency settings (`ALTER DATABASE... SET READ_COMMITTED_SNAPSHOT ON`, isolation-level defaults) are exactly the kind of low-frequency, high-blast-radius change that should be captured by SQL Server Audit/DDL triggers and go through the same change-management/audit-trail process as any other production schema change — a silent, undocumented switch to RCSI (even though usually beneficial, §4) changes observable transaction semantics application code may implicitly depend on, and should never happen outside a reviewed, recorded change.
-
-**Encryption**: TDE encrypts tempdb (when enabled instance-wide) including the version store RCSI/Snapshot Isolation maintains there — since uncommitted, in-flight financial data transiently lives in that version store, this is a genuine, non-obvious reason to ensure TDE covers tempdb specifically, not just user database files, in any environment handling sensitive financial transaction data.
-
-**Row-Level Security interaction**: RLS security predicates are evaluated as part of query execution under whatever isolation level the session is running — under Snapshot Isolation/RCSI specifically, the RLS predicate is evaluated against the transaction's *versioned snapshot*, not the live current state, meaning a permission change (e.g., revoking a user's access to a set of rows) may not be reflected mid-transaction for a long-running snapshot transaction already in flight — a subtle, security-relevant interaction between isolation level and access control worth explicitly testing for any RLS-protected, snapshot-isolated table.
-
-## 9. Scalability
-
-**Read replicas**: Always On Availability Group **readable secondaries** always operate under an implicit, forced row-versioning (snapshot-like) read behavior regardless of the primary's isolation-level configuration — reads on a secondary never take locks against the redo stream applying changes, meaning the RCSI-vs-not decision that matters so much on the primary is effectively moot on a readable secondary, though the secondary's own replication-lag staleness (§Expert Q3) becomes the analogous trade-off to reason about instead.
-
-**Partitioning**: Table partitioning narrows lock/latch scope to the specific partition(s) a transaction actually touches, reducing contention between transactions operating on logically-unrelated partitions (e.g., different date ranges) even without any isolation-level change — a structural contention reducer complementary to, not a replacement for, correct isolation-level and lock-ordering choices.
-
-**Sharding**: Sharding eliminates cross-shard locking by construction (no single lock manager spans shards) — the trade is that any operation genuinely needing atomicity across shards can no longer use a local ACID transaction at all, requiring the saga/outbox eventual-consistency patterns (Expert Q2) rather than any database-level isolation setting.
-
-**HA/DR**: Always On AG **synchronous-commit** mode adds real commit latency — every transaction's commit must wait for the synchronous secondary to harden the log before acknowledging, directly trading transaction throughput/latency for a zero-data-loss (RPO=0) guarantee; **asynchronous-commit** secondaries remove this latency cost but accept a small, non-zero RPO — this HA/DR mode selection is itself a concurrency-adjacent, business-risk-driven architectural decision a Principal Engineer should make deliberately, not accept as an unexamined default (§17).
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

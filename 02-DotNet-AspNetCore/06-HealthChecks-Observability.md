@@ -42,20 +42,6 @@ graph LR
 
 ## 4. Production Example
 **Scenario**: A fleet-wide cascading restart. A shared database experienced a brief (90-second) connection-pool exhaustion under a traffic spike. Every replica's health check — a single, undifferentiated `/health` endpoint checking database connectivity, wired to **both** the Kubernetes liveness **and** readiness probes — failed simultaneously. Kubernetes, interpreting the liveness failure as "the process is broken," killed and restarted **every replica in the fleet at once**, converting a brief, self-recovering database blip into a full-platform outage (all replicas restarting simultaneously, cold-starting, and hitting the still-recovering database with a synchronized reconnection storm). **Fix**: split into separate liveness (`self`-only) and readiness (`database`-included) endpoints, with liveness probe configuration in Kubernetes pointed only at the former. **Lesson**: a health-check design mistake this subtle-looking has fleet-wide blast radius — exactly the "small config detail, catastrophic scale of impact" pattern recurring throughout this course.
-
-## 5. Best Practices
-- Always separate liveness (self-check only) from readiness (full dependency checks) — never let a downstream dependency's health affect liveness.
-- Use `System.Diagnostics.Activity`/OpenTelemetry for tracing rather than provider-specific SDKs, for portability across observability backends.
-- Emit structured logs (not string-interpolated messages) so log fields are queryable, directly enabling the "differentiate expected vs unexpected" triage discipline.
-- Correlate logs, traces, and metrics via a shared `TraceId` for effective cross-signal debugging.
-
-## 6. Anti-patterns
-- A single undifferentiated health-check endpoint serving both liveness and readiness (the incident).
-- Logging at `Information` severity for routine, expected outcomes — reproducing the expected-vs-unexpected severity-differentiation failure at the observability layer.
-- Health checks that themselves perform expensive, side-effecting operations (e.g., writing test data) rather than lightweight connectivity/status checks.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

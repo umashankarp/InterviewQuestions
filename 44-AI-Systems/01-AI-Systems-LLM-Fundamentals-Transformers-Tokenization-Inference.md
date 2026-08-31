@@ -189,7 +189,6 @@ Return Response
 - Queue-based Background Jobs
 - Auto Scaling
 
-
 ## 1. Fundamentals
 
 **What:** An **AI system**, in the engineering sense this course uses throughout, is not "a call to an LLM API" — it is the surrounding engineering discipline (orchestration, retrieval, tool integration, evaluation, guardrails, observability) built *around* a probabilistic, non-deterministic-by-nature core component, the way a database system is the engineering discipline built around a storage engine. A **Large Language Model (LLM)** is a neural network — specifically, almost universally today, a **Transformer** — trained to predict the next token in a sequence, whose emergent capability (given enough scale and training data) is producing coherent, contextually-appropriate continuations of arbitrary text, including instructions, questions, and code.
@@ -293,47 +292,6 @@ Context window — declared capacity vs. actual, measured recall:
 **Trade-offs:** The team's original reasoning (`temperature: 0` implies reproducibility) was a genuinely common, individually-plausible assumption — and was *approximately* true in practice for most requests, which is exactly what made the gap invisible until a specific, high-stakes audit scenario actually exercised it.
 
 **Lessons learned:** **`temperature: 0` narrows non-determinism; it does not eliminate it, and provider-side model updates are an entirely separate, compounding reproducibility risk that no temperature setting addresses at all.** For any system where output reproducibility carries genuine audit/compliance weight — this course's Elite FinTech lens treats this as the common case, not the exception — the correct architecture requires explicitly **pinning to a specific, versioned model snapshot** (never a floating "latest" alias) and **storing the complete, verbatim request (including every parameter) and response**, treating the *stored response* itself, not a promise of future re-generatability, as the actual, permanent audit record — the LLM-system-specific instance of this course's now-thoroughly-established finding that a declared guarantee ("temperature 0 = deterministic") is only ever true for the specific, narrower scope actually verified, never the broader scope casually assumed.
-
----
-
-## 5. Best Practices
-
-- **Never assume `temperature: 0` guarantees bit-for-bit reproducible output** — treat it as "meaningfully more consistent," and for any genuinely audit-critical use case, store the complete verbatim output itself as the permanent record rather than relying on future re-generation.
-- **Pin to a specific, versioned model identifier, never a floating "latest" alias**, for any production system where behavioral consistency over time matters — a provider's routine model update is a silent, compounding non-determinism source independent of temperature.
-- **Budget context-window usage deliberately, accounting for the "lost in the middle" effect** — place the most critical information near the beginning or end of a long prompt, and prefer targeted retrieval over indiscriminately maximizing how much content is stuffed into the window.
-- **Treat token count, not character or word count, as the actual unit of cost and capacity planning** — especially for non-English text, code, or structured/identifier-heavy financial data, which tokenizes less efficiently than plain English prose.
-- **Architect for hallucination as a structural property requiring grounding or verification, not a bug to be prompted away** — any use case with real factual-accuracy consequence needs RAG or an equivalent verification layer, not prompt engineering alone.
-
----
-
-## 6. Anti-patterns
-
-- **Assuming `temperature: 0` makes an LLM-backed feature suitable for exact-reproducibility compliance requirements without explicit model-version pinning and full response archival** — the exact incident.
-- **"Just put the whole document in the context window since it fits"** — ignores both the quadratic cost scaling and the "lost in the middle" recall degradation, producing a system that is both more expensive and silently less accurate than a deliberately-scoped retrieval approach.
-- **Treating hallucination as solvable purely through more careful prompt wording** — addresses surface symptoms at best; the structural fix requires grounding the model's output in externally verifiable, retrieved information.
-- **Estimating token/cost budgets from word or character counts** rather than an actual tokenizer — produces systematically wrong capacity and cost estimates, especially for non-English or structured content.
-- **Floating-alias model references ("use the latest model") in any production system with behavioral-consistency requirements** — reproduces the incident's second, compounding root cause independent of the temperature-setting mistake.
-
----
-
-## 7. Performance Engineering
-
-Production LLM latency must be reasoned about as two structurally distinct components: **TTFT (time-to-first-token)**, dominated by prefill cost and therefore primarily a function of *input* length, and **TPS (tokens-per-second) / total completion time**, dominated by decode cost and therefore primarily a function of *output* length — a system optimizing only one of these two metrics can still deliver a poor overall user experience if the other is neglected (a system with excellent TTFT but slow per-token decode still feels sluggish for long responses; a system with fast decode but slow TTFT feels unresponsive at the start of every interaction). **Streaming** (returning tokens to the client incrementally as they're generated, rather than waiting for the complete response) directly addresses perceived latency by letting a user begin reading a response during the decode phase rather than waiting for total completion — a UX-latency technique with no cost-reduction benefit of its own, but a substantial perceived-responsiveness benefit, directly analogous to the async-pipe streaming reasoning applied to LLM output specifically. Token cost scales with both input and output length (the quadratic input-cost concern, plus linear output-length cost) — making prompt-length discipline (165) a direct, measurable cost-optimization lever, not merely an accuracy one.
-
----
-
-## 8. Security
-
-**Prompt injection** — an attacker (or, more insidiously, content the system retrieves and includes in its own context, the "indirect prompt injection" risk) crafting text specifically designed to override or subvert the system's intended instructions — is this domain's new, LLM-specific threat class, introduced here at the fundamentals level and developed fully (direct injection via user input) and/167 (indirect injection via retrieved documents or tool outputs). Unlike SQL injection, which has a structural, parameterization-based fix that fully closes the vulnerability class, **prompt injection currently has no equivalently complete structural fix** — the model cannot cryptographically distinguish "trusted system instructions" from "untrusted user or retrieved content" the way a parameterized SQL query structurally separates code from data, making this domain's security posture necessarily defense-in-depth (input/output filtering, least-privilege tool access, human-in-the-loop for consequential actions) rather than a single closing control, a genuinely different risk-mitigation shape than this course's other injection-class vulnerabilities. Data sent to a third-party LLM provider (prompts, retrieved context, any PII embedded in either) is a data-residency and confidentiality concern this course's Elite FinTech lens treats with the same weight as any other third-party data-sharing decision (the B2B federation trust-boundary reasoning applies directly) — provider data-retention policies, regional hosting requirements, and contractual data-use terms are all first-class architectural inputs, not afterthoughts.
-
----
-
-## 9. Scalability
-
-Production LLM API integrations must account for **rate limits** (both request-count and token-throughput limits, commonly enforced per-minute by providers) as a first-class capacity constraint — directly analogous to the backend service rate-limiting discipline, but now applied to an external, third-party-controlled dependency the platform doesn't operate itself. **Multi-provider fallback** (routing to a secondary LLM provider or a self-hosted model when the primary is rate-limited, degraded, or unavailable) is this domain's direct instance of the circuit-breaker/fallback pattern, complicated by the fact that different providers' models can produce meaningfully different output style/quality for the same prompt — a fallback isn't a purely mechanical redundancy the way a load-balanced backend service replica is, since switching providers can itself change the user-visible output characteristics. Request batching (grouping multiple independent prompts into fewer API calls where the provider supports it) trades latency for throughput/cost efficiency, the LLM-domain instance of this course's now-familiar batching-versus-latency trade-off (the backpressure reasoning).
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

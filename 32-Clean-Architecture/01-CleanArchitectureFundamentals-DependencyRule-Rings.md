@@ -196,61 +196,6 @@ Solution
 **Trade-offs.** The refactor took roughly three sprints and temporarily slowed feature delivery — a cost the team weighed explicitly against the audit finding that had flagged the untestable rounding logic as a control gap. The DTO-mapping boilerplate at each boundary (Input/Output data classes, a Presenter) added real, ongoing per-feature cost the team accepted specifically because this service is a Core, regulator-scrutinized subdomain, not a supporting one.
 
 **Lessons learned.** (1) The realized benefit was testability, not the theoretical bank-swap flexibility — the JPY bug would have been caught in code review or CI within minutes under the new structure, versus three live settlement cycles under the old one. (2) The second-bank integration, the benefit the team originally justified the refactor with, was genuinely cheap once the port existed — but it was the *secondary* payoff, not the primary one, which matches Module 01's Basic Q8/Q4 ordering exactly.
-
----
-
-## 5. Best Practices
-
-- **Define ports in the inner ring's vocabulary, not the vendor's.** `IAcquirerGateway.AuthorizeAsync(PaymentIntent)` — not `IAcquirerGateway.CallBankApi(BankApiRequest)`. The port's shape should read as a business need, never as a thin wrapper around one vendor's SDK.
-- **Keep Input/Output boundary data plain.** Records or simple classes with no behavior, no framework attributes, no ORM navigation properties.
-- **Enforce ring boundaries at the project-reference level wherever team size/criticality justifies it** (Module 02, Advanced Q5's calibration) — don't rely on discipline alone once the team is larger than "everyone reviews everyone's PRs."
-- **Put a fitness function in CI from day one**, even a minimal one (`NetArchTest`/ArchUnitNET asserting `Domain` has no dependency on `Microsoft.EntityFrameworkCore`). Retrofitting one after a violation has shipped is materially more expensive than starting with one.
-- **Treat the public API contract and the internal Use Case boundary as two separate, independently-versioned types**, even when they look identical on day one (Module 02, Advanced Q7).
-- **Reserve the full four-ring, full-boundary ceremony for Core subdomains** — apply a lighter single-project/folder-based variant elsewhere (§9 develops this as an organizational-scaling decision, not just a technical one).
-
----
-
-## 6. Anti-patterns
-
-- **Leaky abstractions at the port.** An `IOrderRepository.GetAll(): IQueryable<Order>` signature lets EF Core's deferred-execution semantics — and, by extension, LINQ-provider-specific behavior — leak straight through what should be a plain domain-facing contract. Fix: return a materialized `IReadOnlyList<Order>` or a purpose-built read DTO.
-- **Framework types bleeding into the domain.** `[Key]`, `[Table]`, `[JsonPropertyName]`, or a base class like `EntityBase: IEntity<TKey>` supplied by an ORM or a web framework appearing on an Entities-ring class. Fix: keep all such mapping/serialization concerns in outer-ring configuration classes (EF Core `IEntityTypeConfiguration<T>`, a dedicated API contract type).
-- **Anemic ports.** A Repository interface with `Save(object)`/`Load(Guid): object` — so generic it enforces nothing and forces every caller to cast. A port should be shaped precisely around what the specific inner-ring consumer actually needs.
-- **Controllers containing business rules.** Even a "trivial" one-line discount-eligibility check placed directly in a controller is now living in the least-tested, most framework-coupled ring, invisible to the fast Use-Case-level test suite, and silently duplicated the moment a second entry point needs the same rule.
-- **Business rules hiding inside generic cross-cutting infrastructure** — e.g., a specific dollar-threshold approval rule implemented as a MediatR pipeline behavior meant for logging/transactions. This is the anemic-domain-model anti-pattern wearing a different, more modern disguise.
-- **A "Clean Architecture" folder structure with no enforcement mechanism behind it.** Four correctly-named folders and a design document are not evidence the Dependency Rule is actually being followed today — only a continuously-run fitness function or compiler-enforced project-reference graph is (§8/§9 return to this as the "declared ≠ actual" risk specific to this domain).
-
----
-
-## 7. Performance Engineering
-
-- **Mapping/allocation cost is real but small relative to I/O.** A request that crosses API DTO → Input DTO → Aggregate → Output DTO → API DTO allocates roughly four to five short-lived object graphs per request. Benchmarked on a typical `PlaceOrder`-shaped payload (a handful of scalar fields plus a small line-item collection), this mapping overhead measures in low single-digit microseconds on modern .NET (8/9) — two to three orders of magnitude below a single round trip to SQL Server (typically 1–5ms) or an external payment gateway call (50–300ms). In other words: the ring-boundary mapping tax is not where your P99 latency budget goes; don't skip DTO boundaries "for performance" — profile first.
-- **DI container resolution cost.** ASP.NET Core's built-in container resolves a `Scoped` service graph via reflection-backed activation. For a typical 4–6-deep dependency chain (Controller → Use Case → Repository → UnitOfWork → DbContext), resolution measures in the single-digit-microsecond range per request — negligible against the request's actual I/O, but worth knowing if a profiler flags `IServiceProvider.GetService` as a meaningful percentage of a *very* hot, low-latency-budget path (e.g., a sub-millisecond internal RPC), in which case source-generated DI (compile-time service registration) or manual composition can remove it entirely.
-- **N+1 queries from boundary violations, not from the architecture itself.** The performance risk this architecture style genuinely introduces isn't the mapping cost above — it's a returned-Entity boundary violation (§6) letting a lazily-loaded EF Core navigation property trigger a surprise query per iteration in outer-ring code that has no visibility into the fact it's touching the ORM at all.
-- **Use case granularity affects allocation count more than ring count does.** A `PlaceOrder` Use Case that internally calls three narrower Use Cases (reserve stock, calculate tax, create order) multiplies the DTO-mapping allocation count by roughly three; consolidate tightly-coupled steps into one Use Case when the extra boundary crossings buy no genuine decoupling benefit.
-
----
-
-## 8. Security
-
-- **Authentication/authorization is an outer-ring concern for the mechanism, but an inner-ring concern for the rule.** *Who is this request?* (JWT validation, `[Authorize]` middleware, claims extraction) belongs in `Api`/Frameworks & Drivers. *Is this specific user allowed to cancel this specific order given its current state?* is a business rule and belongs on the Aggregate or in the Use Case — exactly the same split established for validation generally (Module 02, Intermediate Q5). Putting the second kind of check only in an `[Authorize(Policy=...)]` attribute means a second entry point (a background job, a gRPC service) invoking the same Use Case silently bypasses it.
-- **Secrets never reach the inner rings.** Connection strings, API keys, and signing certificates are read from `IConfiguration`/a secrets manager entirely within the `Api` composition root and injected into `Infrastructure` adapters as constructor parameters — `Domain` and `Application` never reference `IConfiguration` at all (Module 02, Basic Q8), which also means a secret can never accidentally leak into a unit test log or a domain-level exception message, because the domain has no way to hold one.
-- **The Entities ring is the natural place to enforce data-classification/PII rules**, because it's the one place every code path touching that data is guaranteed to pass through (a `Money` or `PiiRedacted<T>` Value Object can enforce masking/formatting invariants centrally, rather than relying on every outer-ring consumer to remember to redact independently).
-- **Audit-trail generation belongs at the Use Case boundary**, not scattered across controllers — since every business operation, from every entry point, passes through exactly one Use Case, that is the single point where "who did what, to what, when" can be captured once, consistently, satisfying SOX/PCI-DSS-style audit requirements without duplicated logging code per entry point.
-- **Anti-corruption at the Gateway.** A third-party payment SDK's error codes, amount scale, and status strings should never propagate raw into the domain — the Gateway/Adapter is exactly the place to normalize and validate them, both for correctness and so a vendor's own security-relevant quirks (e.g., an ambiguous "pending" status that could mean either success or failure) can't silently corrupt ledger state.
-
----
-
-## 9. Scalability
-
-Two distinct meanings of "scale" apply to this architecture, and they're often conflated:
-
-- **Runtime scalability.** The ring structure is largely orthogonal to horizontal scaling — a Clean-Architecture-structured ASP.NET Core service scales the same way any stateless HTTP service does (multiple instances behind a load balancer, `Scoped` DI lifetimes per request preventing cross-request state leakage). The one genuine runtime-scaling implication is that a strictly-layered Repository abstraction can make it *harder* to reach for query-level optimizations (a hand-tuned, denormalized read query) if the team insists every read goes through the same write-side Repository interface — which is exactly the pressure that eventually justifies introducing a dedicated, narrower read port (Module 02, Intermediate Q5) or, at larger scale, full CQRS.
-- **Organizational/codebase scalability — the more important one for this architecture style.** The Dependency Rule's real payoff at scale is letting many engineers, or many teams, work on the same codebase without stepping on each other's infrastructure choices: a team can swap the Repository implementation, add a caching decorator, or change the ORM version without any of that rippling into the Entities/Use Cases code another team owns and tests independently. This is the sense in which Clean Architecture "scales a codebase across teams" — not requests per second, but the number of engineers who can safely change infrastructure without breaking business logic they don't own.
-- **Failure and change isolation as a scaling property.** Because an outer-ring adapter can be swapped without touching an inner ring, a failing or slow third-party integration (a specific payment rail) can be replaced or wrapped with a resilience layer (retry, circuit breaker, failover to a second adapter) without any change to, or re-test of, the Use Case that depends on it — letting the system's *resilience engineering* scale independently of its *business-logic* engineering.
-- **The honest limit.** None of this makes the underlying database or downstream service scale better on its own — Clean Architecture creates the seams that let you introduce sharding, read replicas, or a different data store later with contained blast radius; it does not substitute for actually doing that work.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

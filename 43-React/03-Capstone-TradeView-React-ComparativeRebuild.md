@@ -100,47 +100,6 @@ DI scoping — Angular's automatic isolation vs. React's manual, easy-to-break a
 **Trade-offs:** The `useDeferredValue` choice was correct and well-reasoned in isolation — the order-entry form's responsiveness during a burst genuinely is the platform's highest-priority requirement, and deferring the grid's less time-critical re-render to protect that responsiveness is exactly Fiber's intended, valuable behavior. The defect was not in either component's own configuration but in the *lack of any coordination or visual signal* between the two views about which one might currently be lagging, leaving a trader with no way to know, at a glance, that the grid's current display might not yet reflect what the form beside it already showed.
 
 **Lessons learned:** **`useDeferredValue`'s benefit — letting different parts of a UI update at different priorities — is inseparable from its risk: those different parts can, by design, briefly disagree about the current state of the world, and nothing in React's own model prevents two visually-adjacent components from reading the same underlying data at different deferral levels without any indication to the user that they may currently be out of sync.** This is React's own, Fiber-specific instance of the composition-risk finding — a mechanism (Fiber's prioritized rendering) working exactly as designed, composed with another individually-reasonable choice (which specific data feeds which specific view), producing an emergent, genuinely new failure class with no Angular counterpart, since Angular's synchronous change-detection model has no equivalent notion of one part of the tree being allowed to lag behind another mid-update at all.
-
----
-
-## 5. Best Practices
-
-- **Treat `useDeferredValue`/`useTransition` as requiring an explicit design decision about every other view reading the same underlying data**, not merely a local performance optimization applied to one component in isolation — if two visually-related views can display the same data at different currency, the design must either accept and visually signal that possibility, or ensure both views defer (or both don't) consistently.
-- **Never use a module-level variable, singleton class instance, or any state declared outside a custom Hook's own function body to represent per-widget-instance state** — always use `useState`/`useReducer`/`useRef` declared *inside* the Hook, which React automatically scopes to the calling component instance's own Fiber node.
-- **When a genuine need exists for state shared across multiple instances of the same reusable widget** (the intentional-sharing case, contrasted with the accidental one), make that sharing explicit and deliberate — via Context with an explicitly-scoped Provider placed at the correct tree level, or a dedicated shared store — never an implicit module-level variable a future maintainer might mistake for automatically-instance-scoped state.
-- **Provide an explicit "may be updating" visual indicator for any deferred value shown near a non-deferred, related value** (the fix) — a subtle loading/pending affordance on the grid during a detected deferral lag, giving the trader a signal rather than a silent, unexplained inconsistency.
-- **Document, for every custom Hook intended for reuse across multiple widget instances, whether its state is instance-scoped (the default, correct behavior when declared via `useState` inside the Hook) or intentionally shared** — making the scoping decision an explicit, reviewable contract rather than an implicit consequence of how the Hook happens to be implemented internally.
-
----
-
-## 6. Anti-patterns
-
-- **Module-level (or otherwise externally-declared) mutable state backing a custom Hook intended to represent per-widget-instance state** — the exact incident; silently and completely defeats the isolation a developer coming from Angular's DI model would reasonably, but incorrectly, assume the Hook pattern provides automatically.
-- **Deferring one view's data via `useDeferredValue` without considering every other, visually-related view reading the same underlying data non-deferred** — produces a torn, inconsistent UI with no error, no warning, and no signal to the affected user.
-- **Assuming React Hooks provide Angular-DI-equivalent per-instance service scoping "because they're both dependency-injection-flavored patterns"** — a category error this course's comparative treatment (I7) flagged for Context specifically and this capstone now demonstrates concretely for Hooks generally.
-- **Treating `useDeferredValue`/`useTransition` adoption as a purely local, single-component performance decision** — its correctness is inherently a property of the *composition* of every view reading the same underlying data, not any one component's own configuration in isolation.
-- **Building a reusable widget's state-management Hook without an explicit, documented statement of its instance-scoping intent** — leaves the next developer to guess (and, guess wrong) whether the pattern provides isolation or sharing.
-
----
-
-## 7. Performance Engineering
-
-`useDeferredValue`'s performance benefit (protecting a high-priority update's responsiveness from competing with a lower-priority subtree's re-render cost) is genuinely valuable and genuinely unique to React's Fiber-based model — but demonstrates it is not a cost-free, purely-additive optimization the way `memo`/virtual-scrolling are largely composable without cross-component risk; it introduces a *new dimension of coordination cost* (ensuring related, visually-adjacent views' currency expectations are either aligned or explicitly signaled as potentially divergent) that a team must design for deliberately, not merely apply as a drop-in performance win. This is the capstone-level refinement of the four-lever composition reasoning: buffering (frequency), `memo` (scope), virtual scrolling (DOM-node count), and now `useDeferredValue`/Fiber prioritization (scheduling) compose multiplicatively for raw performance exactly as established — but this fourth lever specifically introduces a *correctness*-adjacent coordination cost the other three don't, since it is the only one of the four that can cause two currently-rendered views to legitimately, by design, disagree about the current state of the world.
-
----
-
-## 8. Security
-
-No new security-specific finding beyond-160's coverage (of each) — TradeView-React's client-side state (Redux/RTK, React Query cache) remains a UX layer over server-authoritative decisions throughout, with the identical defense-in-depth discipline applying to order submission and entitlement-gated UI visibility as established previously. the DI-scoping incident carries a security-adjacent dimension worth naming: an accidentally-shared "isolated" widget's state, if that widget happened to hold anything account-specific or entitlement-sensitive (rather than this capstone's benign portfolio-summary example), could reproduce the cross-account data-exposure shape via a structurally different mechanism (accidental Hook-state sharing rather than an under-scoped cache key) — reinforcing that this domain's cross-account-exposure risk category has now been demonstrated via three independent, mechanically distinct causes (the trackBy, the cache key, this module's shared Hook state).
-
----
-
-## 9. Scalability
-
-This capstone adds no new scalability finding beyond composing Modules 159-160's established levers — its distinguishing contribution is specifically the *correctness*-coordination cost identifies for `useDeferredValue`/Fiber-prioritization specifically, which is a genuinely new dimension this domain's prior two modules' performance discussions didn't need to address, since neither Angular's model (no interruptible rendering) nor this domain's own earlier Easy/Medium-tier examples (160) composed a deferred and non-deferred view of the same data within one visible UI simultaneously.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

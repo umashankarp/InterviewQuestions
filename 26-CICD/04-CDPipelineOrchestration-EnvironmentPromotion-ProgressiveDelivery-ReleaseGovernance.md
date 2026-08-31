@@ -119,27 +119,6 @@ T2: v2 fails health check again -> automated rollback reverts to v1 -- repeat T1
 **Fix**: (1) Instrumented the emergency path with mandatory, structured audit logging — every emergency-path deployment now records a required justification, is automatically flagged for post-hoc review within 24 hours, and its usage rate is tracked on a standing dashboard, converting an unmeasured escape hatch into a break-glass procedure that actually matches the discipline rather than merely being named similarly to one. (2) Addressed the root friction directly: routine, low-risk releases (determined by an automated risk-scoring heuristic — small diff size, no schema/infrastructure change, prior canary history clean) now satisfy their approval requirement via an automated policy-as-code gate evaluating the same criteria a human approver typically checked, reserving human approval specifically for releases the risk heuristic flags as genuinely warranting judgment — removing the incentive to bypass rather than merely monitoring the bypass more closely. (3) Even the emergency path was changed to pass through an *abbreviated* automated canary check (a 2-minute bake at 1% traffic) rather than skipping progressive delivery altogether — accepting some added latency even during a genuine incident in exchange for retaining at least some automated safety net on every path an artifact can take to production.
 
 **Lesson**: This incident is the CI/CD domain's capstone instance of its now-repeated theme: a control declared as blocking (canary analysis and approval, required "before any production change") is only as real as its *actual, universal, audited* enforcement across every path a deployment can take through the orchestration system — an unmonitored escape hatch is a silent policy bypass waiting to be discovered by the exact worst-case event it existed to prevent. And critically, the bypass here was not driven by malice or carelessness but by an entirely rational, individually-reasonable response to a gate whose friction the organization never addressed at its source — meaning the durable fix had to address the friction itself, not merely add more monitoring around the symptom of engineers routing around it.
-
----
-
-## 5. Best Practices
-- Promote a single, immutable, digest-identified artifact through every environment — never rebuild per environment.
-- Design promotion gates with explicit awareness that latency in a gate on the critical path creates a structural incentive to bypass it — risk-tier which releases genuinely need human approval vs. which can be safely automated, rather than treating "add more manual approval" as costless.
-- Wire the canary-analysis/blue-green mechanics directly into the orchestrator's stage definitions so promotion decisions are automated, consistent verdicts, not a human manually watching a dashboard.
-- Treat rollback as a symmetric, automated, and *periodically drilled* capability — never an ad hoc procedure improvised only during a live incident.
-- Instrument every emergency/hotfix bypass path with mandatory audit logging, usage-rate tracking, and periodic review — a break-glass procedure without this instrumentation is indistinguishable, in practice, from no control at all.
-- Where GitOps reconciliation and automated rollback both operate against the same target, explicitly coordinate their authority (e.g., rollback updates the Git-declared desired state itself, rather than only the live cluster) to prevent the two systems fighting each other.
-
-## 6. Anti-patterns
-- Rebuilding an artifact per environment rather than promoting the identical, already-validated digest forward.
-- A manual-approval gate with no risk-tiering, applied uniformly regardless of a release's actual risk profile — the single largest driver of gate-bypass incentive.
-- Manually watching a canary dashboard and eyeballing a promote/rollback decision rather than wiring an automated, consistent analysis verdict into the orchestrator.
-- Treating rollback as an improvised, rarely-exercised emergency procedure rather than a first-class, automated, periodically-drilled capability.
-- An emergency/hotfix bypass path with no audit logging or usage-rate review, indistinguishable in the deployment log from a normal-path release.
-- Running GitOps reconciliation and an independent automated-rollback system against the same target with no coordination between their respective notions of "desired state".
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

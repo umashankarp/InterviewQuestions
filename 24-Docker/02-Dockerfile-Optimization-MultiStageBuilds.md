@@ -90,24 +90,6 @@ graph LR
 **Trade-offs:** The team's verification method was procedurally identical to the original mistake (verifying only the running container's visible state) even though they believed they'd learned that exact lesson — the specific *mechanism* they checked (runtime environment variables) was different from the (filesystem content), but the *category* of error (verifying a narrow, convenient view rather than the complete, underlying artifact) was identical.
 
 **Lessons learned:** A subsequent, more rigorous security review ran `docker history --no-trunc` against the image (the exact recommended tool) and found the database password in cleartext, directly visible in the recorded command for the `RUN` instruction that had used the `ARG` — fully exposed to anyone with pull access to the image, via a completely different recovery mechanism (image build history/metadata) than the original incident (filesystem layer content), meaning a scanner configured only to inspect filesystem layer *contents* (exactly as the exercise was scoped) would have **missed this specific leak entirely**, despite correctly catching the original vulnerability class. The fix was, once again, migrating to BuildKit's `RUN --mount=type=secret` — the same tool that correctly resolves *both* mechanisms, since it never appears in the image's build history *or* its filesystem content at all. **This is this module's defining lesson**: fixing one specific instance of a general risk category (the filesystem-layer secret persistence) does not automatically fix every mechanism capable of producing the *same underlying risk* (permanent, recoverable secret exposure in a shipped image) — a Principal Engineer must generalize the *underlying principle* ("does this value get permanently, recoverably embedded anywhere in the image artifact, through any mechanism") rather than pattern-matching only the *specific technique* (a file written to a layer) the original incident happened to use, and must correspondingly widen any verification tooling (the scanner) to cover every known exposure mechanism, not just the first one discovered.
-
-## 5. Best Practices
-- Use multi-stage builds for any application requiring build-time tooling (compilers, test runners, dependency managers) not needed at runtime — the builder stage's layers never reach the shipped image at all.
-- Use `docker build --target=<stage>` to serve development and production needs from one Dockerfile, avoiding a separately-maintained dev Dockerfile that drifts from production.
-- Evaluate Alpine's musl-libc compatibility explicitly for any workload with native/compiled dependencies before adopting it purely for its smaller size.
-- Optimize for the *combination* of final image size and cache granularity — consolidate within a logical concern, separate across independent ones — not a single "minimize layer count" metric.
-- Maintain a `.dockerignore` excluding any credential files, `.git`, and build-irrelevant large directories from the build context, treating it as a security control, not merely a performance one.
-- Never use `ARG` to pass a genuine secret, even though it doesn't appear in the running container's environment — its value remains permanently visible via `docker history` regardless; use `RUN --mount=type=secret` instead.
-
-## 6. Anti-patterns
-- Believing `ARG` (versus `ENV`) is a safe mechanism for passing secrets, based on its absence from the running container's environment alone.
-- Verifying secret non-exposure only against a running container's visible state (environment variables or filesystem), rather than the image's complete build history and metadata.
-- Applying "minimize the number of RUN instructions" indiscriminately, without considering the resulting loss of cache granularity across logically-unrelated concerns.
-- Adopting Alpine purely for its smaller size without validating native-dependency compatibility against musl libc.
-- Omitting a `.dockerignore`, allowing a broad `COPY..` to inadvertently include local credential files present in the build context.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

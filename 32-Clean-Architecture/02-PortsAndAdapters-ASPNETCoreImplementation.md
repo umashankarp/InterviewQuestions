@@ -124,61 +124,6 @@ sequenceDiagram
 **Trade-offs.** The team paid for a second Adapter (`FileBasedTransactionSource`) and the DI-scope-per-batch-item ceremony inside the worker — a `BackgroundService` has no ambient HTTP request to hang a `Scoped` lifetime off, so `IServiceScopeFactory.CreateScope()` had to be called explicitly per unit of work, a detail easy to get wrong (Advanced Q6-style captive-dependency risk applies here too if a scope is created once for the whole batch run instead of per item).
 
 **Lessons learned.** The single-Use-Case-multiple-entry-points structure was what actually fixed the discrepancy — not a code review reminding developers to "keep the logic in sync," a structural guarantee that there was only one place the logic could live at all.
-
----
-
-## 5. Best Practices
-
-- **Register every Port-to-Adapter mapping in exactly one composition root (`Program.cs`)** — never scatter DI registrations across multiple `IServiceCollection` extension methods spread across projects without at least a single, discoverable entry point calling them all.
-- **Default every Adapter wrapping a `Scoped` resource to `Scoped` registration**, and treat any deviation as a decision requiring an explicit comment explaining why.
-- **Enable `ValidateScopes = true` and `ValidateOnBuild = true` in every environment**, not just Development — Advanced Q6's incident specifically happened because this was only checked in Development.
-- **Keep the `Api` project's request/response contract types separate from `Application`'s Input/Output boundary types**, even when they're identical today (Advanced Q7) — the mapping cost is small and buys independent API versioning.
-- **Write the fitness-function test before the second feature is built**, not after the first violation is found — retrofitting is materially more expensive once violations exist to clean up.
-- **Use `IServiceScopeFactory.CreateScope()` explicitly, per unit of work, inside any `BackgroundService`/queue consumer** — there is no ambient HTTP-request-scoped lifetime to rely on outside a controller action.
-
----
-
-## 6. Anti-patterns
-
-- **`Singleton` service capturing a `Scoped` dependency**, directly or through a decorator — the single most common, most severe DI-lifetime bug in ASP.NET Core Clean Architecture implementations (Advanced Q6's incident).
-- **Business-rule logic hidden inside a generic MediatR pipeline behavior** meant for cross-cutting concerns (Advanced Q3) — a specific dollar-threshold approval rule buried where no one reading the Use Case would find it.
-- **Reusing `Application`-ring Input/Output DTOs as the literal public API contract** to "save a mapping step," coupling external API consumers to internal refactors (Advanced Q7).
-- **A fitness-function test that exists in the repository but has silently stopped running** in CI due to an unrelated test-filter change — a green build providing zero actual protection (Expert Q4).
-- **Injecting `IConfiguration` directly into a Use Case** "just in case it needs a setting," instead of a purpose-built, strongly-typed port — reintroduces a stringly-typed, compile-time-unchecked dependency into the inner ring.
-- **A single, shared `DbContext` scope created once for an entire batch job's lifetime inside a `BackgroundService`**, rather than per unit of work — silently accumulates tracked entities and stale state across thousands of iterations, degrading performance and correctness simultaneously.
-
----
-
-## 7. Performance Engineering
-
-- **DI resolution cost is real but small.** Resolving a 4–6-deep `Scoped` service graph (Controller → Use Case → Repository → DbContext) via the built-in container measures in low single-digit microseconds per request on .NET 8/9 — immaterial next to a database round trip (1–5ms) or an external gateway call (50–300ms+). Only on a very tight, sub-millisecond internal-RPC budget does this become worth profiling and addressing (e.g., via source-generated DI or manual composition).
-- **MediatR's reflection-based dispatch adds a small, additional per-request cost** over a direct interface call — typically low-microsecond overhead per `Send`, since handler lookup is cached after the first resolution per request type, not re-scanned from scratch every call; still non-zero versus a hand-rolled `IPlaceOrderInputBoundary` direct call, a real (if usually negligible) trade-off against the convenience it buys.
-- **NetArchTest/fitness-function suites run at test time, not runtime** — their cost is entirely a CI-pipeline-duration concern (typically low single-digit seconds per assembly scanned via Mono.Cecil), never a production-latency concern; keep them in a fast, dedicated CI stage so they don't get skipped under time pressure (a direct mitigation for Expert Q4's silent-failure risk).
-- **`WebApplicationFactory`-based end-to-end tests are comparatively expensive** (typically tens to hundreds of milliseconds per test, spinning up the full DI container and middleware pipeline) — reserve them for wiring/HTTP-contract verification, per the established testing-strategy split, not for re-verifying business rules the millisecond-fast `Domain.Tests`/`Application.Tests` already cover.
-- **Batch/background-worker DI-scope-per-item overhead.** Creating a new `IServiceScope` per processed item in a high-volume batch job (Production Example, §4) has real, measurable per-item allocation cost; for extremely high-volume batches, scoping per small *chunk* of items (with an explicit, deliberate acceptance of the resulting captive-dependency risk within just that chunk) is a documented, conscious trade-off — never an accidental one.
-
----
-
-## 8. Security
-
-- **Authentication/authorization middleware lives in `Api`, but authorization *decisions* referencing business state belong in the Use Case or Entity.** `[Authorize]` establishes *who* the caller is; whether that specific caller may cancel *this specific* order in *this specific* state is business logic, and must be enforced identically whether invoked via `OrdersController` or a background job calling the same Use Case directly.
-- **Secrets never reach `Domain`/`Application`.** Connection strings and API keys are resolved from `IConfiguration`/a secrets manager (e.g., Azure Key Vault, AWS Secrets Manager) entirely inside `Program.cs`, then passed as already-resolved values into `Infrastructure`-ring adapter constructors — never as a raw `IConfiguration` reference threaded down into inner-ring code.
-- **`Domain`-ring custom exceptions are safe for `Api`-ring middleware to catch and translate**, since outward-referencing (`Api` referencing a `Domain` exception type) is always permitted — the risk direction runs the other way: a `Domain`-ring exception must never itself reference an outer-ring type (an ASP.NET Core-specific response type) in its own definition.
-- **Anti-corruption at every external Adapter.** A third-party SDK's own error codes, status strings, and amount representations must be validated and normalized at the Adapter boundary before crossing into `Domain`/`Application` — an unvalidated or ambiguous vendor status (e.g., a "pending" that could mean success or failure) propagating raw into settlement/ledger logic is a genuine correctness and security risk, not merely a style concern.
-- **Audit-trail capture at the Use Case boundary, once, centrally** — since every business operation from every entry point (API, batch job, gRPC) resolves to exactly one Use Case, that single point is where a consistent, tamper-evident audit record (who, what, when, from where) can be captured without relying on every controller/entry point to remember to log it independently.
-
----
-
-## 9. Scalability
-
-- **Runtime scaling is orthogonal to the ring structure**, but the concrete implementation choices here directly affect it: `Scoped` DI lifetimes keep each request's object graph isolated, letting the `Api` project scale horizontally behind a load balancer with zero shared in-process state between instances — provided no `Singleton` accidentally captures request-specific state (§6/Advanced Q6).
-- **Message-driven entry points scale independently of the synchronous API.** The Production Example's `BatchReconciliationWorker`, driven by a queue/file rather than HTTP, can be scaled (more consumer instances) or throttled independently of `AuthorizationsController`'s own scaling, because both share only the same `Application`-ring Use Case, not any runtime infrastructure.
-- **Fitness-function CI cost scales with assembly size, not with request volume** — a large `Domain` assembly with thousands of types still completes a Mono.Cecil-based scan in low single-digit seconds; this is a build-pipeline scaling concern, not a production one, and rarely becomes a bottleneck even for large monorepo-style solutions.
-- **Organizational scaling: the four-project split is what lets independent teams own independent Adapters** (one team owns `Infrastructure`'s custodian/payment-rail adapters, another owns `Application`'s Use Cases) without either team's changes requiring the other's review — the concrete .NET mechanism (separate projects, separate `CODEOWNERS` entries) realizing Module 01 §9's organizational-scalability claim in actual repository structure.
-- **The honest limit.** None of the DI/project-structure choices in this module make SQL Server or a downstream custodian API itself scale better — they create the seams (a swappable `IOrderRepository`/`ICustodianGateway` Adapter) that let a team introduce read replicas, sharding, or a different data store later with contained blast radius, which is a necessary precondition for scaling, not a substitute for doing the scaling work itself.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

@@ -106,47 +106,6 @@ Structural fix vs. probabilistic request:
 **Trade-offs:** The engineer's original few-shot example selection was a reasonable, fast way to get the feature working initially — the defect wasn't in the *technique* (few-shot classification is a legitimate, common approach) but in treating example *curation* as a one-time, low-stakes implementation detail rather than a governed design decision requiring deliberate coverage of the full label distribution, including rare-but-critical categories.
 
 **Lessons learned:** **Few-shot example selection directly, measurably biases model output toward the examples' own characteristics — including their label distribution — and this bias is strongest specifically for rare, ambiguous, or high-stakes categories that are, almost by definition, under-represented in a "convenient sample" of typical recent activity.** The fix required deliberately curating few-shot examples to represent every category the classifier needed to distinguish, including specifically over-representing rare-but-critical categories (fraud reports) relative to their natural frequency, precisely because under-representation in the examples produces under-classification in production — directly recurring this course's now-familiar "a configuration choice's correctness depends on matching the actual scope/distribution of what it's applied to, not merely being present" finding, now demonstrated at the prompt-engineering layer specifically.
-
----
-
-## 5. Best Practices
-
-- **Curate few-shot examples deliberately to cover the full range of desired output categories/patterns**, explicitly over-representing rare-but-high-stakes cases relative to their natural frequency — never draw examples from a "convenient" recent sample without checking its actual label distribution.
-- **Reserve chain-of-thought prompting for genuinely multi-step reasoning tasks**, not uniformly — its real, measurable accuracy benefit comes at a real, measurable token/latency cost that isn't justified for simple, single-step tasks.
-- **Default to provider-native structured/constrained output for any machine-parseable response requirement** — reserve instruction-only formatting requests for providers genuinely lacking constrained-generation support.
-- **Test prompts with property-based assertions across a representative, adversarial-inclusive input range**, never exact-match assertions against a small, curated example set.
-- **Classify every retrieved-content source by trust level and apply injection-defense rigor proportionally** — an externally-writable or open content source warrants the full defense-in-depth stack applied specifically to that content before it enters the model's context.
-
----
-
-## 6. Anti-patterns
-
-- **Few-shot examples drawn from a "convenient" sample with no deliberate check of their category/label distribution** — the exact incident, silently biasing model output toward whatever distribution the examples happen to demonstrate.
-- **Applying chain-of-thought prompting uniformly to every task regardless of complexity** — pays real token/latency cost for tasks that don't need the accuracy benefit it provides.
-- **Relying on instruction-only formatting requests ("respond in JSON") for a use case with genuine machine-parsing requirements**, when the provider offers constrained/structured-output generation — accepts probabilistic compliance where a structural guarantee is available.
-- **Treating prompt injection defense as "add one filter and move on"** rather than a genuinely layered, defense-in-depth stack — no single layer is sufficient given the absence of a complete structural fix.
-- **Applying uniform injection-defense rigor to every content source regardless of trust level** — either under-protecting genuinely untrusted, externally-writable sources, or over-engineering defense for first-party, fully-curated content that doesn't need it.
-
----
-
-## 7. Performance Engineering
-
-Chain-of-thought's token/latency cost directly compounds with the decode-phase-scales-with-output-length finding — a chain-of-thought prompt's reasoning tokens are additional *output* tokens the model must generate before reaching its final answer, meaningfully increasing both cost and total completion time relative to a direct-answer prompt for the same underlying task. Few-shot examples are additional *input* tokens, incurring the quadratic-attention-cost concern — a prompt with many, lengthy few-shot examples pays real prefill/TTFT cost, motivating a genuine trade-off between example-set size (more examples generally improve reliability, up to a point of diminishing returns) and cost/latency, calibrated per use case rather than maximized by default.
-
----
-
-## 8. Security
-
-This module's- develop the prompt-injection introduction into a concrete, layered defense architecture — the central, non-negotiable governance principle: **any action an LLM-backed system can trigger (a tool call, a database write, an email send) must be independently, structurally authorized by the system's own access-control layer, never by trusting that the model's own instructions (however carefully engineered) will reliably refuse an injected, malicious request** — the same defense-in-depth-never-trust-the-client-layer-alone principle this course has established repeatedly, now applied to the model's own generated intent as an additional, still-untrusted "client" layer requiring independent, server-side (or tool-execution-layer) enforcement regardless of how well the prompt itself is engineered.
-
----
-
-## 9. Scalability
-
-Structured/constrained output provides a genuine reliability-at-scale benefit beyond its per-request correctness guarantee: a system relying on instruction-only formatting requests must budget for a real, non-zero parsing-failure rate at scale (A4's exact finding) requiring retry/fallback handling for every malformed response — constrained generation's structural guarantee eliminates this entire failure class, directly reducing the operational complexity and retry-volume overhead a large-scale, high-request-volume system would otherwise need to absorb. Few-shot prompt token overhead compounds across every single request at scale, making example-set-size calibration a direct, multiplicative cost-scaling decision, not merely a per-request one.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

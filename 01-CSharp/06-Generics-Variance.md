@@ -203,37 +203,6 @@ A team building a notification service had a method accepting `ICacheReader<Noti
 1. Splitting a read/write interface into a narrower covariant "reader" interface plus an invariant "read-write" interface is a deliberate, valuable design pattern precisely *because* it unlocks safe substitutability that the combined interface can never support — this should be a documented, intentional decision, not something a later refactor casually undoes.
 2. An unsafe cast used to "fix" a variance-related compile error is a major red flag in code review — it's almost never actually safe, and its entire purpose is bypassing the exact safety check that just caught a real design mismatch.
 3. `(object)`-mediated casts between generic interface instantiations should be treated with the same suspicion as raw pointer casts in `unsafe` code — they defeat a compiler-enforced safety guarantee, not just a style preference.
-
----
-
-## 5. Best Practices
-
-- **Prefer generic constraints (`where T: IComparable<T>`) over runtime type checks/casts inside generic methods.** Why: constraints are compile-time-enforced and enable JIT specialization without boxing/casting — a runtime `is`/`as` check inside a generic method is both slower and less safe (caught at runtime, not compile time).
-- **Split a combined read-write generic interface into a narrower covariant "reader" interface when read-only consumers genuinely exist**, exactly as in the fix — a deliberate application of Interface Segregation specifically to unlock variance, not a default habit for every interface.
-- **Never bypass a variance-related compile error with an unsafe `(object)` cast.** Why: the compiler error is correctly identifying that the substitution isn't type-safe — bypassing it reintroduces exactly the class of runtime type-corruption bug illustrated.
-- **Use generic math interfaces (`INumber<T>`, etc.) for numeric algorithms that should work across `int`/`double`/`decimal`/custom numeric types**, instead of either duplicating the algorithm per type or falling back to a slower `dynamic`/reflection-based generic implementation.
-- **Understand and explicitly state the reason `List<T>` isn't covariant while `IEnumerable<T>` is** when reviewing any API design choice between them — if a method only needs to *read* a sequence, prefer accepting `IEnumerable<T>` (or `IReadOnlyList<T>`/`IReadOnlyCollection<T>`, themselves covariant) over `List<T>`, both for variance flexibility and for the general "accept the narrowest interface you actually need" principle.
-- **Use `where T: allows ref struct` (C# 13+)** when writing generic utility code that should also work with `Span<T>`/other `ref struct` types, rather than maintaining a separate non-generic overload — but recognize this is a narrow, specialized feature (relevant mainly to low-level/performance-library code, directly connecting back to) rather than an everyday constraint.
-
----
-
-## 6. Anti-patterns
-
-- **Bypassing a variance compile error via an unsafe cast** (the root cause). Fix: reconsider whether the interface design should be split (reader/writer) or whether the invariant interface is genuinely, correctly required — never cast around the compiler's correct rejection.
-- **Using `object`/non-generic collections (`ArrayList`, `Hashtable`) in new code.** Why it fails: reintroduces boxing and eliminates compile-time type safety entirely — there is essentially never a legitimate reason to reach for these in modern C#. Fix: always use the generic collection equivalents.
-- **Assuming `List<Derived>` can be passed where `List<Base>` is expected** (the classic trap). Fix: know the precise rule — use `IEnumerable<T>`/other covariant interfaces if only reading is needed; if mutation is genuinely required through the substituted reference, the design requirement itself is unsound and needs rethinking (there is no safe way to make `List<T>` itself variant).
-- **Over-constraining generic methods "just in case"** (e.g., adding `where T: class, new, IComparable<T>, IDisposable` when the method body only ever calls `.CompareTo`). Why it fails: unnecessarily restricts which types can call the method, and signals a contract broader than what's actually used — a Liskov/Interface-Segregation-style violation applied to generic constraints. Fix: constrain to exactly what the method body requires, no more.
-- **Writing a generic method with a constraint that could instead be expressed as a simple overload or non-generic method**, adding unnecessary complexity/compile-time cost for no real reuse benefit (e.g., a "generic" method that's only ever called with one concrete type across the entire codebase). Fix: don't generalize speculatively — introduce genericity when actual reuse across multiple concrete types materializes, consistent with this course's recurring "don't design for hypothetical future requirements" principle.
-- **Ignoring the reference-type-code-sharing behavior when reasoning about per-type static state.** A `static` field inside a generic class (`class Cache<T> { static Dictionary<string,T> _store; }`) gets a **separate** static field instance **per distinct closed generic type** (`Cache<int>`, `Cache<string>`, `Cache<MyClass>` each have their own independent `_store`) — a common, subtle bug source when a developer assumes (incorrectly) that reference-type code-sharing also means shared static state across reference-type instantiations; it does not — static field instances are always per-closed-type, regardless of native-code sharing.
-
----
-
----
-
----
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

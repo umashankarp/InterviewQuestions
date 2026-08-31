@@ -116,26 +116,6 @@ graph LR
 **Fix**: (1) Redesigned the onboarding scaffolding tool to **reference the canonical, continuously-updated standard directly** — rather than embedding a static, point-in-time copy — so that any future improvement to the canonical standard automatically, immediately propagates to every subsequently-onboarded service without requiring a separate, manual scaffolding-tool update step; directly the exact fix, now applied to observability-platform onboarding specifically. (2) Conducted an organization-wide **retroactive audit**, comparing every already-onboarded service's actual, current observability configuration against the canonical standard, identifying and remediating every service (a substantial fraction of those onboarded in the platform's first year) missing one or more of the three verification layers. (3) Established a standing, periodic **platform capability audit** — sampling live services on a recurring schedule and confirming each of the three verification layers is not merely nominally present but actually, functionally current, converting "we have a golden-path onboarding template" from an assumed, one-time-verified claim into a continuously re-verified one.
 
 **Lesson**: This is the domain's capstone-level generalization of every prior module's finding: even a fully-designed, three-layer "verify the verifier" governance model (Modules 93–95) is itself subject to a **fourth-order instance of the identical risk** — the mechanism responsible for *delivering* these three verified layers to every service can itself silently drift and stop doing so, and "we have this governance model" is, at the platform-architecture level, exactly as unverified an assumption as any single layer within it, until the delivery mechanism's own currency is independently, continuously confirmed. The recursive "verify the verifier" principle this domain has now applied at three successive layers (telemetry coverage, alerting response, human procedure) has, at the platform-capstone level, one further necessary turn: verify that the thing delivering all three verified layers to every new instance of the system is itself still delivering the current, complete version — not the version that happened to be correct when it was first built.
-
----
-
-## 5. Best Practices
-- Treat Modules 93–95's three verification layers as one unified governance framework, automatically provisioned together for every service, with a single dashboard reporting each layer's actual status per service.
-- Enforce cardinality budgets and cost attribution/chargeback organization-wide as a platform-provisioned default, not an optional, per-team-adopted practice.
-- Design for seamless multi-signal correlation (metric → exemplar trace → correlated logs → linked runbook) via a consistent, platform-wide identifier scheme, rather than three separately-queried, disconnected tools.
-- Apply the three-constraint retention model (age, reference, compliance) to tiered telemetry storage specifically, avoiding both prohibitive all-hot-tier cost and premature, irretrievable-when-needed cold-archival.
-- Build golden-path onboarding scaffolding that *references* the canonical, continuously-evolving platform standard directly, never a static, point-in-time snapshot requiring a separate, easily-forgotten manual update step.
-- Periodically, actively audit already-onboarded services against the *current* canonical standard, not merely against whatever standard existed when they were originally onboarded.
-
-## 6. Anti-patterns
-- Allowing each team to independently adopt (or skip) Modules 93–95's practices piecemeal, rather than delivering all three as one unified, automatically-provisioned platform default.
-- Organization-wide telemetry cost governance with no per-team attribution/chargeback, creating a tragedy-of-the-commons dynamic with no individual accountability.
-- Three separate, disconnected observability tools (metrics, logs, traces) requiring manual, by-hand cross-referencing during a live incident, rather than a unified, correlated query experience.
-- A static, hard-coded onboarding scaffolding template that silently falls out of sync with the platform's own evolving canonical standard, delivering an outdated, incomplete version of "the platform standard" to every service onboarded after a given point.
-- Assuming an organization-wide observability governance model is complete and functioning because it was correctly designed once, without periodically, actively auditing whether its delivery mechanism is still current.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

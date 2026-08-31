@@ -62,59 +62,6 @@ graph TB
 
 ## 4. Production Example
 **Scenario**: A reporting query joining `Orders` to `Customers` on `CustomerId` degraded from ~200ms to over 30 seconds after a large data migration. **Investigation**: the execution plan showed a **Nested Loop Join** with an estimated outer-row-count of ~50 (stale statistics from before the migration) against an *actual* row count of ~2 million — the optimizer had chosen a nested-loop join appropriate for 50 rows, but was actually executing 2 million individual inner-side seeks. **Fix**: `UPDATE STATISTICS Orders WITH FULLSCAN` immediately corrected the cardinality estimate, and the optimizer automatically switched to a Hash Join on the next execution, restoring the original ~200ms performance with no query-text or index changes at all. **Lesson**: a "slow query" is very often not a missing-index problem at all — stale statistics causing a cardinality misestimate is one of the most common, and most trivially fixable (once diagnosed), root causes of a sudden, unexplained query-performance regression after a bulk data change.
-
-## 5. Best Practices
-- Always inspect the actual execution plan (not just the query text) before attempting any index/query change — diagnose the actual bottleneck (scan vs. seek, join algorithm, cardinality estimate accuracy) rather than guessing.
-- Keep predicates sargable — never wrap an indexed column in a function/implicit conversion in a `WHERE` clause.
-- Use covering indexes (`INCLUDE`) for frequently-run, read-heavy queries to eliminate key-lookup cost entirely.
-- Update statistics proactively after large bulk loads, not only relying on the auto-update threshold.
-
-## 6. Anti-patterns
-- Wrapping indexed columns in functions in `WHERE` clauses (`WHERE UPPER(Email) = 'X'`), destroying sargability.
-- Creating an index for every column combination speculatively "just in case," incurring substantial write-cost overhead without measured read benefit.
-- Ignoring implicit conversions between mismatched column/parameter types, silently defeating an otherwise-correct index.
-- Applying every DMV-suggested missing index blindly without evaluating overlap with existing indexes.
-
----
-
-## 7. Performance Engineering
-
-**CPU**: An index seek's CPU cost scales with matching rows plus B+ tree depth (typically 3-4 levels even for a multi-million-row table, since each level fans out by hundreds of entries) — a scan's CPU cost scales linearly with every row/page touched, which is why a seek-vs-scan misdiagnosis is the single biggest CPU-cost lever in this module's scope. A hash join's build phase is CPU-intensive proportional to the smaller input's row count; a sort operator (feeding a merge join, or satisfying an `ORDER BY` with no supporting index) is O(n log n) CPU cost that a covering, ordered index can eliminate entirely.
-
-**Memory**: The optimizer requests a **memory grant** (for sort/hash workspace) sized from the same cardinality estimate driving plan selection — an underestimated grant causes a **spill to tempdb** (the sort/hash overflows to disk, visible in the plan as a `SpillToTempDb` warning, often a 10-100x slowdown for that operator); an overestimated grant wastes server memory and can starve concurrent queries waiting on `RESOURCE_SEMAPHORE` for their own grant. This is the same cardinality-estimation dependency as plan-shape selection (§2.4), just manifesting as a memory problem instead of a join-algorithm problem.
-
-**Execution-plan/compilation cost**: Every distinct query text (or one lacking parameterization) triggers a fresh compilation, consuming CPU and plan-cache memory — non-parameterized ad-hoc SQL (string-concatenated literals instead of parameters) is a classic **plan cache bloat** anti-pattern: thousands of single-use plans evict genuinely reusable ones and add per-execution compilation overhead that stored procedures/parameterized queries avoid.
-
-**Index write cost**: Every nonclustered index adds an update to every insert/update/delete touching its key or `INCLUDE` columns — a table with 8 indexes pays that cost 8 times per write; for a high-ingest FinTech ledger/order table, this is frequently the dominant cost driver, making "how many indexes does this table actually need" a genuine capacity-planning question, not just a design nicety.
-
-**Benchmarking**: Use `SET STATISTICS TIME, IO ON` for logical reads/CPU/elapsed time per statement, and the actual execution plan's operator-level warnings (spill, memory grant, excessive actual-vs-estimated rows) as the primary diagnostic signal — never benchmark against an empty or freshly-reindexed table, since fragmentation and realistic data-skew change both seek cost and cardinality estimates materially.
-
-**Caching**: SQL Server's **buffer pool** caches data/index pages in memory across executions — a "cold cache" first execution of a query touching pages not yet resident is dominated by physical I/O, while a warm cache serves entirely from memory; a working set (hot index pages for the most active accounts/instruments) that fits comfortably in buffer pool memory is a major, often-overlooked lever for OLTP latency, distinct from and additive to index design itself.
-
-## 8. Security
-
-**SQL injection and index/plan interaction**: String-concatenated dynamic SQL is both a classic injection vector *and* defeats the plan cache (each injected literal produces a distinct query text) — parameterized queries/stored procedures fix both problems simultaneously, which is a genuinely useful framing when explaining to a team why "just use parameters" is a security fix and a performance fix at once, not two separate asks.
-
-**Least privilege**: Grant `ALTER INDEX`/`CREATE INDEX` rights narrowly (a dedicated DBA/release-automation role), not broadly to application service accounts — an application account only ever needs `SELECT`/`INSERT`/`UPDATE`/`DELETE` on its own schema, never DDL rights that could let a compromised application identity silently drop or degrade production indexes.
-
-**Information disclosure via `INCLUDE` columns**: A covering index's `INCLUDE` list physically duplicates column data into the index's leaf pages — including a sensitive column (SSN, account number) purely to make one query covering widens that column's on-disk footprint and backup/restore exposure surface without a corresponding access-control benefit; weigh covering-index design against data-minimization, not purely against query speed.
-
-**Encryption at rest (TDE)**: Transparent Data Encryption encrypts data and index pages transparently at the storage-engine I/O layer — seeks/scans operate on decrypted in-memory buffer-pool pages exactly as without TDE, so index design and query-plan behavior are unaffected by enabling it; the cost is at the physical I/O layer (page encrypt/decrypt), not the logical seek/scan cost.
-
-**Audit logging**: Track DDL changes to indexes (`CREATE`/`DROP`/`ALTER INDEX`) via **SQL Server Audit** or Extended Events specifically — an unreviewed index drop by a well-intentioned cleanup script is a realistic, high-impact incident class (§14) in any production financial system, and having an audit trail of exactly who changed which index and when is the difference between a five-minute root-cause and a multi-hour one.
-
-## 9. Scalability
-
-**Read replicas**: Always On Availability Group **readable secondaries** offload reporting/analytical scans from the primary — but secondaries apply changes via log redo, not independent index maintenance, so a secondary's index state always trails the primary by the current redo lag; a reporting query relying on a secondary's index must tolerate that staleness, which matters materially for regulatory "as of now" reporting (cross-reference Module 19 Expert Q3).
-
-**Partitioning**: Partition-aligned indexes (an index sharing the base table's partition scheme) enable **partition elimination** — a query with a predicate on the partition key only scans/seeks the relevant partition(s), not the whole table — essential for a billion-row time-series/ledger table's both reporting-scan and retention (`SWITCH`-based archival) story.
-
-**Sharding**: Cross-shard index design is duplicated per shard with no engine-level cross-shard index — a query spanning shards requires application-level fan-out and merge, since no single B+ tree spans the shard boundary; index design decisions (covering columns, key order) must be made per-shard but are typically identical across shards for a uniformly-sharded schema.
-
-**HA/DR**: Index rebuild/reorganize operations generate substantial transaction-log volume, which must ship to every synchronous/asynchronous secondary in an Always On AG — scheduling large index maintenance requires accounting for secondary log-shipping bandwidth and redo-thread catch-up capacity, not just primary-side resource availability, to avoid growing replication lag as a side effect of routine maintenance.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

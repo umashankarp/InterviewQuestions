@@ -111,47 +111,6 @@ trackBy (Angular,/158) vs. key (React) — same PURPOSE, different DEFAULT VISIB
 **Trade-offs:** The empty dependency array was not a careless mistake but a deliberate, individually-reasonable choice to avoid the WebSocket subscription being torn down and re-established on every keystroke in the order-price input (which *would* have been a genuine, separate performance problem) — the team correctly avoided one failure mode (resubscription thrashing) while not recognizing that the same fix silently introduced the stale-closure failure mode instead, since both share the identical `useEffect` dependency-array configuration point.
 
 **Lessons learned:** **A `useEffect`'s dependency array is not merely a performance-tuning knob (how often does this re-run) — it is a correctness contract about which values the effect's closure is allowed to safely read**, and omitting a value the closure genuinely uses doesn't merely risk "a slightly stale UI," it can silently and permanently disconnect a safety-relevant check from the value it was supposed to validate against, with the framework providing zero runtime signal (React's `eslint-plugin-react-hooks` *exhaustive-deps* lint rule is a static, opt-in check catching exactly this class of bug at write-time — but only if enabled and heeded, not a runtime guarantee). This is React's own, structurally distinct instance of the "individually-correct-seeming configuration choice silently wrong for the actual usage" composition-risk shape, occurring specifically at the closure-capture seam that has no Angular counterpart at all.
-
----
-
-## 5. Best Practices
-
-- **Enable and enforce `eslint-plugin-react-hooks`'s `exhaustive-deps` rule** across the codebase — it is the closest mechanical safeguard against the exact stale-closure failure class, catching a missing dependency at write-time rather than relying on a developer noticing a silently-wrong runtime value.
-- **Use the functional-update form of `setState`** (`setOrderPrice(prev =>...)`) when a state update depends on the previous state value, rather than reading the outer closure's snapshot — sidesteps a category of stale-closure bugs specifically for state *updates*, independent of the effect-dependency-array discipline needed for state *reads* inside effects.
-- **Treat `key` as always requiring a genuinely stable, unique identifier drawn from the data itself** (an instrument symbol, a database ID) — never array index for any list that can reorder, filter, or have items inserted/removed from the middle, directly reusing/I1's Angular `trackBy` guidance verbatim.
-- **Wrap expensive child components in `memo` deliberately, and stabilize the props passed to them with `useMemo`/`useCallback`** — matching the risk-tiered `OnPush` adoption principle: apply where profiling demonstrates genuine re-render cost, not uniformly by default.
-- **Prefer the Rules-of-Hooks-compliant, unconditional hook-call pattern always**, even when it feels like it requires slightly more verbose conditional logic *inside* a hook body rather than conditionally calling the hook itself — this is a hard, non-negotiable structural requirement, not a style preference.
-
----
-
-## 6. Anti-patterns
-
-- **A `useEffect` reading a value from its closure that isn't listed in its dependency array** — the exact incident; React's single most distinctive, most commonly interview-tested footgun.
-- **Array-index-based `key` props on any reorderable, filterable, or insert/delete-in-the-middle list** — the React-specific instance of the identical incident mechanism, made only marginally more visible by React's presence-only console warning.
-- **Passing inline object/array/function literals as props to a `memo`-wrapped child** — silently defeats the memoization the wrapping was added specifically to provide, a distinctly-React footgun with no Angular equivalent since Angular's `OnPush` doesn't depend on prop-reference stability being independently maintained by the *parent's* own render behavior in the same way.
-- **Conditionally calling a hook** (inside an `if`, a loop, or after an early `return`) — a structural correctness violation, not a style issue, per the call-order-identity mechanism.
-- **Treating Context as a full dependency-injection replacement for Angular's injector** — Context provides value distribution with scoped overrides, but not the transitive, type-resolved dependency graph Angular's DI provides; teams migrating between the two frameworks who assume feature parity here are systematically surprised.
-
----
-
-## 7. Performance Engineering
-
-React's default "re-render the whole function on any relevant state change" model means the *reconciliation diffing cost* — not a Zone.js-style blanket change-detection trigger — is the dominant cost model: Fiber's incremental scheduling bounds *when* work happens (deferring low-priority re-renders behind high-priority ones, via `startTransition`/`useDeferredValue` in React 18+, a capability with no Angular analogue) but does not, on its own, reduce *how much* diffing work a given re-render requires — that reduction is `memo`/`useMemo`/`useCallback`'s job specifically, the React-layer equivalent of the two-lever (frequency and scope) reasoning, but mapped onto different concrete mechanisms: Fiber's prioritization addresses something closer to *when/frequency of committed work*, while `memo` addresses *scope* (which subtrees re-render at all). A high-frequency data source (a live tick feed) feeding React state should be buffered/throttled before triggering `setState` for exactly the same reason established for Angular — reducing state-update frequency reduces the number of reconciliation passes triggered, independent of how well-memoized the receiving components are.
-
----
-
-## 8. Security
-
-React, like Angular, sanitizes rendered content by default — JSX's `{expression}` interpolation automatically escapes values, and React requires an explicit, clearly-named opt-out (`dangerouslySetInnerHTML`, whose deliberately alarming name is itself a design choice signaling the same risk Angular's `bypassSecurityTrustHtml` methods carry) to render raw, unescaped HTML. The identical governance recommendation applies verbatim: every `dangerouslySetInnerHTML` call site should be inventoried, justified, and periodically re-audited (/A7's discipline transfers directly, with no meaningful divergence between the two frameworks here beyond naming convention).
-
----
-
-## 9. Scalability
-
-Fiber's interruptible, priority-scheduled rendering is React's most distinctive scalability lever with no Angular counterpart — a large, complex UI update can be deferred behind a more urgent user interaction automatically, rather than blocking the main thread for a single, uninterruptible synchronous pass the way Angular's change-detection tree walk does by default. React's code-splitting (`React.lazy` plus dynamic `import`) provides the same initial-load-bounding benefit as Angular's lazy-loaded modules via a structurally near-identical mechanism (both ultimately rely on the bundler's dynamic-import support) — this is a case of genuine, near-total parity rather than divergence.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

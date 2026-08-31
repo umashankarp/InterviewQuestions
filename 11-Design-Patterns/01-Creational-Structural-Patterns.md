@@ -125,69 +125,6 @@ classDiagram
 
 ## 4. Production Example
 **Scenario**: A team needed to add response caching, retry-with-backoff, and logging to an existing `IPaymentGateway` implementation (a third-party SDK wrapper) — the initial approach created a single `EnhancedPaymentGateway` class directly containing all three concerns' logic inline, which quickly became difficult to test in isolation (a bug in the retry logic required mocking through caching and logging code irrelevantly) and impossible to reuse the caching/retry logic for a *different* interface (`IShippingRateProvider`) without duplicating it. **Investigation**: recognized the underlying problem as forcing three genuinely independent, composable concerns into one monolithic class rather than three independently-testable, stackable Decorators. **Fix**: refactored into `CachingGatewayDecorator`, `RetryGatewayDecorator`, and `LoggingGatewayDecorator`, each implementing `IPaymentGateway` and wrapping an inner `IPaymentGateway`, composed at the DI registration point (`services.AddScoped<IPaymentGateway>(sp => new LoggingGatewayDecorator(new RetryGatewayDecorator(new CachingGatewayDecorator(new StripeGatewayAdapter(...)))))`) — each decorator independently unit-testable (mocking only its immediate inner dependency), and the retry/caching decorators directly reusable for `IShippingRateProvider` by simply making them generic over the wrapped interface type where the logic was interface-agnostic. **Lesson**: when multiple genuinely independent cross-cutting concerns need to wrap a single core operation, Decorator's composability is the correct structural pattern — a monolithic class combining all concerns inline both fails single-responsibility and forfeits the reuse opportunity a properly-factored Decorator chain provides across multiple unrelated interfaces.
-
-## 5. Best Practices
-- Use Factory Method/Abstract Factory when construction logic needs to vary by context, especially for maintaining a consistent "family" of related objects (Abstract Factory specifically).
-- Use Builder for objects with many optional/conditional construction parameters needing validation, not for simple, few-parameter object creation.
-- Prefer DI-container `Singleton` lifetime over the classic static-instance Singleton pattern in DI-container-based codebases.
-- Use Decorator for independently-composable cross-cutting concerns (caching, retry, logging) around a shared interface, rather than a monolithic class combining them inline.
-
-## 6. Anti-patterns
-- Using the classic static-instance Singleton pattern in a DI-container-based codebase instead of `Singleton`-lifetime registration (the captive-dependency/testability concerns apply identically).
-- Forcing an Abstract Factory where a simple Factory Method suffices (no genuine "family consistency" requirement exists).
-- A monolithic class combining multiple independent cross-cutting concerns inline instead of composable Decorators (the §4 payment-gateway-wrapper incident).
-- Confusing Adapter and Facade's intent — using an Adapter to "simplify" an already-compatible interface, or a Facade to bridge a genuinely incompatible one.
-
----
-
-## 7. Performance Engineering
-
-**CPU/allocation cost of pattern overhead:** A Decorator chain of depth *n* adds *n* virtual-dispatch hops per call — for the `LoggingGatewayDecorator(RetryGatewayDecorator(CachingGatewayDecorator(StripeGatewayAdapter)))` chain, every `ChargeAsync` call pays three extra virtual calls before reaching the real gateway. On modern .NET this is typically 1-3ns per virtual call (a vtable/interface-dispatch lookup, not a heap allocation) — negligible against an actual network round-trip to a payment provider (50-300ms), but measurable and worth avoiding in a hot, in-process, allocation-sensitive path (e.g., a market-data tick-processing pipeline calling a Decorator-wrapped price normalizer millions of times/second, where 3ns × millions of calls/sec becomes a visible line in a CPU profile).
-
-**Allocation cost:** Each Decorator/Proxy/Adapter instance is itself a heap allocation, but these are typically constructed **once** at DI-composition time (`services.AddScoped<IPaymentGateway>(sp => new Logging(new Retry(new Caching(...))))`), not per-call — the real allocation cost to watch for is a Decorator that captures per-call state via closures or boxes value types on every invocation (e.g., a logging decorator that builds a new `Dictionary<string,object>` of structured-log properties on every call instead of using a pre-allocated, pooled buffer or `LoggerMessage` source-generated delegates).
-
-**Factory allocation patterns:** A Factory Method invoked in a hot path (e.g., re-resolving `IPaymentGatewayFactory.Create(region)` per request instead of caching the resolved gateway per region) repeats a `switch`-based lookup and, depending on implementation, a fresh object allocation each time — for genuinely stateless gateway adapters, caching the constructed instance per region (a `ConcurrentDictionary<string, IPaymentGateway>` memoized inside the factory, or simply registering region-specific gateways as DI singletons keyed by region) eliminates the repeated allocation entirely.
-
-**Builder cost:** A fluent Builder that mutates and returns `this` (the common case) allocates once regardless of how many `With*` calls chain onto it; a Builder implemented as an immutable `record`-returning-`with` chain instead allocates one new object per step — fine for a handful of Builder calls per request, but a real cost difference to know when justifying "why does our Builder mutate an internal list instead of using `with` expressions" in a code review.
-
-**Proxy/virtual-dispatch cost for high-frequency paths:** A protection proxy (Expert exercise) adds an authorization-service call on **every** access — acceptable for a `GetByIdAsync` called once per HTTP request, but if the same proxy wraps a repository called in a tight loop (e.g., authorizing each of 10,000 rows individually while streaming a report), the authorization check's cost (frequently itself a database or cache round-trip) dominates; the fix is batching the authorization decision (authorize the *query*, not each *row*) rather than removing the proxy.
-
-**Benchmarking guidance:** Benchmark a Decorator/Proxy chain's overhead with `BenchmarkDotNet` against the raw, undecorated call to get an honest per-hop cost, and always benchmark in the context the pattern will actually run in (in-process CPU-bound loop vs. I/O-bound network call) — the same 3ns virtual-dispatch cost that's completely irrelevant wrapped around a 100ms network call becomes the dominant cost wrapped around a 10ns in-memory computation.
-
----
-
-## 8. Security
-
-**Threats:** The classic static-instance Singleton (§2.3) holding **mutable, request-scoped-looking state** (e.g., a "current user" or "current tenant" field set by one request and read by another) is a direct multi-tenant data-leak vector in any ASP.NET Core app, because a Singleton's lifetime spans the entire process, not one request — if code ever assigns to a Singleton's mutable field from within a request handler, that assignment is visible to **every concurrently-executing request** on the same process, not just the request that set it. This is precisely the shape of the Production Debugging incident below.
-
-**Mitigations:** Never store per-request/per-tenant mutable state in a `Singleton`-lifetime object; if a Singleton needs per-request context, inject `IHttpContextAccessor` (itself safe, since it reads `AsyncLocal`-flowed, per-request-scoped context) rather than storing the context as a field. Treat any Singleton with a settable, non-`readonly` field as a code-review red flag requiring justification.
-
-**Untrusted-type instantiation via Factory:** A Factory Method or Abstract Factory that constructs a type by name from **untrusted input** (e.g., `Type.GetType(userSuppliedTypeName)` or a `switch` driven by a deserialized string from an external payload, then `Activator.CreateInstance`) is a direct code-execution/deserialization-gadget risk — an attacker able to influence the "which type to construct" input can potentially instantiate an arbitrary type on the classpath with attacker-controlled constructor arguments, one of the standard mechanisms behind insecure-deserialization CVEs (the same underlying risk class as `BinaryFormatter`/`Newtonsoft.Json TypeNameHandling.All`). A Factory's `switch`/lookup **must** be closed over a fixed, hardcoded, allow-listed set of known types (exactly as `PaymentGatewayFactory`'s region `switch` does) — never open-ended reflection driven directly by untrusted input.
-
-**OWASP mapping:** A mutable-state Singleton leaking data across tenants maps to OWASP's Broken Access Control / sensitive-data-exposure categories; a reflection-driven Factory instantiating attacker-influenced types maps to Insecure Deserialization (A08:2021 — Software and Data Integrity Failures).
-
-**AuthN/AuthZ:** A protection proxy (§2.8) centralizes authorization — but only as strongly as its own placement is enforced; if any code path can reach the wrapped `SqlOrderRepository` directly (bypassing the `AuthorizingOrderRepositoryProxy`), the proxy provides no real guarantee. DI registration must bind the interface exclusively to the proxy-wrapped chain, and the inner, unwrapped implementation should not itself be separately registered/resolvable.
-
-**Secrets:** A Decorator/Proxy that logs request/response payloads (the `LoggingGatewayDecorator`) must be reviewed for what it actually logs — a naive `logger.LogInformation("Charging {Amount} with card {Card}", amount, cardNumber)` inside a logging decorator wrapping a payment gateway is a PCI-DSS violation baked directly into a "harmless" cross-cutting concern; logging decorators need the same secret/PII redaction discipline as any other logging code, arguably more so since they're applied broadly and easy to forget are on the hot path of every call.
-
-**Encryption:** Not pattern-specific; standard in-transit/at-rest requirements apply to whatever the Adapter/Proxy/Decorator ultimately transmits or persists.
-
----
-
-## 9. Scalability
-
-**Codebase/team scaling:** Decorator's composability is a direct enabler of **team-boundary scaling** — a platform team can own the caching/retry/logging decorators as shared, independently-versioned components while product teams own the core business-logic implementations they wrap, with the DI composition root as the single, small point of integration between the two ownership domains; a monolithic class combining all concerns (the §4 incident) has no such natural ownership seam, forcing every team touching any concern to coordinate changes to the same file.
-
-**Abstract Factory and family consistency at scale:** As a codebase grows to support more "families" (more cloud providers, more regions, more payment-gateway tiers), Abstract Factory keeps the family-consistency guarantee **structural** regardless of team count — any team adding a new family (a new `ICloudProviderFactory` implementation) cannot accidentally produce an inconsistent mix, without needing cross-team code review of every other team's factory to verify compatibility.
-
-**Singleton and horizontal scaling:** A DI-container `Singleton` is one-instance-**per-process**, not one-instance-globally — in a horizontally-scaled deployment (multiple pod/instance replicas), each replica has its own Singleton instance; any invariant a team assumes a Singleton enforces ("only one instance exists, so this in-memory counter is authoritative") silently breaks the moment the service scales beyond one replica, a frequent source of subtly wrong assumptions when a service that was safely running as a single instance is later horizontally scaled for load.
-
-**Proxy and remote-call fan-out:** A remote proxy (a generated gRPC client stub, §2.8) that doesn't pool/reuse underlying channels can become a scaling bottleneck under load (channel/connection exhaustion) — the proxy pattern's transparency (callers don't know they're crossing a process boundary) is exactly what makes this easy to overlook, since nothing in the calling code's shape signals "this call has network-scaling implications the way a local method call doesn't."
-
-**Facade and organizational scaling:** A Facade over a complex subsystem is also an organizational tool — it lets a subsystem-owning team evolve internal structure freely (splitting/merging internal components) without breaking every consuming team, as long as the Facade's own contract stays stable; this is the same "stable public contract, free internal evolution" property that makes microservice API boundaries valuable at a much larger organizational scale.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

@@ -107,47 +107,6 @@ trackBy correctness — the module's own incident mechanism:
 **Trade-offs:** The index-based `trackBy` was not a careless omission but a copy-paste inheritance from the platform's other grids, where it was genuinely, correctly harmless — the component itself was reused across multiple views with different reordering behavior, and nothing in the component's own interface signaled that `trackBy` needed to be reconsidered per-usage rather than treated as a fixed, inherited default.
 
 **Lessons learned:** **A shared, reusable component's correctness is not a fixed property of the component itself when one of its configuration parameters' correctness depends on how the specific consuming context uses it** — `trackBy: index` is correct for append/update-only usage and silently incorrect for reordering usage, and nothing about the grid component's own contract communicated this distinction to a team reusing it for a new, reordering-heavy view. This directly recurs the "control fired correctly, but its actual effect was never independently verified for this specific usage" finding, now at the frontend component-reuse layer: the grid component "worked" by every test it had ever been run against, because none of those prior tests exercised reordering specifically.
-
----
-
-## 5. Best Practices
-
-- **Treat `trackBy` as a per-usage correctness decision, never an inherited default** — a component reused across views with different reordering behavior needs its `trackBy` function explicitly reconsidered for each new usage, not copy-pasted from a prior, superficially-similar usage.
-- **Reserve NgRx for genuinely cross-desk, audit-relevant state; keep desk-local state in Signals** — TradeView's shell store staying narrowly scoped is what keeps five independent teams' deployment cadences genuinely independent.
-- **Never derive authorization/entitlement decisions client-side from cached state** — always treat client-held entitlement data as a UX cache of a server-side decision, re-verified server-side on every consequential action (order submission), per the defense-in-depth finding.
-- **Test virtualized/recycled grids specifically against reordering, not merely append/update scenarios** (the exact gap) — a grid's correctness under `OnPush` + `trackBy` + virtual scrolling is a genuinely different test surface than its correctness under simple data updates.
-- **Instrument the order-submission path end-to-end**, not merely each mechanism (form validation, NgRx dispatch, backend confirmation) independently — the highest-consequence composition point deserves its own dedicated, end-to-end verification distinct from any single mechanism's unit tests.
-
----
-
-## 6. Anti-patterns
-
-- **Index-based `trackBy` on any grid whose underlying data can be reordered** — the precise incident; correct only for strictly append/update-only usage.
-- **Copy-pasting a working component's configuration into a new usage context without re-verifying every configuration choice remains valid for the new context's specific behavior** — the platform-adoption-without-currency-verification pattern identified, now at the component-reuse layer.
-- **Deriving client-visible authorization state from a stale, cached NgRx entitlements slice without re-verification at consequential action points** — reintroduces exactly the client-side-security-boundary anti-pattern warns against.
-- **Treating a virtualized grid's correctness as fully covered by the same test suite used for a non-virtualized, non-reordering grid** — misses the specific, distinct failure surface reordering-under-recycling introduces.
-- **Centralizing desk-local, high-frequency state into the shell's cross-desk NgRx store "for consistency"** — reintroduces the unnecessary cross-team coupling A1 explicitly warned against, and needlessly widens the shell's own change-detection/state-update surface.
-
----
-
-## 7. Performance Engineering
-
-TradeView's performance budget is the composed product of every lever this course's Angular domain has established: `OnPush` plus buffered ingestion bound change-detection frequency and scope; virtual scrolling bounds DOM-node count independent of dataset size; Signals' precise dependency tracking bounds recomputation to genuinely-changed derived values; lazy-loaded, independently-deployed remotes bound initial-load cost to only the desks a given trader actually needs. **The critical, composition-specific performance insight this capstone adds: these levers compose multiplicatively, not additively** — a grid correctly using `OnPush`, buffering, virtual scrolling, and precise `trackBy` simultaneously handles a market-open volume spike that any single lever alone, however well-tuned, could not absorb on its own; the incident demonstrates that a single incorrectly-configured lever (`trackBy`) can silently undermine the correctness guarantee the other three, individually correct, levers were assumed to jointly provide.
-
----
-
-## 8. Security
-
-Every order-entry submission is a consequential financial action requiring the same defense-in-depth discipline this course's backend domains established: client-side buying-power validation is a UX convenience, never a substitute for the identical check re-run authoritatively server-side before an order is actually accepted (directly recurring the gateway-defense-in-depth finding). TradeView's entitlement-driven UI visibility — hiding instruments a trader isn't authorized to view — is likewise a UX layer over server-side-enforced access control (this course's/41 IAM/OAuth2 domains), never itself the authorization boundary; a trader manipulating client-side NgRx state via browser developer tools must never be able to gain actual access to data or actions the backend hasn't independently authorized.
-
----
-
-## 9. Scalability
-
-TradeView's five-remote micro-frontend decomposition scales team independence with desk count — each desk team ships on its own schedule, verified against the shared-instance integrity check (/Expert exercise) rather than requiring shell-team coordination for every change. Virtual scrolling scales rendering cost with viewport size, not instrument-universe size, letting the platform's total addressable instrument count grow without a corresponding grid-performance regression. The shell's deliberately narrow cross-desk NgRx store scales independent of any single desk's internal state complexity, keeping the platform's single shared-coupling surface bounded and explicit rather than growing implicitly as desks add features.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

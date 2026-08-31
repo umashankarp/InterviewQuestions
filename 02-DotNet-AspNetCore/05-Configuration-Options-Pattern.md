@@ -65,21 +65,6 @@ graph LR
 ## 4. Production Example
 
 **Scenario**: A feature-flag service injected `IOptionsSnapshot<FeatureFlags>` into a `Singleton`-registered background scheduler — this threw `InvalidOperationException` (captive-dependency violation) immediately once `ValidateOnBuild` was enabled organization-wide (the remediation). **Fix**: switched to `IOptionsMonitor<FeatureFlags>`, which is `Singleton`-safe and still reflects live config-file changes via its `.OnChange` hook. **Lesson**: the three options interfaces aren't interchangeable — the choice is a lifetime decision with the exact same captive-dependency stakes as any other DI lifetime choice.
-
----
-
-## 5. Best Practices
-- Default to `IOptionsMonitor<T>` for anything that might ever be consumed by a `Singleton`; use `IOptionsSnapshot<T>` only for genuinely `Scoped` consumers needing per-request consistency.
-- Always call `.ValidateOnStart` for required configuration — fail at startup, not on first use.
-- Never inject raw `IConfiguration` deep into business logic — bind to a typed options class at the composition root.
-
-## 6. Anti-patterns
-- Injecting `IOptionsSnapshot<T>` into a `Singleton` (captive dependency).
-- Stringly-typed `configuration["A:B:C"]` lookups scattered through business logic instead of bound options classes.
-- Storing secrets in `appsettings.json` committed to source control instead of user-secrets/Key Vault/environment variables.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

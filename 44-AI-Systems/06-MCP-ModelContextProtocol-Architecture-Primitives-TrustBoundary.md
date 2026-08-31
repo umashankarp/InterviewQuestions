@@ -92,47 +92,6 @@ graph TB
 **Trade-offs:** The individual relationship managers' original adoption decision was entirely reasonable given the tool's genuine, demonstrated productivity value and the ease MCP is explicitly designed to provide — the defect was organizational: no governance process existed to review, approve, or even become aware of *either* the initial adoption *or* the subsequent capability change, exactly the gap identifies as structural to MCP's own design goal.
 
 **Lessons learned:** **MCP's frictionless-adoption design goal, genuinely valuable for its intended purpose, requires an equally deliberate, organizationally-imposed governance layer specifically because the protocol itself provides no structural mechanism preventing an individual user from unilaterally granting a third-party server ongoing, silently-updatable capability** — this is this domain's sharpest instance yet of a course-wide finding (onward): a mechanism's genuine, real design benefit (here, ease of adoption) is inseparable from a corresponding, structurally-inherent risk (here, absence of any built-in re-review trigger for capability changes) that only deliberate, external governance — never the protocol's own defaults — can close.
-
----
-
-## 5. Best Practices
-
-- **Maintain a governed, centrally-reviewed allowlist of approved MCP servers**, explicitly closing the gap/ identify as structural to MCP's own frictionless-adoption design — never permit individual, ungoverned server installation for any use case touching consequential data or actions.
-- **Pin MCP server versions where the transport/distribution mechanism supports it**, and require an explicit re-review trigger on any version change — directly extending the model-version-pinning discipline to this module's own tool-capability layer.
-- **Apply the risk-tiered authorization discipline using MCP's own Resources-versus-Tools distinction as the structural hook** — never treat a Tool invocation as safe by default merely because it originated through the standardized MCP protocol rather than a bespoke integration.
-- **Treat every Server-initiated sampling request with the identical cost-governance and authorization scrutiny as any Tool invocation** — never exempt inverted-control requests from this domain's established governance simply because they flow in an unusual direction.
-- **Include tool-description text in this domain's indirect-injection red-teaming scope** (extending A5) — a server's tool descriptions are untrusted, third-party-controlled input exactly like retrieved RAG content, requiring the identical defense-in-depth scrutiny.
-
----
-
-## 6. Anti-patterns
-
-- **Individual, ungoverned MCP server installation with no centralized review process** — the exact incident; the single most consequential anti-pattern this module establishes.
-- **Trusting an MCP server's tool description text as inherently benign because it "looks" like ordinary documentation** — treats a genuine, untrusted-third-party-content injection surface as if it were first-party, reviewed content.
-- **Assuming a once-approved MCP server remains safe indefinitely with no re-review trigger on subsequent updates** — the exact "rug pull" mechanism/ demonstrate.
-- **Exempting Server-initiated sampling requests from cost governance or authorization scrutiny** because they don't fit the usual Host-initiates-everything mental model.
-- **Adopting MCP for a narrow, single-purpose, highly consequential internal tool** where the direct, custom, fully-governed integration would provide equivalent capability with meaningfully less third-party trust-surface exposure.
-
----
-
-## 7. Performance Engineering
-
-MCP's protocol overhead (message serialization, the client-server connection handshake) is comparatively modest relative to the underlying LLM inference cost this domain has established as the dominant cost driver throughout — the module's genuinely consequential performance consideration is instead the **connection-management cost at scale**: a Host maintaining many simultaneous 1:1 Client-Server connections needs the identical connection-pooling and resource-limit discipline this course established for any many-persistent-connection architecture (the introspection-endpoint scaling concern is a reasonable structural analogy), particularly for remote (HTTP/SSE-transported) Servers versus local (stdio-transported) ones, which carry meaningfully different latency and connection-lifecycle profiles.
-
----
-
-## 8. Security
-
-This module's security finding is its central contribution to the entire domain: **MCP's third-party trust boundary and tool-description injection surface together constitute a genuinely new attack surface this domain's prior modules' defenses only partially cover** — the independent-authorization backstop remains the correct, load-bearing final defense (a successfully-manipulated tool-call request, however it was manipulated, still cannot execute beyond its registered authorization scope) but does *not* address the risk that the scope itself was granted too broadly in the first place, by an individual user's own, ungoverned adoption decision. **The correct, complete defense requires composing this domain's existing authorization backstop with a genuinely new, MCP-specific control: centralized server-allowlist governance closing the adoption-side gap that no amount of downstream authorization scoping alone can fully substitute for**, since an overly-broad authorization scope granted at adoption time is itself the vulnerability, independent of how rigorously that (already-too-broad) scope is subsequently enforced.
-
----
-
-## 9. Scalability
-
-The N+M architectural benefit scales an organization's total integration-maintenance burden favorably as both the number of AI-application Hosts and the number of external tool/data-source integrations grow — but, this scaling benefit is specifically an *engineering-effort* scaling improvement, not a *governance-effort* one: the number of servers requiring centralized trust review and ongoing re-review still scales with M (total server count) regardless of MCP's protocol-level engineering-effort savings, meaning an organization cannot assume MCP's adoption-ease automatically scales its governance capacity commensurately — the governance review process itself remains a real, unreduced bottleneck this module's own findings establish as necessary, independent of the genuine engineering-effort benefit MCP's standardization provides.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

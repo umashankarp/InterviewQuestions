@@ -116,48 +116,6 @@ Single Sign-Out propagation:
 **Trade-offs:** The mapping table was correctly built and reviewed at integration time — the gap was not an implementation defect but the complete absence of any mechanism verifying that the *semantic assumption* underlying a static mapping remained true on a partner's side, which the bank had no visibility into and no contractual mechanism to be notified of.
 
 **Lessons learned:** **A federation claims-mapping table encodes a semantic assumption about a partner's own internal role definitions at the moment it was built — an assumption the enterprise cannot control, observe, or be automatically notified of should it change**, directly recurring the federation-trust-scope-creep finding at the claims-semantics layer instead of the network-policy layer. The eventual fix was not a one-time re-mapping but a periodic, contractually-required attestation process with each federated partner confirming their asserted roles' current scope still matches the bank's mapping assumptions — the claims-mapping equivalent of the access-certification discipline, now applied across an organizational boundary the bank cannot unilaterally audit.
-
----
-
-## 5. Best Practices
-
-- **Centralize federation through a broker/hub, never point-to-point** — collapses N×M independent trust relationships into N+M, each maintained once.
-- **Treat every claims-mapping entry as a governed artifact with an explicit owner and periodic re-validation cadence**, not a one-time integration configuration — the incident is precisely what an unmonitored mapping table risks indefinitely.
-- **Use token exchange (RFC 8693) for every internal service-to-service delegation involving a user's authority**, never raw token forwarding — closes the confused-deputy risk structurally rather than relying on each downstream service's own discretion.
-- **Prefer back-channel logout over front-channel-only** for single sign-out — server-to-server propagation doesn't depend on the user's browser successfully reaching every relying party.
-- **Require, contractually, that federated partners notify the enterprise of any semantic change to asserted claim values** (the fix) — a technical mapping table cannot substitute for an organizational communication channel about a partner's own internal role-definition changes.
-- **Log the full delegation chain (`act` claims) on every token-exchange hop** — makes a multi-hop, cross-service authorization decision forensically reconstructable after the fact, directly supporting the PAM-style audit requirements at the service-delegation layer.
-
----
-
-## 6. Anti-patterns
-
-- **Point-to-point federation at any meaningful scale** — reproduces A2's per-integration-variance risk multiplied across every partner/relying-party pair.
-- **Forwarding a service's own broadly-scoped token to a downstream service "because it already has a valid token"** — the confused-deputy pattern exists specifically to eliminate.
-- **Treating a claims-mapping table as a one-time integration deliverable** rather than a continuously-governed artifact subject to the same drift risk as any other entitlement (directly recurring the entitlement-drift finding).
-- **Front-channel-only single sign-out** with no back-channel fallback — silently leaves sessions alive at any relying party the user's browser fails to reach during logout.
-- **Assuming a partner's asserted claim semantics are immutable** once an integration is built — the incident is exactly this assumption failing silently, with no technical signal available to detect the change from the enterprise's side alone.
-
----
-
-## 7. Performance Engineering
-
-An identity broker sits on the critical path of every internal application's authentication flow — its own latency and availability become a platform-wide multiplier (the introspection-endpoint lesson, now applied to the broker itself, which is structurally an even more central dependency than any single introspection endpoint). Claims-mapping evaluation should be a fast, in-memory lookup against a cached, versioned mapping table (refreshed on a change event, not re-fetched per authentication) rather than a per-request external call to a partner's own system. Token-exchange hops each add one additional authorization-server round-trip to a multi-service call chain — acceptable for the specific, bounded delegation scenarios that genuinely require it, but a design smell if a call chain requires many sequential exchange hops, which should instead prompt reconsidering whether the chain itself is too deep (recurring the fan-out-latency reasoning, now for sequential rather than parallel calls).
-
----
-
-## 8. Security
-
-Centralizing federation concentrates trust-relationship risk into one broker, making the broker itself the highest-value target and correspondingly the component warranting the most PAM/governance rigor of anything in the identity estate — a compromised broker's blast radius spans every federated relying party and every federated partner simultaneously, the single largest blast-radius component this course's identity-domain arc has examined. Token exchange's `act` claim chain is a security-relevant audit artifact in its own right — a delegation chain that grows unexpectedly long, or that includes a service with no legitimate business reason to be in the chain, is itself a detectable anomaly signal. Claims-mapping governance is this module's primary defense against a threat class unique to federation — semantic drift on a partner's side the enterprise has no unilateral visibility into — requiring a contractual/organizational control (mandatory partner notification, periodic attestation) precisely because no purely technical control can observe a partner's own internal role-definition change.
-
----
-
-## 9. Scalability
-
-The broker/hub pattern's N+M trust-relationship scaling versus point-to-point's N×M is this module's central scalability argument, and it compounds specifically as an enterprise's partner-institution count grows — exactly the regime where point-to-point federation becomes operationally unmanageable and where-style claims-mapping drift risk multiplies fastest, since each additional partner is another independently-governed mapping table potentially drifting on its own, uncoordinated timeline. Back-channel single sign-out scales as a fan-out of server-to-server calls from the broker to every relying party — bounded, parallelizable, and independent of browser/network conditions, unlike front-channel logout's dependency on the user's own, uncontrolled client environment successfully reaching every relying party in sequence.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

@@ -185,32 +185,6 @@ graph TB
 1. The captive-dependency validation being **environment-gated by default** (on in Development, off elsewhere) is a genuine, easy-to-overlook configuration gap — this incident would have been caught **at build/deploy time in staging**, months earlier, had the validation simply been enabled everywhere from the start.
 2. A seemingly innocuous refactor (adding one constructor parameter to a `Singleton` for what seemed like a reasonable convenience) is exactly how this bug class is introduced in practice — it requires no obviously "risky"-looking code change, which is precisely why static, automated validation (not just code review) is the appropriate defense.
 3. Multi-tenant systems have an especially severe blast radius for this specific bug class — a captive-dependency bug that would merely be "annoying/incorrect" in a single-tenant system becomes a genuine security/compliance incident (cross-tenant data leakage) in a multi-tenant one, raising the stakes for proactive prevention substantially.
-
----
-
-## 5. Best Practices
-
-- **Enable `ValidateOnBuild = true` and `ValidateScopes = true` in every environment**, not just Development — the startup-cost overhead is negligible relative to the severity of the bug class it prevents.
-- **Never inject a `Scoped` service directly into a `Singleton`'s constructor.** If a `Singleton` genuinely needs to use `Scoped` functionality, inject `IServiceScopeFactory` and create a fresh scope at the point of actual use, never at construction time.
-- **Prefer `Scoped` as the default lifetime for anything touching per-request state** (repositories, `DbContext`, anything reflecting the current user/tenant) — reserve `Singleton` specifically for genuinely stateless or intentionally-shared-across-all-requests services (configuration, caches, connection-pool-managing clients like `HttpClient` via `IHttpClientFactory`).
-- **Design services to depend on abstractions (interfaces), not concrete types**, even for internal (non-swappable-in-practice) implementations — this is what makes substituting test doubles practical and keeps the dependency-inversion benefit real, not just nominal.
-- **Use `IEnumerable<TService>` (multiple registrations) for genuinely pluggable, multi-handler scenarios** (the mediator pattern) rather than a single service with an internal `switch`/if-chain over "which handler applies" — lets new handlers be added via a new registration line, not by modifying existing dispatch code.
-- **Avoid ambiguous multi-constructor types intended for DI** — if a class has multiple constructors, ensure the container's resolution behavior (the "most-parameters-that-resolve" rule, or an outright ambiguity exception) is well-understood and intentional, not accidental; generally, prefer exactly one DI-facing constructor per class.
-- **Register `HttpClient` via `IHttpClientFactory`** (`services.AddHttpClient<IMyApiClient, MyApiClient>`), never `new HttpClient` directly inside a service — `IHttpClientFactory` correctly manages the underlying `SocketsHttpHandler`/connection-pooling lifetime (a distinct, separate lifetime-management concern from ordinary DI lifetimes, addressing the well-known "`HttpClient` socket exhaustion" problem when `HttpClient` instances are created and disposed too frequently).
-
----
-
-## 6. Anti-patterns
-
-- **Capturing a `Scoped` service (directly or transitively) into a `Singleton`'s field** (/the incident). Fix: `IServiceScopeFactory`-based on-demand scope creation.
-- **Relying on Development-only validation defaults and never explicitly configuring `ValidateOnBuild`/`ValidateScopes` for other environments.** Fix: explicit, environment-independent configuration, exactly as the remediation did.
-- **Using the Service Locator anti-pattern** — injecting `IServiceProvider` itself into a class and calling `.GetService<T>` on demand throughout its methods, instead of declaring actual dependencies via constructor parameters. Why it fails: hides a class's true dependencies (they're no longer visible in its constructor signature, making the class harder to understand, test, and reason about — the code compiles and "works" but with all the coupling/opacity DI is meant to eliminate, just relocated). Fix: declare genuine constructor-injected dependencies; reserve direct `IServiceProvider` injection for the narrow, legitimate cases where dynamic, runtime-determined resolution is genuinely required (e.g., `IServiceScopeFactory`-based patterns, or a plugin-loading system resolving a dynamically-determined type).
-- **Over-registering everything as `Singleton` "for performance"** without considering correctness. Why it fails: beyond the captive-dependency risk, `Singleton` services must be thread-safe for concurrent access across all simultaneously-handled requests — a `Singleton` with mutable, unsynchronized instance state is a concurrent-access bug waiting to happen (directly the concurrency concerns, now surfacing via a DI-lifetime choice) — `Transient`/`Scoped` services don't need this concern since they're never concurrently shared across requests by construction.
-- **Registering a concrete type without a corresponding interface for services that will realistically need substitution in tests or alternate implementations** — while not every internal type needs an interface (a well-known, sometimes-debated point — "interface for every class" is itself an over-application, not a universal rule), completely skipping abstraction for anything crossing a meaningful architectural boundary (a repository, an external API client) reintroduces tight coupling DI is meant to avoid.
-- **Constructing services with heavy, expensive constructor-time work** (a `Singleton` whose constructor performs a slow network call to "warm up") without considering the application's actual startup-latency requirements — if lazily constructed, this cost is paid by whichever unlucky first request happens to trigger it (a direct, visible latency spike for that specific request); if this is undesirable, either perform the expensive work asynchronously after construction (a background warm-up task) or explicitly force eager construction at a controlled point in startup (e.g., resolving the singleton once explicitly during `app.Build`-time initialization) rather than leaving it to accidental first-request timing.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

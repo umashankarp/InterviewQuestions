@@ -234,39 +234,6 @@ graph TB
 2. Low CPU + high latency + climbing queue length is the diagnostic signature of thread pool starvation — don't chase CPU-bound explanations when CPU is low.
 3. `ThreadPool.SetMinThreads` treats a symptom; fixing sync-over-async treats the cause.
 4. Static analysis (banning blocking async calls) is cheaper than repeat incidents.
-
----
-
-## 5. Best Practices
-
-- **`async` all the way down.** Why: any sync-over-async boundary anywhere in a call chain reintroduces thread-pool blocking risk for everyone sharing that pool. Exception: true top-level entry points (`Main`, a console app with no further async callers) where there's nothing left to compose with.
-- **Use `ConfigureAwait(false)` in library/shared code that has no UI-thread affinity requirement.** Why: avoids unnecessary `SynchronizationContext` capture/marshaling cost and prevents accidental UI-thread deadlocks if the library is ever called from a context that has one. Don't bother in ASP.NET Core app-level code (no default `SynchronizationContext` to avoid) unless the team has a blanket style-consistency rule — but always do it in reusable NuGet-published libraries, since you don't control the caller's context.
-- **Prefer `Task`/`Task<T>` by default; reach for `ValueTask<T>` only after profiling shows allocation matters** on a genuinely hot, frequently-synchronously-completing path. Don't cargo-cult `ValueTask` everywhere — its usage restrictions are a real correctness hazard if misused.
-- **Never use `async void` except for framework-mandated event handler signatures.** Wrap the body in `try`/`catch` if you must use `async void`, since unhandled exceptions there crash the process instead of propagating normally.
-- **Use `CancellationToken` end-to-end** for any async API that might run long or be user-cancelable (HTTP requests, DB queries) — propagate the token from the request's `HttpContext.RequestAborted` down through every layer, don't swallow it at a service boundary.
-- **Use `IAsyncEnumerable<T>`/`await foreach` for streaming large result sets** instead of materializing a full `List<T>` in memory — directly reduces both latency-to-first-byte and peak memory/GC pressure (ties back to the LOH/allocation guidance).
-- **Use `Task.WhenAll`/`Task.WhenAny` for independent concurrent operations**, not sequential `await` in a loop, when operations don't depend on each other's results — e.g., fetching from 3 independent services in parallel rather than one after another.
-
----
-
-## 6. Anti-patterns
-
-- **Sync-over-async (`.Result`, `.Wait`, `.GetAwaiter.GetResult`) in hot/shared-pool code.** Why it fails: causes deadlocks (classic `SynchronizationContext` contexts) or thread-pool starvation (ASP.NET Core). Fix: propagate `async` through the call chain; if truly blocked by a synchronous interface you don't own, isolate the blocking call to a dedicated, bounded thread pool (not the shared CLR pool) as damage control while planning the real fix.
-- **`async void` for anything but UI event handlers.** Fix: return `Task`; if the signature is fixed by a framework delegate, wrap the body defensively in `try`/`catch` and log — never let an exception escape unguarded.
-- **Wrapping CPU-bound work in `Task.Run` inside an already-pool-threaded ASP.NET Core request handler "to make it async."** Why it fails: adds a thread-hop + allocation for zero concurrency benefit — the request thread was already a pool thread. Fix: just call the CPU-bound method directly (synchronously) if it must run on this request's thread, or genuinely offload to a separate, bounded worker/queue (background service, message queue) if you need to decouple request latency from the CPU work's duration.
-- **`Task.WhenAll` without exception aggregation awareness.** `Task.WhenAll` only rethrows the *first* exception via `await`; other faulted tasks' exceptions are silently available only via the `AggregateException` on the `Task` itself, not the awaited result. Fix: inspect `.Exceptions` explicitly if multiple failures matter, or use per-task error handling before aggregating.
-- **Capturing large objects across `await` boundaries in hot-path async methods**, needlessly inflating the (potentially heap-boxed) state machine size. Fix: scope locals tightly; avoid holding onto large buffers/DTOs across suspension points longer than necessary.
-- **Using `ValueTask<T>` as a general-purpose "faster Task" without respecting its single-await/single-consumption contract.** Why it fails: awaiting it twice, or calling `.Result` and then `await`-ing, is undefined/broken behavior specific to the backing `IValueTaskSource` implementation — can silently corrupt results or throw obscure exceptions. Fix: `.AsTask` immediately if you need `Task`-like flexibility.
-- **Fire-and-forget `async` calls without exception handling** (`_ = DoSomethingAsync;` with no follow-up). Why it fails: exceptions vanish silently (or crash the process if unobserved-task-exception policies are strict) — failures become invisible. Fix: explicitly handle/log within the fire-and-forget method itself, or use a proper background task/queue abstraction with observability.
-
----
-
----
-
----
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

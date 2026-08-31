@@ -112,47 +112,6 @@ sequenceDiagram
 **Trade-offs:** Short access-token lifetime alone was reasoned as sufficient protection, treating the refresh token as a secondary concern since it "only" talks to the token endpoint — missing that the token endpoint *is* the place where a stolen long-lived credential eventually gets converted into fully usable access tokens, repeatedly, for its entire lifetime.
 
 **Lessons learned:** **Short access-token lifetime bounds exposure only for the access token itself — it does nothing to bound or detect compromise of the refresh token behind it**, and a non-rotating refresh token provides no structural theft-detection signal at all, since legitimate and illegitimate use of an unchanging credential are indistinguishable to the issuing server. The fix — refresh-token rotation with reuse detection — doesn't just shorten the exposure window, it converts an otherwise-invisible, months-long compromise into a detectable event the very next time the legitimate client attempts to refresh.
-
----
-
-## 5. Best Practices
-
-- **Always rotate refresh tokens on use, with reuse-detection triggering full token-family revocation** — non-rotating refresh tokens provide zero structural theft-detection signal, as demonstrates directly.
-- **Choose introspection over self-contained JWTs specifically where sub-minute revocation matters** — don't default to introspection everywhere "for safety," since it forfeits JWT's zero-round-trip scalability for use cases that don't need it.
-- **Use DPoP (or mTLS for service-to-service) wherever bearer-token theft is a credible threat** — for consumer-facing public clients specifically, given how much easier device/browser-level token theft is than intercepting a properly-secured TLS channel.
-- **Treat a `cnf` (confirmation) claim binding as mandatory to check**, not optional — a resource server that validates a DPoP-bound token's signature and claims but skips the `cnf`-to-proof-key match provides zero sender-constraining benefit despite the token nominally being sender-constrained.
-- **Alert on refresh-token-reuse events as security incidents**, not silent rejections — the entire value of rotation's detection property depends on someone actually acting on the signal it produces.
-
----
-
-## 6. Anti-patterns
-
-- **Long-lived, non-rotating refresh tokens** — the exact failure; provides no detection signal and no bounded exposure window for the estate's actual longest-lived credential.
-- **Reacting to refresh-token reuse by rejecting only the single reused request**, leaving the rest of the token family (including whichever side — attacker or legitimate client — didn't trigger the detected reuse) still valid — the full-family revocation is the correct response precisely because the two competing holders can't be distinguished after the fact.
-- **"Sender-constrained" tokens whose resource-server validation never actually checks the `cnf` binding** — the binding exists only if it's enforced on every validation, not merely present in the token.
-- **Defaulting to introspection everywhere "to be safe,"** discarding JWT's scalability advantage (/) for use cases where a short expiry already provides adequate risk bounding.
-- **mTLS client-certificate provisioning treated as a one-time setup task**, with no certificate-rotation or revocation discipline of its own — reintroducing exactly the standing-credential risk addresses, now at the transport-layer client-identity layer.
-
----
-
-## 7. Performance Engineering
-
-Refresh-token rotation adds one additional authorization-server round-trip per refresh cycle relative to a non-rotating design, negligible against the security value given refresh cycles are inherently infrequent (tied to access-token lifetime, typically minutes-to-hours apart, not per-request). Introspection's cost is the opposite profile — a synchronous call *per resource-server request*, making its latency and the authorization server's horizontal scalability a first-class, request-path-critical concern in a way JWT validation never is; introspection-backed resource servers should cache negative and positive introspection results for a bounded, short TTL (materially shorter than the token's own remaining lifetime) to blunt request-path load without meaningfully reopening the revocation-latency gap introspection exists to close. DPoP proof generation (a signature per request, client-side) and verification (resource-server-side) add CPU cost proportional to request volume, comparable in shape to the JWT-signature-verification cost, and should use ECDSA over RSA for the same latency reasons noted there.
-
----
-
-## 8. Security
-
-Refresh-token rotation with reuse detection is this module's primary proactive-detection control — it is the rare security mechanism that converts an otherwise fully-silent compromise into an actively-alerting one, without requiring any additional monitoring infrastructure beyond the authorization server's own token-family bookkeeping. Sender-constraining (DPoP/mTLS) is the module's primary prevention control — unlike every other mechanism here, which detects or bounds a theft's consequence after the fact, sender-constraining makes a stolen bearer token structurally unusable in the first place, changing the threat model from "protect the token" to "protect the token *and* a key that must independently also be exfiltrated." Introspection's security value is bounded by the authorization server's own availability and correctness — an introspection endpoint that's itself compromised or unavailable undermines every resource server depending on it, making its own security posture (the PAM/governance disciplines, applied reflexively) disproportionately consequential relative to its architectural size.
-
----
-
-## 9. Scalability
-
-Introspection's synchronous-call-per-request model means the authorization server's introspection endpoint must scale with the *sum* of all resource servers' combined request volume — a materially different (and larger) scaling target than the authorization server's token-issuance endpoint alone, which scales only with login/refresh frequency. This is the direct cost side of the trade and the reason most large-scale deployments reserve introspection for specifically high-risk flows rather than applying it estate-wide. Refresh-token rotation's family-revocation bookkeeping (tracking lineage across rotations) grows with active-session count, not request volume, and should be indexed for fast family-wide revocation lookups (a single compromised leaf token must trigger revocation across the entire family in one operation, not an iterative walk) to keep incident response fast at scale.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

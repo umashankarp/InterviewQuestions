@@ -97,47 +97,6 @@ Peer-to-Peer (more flexible, less auditable — the identical trade-off, restate
 **Trade-offs:** The generous step budget was a reasonable response to the genuine variability of investigation complexity — a tighter budget would have cut off legitimately complex, multi-faceted investigations prematurely just as often as it would have caught this specific stalling pattern, meaning the fix couldn't simply be "use a smaller number."
 
 **Lessons learned:** **A step-count ceiling alone (the cost-governance control) bounds cost and prevents unbounded runaway loops, but does not by itself distinguish "genuinely converging toward completion" from "unproductively churning without progress"** — the two consume budget identically and are indistinguishable from step count alone. The fix required an explicit **progress-detection signal** independent of step count: tracking whether each successive step's tool calls target genuinely new information (not merely non-identical, per the narrower repeated-call check) or substantively overlap with already-queried context, flagging a stalled — as opposed to merely lengthy — investigation for explicit human escalation rather than silently exhausting its budget and delivering an incomplete result presented with the same confidence as a genuinely complete one.
-
----
-
-## 5. Best Practices
-
-- **Set `max_steps` as a genuine safety ceiling, never the primary mechanism for detecting a stalled or unproductive loop** — pair it with an explicit progress-detection signal distinguishing genuine convergence from unproductive churning.
-- **Treat every agent step's authorization exactly as established for a single function call** — an agent loop must never be granted a broader, session-level authorization bypassing per-step, independent verification.
-- **Calibrate autonomy/human-in-the-loop requirements to the compounded risk of the specific task's actual step count and action consequentiality**, never uniformly across every agentic capability the platform supports.
-- **Explicitly manage agent memory/context** (summarization, external retrieval) for any agent whose interaction can plausibly exceed a manageable context length — never assume unbounded verbatim history retention is safe or reliable.
-- **Prefer orchestrator-worker over peer-to-peer multi-agent architectures for regulated, auditability-sensitive workflows** — the same centralized-control-flow preference this course established for sagas generally.
-
----
-
-## 6. Anti-patterns
-
-- **Relying on `max_steps` alone as the sole safeguard against a stalled or unproductively-looping agent** — the exact incident; a step ceiling bounds cost, not quality or productive progress.
-- **Delivering an agent's result at its step-budget ceiling with the same presentation confidence as a genuinely converged, complete result** — silently masks the distinction between "finished" and "ran out of budget," a distinction the downstream consumer critically needs to know.
-- **Session-level or task-level authorization bypassing the per-step, independent verification** — reintroduces exactly the "trust the model's own generated intent" anti-pattern that module established as unacceptable, now at agent-loop scale.
-- **Peer-to-peer multi-agent architectures for regulated, compliance-sensitive workflows** where centralized auditability is a genuine, non-negotiable requirement — trades auditability for flexibility the use case doesn't need.
-- **Unbounded, unmanaged agent context/memory growth** with no summarization or external-retrieval strategy — reproduces the "lost in the middle" risk at agent-history scale, silently degrading the agent's own ability to recall its own earlier findings.
-
----
-
-## 7. Performance Engineering
-
-An N-step agent loop's total latency and cost is the *sum* of N individual step latencies/costs (each itself potentially a two-round-trip function call) — directly compounding the per-call latency budget by the loop's actual, runtime-determined step count, which — unlike a conventional, fixed-shape API call — is not knowable in advance, making agent-based features' latency/cost distribution inherently long-tailed and harder to provide a tight SLA for than a single-turn interaction. Production agent systems should track and expose step-count distribution (p50/p95/p99, directly analogous to the latency-percentile discipline) as a first-class metric, since a small fraction of interactions consuming disproportionately many steps (exactly the incident pattern) can dominate aggregate cost even when the median interaction is well-behaved and efficient.
-
----
-
-## 8. Security
-
-Every risk this domain has established compounds across an agent loop's steps, making this module's security posture the union, not merely the sum, of every prior module's individual security finding, now applied iteratively: prompt injection becomes more dangerous specifically because a successful injection at any single step can redirect the *entire remainder* of the loop's subsequent reasoning and tool calls, not merely that one step's own output — an agent's iterative, self-referential reasoning process means a single successful injection has a substantially larger blast radius than the equivalent injection against a single-turn interaction. **This directly motivates treating each step's tool-call authorization as the primary, load-bearing defense against this amplified risk** — since even a fully-redirected reasoning process cannot cause harm beyond what its available tools' own least-privilege authorization scope permits, the same "authorization is the backstop, since prompting/injection defenses alone cannot be complete" principle established, now doing even more load-bearing work given the amplified injection-blast-radius this module's iterative architecture introduces.
-
----
-
-## 9. Scalability
-
-Multi-agent orchestrator-worker architectures scale horizontally by parallelizing genuinely independent sub-tasks across worker agents — directly analogous to the parallel-saga-branch pattern (the capstone) — while remaining subject to the identical join/synchronization discipline that module established for reconciling parallel branches' results. Agent memory/context-management strategy directly determines whether a long-running or multi-session agent's operational cost and latency scale linearly with accumulated history (unmanaged, verbatim retention) or remain bounded (summarization/external-retrieval-based management) — a genuine, first-class scalability design decision for any agent expected to operate across sessions longer than a single, short interaction.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

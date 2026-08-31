@@ -185,33 +185,6 @@ sequenceDiagram
 1. `HttpContext.Connection.RemoteIpAddress` reports the **immediate** TCP peer, which is the reverse proxy in essentially every real production deployment — any feature depending on the "real" client IP must explicitly configure `UseForwardedHeaders`, this is never automatic.
 2. `UseForwardedHeaders` must be registered extremely early in the pipeline (before anything that reads IP/scheme) for its rewritten values to be visible to everything downstream — a direct, concrete instance of "middleware order matters" (/).
 3. Never trust forwarded headers unconditionally — always scope `KnownProxies`/`KnownNetworks` to prevent spoofing from untrusted direct connections.
-
----
-
-## 5. Best Practices
-
-- **Register exception-handling middleware first** (or as close to first as possible), so it wraps the maximum possible surface of the pipeline and can catch failures from as much downstream code as possible before the response has started.
-- **Register `UseForwardedHeaders` very early**, with explicitly scoped `KnownProxies`/`KnownNetworks`, whenever the app runs behind any reverse proxy/load balancer (essentially always in production) — never trust forwarded headers unconditionally.
-- **Register `UseAuthentication` and `UseAuthorization` after `UseRouting` and before endpoint execution** — this ordering is not arbitrary; it's what makes endpoint-metadata-driven authorization (`[Authorize]`) possible at all.
-- **Keep middleware focused on cross-cutting concerns** (logging, exception handling, correlation IDs, response compression, CORS) — push business logic into the endpoint/controller/service layer, not into custom middleware, to keep the pipeline's role clear and testable.
-- **Use `HttpContext.Items` (not static/singleton state) for passing per-request data between middleware** — respects the request-scoped lifetime correctly and avoids the cross-request data leakage risk of accidentally using shared mutable state instead.
-- **Avoid modifying the response after any possibility it may have started streaming** — check `HttpResponse.HasStarted` defensively in any middleware that conditionally rewrites status codes/headers based on downstream behavior, and design streaming endpoints (large file downloads, Server-Sent Events) with this constraint explicitly in mind.
-- **Propagate `HttpContext.RequestAborted` into every downstream async call** (database queries, HTTP client calls) — directly reusing the cancellation-token-propagation guidance, specifically important at the pipeline/endpoint level since this is exactly where that token originates and where it's easiest to forget to pass it further down.
-
----
-
-## 6. Anti-patterns
-
-- **Registering authentication/authorization before `UseRouting`.** Why it fails: no endpoint (and thus no endpoint metadata, like `[Authorize]` attributes) has been determined yet — authorization middleware has nothing meaningful to check against. Fix: always `UseRouting` first, then `UseAuthentication`/`UseAuthorization`, then endpoint mapping.
-- **Forgetting `UseForwardedHeaders` behind a reverse proxy** (the incident). Fix: always configure it, with explicit trusted-proxy scoping, for any service not directly exposed to the internet without an intermediary.
-- **Putting substantial business logic inside custom middleware** instead of the endpoint/service layer. Why it fails: middleware runs for *every* matching request regardless of endpoint-specific needs, is harder to unit-test in isolation compared to an injected service, and blurs the pipeline's intended cross-cutting-concerns role. Fix: keep middleware thin; delegate actual business logic to injected, testable services.
-- **Capturing a `Scoped` service (like `DbContext`) into a field of a `Singleton`-lifetime service or a static field**, across a request boundary. Why it fails: the captured instance outlives its intended per-request scope, either throwing (if the underlying context is disposed at request end while still referenced) or, worse, silently being reused/shared incorrectly across unrelated requests — a serious, sometimes-hard-to-diagnose correctness bug. Fix: never store scoped services outside their natural per-request lifetime; use `IServiceScopeFactory` to explicitly create a new scope if a background/long-lived component genuinely needs its own independent scoped-service instances.
-- **Assuming middleware registered via `app.Use(...)` after `app.Run(...)` will execute.** Why it fails: `app.Run(...)` is terminal — nothing registered after it in that branch of the pipeline will ever execute, a straightforward but real beginner mistake. Fix: use `app.Use(...)` for anything that should call `next`; reserve `app.Run(...)` for the deliberate final handler in a given pipeline branch.
-- **Ignoring `HttpContext.RequestAborted` in long-running endpoint logic**, continuing expensive work (DB queries, external calls) even after the client has disconnected. Fix: propagate the token, exactly as the cancellation guidance requires, especially important here since a disconnected client on a busy service wastes resources that could serve other, still-connected clients.
-- **Accessing `HttpContext` from a "fire-and-forget" background task spawned during request handling**, after the request itself may have already completed (and `HttpContext` potentially recycled/invalidated by the framework). Fix: extract only the specific data needed *before* spawning background work, never pass the live `HttpContext` reference itself into detached background work.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

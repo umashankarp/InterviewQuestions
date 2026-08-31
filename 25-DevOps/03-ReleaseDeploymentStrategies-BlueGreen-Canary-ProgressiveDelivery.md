@@ -118,25 +118,6 @@ Migration 2 (CONTRACT): ALTER TABLE orders DROP COLUMN shipping_zone
 **Fix**: Migrated checkout-service deployments to a canary strategy via Argo Rollouts, with automated analysis explicitly including a business-metric check (average order value and tax-collected-per-order compared against the stable baseline, not just infrastructure error rate/latency) — a check specifically designed to catch the exact bug class that slipped through, since a tax-calculation bug doesn't necessarily raise HTTP error rates or latency at all.
 
 **Lesson**: A deployment strategy's *mechanical* success (pods started, rollout completed, no crashes) is a categorically different claim from a deployment's *behavioral* correctness — directly this course's recurring "declared/mechanical success ≠ actual correctness" theme, now applied to the release-validation dimension: the right deployment strategy must be chosen to match the specific risk profile of the change, and a rolling deployment's speed and mechanical reliability say nothing about whether the *business logic* it shipped is correct.
-
----
-
-## 5. Best Practices
-- Decouple deployment from release via feature flags for any change with meaningful user-facing risk — it converts the fastest possible rollback (a flag flip) into the default recovery path, reserving deployment-level rollback for genuinely code-level failures.
-- Match the deployment strategy to the change's actual risk profile: rolling for low-risk, structurally-validated changes; canary with business-metric-aware automated analysis for changes where behavioral correctness (not just uptime) is the real risk.
-- Design database migrations as expand/contract from the outset for any schema change accompanying a deployment where old and new code might coexist, even briefly.
-- Instrument the specific success metrics a canary analysis will gate on *before* the first canary run — discovering mid-incident that no metric exists to detect the failure mode is a design gap, not bad luck.
-- Treat blue-green's double-infrastructure-cost window as a deliberate, bounded trade-off for services needing atomic, instant rollback — not a default applied indiscriminately regardless of a service's actual rollback-speed requirements.
-
-## 6. Anti-patterns
-- Treating "the rollout completed with no pod failures" as evidence of correctness for changes carrying genuine business-logic risk (the exact incident).
-- A single "expand-and-drop" migration shipped alongside a rolling or canary deployment, assuming instantaneous cutover when neither strategy provides one.
-- Canary analysis gating only on infrastructure metrics (error rate, latency) for changes whose failure mode is a silent business-logic error that raises neither.
-- Using feature flags as a substitute for deployment-level safety nets, rather than a complementary layer — a flag protects only the flagged feature's behavior, not a crash-looping or resource-leaking deployment underneath it.
-- Running blue-green without addressing in-flight-request handling during cutover, risking requests straddling the old and new environment against a database mid-migration.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

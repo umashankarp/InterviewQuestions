@@ -215,39 +215,6 @@ graph TB
 2. Client-side evaluation is the single most dangerous, least-visible LINQ-to-Entities failure mode — it produces *correct results*, just via a catastrophically inefficient path, so it's invisible to correctness-only testing.
 3. Upgrading to a stricter EF Core version that fails loudly instead of silently degrading is a legitimate, high-value defensive engineering investment, not just a routine dependency bump.
 4. When a business rule genuinely can't be translated to SQL, deliberately and explicitly split the query (SQL-translatable coarse filter, then in-memory fine filter) rather than accidentally falling into it.
-
----
-
-## 5. Best Practices
-
-- **Materialize (`.ToList`/`.ToArray`) a query exactly once if you need to enumerate it more than once**, and store the materialized result, not the original deferred `IQueryable`/`IEnumerable`. Why: prevents both the performance cost and the correctness risk of multiple enumeration.
-- **Always check the actual generated SQL for any non-trivial `IQueryable<T>` query against a large table** (EF Core logging, `ToQueryString` in modern EF Core) before shipping — never assume a `.Where(...)` clause you wrote in C# became a `WHERE` clause in SQL.
-- **Keep predicates passed to `IQueryable<T>` operators translatable** — simple property comparisons, standard string/math methods the provider documents support for. Push genuinely complex/non-translatable business logic to a deliberate, explicit in-memory step **after** a SQL-translatable coarse filter has already reduced the result set (the fix pattern), never as an accidental fallback.
-- **Prefer `Any` over `Count > 0`** for existence checks — `Any` short-circuits on the first match (O(1) in the best case); `Count` must enumerate the entire sequence (or, for `IQueryable`, translates to a full `COUNT(*)` that's more expensive than an `EXISTS`-shaped query) even when you only care whether *any* element exists.
-- **Avoid LINQ (especially chained, multi-operator queries) in profiled hot loops** — directly extending the guidance; each operator in a chain (`Where.Select.OrderBy`) allocates its own iterator wrapper object, and non-static lambdas capturing locals allocate closures — fine for ordinary code, a real cost at extreme call frequency.
-- **Use `AsNoTracking` for read-only EF Core queries** — skips change-tracking overhead entirely for query results that will never be updated/saved back, a genuinely free, low-effort performance win for reporting/read-heavy endpoints.
-- **Be explicit about the `AsEnumerable`/`AsQueryable` boundary** when intentionally mixing SQL-side and in-memory-side LINQ — a bare, unexplained `.AsEnumerable` call in the middle of a query chain should always carry a comment explaining *why* the switch to client-side evaluation is deliberate here, not accidental (directly addressing the diagnostic confusion at the heart of the incident).
-
----
-
-## 6. Anti-patterns
-
-- **Calling non-translatable C# methods inside an `IQueryable<T>` `.Where`/`.Select` without realizing the risk of client-side evaluation.** Why it fails: silently (in permissive providers) or loudly (in strict modern EF Core) breaks — either catastrophic performance or a runtime exception discovered late. Fix: know your provider's translation capabilities; test against realistic data volumes, not just dev-sized data.
-- **Enumerating the same deferred `IEnumerable<T>`/`IQueryable<T>` multiple times**, assuming it behaves like a cached list. Why it fails: re-executes the entire chain (and, for `IQueryable`, re-issues the database query) every single time — a correctness risk too if the source isn't idempotent. Fix: materialize once (`.ToList`) if reused.
-- **Capturing a mutable variable in a LINQ predicate closure and mutating it before the query is enumerated**, expecting the query to have "already captured the old value." Why it fails: deferred execution + closure-by-reference means the query sees the variable's value **at enumeration time**, not at `.Where`-call time — a subtle, easy-to-miss bug, especially across method boundaries. Fix: capture an explicit local snapshot (`var snapshot = threshold;`) immediately before building the query if you need the value pinned at that point.
-- **Chaining many LINQ operators over a large in-memory collection inside a hot, frequently-called method** without considering the per-call allocation cost (each operator wraps an iterator object; captured-variable lambdas allocate closures). Fix: for genuinely hot paths, a hand-written loop (verified via BenchmarkDotNet to actually matter, per the discipline) can meaningfully outperform an equivalent LINQ chain — but only reach for this after profiling proves it, not reflexively.
-- **Using `.Count > 0` or `.Any(x => true)` instead of plain `.Any`** for existence checks. Fix: `.Any` alone; reserve `.Count` for when you actually need the count value itself.
-- **Returning `IQueryable<T>` from a repository/service-layer method exposed to arbitrary downstream callers**, letting callers tack on arbitrary further `.Where` clauses (including non-translatable ones) far from the original query's context — this leaks the ORM/provider abstraction across an architectural boundary that should otherwise hide it, and makes the client-side-evaluation risk an org-wide, hard-to-audit surface instead of a contained one. Fix: repository/service layers should generally return already-materialized results (`List<T>`/`IReadOnlyList<T>`) or, if genuinely composable querying is a deliberate design goal, a narrowly-scoped specification/query-object pattern instead of a raw leaked `IQueryable<T>`.
-- **Assuming `OrderBy` followed by `Take` is always efficiently translated/executed** without verifying — for `IQueryable`, this is usually fine (translates to `ORDER BY... OFFSET/FETCH` or `TOP`), but for `IEnumerable`, `OrderBy` **must** buffer and fully sort the entire source before yielding the first `Take`-limited item, an O(n log n) + full-buffering cost that's easy to underestimate for a large in-memory sequence.
-
----
-
----
-
----
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

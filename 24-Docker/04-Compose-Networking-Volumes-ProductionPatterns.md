@@ -94,23 +94,6 @@ graph LR
 **Trade-offs:** The team's CI pipeline had, in effect, been relying on a timing coincidence (Postgres consistently starting fast enough) rather than a genuine, guaranteed ordering — a fragile, undocumented dependency the team had no visibility into, since `depends_on`'s presence in the YAML *looked* like a correct, complete solution to the startup-ordering problem.
 
 **Lessons learned:** As Postgres's startup time grew, CI began failing **intermittently** — the exact signature of a race condition (sometimes Postgres finished in time, sometimes it didn't) rather than a consistent, deterministic failure, making the root cause substantially harder to diagnose than an outright, always-reproducible bug would have been; the team's initial investigation focused on the application's own database-connection retry logic before recognizing the actual root cause was `depends_on`'s well-documented, but easy-to-overlook, started-versus-ready gap. The fix added an explicit `healthcheck:` to the `postgres` service (`pg_isready` as the check command) and changed the application service's dependency declaration to `depends_on: postgres: condition: service_healthy` — Compose now genuinely waits for Postgres's own health check to pass, not merely its container process to start, eliminating the race condition deterministically rather than papering over it with an application-level retry loop that would have merely reduced, not eliminated, the underlying timing risk. **This is this module's — and this domain's — capstone lesson**: a declared dependency ordering (`depends_on`) that *looks* complete and correct in a Compose YAML file provides no guarantee, on its own, about the *actual, load-bearing property* (genuine downstream readiness) a team typically assumes it provides — directly generalizing the Running-vs-Ready Kubernetes finding into a structurally distinct but conceptually resonant instance in an entirely different, simpler orchestration tool, and reinforcing this course's broader, now cross-domain theme that a configuration's *presence* and its *actual, complete guarantee* must always be verified as two independent claims, regardless of which specific tool or domain is involved.
-
-## 5. Best Practices
-- Always pair `depends_on` with an explicit `healthcheck:` and `condition: service_healthy` for any dependency whose actual readiness (not merely process start) matters to the dependent service's correct startup.
-- Use named volumes, not anonymous volumes or the container's own writable layer, for any data that must survive `docker compose down`/container recreation.
-- Layer environment-specific Compose override files rather than maintaining fully separate, independently-drifting Compose files per environment.
-- Explicitly configure resource limits and restart policies in production Compose deployments — don't rely on Docker's unconfigured defaults, directly applying the cgroup discipline through Compose's own YAML surface.
-- Choose Compose or Kubernetes based on an explicit, articulated multi-host requirement (or its absence), not a default assumption that "production always needs Kubernetes" or "Compose is only for local development".
-
-## 6. Anti-patterns
-- Assuming `depends_on` alone guarantees a dependency is genuinely ready to serve requests, without an explicit health check and `condition: service_healthy`.
-- Relying on data written to an anonymous volume or a container's writable layer, discovering only after a `docker compose down` that it wasn't actually persisted.
-- Maintaining fully separate, independently-authored Compose files per environment rather than layering override files from one shared base.
-- Adopting Kubernetes for a genuinely single-host workload with no articulated multi-host requirement, incurring its operational complexity for no corresponding benefit.
-- Treating an intermittent, timing-dependent CI failure as an application-code bug to patch around (a retry loop) rather than recognizing and fixing the actual, underlying orchestration-level race condition.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

@@ -57,65 +57,6 @@ graph LR
 
 ## 4. Production Example
 **Scenario**: An order-creation API returned the newly-created order in its `201 Created` response body (the standard pattern) by writing the order item and then immediately performing a `GetItem` to construct the response — under normal load this worked reliably, but under a specific traffic pattern (a burst of concurrent order creations), a small but consistent percentage of responses intermittently returned an empty/stale result for the just-written order, confusing client integrations that expected the just-created resource to always be immediately retrievable. **Investigation**: confirmed the `GetItem` call used the default eventually-consistent read, and the failure rate correlated with request concurrency/load, consistent with the propagation-lag window occasionally exceeding the time between write and read under contention. **Fix**: added `ConsistentRead: true` specifically to this read-after-write path (accepting its doubled read-capacity cost only for this specific, low-volume-relative-to-overall-traffic operation), eliminating the intermittent empty-response bug entirely. **Lesson**: the default eventually-consistent read is usually fine for independent, unrelated reads, but any read explicitly reading back data from the *same* logical write operation needs strong consistency — a subtle, load-dependent bug that's easy to miss in low-concurrency testing and only manifests reliably under realistic production traffic patterns, directly echoing this course's recurring "test at representative scale" theme.
-
-## 5. Best Practices
-- Use `ConsistentRead: true` for any read-after-write within the same logical operation; leave independent reads at the cheaper eventually-consistent default.
-- Choose provisioned capacity (with auto-scaling) for steady, well-forecasted traffic; on-demand for unpredictable, spiky, or new workloads.
-- Use DAX specifically for read-heavy, latency-critical, eventually-consistency-tolerant access patterns — not as a blanket cache for every read.
-- Use TTL for automatic item expiration (session data, outbox items post-publication) rather than a manual cleanup job, but account for its up-to-48-hour deletion lag in any design depending on precise expiration timing.
-
-## 6. Anti-patterns
-- Reading back a just-written item with the default eventually-consistent read and assuming it will always reflect the write (the incident).
-- Choosing on-demand capacity for steady, high-volume, well-understood traffic without evaluating provisioned capacity's cost efficiency for that specific pattern.
-- Assuming DAX accelerates every read uniformly, without recognizing strongly-consistent reads bypass its cache entirely.
-- Relying on TTL for precise, time-sensitive expiration without accounting for its documented deletion-lag window.
-
----
-
-## 7. Performance Engineering
-
-### 7.1 The RCU Cost of Consistency — Modeling It Precisely
-A strongly consistent read of a 4KB item costs 1 RCU; the equivalent eventually consistent read costs 0.5 RCU — a straightforward 2x multiplier, but one that compounds non-trivially across a high-read-volume service. A balance-check API serving 5,000 reads/sec, if every read is (over-cautiously) upgraded to `ConsistentRead: true` per Advanced Q2's warning, costs 5,000 RCU/sec versus 2,500 RCU/sec at eventual consistency — at provisioned pricing, this is a direct, ongoing, easily-avoidable doubling of the service's read-capacity bill for the (typically large) majority of reads that have no actual read-your-own-writes requirement. The performance-engineering discipline here is precise: profile which specific code paths genuinely need strong consistency (immediately-after-write reads) versus which are independent lookups, and apply `ConsistentRead: true` surgically, not as a blanket "safer" default.
-
-### 7.2 DAX Latency Characteristics — the Numbers That Matter
-DAX serves cache hits in **microseconds** (typically under 1ms, often in the hundreds-of-microseconds range) versus DynamoDB's own single-digit-millisecond p99 for a direct table read — roughly a 10x latency improvement on cache hits, which matters disproportionately for latency-budget-constrained synchronous call chains (a payment-authorization path checking a cached rate-limit counter or fraud-score lookup mid-flow, where every millisecond of the synchronous chain counts toward the overall authorization SLA). On a cache **miss**, DAX adds its own round-trip overhead on top of the underlying DynamoDB read, meaning a poorly-tuned cache with a low hit rate can be net *slower* than reading DynamoDB directly — making cache-hit-rate monitoring (§7.4) not an optional nicety but the metric determining whether DAX is actually helping.
-
-### 7.3 GSI Propagation Lag Interacting with Consistency Choices
-A GSI never supports strongly consistent reads (§Basic Q4) — meaning for any access pattern routed through a GSI, the propagation-lag question (Module 27 §7.3) isn't a tunable trade-off, it's a structural given. Performance engineering for a GSI-backed read path means designing the *application* around this — e.g., a reporting dashboard reading a GSI should display a "as of" timestamp reflecting the known propagation-lag envelope, rather than presenting GSI data with the same freshness confidence as a base-table strongly-consistent read.
-
-### 7.4 Benchmarking DAX Cache-Hit Rate Before Committing to It
-Before adopting DAX for a given access pattern, measure the pattern's actual **key-repetition rate** in production traffic (how often the same partition/sort-key combination is re-requested within DAX's TTL window) — a uniformly-unique-key access pattern (each request touching a distinct, rarely-repeated key) will show a near-zero cache-hit rate regardless of DAX's raw capability, making the DAX cluster's operational cost (Advanced Q9) pure overhead with none of §7.2's latency benefit realized. This is a pre-adoption benchmarking step, not a post-adoption tuning step — the decision to adopt DAX for a given access pattern should be evidence-based (measured hit-rate potential), not assumed.
-
-## 8. Security
-
-### 8.1 IAM Conditions on Consistency and Capacity Operations
-Beyond the `LeadingKeys` data-isolation pattern (Module 27 §8.1), IAM policies can also restrict which principals may perform capacity-affecting operations (`dynamodb:UpdateTable`, changing provisioned throughput or switching capacity mode) — a meaningful control for a regulated environment where an unreviewed capacity-mode change (e.g., an engineer switching a production ledger table to on-demand without a cost/throttling-behavior review) should require an elevated, audited permission rather than being available to every service-role credential with table read/write access.
-
-### 8.2 Encryption Considerations Specific to DAX
-DAX supports encryption at rest and TLS in transit for cluster-to-client and cluster-to-DynamoDB traffic, but — a detail worth calling out explicitly in a security review — DAX's in-memory cache holds **decrypted** item data in the cluster nodes' memory for serving fast reads, meaning DAX cluster nodes themselves become part of the sensitive-data trust boundary and need the same VPC/security-group isolation discipline as the underlying DynamoDB table, not a lesser standard just because it's "only a cache."
-
-### 8.3 VPC Endpoints for DAX
-Like DynamoDB itself, a DAX cluster should be deployed inside a VPC with access restricted via security groups to only the specific application tier consuming it — DAX clusters are inherently VPC-resident (unlike DynamoDB's public-endpoint-capable default), which is actually a stronger default security posture, but still requires deliberate security-group scoping rather than an overly permissive "allow from anywhere in the VPC" rule.
-
-### 8.4 Auditability of Capacity-Mode and Consistency-Setting Changes
-For a SOX/PCI-DSS-relevant workload, changes to a table's capacity mode (provisioned ↔ on-demand) or to auto-scaling policy thresholds should be captured in CloudTrail and reviewed as part of standard change-management process — the same audit-trail discipline this course applies to schema/infrastructure changes generally, specifically relevant here because a capacity-mode change has direct cost and availability-risk implications that a compliance-minded organization expects to trace back to an approved change record.
-
-## 9. Scalability
-
-### 9.1 Adaptive Capacity and Its Interaction With On-Demand Mode
-On-demand capacity mode has its own internal analog of adaptive capacity — DynamoDB provisions and rebalances partition-level capacity automatically based on observed traffic, without the customer specifying RCU/WCU at all. This means on-demand mode doesn't eliminate the underlying per-partition-throughput-ceiling physics (Module 27 §7.1) — a severely skewed key can still, in principle, hit a per-partition ceiling under on-demand — but it removes the customer's own forecasting burden and reacts to organic traffic growth faster than provisioned-mode auto-scaling's polling-based reaction, at the cost premium already discussed (§2.3).
-
-### 9.2 Provisioned-with-Scheduled-Scaling for Predictable Bursts
-For a workload with a **known, calendar-predictable** burst (month-end settlement, quarter-end reporting, a retail Black Friday spike) — as opposed to a genuinely unpredictable one — the correct scalability tool is neither pure on-demand (paying its per-request premium for the entire steady-state period, not just the burst) nor unaided provisioned auto-scaling (which reacts with lag right as the predictable burst begins) but **scheduled scaling**: a pre-configured capacity increase timed ahead of the known burst window, reverting afterward. This captures on-demand's safety for the burst window specifically while retaining provisioned's cost efficiency for the (much longer) steady-state period — the single highest-leverage capacity-planning move for a workload whose bursts are calendar-predictable rather than genuinely random.
-
-### 9.3 Global Tables — Read-Scaling and DR, Not a Write-Scaling Mechanism
-Global Tables (Module 27 §9.3, Expert Q1) replicate a table across regions for **read locality and disaster-recovery** purposes — each region serves local reads at local latency, and a regional outage can fail over to a healthy region. It is explicitly **not** a write-throughput-scaling mechanism for a single logical entity: concurrent writes to the same item across regions resolve via last-writer-wins (Expert Q1), meaning Global Tables scale *aggregate* write capacity for *different* items/keys well, but do not provide a safe way to scale writes to the *same* hot item beyond what write-sharding (Module 27 Expert Q3) already provides within a single region.
-
-### 9.4 DAX as a Scalability Multiplier for Read-Heavy Workloads
-For a genuinely read-heavy, cache-hit-friendly access pattern (§7.4), DAX effectively multiplies the read capacity available to an application without a corresponding multiplication of DynamoDB's own provisioned/on-demand cost — cache hits are served entirely from DAX's memory, never consuming DynamoDB read capacity at all. This makes DAX a legitimate scalability lever specifically for the read side of a workload, distinct from and complementary to Global Tables' cross-region read-locality scaling — a single-region service under heavy read load from a *concentrated* set of hot keys benefits more from DAX; a globally-distributed user base benefits more from Global Tables' regional read locality; the two are frequently combined (DAX deployed per-region in front of a Global Table).
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

@@ -102,26 +102,6 @@ graph TB
 **Fix**: (1) Added explicit context-propagation code to the Kafka producer (injecting the W3C-Trace-Context-equivalent trace/span IDs into message headers) and the consumer (extracting them to continue the same trace rather than starting a new one) — closing the specific gap. (2) Instrumented a synthetic, periodic "trace continuity check" — a canary order deliberately pushed through the full pipeline on a schedule, with automated verification that its resulting trace is a single, continuous trace spanning both services rather than two fragments — converting "we assume tracing coverage is complete" into an actively, continuously verified property, directly mirroring [[../26-CICD/03-ArtifactManagement-ReproducibleBuilds-RetentionPolicies]] the rebuild-and-diff reproducibility verification and [[../25-DevOps/04-DevSecOps-PolicyAsCode-PlatformEngineering]] §Advanced Q7's policy-liveness-canary pattern, now applied to trace-context propagation specifically. (3) Audited every other async messaging boundary in the system for the identical gap, finding two more instances.
 
 **Lesson**: A fragmented trace produces no error, no warning, and no visible signal in the tracing UI distinguishing "this is a genuinely complete trace" from "this is one half of a silently-broken propagation chain" — meaning tracing *coverage completeness* is, exactly like the build reproducibility and the promotion-gate enforcement, an assumed-but-never-measured property until the one specific incident that actually requires the missing causal link exposes the gap. The specific, generalizable insight for observability broadly: instrumentation *presence* (spans are being created, telemetry is flowing, dashboards render data) is not evidence of instrumentation *completeness* — the same "declared/present ≠ actual/complete" pattern this course has traced across Kubernetes, Docker, DevOps, and CI/CD recurs here in the very telemetry infrastructure meant to make every other domain's failures observable in the first place.
-
----
-
-## 5. Best Practices
-- Identify which pillar's data shape (aggregate metric, per-event log, causal trace) a given investigative question actually requires before reaching for more of whichever signal is already familiar.
-- Adopt OpenTelemetry's API/SDK/Collector separation so instrumentation is never coupled to a specific backend — a Collector configuration change, not a re-instrumentation project, should be sufficient to switch or add a backend.
-- Treat every new metric label as a deliberate cardinality decision — estimate the multiplicative combination of label values before adding a high-cardinality dimension (a user ID, a raw unbounded path) to a metric.
-- Ensure trace/span IDs are automatically injected into structured logs so a request's logs and trace are correlatable without manual, timestamp-based reconstruction.
-- Explicitly propagate trace context across every non-HTTP hop (message queues, background jobs) — auto-instrumentation commonly covers HTTP calls but requires deliberate, manual integration for async messaging clients.
-- Periodically, actively verify trace-context propagation coverage via a synthetic continuity check spanning every genuine hop in the architecture, rather than assuming coverage is complete because dashboards render data.
-
-## 6. Anti-patterns
-- Treating "logs exist and I can grep them" as a substitute for causal tracing when the actual investigative question requires understanding a request's cross-service path, not merely its per-service detail.
-- Adding a high-cardinality label to a metric without estimating the multiplicative time-series growth it produces, risking silent metrics-backend degradation.
-- Unstructured, free-text logging with no trace/span ID correlation, requiring manual timestamp-based reconstruction to connect a log entry to its causing request.
-- Assuming auto-instrumentation covers every hop in a distributed system, without explicitly verifying async/messaging boundaries specifically carry propagated trace context.
-- Treating "traces are rendering in the UI" as proof that tracing coverage is complete, rather than periodically, deliberately verifying continuity across every genuine architectural hop.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

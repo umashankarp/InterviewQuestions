@@ -60,67 +60,6 @@ graph TB
 
 ## 4. Production Example
 **Scenario**: A real-time notification service used Redis Pub/Sub to broadcast "order status changed" events to a downstream analytics consumer — during a routine deployment of the analytics service (a brief restart, a few seconds of downtime), every order-status-change event published during that restart window was **permanently lost**, since Pub/Sub delivers only to currently-connected subscribers; the analytics dashboard subsequently showed gaps/inconsistencies in order-status transition counts that took significant investigation to trace back to this specific deployment window, since nothing logged an error anywhere (Pub/Sub doesn't fail loudly — it simply doesn't deliver to a disconnected subscriber, silently). **Investigation**: correlating the analytics discrepancy's timing precisely with the deployment's restart window confirmed the root cause. **Fix**: migrated the notification mechanism from Pub/Sub to Streams (`XADD`/`XREADGROUP`) — the analytics consumer now resumes from its last-acknowledged position after any restart, with zero message loss regardless of downtime duration (bounded only by the stream's own retention/trimming configuration). **Lesson**: Pub/Sub's fire-and-forget semantics make it fundamentally unsuitable for any consumer that isn't guaranteed to be continuously connected — "we'll just use Pub/Sub, it's simpler" is a reasonable choice only for genuinely loss-tolerant notifications, and any consumer with a realistic restart/deployment lifecycle (essentially every production service) needs Streams' durability instead.
-
-## 5. Best Practices
-- Use Streams (not Pub/Sub) for any messaging use case where a consumer's temporary disconnection must not cause permanent message loss.
-- Reserve Pub/Sub genuinely for loss-tolerant, ephemeral real-time notifications where a missed message has no lasting consequence.
-- Use `WAIT` explicitly for any write requiring stronger-than-default durability against primary failover, exactly as MongoDB's `w: "majority"` is used deliberately, not by default.
-- Choose Sentinel or Cluster based on deployment topology (single primary-replica set vs. sharded), never attempt to combine them.
-
-## 6. Anti-patterns
-- Using Pub/Sub for any message a consumer's restart/deployment cycle could cause to be silently lost (the incident).
-- Assuming Redis's default asynchronous replication provides the same durability as an explicit `WAIT`-confirmed write.
-- Running both Sentinel and Cluster simultaneously, or misunderstanding which HA mechanism applies to a given deployment's actual topology.
-- Ignoring consumer-group `XPENDING` monitoring, allowing crashed-consumer messages to remain unacknowledged and unprocessed indefinitely.
-
----
-
-## 7. Performance Engineering
-
-**CPU — Streams add real per-message bookkeeping cost.** Unlike Pub/Sub (pure fan-out, no persisted state per message), each `XADD` writes a persisted entry plus consumer-group metadata (the pending-entries list, delivery counts) — meaningfully more per-message CPU/memory cost than Pub/Sub's fire-and-forget delivery, which is the direct, structural price of Streams' durability and replay guarantees (§2.2); this is not a flaw, but a trade-off that must be sized into capacity planning when migrating a high-volume Pub/Sub channel to a Stream (the §4 incident's fix), not assumed to be free.
-
-**Memory — unbounded Stream growth.** A Stream is a persisted, append-only log — without `XTRIM`/`MAXLEN` (or `MINID`-based trimming), it grows without bound, exactly the unbounded-retention risk §6/Advanced Q6 names as structurally similar to an orphaned replication slot or an untrimmed WAL. Use `XADD ... MAXLEN ~ 1000000` (the `~` performs approximate, more efficient trimming rather than an exact-count trim on every single add) sized to the actual replay window consumers genuinely need, not left unset "to be safe."
-
-**Latency — Pub/Sub vs. Streams delivery cost.** Pub/Sub delivery is near-instantaneous (a direct in-memory fan-out to connected sockets, no persistence write on the hot path); Streams' `XADD` pays a small additional latency cost for the persisted-write path before the message is available to consumers via `XREADGROUP` — for a genuinely latency-critical, loss-tolerant broadcast (a live UI indicator), this Pub/Sub-vs-Streams latency delta is a real, relevant factor, not merely a durability-vs-none binary choice.
-
-**Throughput — consumer-group fan-out vs. Pub/Sub fan-out.** A Stream's consumer group distributes messages *competitively* across group members (each message goes to exactly one member) — throughput scales with the number of consumers processing in parallel, capped by the single Stream key's placement on one Cluster node (§8 exercise) unless the workload is explicitly partitioned across multiple stream keys; Pub/Sub, by contrast, delivers *every* message to *every* subscriber (broadcast, not competitive), so "throughput" for Pub/Sub is bounded by the slowest subscriber's ability to keep its socket buffer drained, not by a shared consumer-group backlog.
-
-**Replication lag's throughput-adjacent cost:** since replication is asynchronous by default (§2.5), a read-scaling strategy that offloads `XRANGE` historical reads to replicas trades consistency (a replica's view of a Stream can lag the primary) for reduced primary load — appropriate for historical/analytics reads, not for a consumer-group's live `XREADGROUP` position, which must be tracked against the primary's authoritative state.
-
-**Benchmarking:** benchmark Streams under realistic consumer-group counts and pending-entries-list depth, not an idealized single-consumer, always-acknowledged-immediately scenario — the pending-entries-list bookkeeping cost (§2.2) is where real production overhead concentrates under a genuinely lagging or partially-failing consumer population, not in the simple `XADD`/`XACK` happy path most naive benchmarks measure.
-
----
-
-## 8. Security
-
-**Threats:** Pub/Sub channels and Stream keys are visible to, and consumable by, any client with sufficient permission on the Redis instance — an over-broadly-credentialed client (or one compromised via the unauthenticated-exposure risk, Module 25 §8) can subscribe to or read from channels/streams carrying sensitive payment-lifecycle events it has no legitimate need to see, a confidentiality risk distinct from Module 25's primarily availability/integrity-focused threats. A second, HA-specific threat surface: **Sentinel's own communication channel** (§2.10) — an attacker able to interfere with unsecured Sentinel traffic could manipulate failover behavior or gain topology reconnaissance, a privileged attack surface adjacent to, but distinct from, the Redis data instances' own security.
-
-**Mitigations:** ACLs (Redis 6+, Module 25 §8) scoped per-channel-pattern (`+psubscribe` restricted to a specific channel prefix) and per-stream-key-pattern, exactly mirroring the least-privilege credential design already established for key-space access — a payment-events consumer credential should be scoped to read only its specific stream(s), not the instance's full channel/stream namespace. TLS for both client-to-Redis and Sentinel-to-Redis/Sentinel-to-Sentinel traffic, particularly for any deployment where Sentinel instances communicate across a network boundary not already fully trusted.
-
-**OWASP mapping:** broken access control (A01:2021) if channel/stream ACL scoping isn't enforced per-consumer; misconfiguration (A05:2021) for an unsecured Sentinel deployment, mirroring the unauthenticated-Redis-exposure risk at the HA-orchestration layer instead of the data layer.
-
-**AuthN/AuthZ:** every consumer group member should authenticate with its own scoped ACL credential (not a single shared credential across an entire consumer-group fleet), so that revoking one compromised consumer's access doesn't require rotating every other consumer's credential simultaneously.
-
-**Secrets:** payment-lifecycle event payloads carried on a Stream (account identifiers, transaction amounts) are sensitive data at rest within Redis's own persistence files (RDB/AOF) — encryption-at-rest for the underlying storage volume is a standing requirement wherever Streams carry this class of payload, exactly as for any other persisted financial data.
-
-**Encryption:** in-transit TLS for all publisher/consumer/Sentinel traffic; at-rest encryption for AOF/RDB files backing any Stream carrying sensitive event content.
-
----
-
-## 9. Scalability
-
-**Horizontal scaling — Streams don't automatically span Cluster slots.** A single Stream is a single key, and a single key lives on a single Redis Cluster hash slot/node (Module 25 §2.5) — Cluster mode does **not** automatically shard one Stream's contents across nodes; scaling a Streams-based pipeline horizontally requires **explicitly partitioning** across multiple stream keys (e.g., `orders:stream:{accountHash mod N}`), each independently placed by Cluster's normal key-to-slot mapping, with consumers responsible for reading across the relevant partition set — directly analogous to a Kafka topic's partition model, but requiring manual partitioning discipline in Streams since Redis doesn't provide it natively the way a dedicated broker does.
-
-**Sentinel failover mechanics (§2.3 recap, scalability lens):** failover time (seconds, not milliseconds) means a Streams-based consumer using `XREADGROUP` against a failed-over primary must handle a connection interruption and resume correctly from its last-acknowledged position — the consumer-group's pending-entries-list state, itself replicated to the new primary (subject to the same async-replication lag caveat as any other write), is what makes this resumption correct rather than requiring the consumer to replay from the very beginning.
-
-**Sentinel split-brain risk under partition:** if a network partition isolates the primary from a majority of Sentinels *and* from its replicas, but the primary itself remains reachable by some clients (a classic partial-partition scenario), those clients can continue writing to what is now a **stale, isolated primary** while Sentinel promotes a replica to be the new primary on the majority side — producing two simultaneously-writable "primaries" for a brief window, with the isolated primary's writes silently diverging and ultimately lost once it's demoted back to a replica on healing. `min-replicas-to-write`/`min-replicas-max-lag` (configuring the primary to refuse writes if it can't confirm replication to at least N replicas within a lag bound) is the mitigating lever — trading some availability (the primary refuses writes during a degraded-replication window) for closing this specific divergence risk, the same availability-vs-consistency trade already recurring throughout this course.
-
-**Replication/Partitioning:** Cluster for data-volume scaling (Module 25 §2.5/§9); explicit Stream-key partitioning (above) for Streams-specific throughput scaling; Sentinel or Cluster's built-in failover (never both) for HA, chosen by topology.
-
-**Cross-region DR:** open-source Redis has no native, built-in asynchronous cross-region replication comparable to a dedicated broker's multi-datacenter mirroring — cross-region DR for a Streams-based pipeline typically requires either a commercial extension (Redis Enterprise's Active-Active/CRDB), application-level dual-write/replay tooling, or accepting that the durable, cross-region system of record lives elsewhere (the transactional database) with Redis Streams as a regional, not global, transport layer — a genuine architectural limit worth surfacing explicitly rather than assuming Streams provides multi-region durability it does not.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)

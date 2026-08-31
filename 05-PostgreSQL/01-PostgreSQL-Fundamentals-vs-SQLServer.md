@@ -57,65 +57,6 @@ graph TB
 
 ## 4. Production Example
 **Scenario**: A team migrated a moderately write-heavy service from SQL Server (with RCSI enabled) to PostgreSQL, expecting equivalent behavior "since both use MVCC now" — after a few weeks in production, query performance degraded steadily, and table sizes grew far beyond expected data volume. **Investigation**: `autovacuum` was running, but its default cost-based throttling settings (tuned for a much lower write-volume workload than this service's actual traffic) meant it consistently fell behind the table's dead-tuple accumulation rate — `pg_stat_user_tables`'s `n_dead_tup` showed dead-tuple counts far exceeding live rows for the hottest tables. **Fix**: tuned `autovacuum_vacuum_cost_limit`/`autovacuum_naptime` more aggressively for the specific high-churn tables (via per-table `ALTER TABLE... SET (autovacuum_vacuum_scale_factor =...)` overrides), and ran a one-time manual `VACUUM (VERBOSE, ANALYZE)` to catch up the existing backlog. **Lesson**: "PostgreSQL uses MVCC just like SQL Server's RCSI" is true for concurrency-model *behavior* but conceals a genuinely distinctive PostgreSQL-specific operational responsibility (vacuum tuning) that SQL Server's tempdb-based version store simply doesn't require in the same way — assuming full behavioral equivalence between the two engines' MVCC implementations is a real, demonstrated migration risk.
-
-## 5. Best Practices
-- Monitor `pg_stat_user_tables`'s dead-tuple counts and `autovacuum` activity proactively for any high-write-volume table, not just at incident time.
-- Use partial and expression indexes deliberately for PostgreSQL-specific query patterns rather than assuming SQL Server indexing conventions transfer directly.
-- Tune `autovacuum` settings per-table for tables with unusually high churn, rather than relying solely on global defaults.
-- Use `JSONB` (not `JSON`) for any semi-structured data needing efficient storage/indexing.
-
-## 6. Anti-patterns
-- Assuming SQL Server and PostgreSQL MVCC implementations are operationally equivalent (the incident).
-- Ignoring `autovacuum` monitoring, allowing dead-tuple bloat to silently degrade performance over time.
-- Using plain `JSON` instead of `JSONB` for data that will actually be queried/indexed, not just stored/retrieved whole.
-- Applying SQL Server's non-sargable-predicate-avoidance discipline without realizing PostgreSQL's expression indexes can directly solve the same problem differently.
-
----
-
-## 7. Performance Engineering
-
-**CPU/Memory:** MVCC's tuple-versioning means every `UPDATE` is effectively an `INSERT` + a tombstone-mark — on a hot ledger-posting table doing thousands of status transitions per second, this doubles the working set the buffer cache must hold relative to a hypothetical in-place-update engine, directly increasing shared_buffers pressure and page eviction churn.
-
-**Query planner:** The planner's row-count estimates come from `pg_statistics`, refreshed by `ANALYZE` (run automatically by `autovacuum` after a threshold of changed rows, but frequently stale immediately after a large bulk load). A reconciliation query joining `trades` and `settlements` on `(account_id, trade_date)` — two correlated columns the default single-column statistics can't capture — routinely mis-estimates row counts and picks a nested-loop join where a hash join would be an order of magnitude faster; `CREATE STATISTICS trades_acct_date_stats (dependencies) ON account_id, trade_date FROM trades;` followed by `ANALYZE` closes exactly this gap.
-
-**Connection pooling (pgbouncer):** In **transaction pooling mode** (the mode that actually gives PostgreSQL connection-scaling headroom, since a single physical backend serves many logical client connections sequentially), session-level state — `SET search_path`, prepared statements via `PREPARE`, advisory locks held across statements, temp tables — does **not** survive between transactions, because the underlying physical connection may be handed to a different client the instant the transaction commits. A team using an ORM's server-side prepared-statement caching against a pgbouncer transaction-pooled endpoint will see intermittent "prepared statement does not exist" errors under load — the fix is either session pooling mode (losing most of the connection-scaling benefit) or disabling server-side prepare in the driver and relying on pgbouncer's own statement caching.
-
-**WAL cost:** Every tuple version written also writes to the WAL — a high-churn table (the vacuum-bloat incident's root cause) doesn't just bloat the heap, it multiplies WAL volume, which directly increases replication lag risk (Module 22 §7) and checkpoint I/O. `wal_compression = on` reduces WAL volume for full-page writes at a modest CPU cost, worth enabling on any high-TPS OLTP primary.
-
-**Benchmarking:** Benchmark query plans against production-representative data volume and statistics freshness, never against a freshly-`ANALYZE`d, artificially small staging copy — the correlated-columns misestimation above is invisible until the planner is actually reasoning about production-scale skew.
-
-**Caching:** Application-level caching (Redis) in front of PostgreSQL should still respect `JSONB`'s native indexing strength for semi-structured lookups before reaching for an external cache purely to avoid a query the database could serve efficiently itself.
-
----
-
-## 8. Security
-
-**Row-Level Security (expanded):** Beyond the multi-tenant policy already shown (§10 Advanced Q8), RLS policies can be scoped per role (`CREATE POLICY... TO analyst_role USING (...)`) so a read-only reporting role sees a masked or restricted row subset distinct from what a service account performing writes sees — a single table, multiple enforced views, all at the engine layer rather than trusted to every application code path.
-
-**Roles and privilege separation:** Follow least-privilege via role hierarchy (`CREATE ROLE app_readonly; GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_readonly;`) rather than granting broad `ALL PRIVILEGES` to a single application role — a payments service's read-replica-serving reporting endpoint should run under a role that structurally cannot `UPDATE` a ledger table, so a SQL-injection or application bug can't escalate beyond what the role's own grants permit, a second, engine-enforced layer beneath application authorization exactly as RLS is.
-
-**`pg_hba.conf`:** Controls *which* authentication method applies per (database, user, source-address, connection-type) tuple — `hostssl` entries reject any non-TLS connection attempt outright at the network layer, and `scram-sha-256` (not `md5`, which is cryptographically weaker and increasingly deprecated) should be the standard password-authentication method. A common FinTech-audit finding is a `pg_hba.conf` with a trailing permissive `host all all 0.0.0.0/0 md5` rule left from initial setup, silently widening the actual attack surface far beyond what the application's documented access pattern implies.
-
-**Encryption:** In-transit: `ssl = on` plus `hostssl`-only `pg_hba.conf` rules enforce TLS for every client connection, including replication connections (Module 22 §8). At-rest: PostgreSQL has no native Transparent Data Encryption; rely on disk/volume-level encryption (AWS EBS encryption, Azure Disk encryption) for the data files, and `pgcrypto`'s `pgp_sym_encrypt`/`pgp_sym_decrypt` for column-level encryption of specific highly sensitive fields (e.g., a stored card-verification value, though PCI-DSS scope reduction argues for never storing this at all rather than encrypting it).
-
-**Injection:** Parameterized queries (`$1`, `$2` placeholders via the driver, never string-concatenated SQL) remain the primary defense — PostgreSQL's `EXECUTE` with dynamically-built SQL inside `PL/pgSQL` functions is a common, easy-to-miss injection vector when a function accepts a table/column name as a parameter; use `format('%I', ident)` (identifier-quoting) rather than naive string interpolation. Pin a function's `search_path` explicitly (`SET search_path = public, pg_temp`) to prevent a "trojan-horse function" attack where a malicious schema earlier in an unpinned search path shadows a built-in function call.
-
----
-
-## 9. Scalability
-
-**Horizontal scaling:** Read replicas (streaming physical replication, Module 22 §2.2) offload read traffic from the primary; logical replication (Module 22 §2.2) additionally enables selective, fan-out replication to multiple independently-schema'd subscribers (a reporting warehouse, a fraud-detection pipeline) without burdening the primary with each subscriber's own query load.
-
-**Vertical scaling:** A single PostgreSQL primary's write throughput is ultimately bounded by WAL-write I/O and single-writer contention on hot rows — vertical scaling (faster storage, more memory for `shared_buffers`) delays but doesn't eliminate the ceiling a genuinely write-heavy, single-primary architecture eventually hits.
-
-**Partitioning/Sharding:** Table partitioning (Module 22 §2.1) addresses maintenance-operation cost at scale, not write-throughput scaling by itself, since all partitions still live on one primary. True horizontal write-sharding requires an extension like **Citus** (distributing partitions/shards across multiple physical nodes with a coordinator routing queries) or application-level sharding — a materially larger architectural commitment than partitioning alone, justified only once a single primary's vertical ceiling is a genuine, demonstrated constraint.
-
-**High Availability / Disaster Recovery:** Streaming replication with a standby ready for promotion (Module 22 §3), ideally with automated, fenced failover orchestration (Patroni/etcd or a managed service's built-in failover) rather than manual intervention — covered in full in Module 22 §12 and §15.
-
-**CAP-adjacent trade-off:** Synchronous vs. asynchronous replication (Module 22 §2.3) is PostgreSQL's concrete instantiation of the availability/consistency trade-off at the replication layer — the scalability lever (more replicas, more read capacity) and the durability lever (synchronous acknowledgment) pull in different directions and must be sized deliberately per workload's actual tolerance for committed-data loss on failover.
-
----
-
 ## 10. Interview Questions
 
 ### Basic (10)
