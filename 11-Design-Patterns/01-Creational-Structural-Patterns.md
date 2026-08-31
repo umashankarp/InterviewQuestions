@@ -17,16 +17,31 @@ Any codebase with genuine construction complexity or structural composition need
 
 ### How does it work (30,000-ft view)?
 ```csharp
-// Factory Method: defer WHICH concrete type to instantiate to a subclass/injected factory
+// C# — Factory Method: defer WHICH concrete type to instantiate to an injected factory
 public interface IPaymentGatewayFactory { IPaymentGateway Create(string region); }
-public class PaymentGatewayFactory: IPaymentGatewayFactory
+public sealed class PaymentGatewayFactory : IPaymentGatewayFactory
 {
     public IPaymentGateway Create(string region) => region switch
     {
-        "US" => new StripeGateway,
-            "EU" => new AdyenGateway,
-            _ => throw new NotSupportedException
+        "US" => new StripeGateway(),
+        "EU" => new AdyenGateway(),
+        _    => throw new NotSupportedException($"No gateway for region {region}")
     };
+}
+```
+```java
+// Java — same pattern. GoF patterns are language-neutral; only the syntax and a few
+// idioms shift (functional interfaces, no properties, Streams). See §2.9 for the full mapping.
+public interface PaymentGatewayFactory { PaymentGateway create(String region); }
+
+public final class DefaultPaymentGatewayFactory implements PaymentGatewayFactory {
+    public PaymentGateway create(String region) {
+        return switch (region) {
+            case "US" -> new StripeGateway();
+            case "EU" -> new AdyenGateway();
+            default   -> throw new UnsupportedOperationException("No gateway for region " + region);
+        };
+    }
 }
 ```
 
@@ -59,6 +74,32 @@ Facade provides a single, simplified interface over a complex subsystem with man
 
 ### 2.8 Proxy — Controlling Access to an Object
 Proxy provides a stand-in for another object, controlling access to it — common variants: a **virtual proxy** (deferring expensive object creation until actually needed, directly related to the lazy-Singleton-construction discussion), a **protection proxy** (adding an authorization check before delegating, directly the resource-based authorization applied structurally as a proxy), and a **remote proxy** (representing an object that actually lives in a different process/machine — the conceptual shape underlying any generated gRPC/WCF client stub). The structural shape (same interface, wraps and delegates to a real object) is nearly identical to Decorator — the distinguishing factor is *intent*: Decorator adds behavior; Proxy controls access, often without the caller even being aware a proxy is interposed at all.
+
+### 2.9 Creational & Structural Patterns in C# and Java — the Same Patterns, Different Machinery
+
+The GoF patterns are language-neutral; a FinTech interviewer at a Java shop asks the identical questions. What shifts is the idiom, and a few patterns are *subsumed by the language* differently in each.
+
+| Pattern / concern | C# | Java |
+|---|---|---|
+| **Factory Method** | `switch` expression returning `new X()`; or an injected `Func<string, IGateway>` | `switch` expression (Java 14+); or an injected `Function<String, Gateway>` |
+| **Abstract Factory** | interface producing a family; DI registers the concrete factory | identical; or an `enum` where each constant overrides factory methods (a very Java idiom for a fixed family) |
+| **Builder** | fluent methods returning `this` + `Build()` validating; or a `record` + `with` for simple cases | fluent methods returning `this` + `build()` validating; **no `with`** so the Builder does more work here; Lombok `@Builder` is common but hides the validation hook |
+| **Singleton** | **superseded** by `services.AddSingleton<T>()` DI lifetime | **superseded** by a Spring `@Component` (singleton scope by default) / Guice `@Singleton`; the classic form is `enum Singleton { INSTANCE }` (Effective Java Item 3 — serialization- and reflection-safe), or a static holder class for lazy init |
+| **Prototype** | `ICloneable` (discouraged); `record` `with`; a hand-written `Clone()` | `Cloneable`/`clone()` is a **known-broken** JDK design (Effective Java Item 13) — prefer a copy constructor or copy factory; `record` (16+) gives value semantics but no built-in copy-with-change |
+| **Adapter** | a wrapper class implementing your `IGateway`, delegating to the vendor SDK | identical wrapper class implementing your `Gateway` interface |
+| **Decorator** | wrapper implementing the same interface; DI can chain them; dynamic proxy via Castle for generic decorators | wrapper implementing the same interface; **`java.lang.reflect.Proxy`** (JDK, no library) for a generic interface decorator; Spring AOP for cross-cutting decoration |
+| **Facade** | a coordinating class exposing one method | identical |
+| **Proxy** | a wrapper class; or `DispatchProxy` (BCL) / Castle DynamicProxy for runtime generation | a wrapper class; or **`Proxy.newProxyInstance(...)`** with an `InvocationHandler` — runtime interface proxying is *built into the JDK*, which is why AOP-style protection/logging proxies are so idiomatic in Java |
+| Object initialization | object initializers `new X { A = 1 }`; primary constructors (C# 12) | constructors only; the Builder is reached for sooner because there is no initializer syntax |
+
+**Where the languages genuinely diverge for these patterns:**
+
+- **Runtime proxying is a JDK primitive in Java.** `java.lang.reflect.Proxy` + `InvocationHandler` lets you wrap *any* interface with cross-cutting behavior (auth, logging, retry, transactions) with no code generation and no library — which is why the Decorator/Proxy patterns, and frameworks built on them (Spring AOP, JPA lazy-loading, mock libraries), are pervasive. C#'s nearest built-in is `DispatchProxy`; the richer story (`Castle.DynamicProxy`) is a library. So a Java answer to "add authorization transparently to every repository call" (Expert exercise) idiomatically reaches for a dynamic proxy / AOP aspect; the C# answer reaches for a hand-written decorator per interface or a source generator.
+- **Singleton's canonical safe form differs.** C#: don't write it — use DI. Java: if you truly need one without a container, `enum Singleton { INSTANCE }` is the recommended form because it's immune to reflection and serialization attacks that break lazy-holder implementations; still, DI (Spring's default singleton scope) is the real answer in application code.
+- **`clone()` / `ICloneable` are both discouraged, for different reasons.** Java's `Cloneable` is a broken contract (no `clone()` method on the interface, shallow-by-default, `protected`); the fix is a copy constructor. C#'s `ICloneable` is discouraded because it doesn't specify deep vs. shallow. Both languages land on "write an explicit copy constructor / factory," and both face the same shallow-vs-deep vigilance the `with`-expression incident showed.
+- **Builder carries more weight in Java** precisely because there is no object-initializer or `with` syntax — the telescoping-constructor problem is sharper, so Builder (or a `record` with a compact canonical constructor for validation) shows up earlier and more often.
+
+**Adapter, Facade, Decorator (hand-written), and Factory Method port line-for-line** — the intent distinctions (Adapter = incompatible→compatible; Facade = complex→simple; Proxy = access control; Decorator = behavior addition) are identical in both languages.
 
 ## 3. Visual Architecture
 ```mermaid
@@ -150,28 +191,118 @@ classDiagram
 ## 10. Interview Questions
 
 ### Basic (10)
-1. **Q: What's the difference between Factory Method and Abstract Factory?** **A:** Factory Method creates one type of object; Abstract Factory creates families of related objects, guaranteeing internal consistency across the family.
-2. **Q: What problem does Builder solve?** **A:** Constructing an object with many optional/conditional parameters readably and with validation, avoiding a telescoping-constructor anti-pattern.
-3. **Q: What does the Singleton pattern guarantee?** **A:** Exactly one instance of a class, globally accessible — with the modern caveat that hand-rolled Singletons (static instance + global access) are usually inferior to DI-container-managed singleton lifetimes, which give the same guarantee without hidden global state or testability loss.
-4. **Q: Why is the classic Singleton pattern considered problematic in modern DI-based codebases?** **A:** It introduces global mutable state, hides dependencies from constructor signatures, and makes unit testing harder — largely superseded by DI-container `Singleton`-lifetime registration.
-5. **Q: What does Adapter do?** **A:** Wraps a class with an incompatible interface, translating calls to conform to the interface client code expects.
-6. **Q: What does Decorator do?** **A:** Wraps an object with the same interface, adding behavior before/after delegating, composably stackable.
-7. **Q: What does Facade do?** **A:** Provides a single, simplified interface over a complex subsystem.
-8. **Q: What does Proxy do?** **A:** Provides a stand-in controlling access to another object (deferred creation, authorization checks, or remote representation).
-9. **Q: What's the key structural difference between Decorator and Proxy?** **A:** They're structurally nearly identical; the distinguishing factor is intent — Decorator adds behavior, Proxy controls access.
-10. **Q: What is Prototype?** **A:** Creating new objects by cloning an existing instance rather than constructing from scratch.
+
+**B1. Q: What's the difference between Factory Method and Abstract Factory?**
+*Ideal answer:* Factory Method defers *which single concrete type* to create to a subclass or injected factory. Abstract Factory produces a whole *family of related objects* (e.g. a matching `Button`, `Checkbox`, `ScrollBar` in one theme) from one factory instance, guaranteeing the family is internally consistent.
+*Common mistake:* Calling any class with a `Create` method an "Abstract Factory" — the defining feature is the *family-consistency* guarantee, not the name.
+*Follow-up:* "Give a case where family consistency is the whole point." (multi-cloud clients — storage/queue/compute must all be the same provider — Advanced Q2).
+
+**B2. Q: What problem does Builder solve?**
+*Ideal answer:* Constructing an object with many optional/conditional steps readably and with validation, avoiding a telescoping constructor (`new Pizza(size, crust, true, false, true, …)`). The `Build()` method is a validation hook that a long constructor or object initializer doesn't have.
+*Common mistake:* Reaching for Builder for a simple value object with 2–3 fields — that's a constructor or a `record`.
+*Follow-up:* "Why does Builder show up more in Java than C#?" (no object-initializer or `with` syntax — §2.9).
+
+**B3. Q: What does the Singleton pattern guarantee, and what's the modern caveat?**
+*Ideal answer:* Exactly one instance of a class, globally accessible. Modern caveat: a hand-rolled Singleton (static instance + global accessor) is usually inferior to a DI container's singleton *lifetime*, which gives the same one-instance guarantee without hidden global state and without breaking testability.
+*Common mistake:* Presenting Singleton as an unconditionally good, current pattern.
+*Follow-up:* "The container isn't an option — safest Singleton in Java?" (`enum Singleton { INSTANCE }` — reflection- and serialization-safe).
+
+**B4. Q: Why is the classic Singleton considered problematic in DI-based codebases?**
+*Ideal answer:* It introduces global mutable state (persists across tests unless explicitly reset), hides a dependency (callers of `X.Instance` have an undeclared dependency invisible in the constructor), and makes substitution for tests hard. DI-container singleton-lifetime registration supersedes it — same guarantee, dependency stays visible and injectable.
+*Common mistake:* Only citing "global state" and missing the hidden-dependency (service-locator) problem.
+*Follow-up:* "When is a genuine process-wide single instance still fine?" (immutable or externally-synchronized global state — a read-only reference-data cache — Expert Q1).
+
+**B5. Q: What does Adapter do?**
+*Ideal answer:* Wraps a class whose interface is *incompatible* with what the client expects, translating calls so it conforms — the standard way to make a third-party SDK satisfy your own `IPaymentGateway`-style abstraction.
+*Common mistake:* Confusing it with Facade (which simplifies an *already-compatible* but complex subsystem) or Decorator (same interface, adds behavior).
+*Follow-up:* "How does Adapter enable DIP with a vendor SDK?" (your domain owns the interface; the adapter conforms the vendor's shape to it — Intermediate Q4).
+
+**B6. Q: What does Decorator do?**
+*Ideal answer:* Wraps an object with the *same* interface, adding behavior before/after delegating to the wrapped instance — composably stackable, so caching, retry, and logging can each be one decorator and combined in any order.
+*Common mistake:* Implementing it by subclassing the concrete type rather than the interface (defeats composability).
+*Follow-up:* "Java route for a *generic* decorator over any interface?" (`java.lang.reflect.Proxy` + one `InvocationHandler`, no library — §2.9).
+
+**B7. Q: What does Facade do?**
+*Ideal answer:* Provides one simplified, purpose-built interface over a complex subsystem of many interacting classes — it hides complexity, it doesn't add capability.
+*Common mistake:* Calling any wrapper a Facade — the intent is *simplification of an already-compatible* subsystem, distinct from Adapter's incompatibility bridging.
+*Follow-up:* "Can a Facade use Adapters internally?" (yes — different levels of concern, they compose — Intermediate Q6).
+
+**B8. Q: What does Proxy do?**
+*Ideal answer:* Provides a stand-in that *controls access* to another object — variants: virtual proxy (defer expensive construction), protection proxy (authorization check before delegating), remote proxy (a local stand-in for an object in another process).
+*Common mistake:* Describing it as "adds behavior" — that's Decorator; Proxy's intent is access control, often invisibly.
+*Follow-up:* "Java's built-in mechanism for runtime proxies?" (`Proxy.newProxyInstance` + `InvocationHandler`; also Spring AOP).
+
+**B9. Q: What's the key structural difference between Decorator and Proxy?**
+*Ideal answer:* Structurally almost none — both implement the same interface and wrap/delegate. The distinction is *intent*: Decorator adds behavior the caller wants; Proxy controls access, often without the caller knowing it's there.
+*Common mistake:* Trying to find a structural difference — there isn't a reliable one; it's intent.
+*Follow-up:* "A caching wrapper — Decorator or Proxy?" (arguably either; if the caller expects caching it's a Decorator, if it's transparent optimization it's a Proxy — the intent framing decides).
+
+**B10. Q: What is Prototype?**
+*Ideal answer:* Creating new objects by *cloning an existing instance* rather than constructing from scratch — useful when construction is expensive (a large object graph) or the concrete type is known only as "a copy of this."
+*Common mistake:* Reaching for `ICloneable`/`Cloneable` — both are discouraged (C#: unspecified deep/shallow; Java: a broken contract — Effective Java Item 13). Prefer a copy constructor / copy factory.
+*Follow-up:* "How does Prototype relate to the `with` expression?" (a language-level shallow-clone-with-changes for records — same deep-vs-shallow vigilance).
 
 ### Intermediate (10)
-1. **Q: Why does Abstract Factory's "family consistency" guarantee matter, concretely?** **A:** It makes it structurally impossible to accidentally mix incompatible components (a dark-theme button with a light-theme checkbox) since one factory instance produces the entire matched set — a plain Factory Method, called independently per component, offers no such guarantee.
-2. **Q: Why can a Builder enforce invariants a plain object initializer can't?** **A:** The `Build` method can validate the fully-assembled configuration before returning the object, rejecting an incoherent combination (e.g., "gluten-free crust" with "regular flour dusting") — an object initializer has no equivalent validation hook at the point of construction.
-3. **Q: Why does the classic Singleton pattern hide a dependency, specifically?** **A:** Code calling `MySingleton.Instance` doesn't declare this dependency in its constructor signature — it's invisible to anyone reading the class's public API, unlike an injected dependency, which is visibly part of the constructor's parameter list.
-4. **Q: Why is Adapter specifically valuable for satisfying DIP when integrating a third-party library?** **A:** The third-party library's concrete shape rarely matches the abstraction a codebase's high-level modules depend on — Adapter bridges this gap, letting the high-level module depend on its own abstraction while the Adapter (a low-level detail) handles the translation to the actual third-party API.
-5. **Q: Why does Decorator avoid the combinatorial subclass explosion inheritance-based extension would require?** **A:** Each decorator adds one concern independently and can be composed in any combination/order at runtime (via composition), whereas inheritance would require a distinct subclass for every combination of concerns needed (logging+caching, logging-only, caching-only, etc.).
-6. **Q: Why might a Facade internally use Adapters, without the two patterns conflicting?** **A:** A Facade's job (simplifying a complex subsystem) can naturally involve some subsystem components having incompatible interfaces the Facade needs to bridge internally via Adapters — the two patterns operate at different levels of concern (Facade: simplification of the client-facing interface; Adapter: interface-compatibility bridging of specific internal components) and compose naturally.
-7. **Q: Why is a virtual proxy (deferred construction) especially valuable for expensive-to-construct objects that are only conditionally needed?** **A:** It avoids paying the construction cost at all for the (possibly common) case where the object is never actually used, deferring the cost to the specific moment it's genuinely needed — directly the same lazy-construction trade-off discussed for Singletons.
-8. **Q: Why does Prototype's cloning approach require the same shallow-vs-deep-copy vigilance as the `with` expressions?** **A:** A naive clone that only shallow-copies reference-type fields shares mutable state between the original and the clone, exactly/the shallow-copy gotcha — a correct Prototype implementation must deliberately deep-copy (or use immutable member types) any mutable reference-type state to avoid unintended sharing.
-9. **Q: Why would a protection proxy be preferable to scattering authorization checks directly inside business-logic methods?** **A:** It centralizes the authorization concern in one, consistently-applied location transparent to calling code, rather than requiring every business-logic method to remember to include its own check — directly the same "centralize invariant enforcement" reasoning from the LSP-violation fix, applied here to authorization instead of a discount-calculation invariant.
-10. **Q: Why might a remote proxy (a generated gRPC client stub) be considered a Proxy pattern instance even though it's auto-generated, not hand-written?** **A:** It still fulfills the Proxy pattern's defining structural/intent shape — presenting the same interface as if the real object were local, while actually delegating (over the network) to a remote implementation — code generation is just the *mechanism* producing the proxy, not a different pattern.
+
+**I1. Q: Why does Abstract Factory's "family consistency" guarantee matter, concretely?**
+*Ideal answer:* Resolving one factory instance and using it to build every member of the family makes an inconsistent mix *structurally impossible* — you cannot get a dark-theme button with a light-theme checkbox, or an AWS storage client with an Azure queue client. Independent Factory Methods, each chosen separately, provide no such guarantee.
+*Why correct:* It states the mechanism (one factory → whole family) and the concrete bad state it prevents.
+*Common mistakes:* Thinking any collection of factory methods gives the guarantee; using Abstract Factory where the members are genuinely independent (then it's over-structure).
+*Follow-up:* "Where does the single factory instance come from?" (resolved once from config/DI based on the target provider or theme).
+
+**I2. Q: Why can a Builder enforce invariants a plain object initializer can't?**
+*Ideal answer:* `Build()` runs *after* all steps are set, so it can validate the fully-assembled configuration and reject an incoherent combination ("gluten-free crust" + "regular flour dusting", or `groupBy` referencing a column not selected). An object initializer / constructor with defaults has no post-assembly validation point.
+*Why correct:* It locates the capability precisely — a validation hook at "construction complete," which cross-field rules need.
+*Common mistakes:* Putting cross-field validation in the `With*` methods (they run before the picture is complete); assuming `required` members / non-null checks cover cross-field rules (they don't).
+*Follow-up:* "Where can a Builder *reintroduce* an OCP violation?" (a giant `Build()` that grows an `if` per new option — Advanced Q3).
+
+**I3. Q: Why does the classic Singleton pattern hide a dependency, specifically?**
+*Ideal answer:* Code that calls `MySingleton.Instance` has a real dependency on it that appears nowhere in the class's constructor signature or public API — a reader can't see it, a test can't substitute it without static hackery. An injected dependency is visibly a constructor parameter.
+*Why correct:* It contrasts the two on *visibility of the dependency*, which is the service-locator anti-pattern's core problem.
+*Common mistakes:* Framing it only as "global state" (that's B4's other half); thinking a `static readonly` field is fine because it's readonly (the hidden-dependency problem remains).
+*Follow-up:* "How does this make a class harder to reason about?" (you must read the whole body to discover what it actually depends on).
+
+**I4. Q: Why is Adapter specifically valuable for satisfying DIP when integrating a third-party library?**
+*Ideal answer:* The library's concrete shape (odd status codes, its own types, its retry semantics) rarely matches the abstraction your high-level modules should depend on. Adapter lets the high-level module depend on *your* interface while the adapter — a low-level detail — translates to the actual SDK, keeping vendor quirks out of the domain (an anti-corruption layer).
+*Why correct:* It ties Adapter to the *ownership direction* of the abstraction (domain-owned) and to keeping the vendor's shape from leaking.
+*Common mistakes:* Shaping your interface to mirror the vendor's API (a leaky abstraction — swapping vendors then still touches call sites); putting the adapter in the domain layer.
+*Follow-up:* "You have two payment providers — how many adapters, how many interfaces?" (one interface, one adapter per provider — that's also OCP).
+
+**I5. Q: Why does Decorator avoid the combinatorial subclass explosion of inheritance-based extension?**
+*Ideal answer:* Each decorator adds one concern and composes with the others at runtime in any order, so N concerns need N decorators. Inheritance would need a distinct subclass per *combination* — `LoggingCachingSqlRepo`, `LoggingSqlRepo`, `CachingSqlRepo`, … — which is 2^N.
+*Why correct:* It quantifies the difference (N vs 2^N) and names the mechanism (runtime composition vs compile-time subclass).
+*Common mistakes:* Claiming decorators must be applied in a fixed order (order matters for *correctness* sometimes, but the composition is still free-form); forgetting each decorator must implement the *interface*, not extend a concrete class.
+*Follow-up:* "Which decorator must be innermost in a retry+cache+log stack, and why?" (retry closest to the real call so each attempt re-executes; log outermost so the whole sequence is one event — Advanced Q7).
+
+**I6. Q: Why might a Facade internally use Adapters without the two patterns conflicting?**
+*Ideal answer:* They operate at different levels. The Facade simplifies the *client-facing* interface over a subsystem; some components *within* that subsystem may have incompatible interfaces the Facade bridges with Adapters. One is about the outer simplification, the other about inner compatibility — they compose.
+*Why correct:* It separates the concerns by level (client-facing vs internal component) so the "aren't they both wrappers?" confusion is resolved.
+*Common mistakes:* Thinking you must pick one; conflating "the Facade wraps things" with "the Facade is an Adapter."
+*Follow-up:* "How do you tell whether you're writing a Facade or an Adapter?" (is the subsystem interface *incompatible* or just *complex*? incompatible → Adapter; complex-but-usable → Facade).
+
+**I7. Q: Why is a virtual proxy (deferred construction) especially valuable for an expensive object that's only conditionally needed?**
+*Ideal answer:* If the object is often never used, a virtual proxy pays *zero* construction cost for that common case, deferring it to the first genuine use. It's the same lazy-construction trade-off as a lazily-initialized Singleton.
+*Why correct:* It identifies the win as "skip the cost entirely in the no-use case," not just "delay it."
+*Common mistakes:* Using a virtual proxy where the object is almost always used (you've added indirection for nothing); ignoring that the deferred factory may capture a scoped dependency (Advanced Q5).
+*Follow-up:* "The deferred factory resolves a `DbContext`-backed builder — what lifetime must the proxy have?" (`Scoped`, not `Singleton` — captive-dependency risk).
+
+**I8. Q: Why does Prototype's cloning require the same shallow-vs-deep-copy vigilance as a `with` expression?**
+*Ideal answer:* A naive clone that shallow-copies reference-type fields leaves the original and the clone *sharing* the same mutable inner objects — mutating one silently mutates the other. A correct Prototype must deliberately deep-copy (or make the member types immutable) any mutable reference state. `with` on a record has the identical trap: it copies references, not the graphs behind them.
+*Why correct:* It names the exact failure (shared mutable inner state) and the two valid fixes (deep copy or immutable members).
+*Common mistakes:* Assuming a clone is automatically independent; deep-copying everything indiscriminately (expensive, and wrong if some sharing is intended).
+*Follow-up:* "When would you redesign the object as immutable instead of maintaining deep-copy logic forever?" (whenever it's conceptually a value with no genuine mutate-after-construction need — Advanced Q4).
+
+**I9. Q: Why is a protection proxy preferable to scattering authorization checks inside business-logic methods?**
+*Ideal answer:* It centralizes the authorization concern in one consistently-applied place, transparent to callers, instead of relying on every business method to remember its own check. It's the same "centralize the enforcement, don't trust every call site" reasoning as the OOP module's LSP-fix invariant centralization — applied to authorization.
+*Why correct:* It frames the benefit as removing a per-call-site obligation (which decays) and connects it to the recurring centralization principle.
+*Common mistakes:* Putting the check in the proxy *and* leaving copies in the methods (drift); a proxy that authorizes reads but a code path that bypasses it (must wrap the only path).
+*Follow-up:* "How does the proxy avoid leaking 'unauthorized' vs 'not found' to the caller?" (return `null`/empty for both — the §11 Expert exercise).
+
+**I10. Q: Why is a generated gRPC client stub still a Proxy pattern instance even though it's auto-generated?**
+*Ideal answer:* It fulfills the pattern's defining shape — presents the same interface as if the real object were local, while actually delegating (over the network) to a remote implementation. Code generation is the *mechanism* that produces the proxy; the pattern is defined by structure and intent, not by who typed it.
+*Why correct:* It separates "what makes it a Proxy" (structure + remote-delegation intent) from "how it was created" (a generator).
+*Common mistakes:* Thinking "a pattern" must be hand-written; not recognizing ORM lazy-loading proxies and mock objects as the same pattern.
+*Follow-up:* "Name two other everyday auto-generated proxies." (ORM lazy-loading entities; mocking-framework test doubles).
 
 ### Advanced (10)
 1. **Q: Diagnose the monolithic-payment-gateway-wrapper production issue from first principles, and explain precisely why the Decorator refactor also improved code reuse, not just testability.**
@@ -317,23 +448,38 @@ public class ReferenceDataCache : IReferenceDataCache
 
 ### Easy — Factory Method for region-specific payment gateways
 ```csharp
+// C#
 public interface IPaymentGatewayFactory { IPaymentGateway Create(string region); }
-public class PaymentGatewayFactory: IPaymentGatewayFactory
+public sealed class PaymentGatewayFactory : IPaymentGatewayFactory
 {
     public IPaymentGateway Create(string region) => region switch
     {
-        "US" => new StripeGateway,
-            "EU" => new AdyenGateway,
-            _ => throw new NotSupportedException($"No gateway configured for region {region}")
+        "US" => new StripeGateway(),
+        "EU" => new AdyenGateway(),
+        _    => throw new NotSupportedException($"No gateway configured for region {region}")
     };
+}
+```
+```java
+// Java
+public interface PaymentGatewayFactory { PaymentGateway create(String region); }
+public final class DefaultPaymentGatewayFactory implements PaymentGatewayFactory {
+    public PaymentGateway create(String region) {
+        return switch (region) {
+            case "US" -> new StripeGateway();
+            case "EU" -> new AdyenGateway();
+            default   -> throw new IllegalArgumentException("No gateway configured for region " + region);
+        };
+    }
 }
 ```
 
 ### Medium — Builder with validated, multi-step construction
 ```csharp
-public class ReportBuilder
+// C#
+public sealed class ReportBuilder
 {
-    private readonly List<string> _columns = new;
+    private readonly List<string> _columns = new();
     private DateRange? _dateRange;
     private string? _groupBy;
 
@@ -341,34 +487,50 @@ public class ReportBuilder
     public ReportBuilder WithDateRange(DateTime from, DateTime to) { _dateRange = new DateRange(from, to); return this; }
     public ReportBuilder GroupBy(string column) { _groupBy = column; return this; }
 
-    public Report Build
+    public Report Build()
     {
         if (_columns.Count == 0) throw new InvalidOperationException("At least one column is required.");
-        if (_dateRange is null) throw new InvalidOperationException("A date range is required.");
-        if (_groupBy is not null &&!_columns.Contains(_groupBy))
+        if (_dateRange is null)  throw new InvalidOperationException("A date range is required.");
+        if (_groupBy is not null && !_columns.Contains(_groupBy))
             throw new InvalidOperationException("GroupBy column must be one of the selected columns."); // cross-field validation
         return new Report(_columns, _dateRange, _groupBy);
+    }
+}
+```
+```java
+// Java — Builder carries more weight here (no object initializer, no 'with').
+// The build() method is where cross-field validation lives — the reason to hand-write it
+// rather than lean on Lombok's @Builder, which has no validation hook.
+public final class ReportBuilder {
+    private final List<String> columns = new ArrayList<>();
+    private DateRange dateRange;
+    private String groupBy;
+
+    public ReportBuilder withColumns(String... cols) { columns.addAll(List.of(cols)); return this; }
+    public ReportBuilder withDateRange(LocalDate from, LocalDate to) { this.dateRange = new DateRange(from, to); return this; }
+    public ReportBuilder groupBy(String column) { this.groupBy = column; return this; }
+
+    public Report build() {
+        if (columns.isEmpty())  throw new IllegalStateException("At least one column is required.");
+        if (dateRange == null)  throw new IllegalStateException("A date range is required.");
+        if (groupBy != null && !columns.contains(groupBy))
+            throw new IllegalStateException("GroupBy column must be one of the selected columns.");
+        return new Report(List.copyOf(columns), dateRange, groupBy);
     }
 }
 ```
 
 ### Hard — Composable Decorator chain (the fix, generalized)
 ```csharp
-public class RetryDecorator<TService> where TService: class
-{
-    // Illustrative -- a genuinely generic retry decorator requires dynamic proxy generation
-    // (e.g., via Castle DynamicProxy or a source generator) to implement TService generically
-    // shown here in its concrete, interface-specific form for clarity:
-}
-
-public class RetryGatewayDecorator: IPaymentGateway
+// C# — each decorator implements IPaymentGateway, wraps one, adds one concern.
+public sealed class RetryGatewayDecorator : IPaymentGateway
 {
     private readonly IPaymentGateway _inner;
     public RetryGatewayDecorator(IPaymentGateway inner) => _inner = inner;
 
     public async Task<bool> ChargeAsync(decimal amount)
     {
-        for (int attempt = 1;; attempt++)
+        for (int attempt = 1; ; attempt++)
         {
             try { return await _inner.ChargeAsync(amount); }
             catch (TransientGatewayException) when (attempt < 3)
@@ -379,46 +541,111 @@ public class RetryGatewayDecorator: IPaymentGateway
     }
 }
 
-public class CachingGatewayDecorator: IPaymentGateway
+public sealed class LoggingGatewayDecorator : IPaymentGateway
 {
     private readonly IPaymentGateway _inner;
-    private readonly IMemoryCache _cache;
-    public CachingGatewayDecorator(IPaymentGateway inner, IMemoryCache cache) { _inner = inner; _cache = cache; }
+    private readonly ILogger _log;
+    public LoggingGatewayDecorator(IPaymentGateway inner, ILogger log) { _inner = inner; _log = log; }
 
-    public Task<bool> ChargeAsync(decimal amount) => _inner.ChargeAsync(amount); // caching N/A for charges (non-idempotent!) --
-    // shown here only to illustrate composition structure
-
+    public async Task<bool> ChargeAsync(decimal amount)
+    {
+        var ok = await _inner.ChargeAsync(amount);
+        _log.LogInformation("Charge {Amount} -> {Result}", amount, ok);
+        return ok;
+    }
 }
-// Composition order matters (Advanced Q7): Retry MUST wrap the innermost real gateway call
-// so each retry attempt genuinely re-executes; Logging typically wraps OUTERMOST to observe
-// the full retry sequence's eventual outcome as ONE logged event.
+
+// Wire: Logging(outermost) -> Retry -> real gateway(innermost)
+IPaymentGateway gw = new LoggingGatewayDecorator(new RetryGatewayDecorator(new StripeGateway()), log);
 ```
+```java
+// Java — same hand-written decorators. Or: java.lang.reflect.Proxy wraps ANY interface
+// with one InvocationHandler (no library) — the idiomatic Java route for a generic decorator.
+public final class RetryGatewayDecorator implements PaymentGateway {
+    private final PaymentGateway inner;
+    public RetryGatewayDecorator(PaymentGateway inner) { this.inner = inner; }
+
+    public boolean charge(BigDecimal amount) {
+        for (int attempt = 1; ; attempt++) {
+            try { return inner.charge(amount); }
+            catch (TransientGatewayException e) {
+                if (attempt >= 3) throw e;
+                try { Thread.sleep(100L * attempt); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); throw e; }
+            }
+        }
+    }
+}
+
+public final class LoggingGatewayDecorator implements PaymentGateway {
+    private final PaymentGateway inner;
+    private final System.Logger log;
+    public LoggingGatewayDecorator(PaymentGateway inner, System.Logger log) { this.inner = inner; this.log = log; }
+
+    public boolean charge(BigDecimal amount) {
+        boolean ok = inner.charge(amount);
+        log.log(System.Logger.Level.INFO, "Charge {0} -> {1}", amount, ok);
+        return ok;
+    }
+}
+
+PaymentGateway gw = new LoggingGatewayDecorator(new RetryGatewayDecorator(new StripeGateway()), log);
+```
+**Composition order matters (Advanced Q7):** Retry must wrap the innermost real call so each attempt genuinely re-executes; Logging wraps outermost so the full retry sequence's eventual outcome is one logged event.
 
 ### Expert — Protection proxy enforcing resource-based authorization transparently (Advanced Q8)
 ```csharp
-public class AuthorizingOrderRepositoryProxy: IOrderRepository
+// C# — hand-written proxy per interface, wired at the DI registration point.
+public sealed class AuthorizingOrderRepositoryProxy : IOrderRepository
 {
     private readonly IOrderRepository _inner;
     private readonly IAuthorizationService _authService;
     private readonly ClaimsPrincipal _currentUser;
 
     public AuthorizingOrderRepositoryProxy(IOrderRepository inner, IAuthorizationService authService, ClaimsPrincipal currentUser)
-    {
-        _inner = inner; _authService = authService; _currentUser = currentUser;
-    }
+        => (_inner, _authService, _currentUser) = (inner, authService, currentUser);
 
     public async Task<Order?> GetByIdAsync(string id)
     {
         var order = await _inner.GetByIdAsync(id);
         if (order is null) return null;
-
         var authResult = await _authService.AuthorizeAsync(_currentUser, order, "OrderAccess");
-        return authResult.Succeeded? order: null; // caller sees "not found," never distinguishing unauthorized
+        return authResult.Succeeded ? order : null; // caller sees "not found," never distinguishing unauthorized
     }
 }
-// Callers depend on IOrderRepository as normal -- COMPLETELY UNAWARE that authorization
-// enforcement is happening transparently via this proxy, wired in at the DI registration point.
 ```
+```java
+// Java — hand-written proxy (below), OR java.lang.reflect.Proxy to authorize EVERY method
+// of ANY repository interface with one handler. The dynamic form is the idiomatic Java answer.
+public final class AuthorizingOrderRepositoryProxy implements OrderRepository {
+    private final OrderRepository inner;
+    private final AuthorizationService authService;
+    private final Principal currentUser;
+
+    public AuthorizingOrderRepositoryProxy(OrderRepository inner, AuthorizationService authService, Principal currentUser) {
+        this.inner = inner; this.authService = authService; this.currentUser = currentUser;
+    }
+
+    public Optional<Order> findById(String id) {
+        return inner.findById(id)
+            .filter(order -> authService.authorize(currentUser, order, "OrderAccess").succeeded());
+    }
+}
+
+// Generic form — no per-interface class, no library:
+@SuppressWarnings("unchecked")
+static <T> T authorizing(T target, AuthorizationService authz, Principal user, Class<T> iface) {
+    return (T) Proxy.newProxyInstance(iface.getClassLoader(), new Class<?>[]{ iface },
+        (proxy, method, args) -> {
+            Object result = method.invoke(target, args);
+            if (result instanceof Optional<?> opt && opt.isPresent()
+                    && !authz.authorize(user, opt.get(), "OrderAccess").succeeded()) {
+                return Optional.empty();
+            }
+            return result;
+        });
+}
+```
+Callers depend on `IOrderRepository` / `OrderRepository` as normal — **completely unaware** that authorization is enforced transparently, wired in at the composition/DI point.
 **Discussion**: This directly operationalizes the resource-based authorization as a structural, Proxy-pattern-shaped design — every caller of `IOrderRepository.GetByIdAsync` automatically gets authorization enforcement without needing to remember to call `IAuthorizationService` manually at every call site, exactly the "centralize the enforcement, don't trust every call site to remember it independently" principle this course returns to repeatedly.
 
 ---
@@ -626,6 +853,8 @@ sequenceDiagram
 ---
 
 ## 18. Revision
+**Language note**: GoF patterns are language-neutral — §2.9 has the full C#↔Java mapping and the code samples are shown in both. Java-specific points for an interview: (1) `java.lang.reflect.Proxy` + `InvocationHandler` gives you runtime interface proxying with **no library**, so Decorator/Proxy for cross-cutting concerns (auth, logging, retry, transactions) is idiomatically a dynamic proxy / Spring AOP aspect, not a hand-written class per interface; (2) the safe Singleton without a container is `enum Singleton { INSTANCE }` (Effective Java Item 3), but Spring's default singleton scope is the real answer; (3) `Cloneable`/`clone()` is a broken JDK design — use a copy constructor (Item 13); (4) Builder shows up sooner because Java has no object-initializer or `with` syntax; (5) an `enum` with per-constant method overrides is a clean Abstract Factory for a fixed family.
+
 **Key takeaways**: Factory Method (one product) vs. Abstract Factory (a consistent family of related products) — the family-consistency guarantee is the defining distinction. Builder handles complex, multi-step, validated construction; classic Singleton is largely superseded by DI-container `Singleton`-lifetime registration in modern codebases. Adapter bridges incompatible interfaces (enabling DIP with third-party code); Decorator composably adds behavior around a shared interface (avoiding inheritance's combinatorial subclass explosion); Facade simplifies a complex subsystem's interface; Proxy controls/defers access (virtual, protection, remote variants) — structurally near-identical to Decorator, distinguished by intent (access control vs. behavior addition).
 
 ---

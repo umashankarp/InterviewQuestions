@@ -17,11 +17,30 @@ Every object-oriented codebase; the depth matters for correctly applying **compo
 
 ### How does it work (30,000-ft view)?
 ```csharp
-public abstract class Shape { public abstract double Area; }
-public class Circle: Shape { public double Radius; public override double Area => Math.PI * Radius * Radius; }
-public class Square: Shape { public double Side; public override double Area => Side * Side; }
+// C#
+public abstract class Shape { public abstract double Area { get; } }
+public sealed class Circle(double radius) : Shape { public override double Area => Math.PI * radius * radius; }
+public sealed class Square(double side)   : Shape { public override double Area => side * side; }
 
 double TotalArea(IEnumerable<Shape> shapes) => shapes.Sum(s => s.Area); // polymorphic: works for ANY Shape subtype
+```
+```java
+// Java — same design, different mechanics (no properties; final for "sealed"; Streams for LINQ)
+public abstract class Shape { public abstract double area(); }
+public final class Circle extends Shape {
+    private final double radius;
+    public Circle(double radius) { this.radius = radius; }
+    @Override public double area() { return Math.PI * radius * radius; }
+}
+public final class Square extends Shape {
+    private final double side;
+    public Square(double side) { this.side = side; }
+    @Override public double area() { return side * side; }
+}
+
+double totalArea(List<Shape> shapes) {
+    return shapes.stream().mapToDouble(Shape::area).sum(); // polymorphic over ANY Shape subtype
+}
 ```
 
 ---
@@ -35,13 +54,37 @@ A subtype must be substitutable for its base type **without altering the correct
 Inheritance creates the **tightest possible coupling** between two types — a subclass depends on its base class's *implementation details*, not just its public interface (the "fragile base class problem": a seemingly-safe internal change to a base class can silently break every derived class depending on undocumented, implicit behavior). Composition (a type *holding a reference to* another type and delegating to it, rather than inheriting from it) couples only through the held type's **public interface**, and can be changed/swapped at runtime (a held `IStrategy` reference can be reassigned; a base class cannot be "reassigned" after construction) — this is precisely why "favor composition over inheritance" is standard guidance: it minimizes coupling to exactly the deliberate, public contract, not incidental implementation detail.
 
 ### 2.3 Interface-Based Polymorphism vs Inheritance-Based Polymorphism
-Inheritance-based polymorphism (a shared base class) forces a single-inheritance hierarchy (in C#) and couples derived types to shared base-class state/implementation, even if unwanted; interface-based polymorphism (the variance discussion) allows a type to implement **multiple** interfaces, coupling only to method signatures, not shared implementation — modern C# design (and this course's recurring/7 discussion of sealed-hierarchy discriminated unions as a records-based alternative) increasingly favors composing small, focused interfaces over deep inheritance hierarchies specifically to avoid the fragile-base-class problem entirely.
+Inheritance-based polymorphism (a shared base class) forces a single-inheritance hierarchy (in C# and Java) and couples derived types to shared base-class state/implementation, even when that coupling is unwanted; interface-based polymorphism allows a type to implement **multiple** interfaces, coupling only to method signatures, not shared implementation — modern C# and Java design (and this course's recurring treatment of sealed-hierarchy discriminated unions — `sealed record` + exhaustive `switch` in C#, `sealed interface ... permits` + `switch` pattern matching in Java 21 — as a records-based alternative to deep inheritance) increasingly favors composing small, focused interfaces over deep inheritance hierarchies specifically to avoid the fragile-base-class problem entirely.
 
 ### 2.4 When Inheritance Is Genuinely the Right Tool
 Despite composition's general preference, inheritance remains the correct choice when there's a genuine **"is-a" relationship with shared, stable behavior** the derived types should not need to reimplement or explicitly delegate to (a template-method-pattern base class providing a fixed algorithm skeleton with specific steps overridden by subclasses) — the deciding factor is whether the relationship is genuinely one of *is-a* substitutability (LSP-compliant) versus merely *has-a*/*can-do* (better modeled via composition/interfaces).
 
 ### 2.5 Encapsulation Beyond `private` — Invariant Protection
 True encapsulation isn't just hiding fields behind properties — it's ensuring an object **can never be observed in an invalid state** by any external code, at any point in its lifetime. A class with a public setter allowing `order.Quantity = -5` (a value violating the domain's actual invariant) has *technically* encapsulated its field behind a property, but has **not** actually encapsulated its invariant — genuine encapsulation requires validating state transitions (a setter/method rejecting invalid values, or the `init`-only properties combined with constructor validation) so external code can never construct or mutate the object into an invalid state, not merely hiding the storage mechanism.
+
+### 2.6 Expressing OOP in C# and Java — the Same Principles, Different Mechanics
+
+The four pillars, LSP, composition-over-inheritance, and the fragile-base-class problem are properties of *type relationships*, not syntax — they translate word-for-word between C# and Java. What differs is the language machinery you reach for, and a FinTech interviewer at a Java shop will phrase the same questions in Java idiom (getters vs. properties, `final` vs. `sealed`, "when do you make a class `final`" instead of "when do you `seal`").
+
+| Concept | C# | Java |
+|---|---|---|
+| Encapsulated field, no external mutation | `public decimal Amount { get; init; }` + ctor validation | `private final BigDecimal amount;` + validating constructor + `getAmount()`, **no setter** |
+| Immutable value object with value equality | `record` / `readonly record struct` | `record` (Java 16+); or a `final` class with `final` fields + `equals`/`hashCode` |
+| Validate on construction of a value type | `init` accessor or ctor body | **compact canonical constructor** in a `record` (a bare `record` does *not* validate — the same "`init`-only alone isn't enough" caveat as Expert Q8) |
+| Non-destructive update ("change" = new instance) | `x with { Amount = y }` — free, runs through validated construction | **no `with`** — a hand-written *wither* (`x.withAmount(y)`) or a builder; the "every change re-runs validation" property is upheld by convention, not the language (a place C# is genuinely stronger out of the box) |
+| Close a concrete class to inheritance | `sealed class` (any version) | `final class` |
+| Closed, exhaustive hierarchy (discriminated union) | `abstract record` + `switch` expression with pattern matching + exhaustiveness | `sealed interface Foo permits A, B` (Java 17+) + `switch` pattern matching with exhaustiveness (Java 21) |
+| Read-only view of an internal collection | `IReadOnlyList<T>` / `list.AsReadOnly()` — mutating methods gone from the compile-time surface | `List.copyOf(...)` (a true immutable copy) — prefer this; `Collections.unmodifiableList(...)` keeps the static type `List<T>` so `.add(...)` *compiles* and throws `UnsupportedOperationException` at runtime |
+| Virtual dispatch default | **opt-in** — methods are non-virtual unless marked `virtual`; the fragile-base-class surface is exactly what the base author deliberately exposed | **opt-out** — every non-`private`/non-`static` instance method is overridable unless `final`; the fragile-base-class surface is the *entire* method set unless actively locked down |
+| Devirtualization / inlining lever | `sealed`, `struct`, dynamic PGO | `final`, JIT class-hierarchy analysis + monomorphic inline caches |
+| Error signalling in a base contract | unchecked exceptions only | checked + unchecked — an interface method that doesn't declare `throws IOException` **cannot** be implemented by a subtype that needs to throw one (a compile-time LSP guardrail C# lacks on that axis, but also the source of the "wrap everything in `RuntimeException`" anti-pattern) |
+| Polymorphic aggregation | LINQ: `shapes.Sum(s => s.Area)` | Streams: `shapes.stream().mapToDouble(Shape::area).sum()` |
+
+**The load-bearing divergence is virtual-by-default.** In C#, "seal concrete classes by default" (Expert Q6) is a modest hardening of an already opt-in system. In Java it is *the* default discipline — Effective Java Item 19 ("design and document for inheritance or else prohibit it") exists precisely because every unsealed method is an implicit, unbounded extension point, so a Java codebase that doesn't mark classes `final` by default has the maximal fragile-base-class surface on every class. The incident in §4 (a `PriorityCustomer` override silently violating a base contract) is *easier* to create accidentally in Java and the `final`-by-default + composed-strategy fix is *more* necessary there.
+
+**Encapsulation of an invariant is identical in spirit, with more ceremony in Java** — no property syntax, no `init`, an explicit getter — which makes the discipline ("validate in the constructor, no setter, defensive-copy in and out") more visibly the thing doing the work rather than something the language hands you. Java `record` closes most of the boilerplate gap and gives value equality, but only validates if you write the compact constructor.
+
+**LSP, ISP, DIP, and strategy-via-composition are unchanged** — the Square/Rectangle trap, capability-interface segregation (`IRefundable` / `interface Refundable`), and domain-owned interfaces + per-vendor adapters all port directly. The §8 "exposing mutable internals" fix differs only in the return type: C# → `IReadOnlyList<T>` over a copy/wrapper; Java → `List.copyOf(...)` and never leak the field.
 
 ## 3. Visual Architecture
 ```mermaid
@@ -81,7 +124,7 @@ classDiagram
 
 ## 6. Anti-patterns
 - Using inheritance purely for code reuse without a genuine is-a relationship (the classic "inheritance for convenience" mistake).
-- Overriding a base class method in a way that violates its implicit behavioral contract, even if it compiles (the incident).
+- Overriding a base class method in a way that violates its implicit behavioral contract, even if it compiles (the §4 `PriorityCustomer` incident).
 - Deep inheritance hierarchies (more than 2-3 levels) making it hard to reason about a derived type's actual, effective behavior.
 - Public setters with no validation, allowing an object to be mutated into an invalid domain state.
 
@@ -124,65 +167,210 @@ classDiagram
 ## 10. Interview Questions
 
 ### Basic (10)
-1. **Q: What are the four pillars of OOP?** **A:** Encapsulation (hiding state behind behavior-exposing interfaces), Inheritance (deriving specialized types from general ones), Polymorphism (one interface, many runtime behaviors via dispatch), and Abstraction (modeling essential characteristics while omitting irrelevant detail).
-2. **Q: What is encapsulation?** **A:** Bundling data with the behavior operating on it, hiding internal representation behind a controlled interface.
-3. **Q: What is polymorphism?** **A:** Code operating uniformly over multiple concrete types through a shared interface/base type, with actual behavior determined at runtime by the concrete type.
-4. **Q: What does "favor composition over inheritance" mean?** **A:** Prefer a type holding and delegating to another type over inheriting from it, to minimize coupling.
-5. **Q: What is the Liskov Substitution Principle?** **A:** A subtype must be substitutable for its base type without altering the correctness of any code using the base type.
-6. **Q: What is the fragile base class problem?** **A:** A subclass depending on a base class's implementation details, such that a seemingly-safe base class change can silently break derived classes.
-7. **Q: Can a C# class inherit from multiple classes?** **A:** No — single inheritance only, though a class can implement multiple interfaces.
-8. **Q: What is an "is-a" versus "has-a" relationship?** **A:** "Is-a" suggests inheritance (a Circle is-a Shape); "has-a" suggests composition (a Car has-a Engine).
-9. **Q: Does a public property with a getter and setter automatically mean a class is well-encapsulated?** **A:** No — true encapsulation requires the setter to also validate/prevent invalid states, not just hide the backing field.
-10. **Q: What is abstraction, distinct from encapsulation?** **A:** Modeling essential characteristics while hiding implementation complexity behind a simpler conceptual interface, distinct from encapsulation's focus on controlling access to internal state.
+
+**B1. Q: What are the four pillars of OOP?**
+*Ideal answer:* Encapsulation (hiding state behind behavior-exposing interfaces), Inheritance (deriving specialized types from general ones), Polymorphism (one interface, many runtime behaviors via dynamic dispatch), and Abstraction (modeling essential characteristics while omitting irrelevant detail).
+*Common mistake:* Listing "classes and objects" as a pillar, or conflating abstraction with encapsulation.
+*Follow-up:* "Which two of the four are most often confused, and how do you distinguish them?" (abstraction = *what* to model; encapsulation = *how* access to state is controlled).
+
+**B2. Q: What is encapsulation?**
+*Ideal answer:* Bundling data with the behavior that operates on it and hiding internal representation behind a controlled interface, so the representation can change without breaking callers — and, done properly, so the object can never be observed in an invalid state.
+*Common mistake:* Equating it with "make fields private and add getters/setters" — that hides storage but not the invariant (B9).
+*Follow-up:* "Is a class with a public validating setter fully encapsulated?" (still weaker than immutable construction — every mutation site must remember to go through the setter).
+
+**B3. Q: What is polymorphism?**
+*Ideal answer:* Code operating uniformly over multiple concrete types through a shared interface or base type, with the actual behavior chosen at runtime by the concrete type (dynamic dispatch).
+*Common mistake:* Describing method overloading (compile-time, same class) as polymorphism — that's ad-hoc, not subtype, polymorphism; the interview means runtime dispatch.
+*Follow-up:* "Interface-based vs inheritance-based polymorphism — what does each couple you to?" (§2.3: method signatures only vs shared base-class state/implementation).
+
+**B4. Q: What does "favor composition over inheritance" mean?**
+*Ideal answer:* Prefer a type *holding a reference to* another type and delegating to it over *inheriting from* it — composition couples only to the held type's public interface and can be swapped at runtime, whereas inheritance couples to the base class's implementation details and is fixed at construction.
+*Common mistake:* Treating it as an absolute ban on inheritance rather than a default preference with genuine exceptions (Advanced Q2/Q9).
+*Follow-up:* "Name a case where inheritance is still the right tool." (a template-method base class — stable shared algorithm skeleton).
+
+**B5. Q: What is the Liskov Substitution Principle?**
+*Ideal answer:* A subtype must be substitutable for its base type without altering the correctness of any code that uses the base type — meaning the subtype preserves the base's *behavioral* contract: preconditions no stronger, postconditions no weaker, invariants preserved.
+*Common mistake:* Reducing it to "it compiles when you substitute" — substitution that compiles can still break behavioral assumptions (the Square/Rectangle case).
+*Follow-up:* "Give a violation that isn't an overridden method." (Advanced Q7: a stricter constructor precondition in the subtype).
+
+**B6. Q: What is the fragile base class problem?**
+*Ideal answer:* A subclass depends on a base class's *implementation details*, not just its public contract, so a seemingly-safe internal change to the base class can silently break every derived class that relied on undocumented behavior.
+*Common mistake:* Calling it "just a versioning problem" — it's a coupling problem: the derived class's correctness is tied to the base's *current implementation*, not its interface (Intermediate Q2).
+*Follow-up:* "Does composition have an equivalent failure mode?" (much narrower — you couple only to the held type's deliberate public contract).
+
+**B7. Q: Can a C# class inherit from multiple classes? Java?**
+*Ideal answer:* No — both C# and Java are single-inheritance for classes. Both allow implementing multiple interfaces, and both allow interface *default* methods (C# 8+, Java 8+) which reintroduces a limited multiple-inheritance-of-behavior with explicit conflict resolution rules.
+*Common mistake:* Saying "interfaces give you multiple inheritance" without noting it's inheritance of *contract* (and, with defaults, limited behavior), never of state.
+*Follow-up:* "Two default methods with the same signature from two interfaces — what happens?" (compile error until the implementing type explicitly overrides/disambiguates).
+
+**B8. Q: What is an "is-a" versus "has-a" relationship?**
+*Ideal answer:* "Is-a" implies a genuine subtype relationship where the subtype is substitutable everywhere the supertype is used (a `Circle` is-a `Shape`) — a candidate for inheritance. "Has-a" implies one type contains/uses another (a `Car` has-a `Engine`) — a candidate for composition.
+*Common mistake:* Using "is-a" loosely for "shares code with" — `PriorityCustomer` shares fields with `Customer` but isn't behaviorally substitutable, so it's not is-a (§4).
+*Follow-up:* "How do you test whether an is-a relationship actually holds?" (the LSP test — does every consumer of the base type stay correct with the subtype substituted).
+
+**B9. Q: Does a public property with a getter and setter automatically mean a class is well-encapsulated?**
+*Ideal answer:* No. True encapsulation means external code can never put the object into an invalid state — so the setter must validate and reject invalid values (or the property is `init`-only / `final` + constructor-validated). A bare `Quantity` setter that accepts `-5` has hidden the field but not the invariant.
+*Common mistake:* Treating "no public field, has a property" as sufficient; also returning a mutable internal collection from a getter-only property (§8 — cosmetic, not real, encapsulation).
+*Follow-up:* "How would you expose a list of child items without letting callers mutate the parent's state?" (`IReadOnlyList<T>` over a copy/wrapper in C#; `List.copyOf(...)` in Java).
+
+**B10. Q: What is abstraction, distinct from encapsulation?**
+*Ideal answer:* Abstraction is deciding *what* to model — which essential characteristics to expose and which complexity to hide behind a simpler conceptual interface. Encapsulation is the *mechanism* that enforces the hiding by controlling access to internal state. Abstraction is a design choice; encapsulation is its enforcement.
+*Common mistake:* Using the two words interchangeably; or describing abstraction purely as `abstract class`/`interface` syntax rather than as a modelling decision.
+*Follow-up:* "Can you have good encapsulation with a bad abstraction?" (yes — perfectly private state behind an interface that models the wrong concept).
 
 ### Intermediate (10)
-1. **Q: Why does the classic Square-extends-Rectangle example violate LSP?** **A:** Because forcing width and height to stay equal (to maintain "squareness") breaks the base class's implicit contract that setting `Width` doesn't affect `Height` — any code relying on that independence breaks when substituted with a `Square`.
-2. **Q: Why is the fragile base class problem specifically a coupling concern, not just a bug-risk concern?** **A:** It means a derived class's correctness depends on the base class's *current implementation*, not just its documented public contract — any future base-class change, even one that preserves its public interface, can silently break derived classes relying on undocumented implementation details.
-3. **Q: Why does composition allow runtime flexibility inheritance doesn't?** **A:** A composed dependency (e.g., an injected `IDiscountStrategy`) can be swapped/reassigned at runtime; an object's inheritance hierarchy is fixed at compile time and construction, with no equivalent runtime-swappable mechanism.
-4. **Q: Why might a large, multi-purpose base class violate the Interface Segregation Principle even if it's technically an interface, not a base class?** **A:** A large interface forces every implementing type to provide (or explicitly stub out) methods it may not actually need, exactly the same unwanted-coupling problem as a fat base class — Interface Segregation (adjacent, a later dedicated SOLID module) addresses this by preferring several small, focused interfaces over one large one.
-5. **Q: Why is "code reuse" alone an insufficient justification for choosing inheritance?** **A:** Reuse can be achieved via composition (delegating to a shared, reusable component) without the tight coupling and LSP-substitutability obligations inheritance specifically implies — inheritance should be justified by a genuine is-a relationship, not merely by wanting to avoid duplicating code.
-6. **Q: Why does deep inheritance (more than 2-3 levels) make a codebase harder to reason about?** **A:** A derived type's actual, effective behavior is the combination of every ancestor's contributions — the deeper the hierarchy, the more distant, indirect base classes an engineer must trace through to understand what a specific derived instance actually does, compounding the fragile-base-class risk at every additional level.
-7. **Q: Why might centralizing invariant enforcement (the fix) be more robust than trusting every subclass to enforce it independently?** **A:** Because it removes the correctness burden from every individual subclass author (who might not anticipate every future interaction, as in the promotional-stacking scenario) and places it in one, single, reviewable location that every code path passes through regardless of which subclass/strategy produced the input.
-8. **Q: What's the relationship between LSP violations and unit testing?** **A:** A well-designed test suite exercising the base type's documented contract (not just each subclass's specific behavior) against every subclass polymorphically is a direct, mechanical way to catch LSP violations — if a subclass fails a test written purely against the base type's contract, that's the LSP violation surfacing concretely.
-9. **Q: Why does an authorization-related class hierarchy warrant extra scrutiny for LSP compliance?** **A:** A subclass silently weakening a base class's security check (e.g., an override that skips a validation step the base class always performs) compiles and appears functionally correct in isolation, but violates the base class's implicit "always enforces this check" contract — exactly the kind of subtle, hard-to-catch bug that can become a genuine security vulnerability if not caught.
-10. **Q: Why would a Staff/Principal-level interview specifically probe "when would you choose inheritance despite generally preferring composition"?** **A:** Because reflexively citing "composition over inheritance" without understanding *when* inheritance is still the correct tool (genuine is-a relationships with stable, shared behavior, like a template-method pattern) suggests a surface-level, slogan-level understanding rather than a genuine grasp of the underlying coupling/substitutability trade-offs.
+
+**I1. Q: Why does the classic Square-extends-Rectangle example violate LSP?**
+*Ideal answer:* `Rectangle`'s implicit contract is that `Width` and `Height` are independent — setting one doesn't affect the other. To stay a valid square, `Square` must override the setters to keep both equal, breaking that contract. Any code written against `Rectangle` (e.g. "set width to 5, set height to 4, assert area is 20") now fails when handed a `Square`, even though it compiled.
+*Why correct:* It identifies the *behavioral* contract being violated (setter independence), not just the type mismatch, and names the concrete caller that breaks.
+*Common mistakes:* Saying "a square isn't a rectangle mathematically" (it is) — the violation is about mutable-setter semantics, not geometry; or claiming immutable `Square`/`Rectangle` value types have the same problem (they don't — with no setters there's no contract to break).
+*Follow-up:* "How would you model squares and rectangles without an LSP violation?" (immutable value types, or a shared `IShape` with `Area` and no dimension setters).
+
+**I2. Q: Why is the fragile base class problem specifically a coupling concern, not just a bug-risk concern?**
+*Ideal answer:* Because the derived class's correctness depends on the base class's *current implementation* — undocumented ordering of internal calls, which method a base method delegates to, side effects — not on the base's published contract. Any future base-class change that preserves the public interface can still silently break the subclass. That's coupling to implementation, the tightest coupling in the language.
+*Why correct:* It ties the failure to *what* the subclass depends on (implementation, not contract), which is why it's structural and not fixable by better testing alone.
+*Common mistakes:* Framing it as "the base class had a bug" — the base change can be entirely correct against its own contract; or thinking `sealed`/`final` "fixes" it rather than *prevents* it by removing the subclass.
+*Follow-up:* "Your base class must be extensible. How do you make its inheritance contract safe?" (document the behavioral contract including which methods are template hooks; make everything else `sealed`/`final` or non-virtual; a template method that calls only documented `protected abstract` hooks).
+
+**I3. Q: Why does composition allow runtime flexibility inheritance doesn't?**
+*Ideal answer:* A composed dependency is a field holding a reference — it can be reassigned, injected differently per instance, decorated, or swapped by configuration at runtime. An object's base class is fixed at construction and for the object's lifetime; there is no "re-parent this instance" operation.
+*Why correct:* It names the concrete mechanism (a reassignable reference vs a fixed vtable) rather than just asserting "more flexible."
+*Common mistakes:* Claiming inheritance can achieve the same with a factory — a factory chooses the concrete type at *construction*, not per-call afterward; or ignoring that composition also enables *multiple* varying behaviors on one object (several injected strategies) where single inheritance allows one.
+*Follow-up:* "When is that runtime swappability actually valuable vs speculative?" (per-tenant/per-region policy, test doubles, A/B strategies, feature flags — not `IRoundingStrategy` for one stable implementation).
+
+**I4. Q: Why might a large, multi-purpose base class violate the Interface Segregation Principle even though ISP is stated for interfaces?**
+*Ideal answer:* ISP's underlying concern — "no client should be forced to depend on members it doesn't use" — applies to any shared contract. A fat base class forces every subclass to inherit (and every consumer to depend on) its entire surface, so a change to a method half the subclasses don't use still recompiles and re-tests all of them. Splitting into small focused interfaces (or composed capabilities) lets each type depend on exactly what it needs.
+*Why correct:* It generalizes ISP from "interface" to "any unwanted-coupling-via-a-broad-contract" and states the concrete cost (recompile/retest blast radius).
+*Common mistakes:* Insisting ISP "only applies to interfaces" as a technicality; or over-correcting into one-method-per-interface proliferation (the SOLID module's over-application warning).
+*Follow-up:* "A subclass throws `NotSupportedException` for an inherited method — what does that tell you?" (the base contract over-promises; segregate by genuine capability and let callers query for it — §Advanced-adjacent, and the SOLID module's Expert Q9).
+
+**I5. Q: Why is "code reuse" alone an insufficient justification for choosing inheritance?**
+*Ideal answer:* Reuse is fully achievable by composition — delegate to a shared component — without inheritance's obligations: LSP substitutability, the fragile-base-class coupling, and a permanent place in a single-inheritance hierarchy. Inheritance should be chosen for a genuine is-a relationship with stable shared behavior, not because it's a convenient way to avoid duplicating a few methods.
+*Why correct:* It separates the *goal* (reuse) from the *mechanism* and shows the cheaper mechanism has none of the liabilities.
+*Common mistakes:* "But composition means writing delegating boilerplate" — true and usually worth it; language features (C# `record` positional members, Java Lombok `@Delegate`, extension methods) reduce it. Or reaching for inheritance to reuse *state* — that's the worst case (shared mutable base state).
+*Follow-up:* "You inherited to reuse three methods and now override five of eight — what's the signal?" (the is-a relationship has decayed; extract to a composed strategy — Expert Q7's override-ratio heuristic).
+
+**I6. Q: Why does deep inheritance (more than 2–3 levels) make a codebase harder to reason about?**
+*Ideal answer:* A leaf type's effective behavior is the composite of every ancestor's contributions and overrides. The deeper the chain, the more files an engineer must trace to answer "what does this call actually do here," and the more base classes exist whose internal change could break this leaf (fragile-base-class risk multiplies per level).
+*Why correct:* It names both costs — comprehension (trace depth) and stability (more fragile-base surfaces) — and ties them to hierarchy depth specifically.
+*Common mistakes:* Blaming the depth on "bad naming" rather than the structural coupling; or assuming an IDE "go to definition" makes it fine — it shows *a* definition, not the resolved runtime behavior across the chain.
+*Follow-up:* "How do you flatten a 5-level hierarchy safely?" (Advanced Q3 — extract strategy-like overrides to composed interfaces one level at a time, deepest first, behind characterization tests).
+
+**I7. Q: Why is centralizing invariant enforcement more robust than trusting every subclass to enforce it?**
+*Ideal answer:* A per-subclass obligation is only as strong as the least careful subclass author, and no author can anticipate every future interaction (the §4 promotional-stacking case). Moving the invariant to one location that every code path passes through — a single `Math.Min(discount, total)` after any strategy runs — makes the invariant a property of the design, not a hope about N implementations.
+*Why correct:* It frames the difference as "N independent chances to get it wrong" vs "one reviewed enforcement point," which is why it prevents *future* violations, not just the known one.
+*Common mistakes:* Putting the check in a base-class method subclasses can override (back to per-subclass trust); or centralizing it but on a path a subclass can bypass (must be non-overridable / applied by the caller of the strategy).
+*Follow-up:* "Where exactly does the enforcement live so a subclass structurally cannot skip it?" (in the context that *calls* the strategy, or a `sealed`/`final` template method — never in an overridable hook).
+
+**I8. Q: What's the relationship between LSP violations and unit testing?**
+*Ideal answer:* LSP violations are caught mechanically by writing tests against the *base type's documented contract* (not each subclass's specific behavior) and running that identical suite against every concrete subclass. A subclass that fails a base-contract test is a demonstrated LSP violation.
+*Why correct:* It shifts testing from per-implementation assertions to contract assertions, which is the only kind that can detect substitutability breakage.
+*Common mistakes:* Testing each subclass only against its own expected behavior — that will never catch a contract violation; or writing the contract test but instantiating only one subclass.
+*Follow-up:* "Show the test structure." (a parameterized/abstract test base with an abstract factory method, one concrete test subclass per implementation — §11 Hard exercise).
+
+**I9. Q: Why does an authorization-related class hierarchy warrant extra LSP scrutiny?**
+*Ideal answer:* A subclass override that silently weakens or skips a security check the base class always performs (an `override` that omits `Authorize`, or degrades a validation to a no-op) compiles cleanly and passes ordinary functional tests — nothing about "returns the right type" detects "no longer enforces the same check." A subtle LSP violation here is a security vulnerability.
+*Why correct:* It connects the general "behavioral contract" argument to the specific, high-consequence case where the contract *is* a control.
+*Common mistakes:* Assuming code review catches it (a one-line omitted call in a large override is easy to miss); or relying on "the base class calls Authorize" without making that call un-overridable.
+*Follow-up:* "How do you make the auth check un-skippable by any override?" (non-overridable template method does `Authorize` then calls a `protected abstract` post-auth hook — the only extension point — §8).
+
+**I10. Q: Why would a Staff/Principal interview specifically probe "when would you choose inheritance despite preferring composition"?**
+*Ideal answer:* Because reciting "composition over inheritance" is the slogan; knowing *when it doesn't apply* is the judgment. A candidate who can't name a legitimate inheritance case (template method, a genuine stable is-a with shared algorithm structure) is pattern-matching, not reasoning about the underlying coupling/substitutability trade-off.
+*Why correct:* It identifies the question as a judgment probe, and names what a good answer contains (a concrete legitimate case + the deciding criterion).
+*Common mistakes:* Answering "never" (dogma); or answering "whenever there's shared code" (that's the reuse trap, I5).
+*Follow-up:* "Your one inheritance case is a template method — why not compose the varying steps as strategies instead?" (you can, and often should; inheritance wins specifically when the *sequencing and non-overridable skeleton* is the thing being shared and must be un-bypassable).
 
 ### Advanced (10)
-1. **Q: Diagnose the discount-calculation LSP violation from first principles, and explain precisely why composition's fix structurally prevents recurrence, not just this specific instance.**
- **A:** The root cause was delegating both "compute the raw discount" and "ensure the discount is a valid amount" to the same override, with no structural guarantee the second concern was upheld — the composition-based fix separates these two concerns explicitly: `IDiscountStrategy` implementations are responsible **only** for computing a raw discount value, while the invariant check (`Math.Min(discount, orderTotal)`) lives in exactly one place, applied uniformly to *every* strategy's output regardless of which one produced it — this isn't just fixing the one instance where `PriorityDiscountStrategy` and promotional stacking interacted badly, it structurally prevents *any* current or future strategy from ever bypassing the invariant, since the invariant enforcement is no longer something each strategy implementation must independently remember to include.
-2. **Q: Design a template-method-pattern base class where inheritance is genuinely the correct tool, and explain why composition wouldn't serve as well here.**
- **A:**
+
+**A1. Q: Diagnose the discount-calculation LSP violation from first principles, and explain precisely why composition's fix structurally prevents recurrence, not just this instance.**
+*Ideal answer:* The root cause was a single override (`PriorityCustomer.ApplyDiscount`) owning *two* responsibilities — compute the raw discount *and* keep the result within the "discount ≤ order total" invariant — with no structural guarantee the second held, especially once a later promotional-stacking feature interacted with it. The composition fix splits them: `IDiscountStrategy` implementations compute only a raw number; the invariant check `Math.Min(raw, order.Total)` lives in exactly one place (`Customer.ApplyDiscount`), applied to every strategy's output regardless of which produced it. This prevents *any* current or future strategy from bypassing the invariant, because upholding it is no longer each strategy's job.
+*Why correct:* It separates the two conflated concerns explicitly and shows the invariant moved from "N implementations must each remember it" to "one path enforces it," which is what makes the fix structural.
+*Common mistakes:* "Fix the `PriorityCustomer` override" — patches this instance, leaves the shape; or centralizing the check but in an overridable base method (a subclass can still skip it).
+*Follow-up:* "Where does the `Math.Min` actually need to sit so a new strategy can't route around it?" / "How would a base-contract test (I8) have caught the original override?"
+
+**A2. Q: Design a template-method-pattern base class where inheritance is genuinely the correct tool, and explain why composition wouldn't serve as well.**
+*Ideal answer:*
  ```csharp
+// C#
 public abstract class ReportGenerator
 {
-    public string Generate // fixed algorithm skeleton -- the "template"
+    public string Generate() // fixed algorithm skeleton -- the "template"
     {
-        var data = FetchData;
+        var data = FetchData();
         var formatted = FormatData(data);
         return WrapWithHeaderFooter(formatted); // shared, stable, non-overridable behavior
     }
-    protected abstract IEnumerable<object> FetchData;
+    protected abstract IEnumerable<object> FetchData();
     protected abstract string FormatData(IEnumerable<object> data);
     private string WrapWithHeaderFooter(string body) => $"--- REPORT ---\n{body}\n--- END ---";
 }
  ```
- Composition would require every concrete report type to separately implement (or remember to call) the shared header/footer-wrapping logic and the fixed fetch-then-format sequencing — the entire point of this pattern is that the **algorithm's structure itself** (fetch, then format, then wrap) is the shared, stable, is-a-"a kind of report generation process" behavior, which inheritance's "share behavior automatically, override only specific steps" mechanism expresses more directly and safely (a subclass literally cannot skip the header/footer wrapping, since it's `private` in the base class) than composition, which would require every composed caller to remember to invoke the shared logic correctly and in the right order.
-3. **Q: Explain how you would refactor a deep (4+ level) inheritance hierarchy exhibiting fragile-base-class symptoms, without a risky, all-at-once rewrite.**
- **A:** Identify, level by level starting from the deepest, which derived classes' behavior is genuinely "is-a" (LSP-compliant, benefiting from automatic base-class behavior) versus which have accumulated ad-hoc overrides that actually represent a "has-a"/strategy-like variation (a red flag for a should-be-composed concern trapped inside an inheritance hierarchy); extract the strategy-like variations into composed, injected interfaces one at a time (directly the "expand, don't break" incremental-migration pattern recurring throughout this course), flattening the hierarchy's depth incrementally rather than attempting a single, large, all-at-once redesign that risks introducing new bugs across the entire hierarchy simultaneously.
-4. **Q: How would you write an automated test specifically designed to catch LSP violations across an entire inheritance hierarchy, generalizing beyond manually reasoning about each subclass individually?**
- **A:** Write a **shared, parameterized contract test suite** expressed purely in terms of the base type's documented behavior/postconditions (e.g., "discount never exceeds order total," "calling Dispose twice never throws"), then run that **identical** test suite against every concrete subclass in the hierarchy (via a test framework's parameterized/theory-based test mechanism, instantiating each subclass in turn) — any subclass failing a test written purely against the base contract is a mechanically-detected LSP violation, directly generalizing this course's recurring "test the actual contract, not just each specific implementation" theme (REST APIs module's contract testing, the query-count regression testing) to the OOP inheritance-hierarchy context specifically.
-5. **Q: Explain a scenario where an interface (not a class hierarchy) can still suffer from an LSP-like violation, despite interfaces having no shared implementation to inherit incorrectly.**
- **A:** If an interface's documentation implies a behavioral contract beyond its method signatures (e.g., `IRepository<T>.GetByIdAsync` is documented/expected to return `null` for a non-existent ID, never throw), an implementation that instead throws an exception for a missing ID **compiles** and satisfies the interface's *signature* but violates its *behavioral* contract — any caller written against the documented contract (expecting `null`, handling it gracefully) breaks when given this particular implementation, demonstrating that LSP-style substitutability concerns apply to interface implementations just as much as class inheritance, even without any shared implementation code to blame.
-6. **Q: How would you decide whether a "Manager" role needing most of an "Employee" class's behavior plus a few additional capabilities should be modeled via inheritance (`Manager: Employee`) or composition (`Manager` having an `Employee` plus additional manager-specific data/behavior)?**
- **A:** Ask whether every piece of code that operates on `Employee` should also correctly, safely operate on a `Manager` substituted in its place (the LSP test) — if yes (a `Manager` genuinely "is-a" `Employee` in every behaviorally-relevant sense the codebase cares about), inheritance is appropriate; if a `Manager`'s additional responsibilities create scenarios where treating it uniformly as "just an Employee" would be incorrect or requires special-casing elsewhere in the codebase, that's a signal the relationship is better modeled as `Manager` composing/holding employee-related data alongside its own distinct manager-specific behavior, rather than forcing an is-a relationship that doesn't actually hold cleanly.
-7. **Q: Explain why "the derived class only adds new methods, never overrides existing ones" is not, by itself, sufficient to guarantee LSP compliance.**
- **A:** LSP concerns aren't limited to overridden methods — a derived class can also violate the base type's contract through **new invariants it introduces that conflict with existing base-class assumptions** (e.g., a derived class adding a constructor precondition stricter than the base class's, such that code polymorphically constructing/using base-typed objects via a factory now fails for this specific subtype in a way the base contract never anticipated) — LSP is about the full behavioral contract (preconditions, postconditions, invariants) across the type's entire public surface, not merely "did you override an existing method in an incompatible way."
-8. **Q: Design a strategy for safely introducing a new interface-based composition point into an existing, working inheritance hierarchy without breaking existing subclasses.**
- **A:** Add the new interface as an **additional**, optional composed dependency on the base class (injected via constructor with a sensible default implementation for backward compatibility), rather than immediately removing the corresponding inherited-and-overridden behavior — existing subclasses continue working unchanged (their overrides still apply, since nothing was removed), while new code can be written against the new, composition-based extension point; gradually migrate existing subclasses' logic into the new composed mechanism one at a time, only removing the old inheritance-based override path once every subclass has been migrated and validated — directly the same additive, non-breaking migration discipline recurring throughout this course.
-9. **Q: A team argues "we should never use inheritance at all, only composition, as an absolute rule." Evaluate this as a Principal Engineer.**
- **A:** Push back on the absolutism: composition-over-inheritance is a strong **default preference**, not a rule with zero exceptions — the template-method pattern (Advanced Q2) and other genuine is-a relationships with stable shared algorithmic structure are legitimate, LSP-compliant uses of inheritance that composition would express more awkwardly; recommend the nuanced guidance this module actually teaches ("default to composition; use inheritance deliberately, only for genuine, LSP-verified is-a relationships") rather than either extreme (always inherit, or never inherit) — dogmatic rule-following in either direction misses the actual underlying engineering judgment this principle exists to develop.
-10. **Q: As a Principal Engineer conducting an architecture review, how would you evaluate a proposed new class hierarchy for LSP compliance and appropriate inheritance-vs-composition usage before it's built, rather than discovering issues after the fact (as)?**
- **A:** Require the proposal to explicitly state the base type's full behavioral contract (not just method signatures) and walk through, for each proposed subclass, whether it genuinely preserves every part of that contract — specifically probing any override with "what does this override change about the base class's behavior, and can you identify any existing or plausible-future caller that might rely on the behavior being changed?" (directly the question that would have caught the incident before it shipped); for any relationship where the answer reveals genuine behavioral divergence rather than pure specialization, recommend composition/strategy-pattern instead, structurally preventing the LSP violation from ever being built rather than needing to be discovered and refactored later.
+ ```java
+ // Java — 'final' on the template method is what makes "a subclass literally cannot skip
+ // the header/footer wrapping" a compile-time guarantee rather than a convention.
+ public abstract class ReportGenerator {
+     public final String generate() {
+         List<Object> data = fetchData();
+         String formatted = formatData(data);
+         return wrapWithHeaderFooter(formatted);
+     }
+     protected abstract List<Object> fetchData();
+     protected abstract String formatData(List<Object> data);
+     private String wrapWithHeaderFooter(String body) { return "--- REPORT ---\n" + body + "\n--- END ---"; }
+ }
+ ```
+ Composition would require every concrete report type to separately implement (or remember to call) the shared header/footer-wrapping logic and the fixed fetch-then-format sequencing — the entire point of this pattern is that the **algorithm's structure itself** (fetch, then format, then wrap) is the shared, stable, is-a-"a kind of report generation process" behavior, which inheritance's "share behavior automatically, override only specific steps" mechanism expresses more directly and safely (a subclass literally cannot skip the header/footer wrapping, since it's `private` in C# / the template method is `final` in Java) than composition, which would require every composed caller to remember to invoke the shared logic correctly and in the right order.
+*Why correct:* It identifies the shared thing as the *algorithm's structure and its non-bypassable steps*, not shared data or reusable helpers — which is exactly the case inheritance expresses better than composition.
+*Common mistakes:* Choosing template-method for shared *code* rather than shared *sequencing* (that's the I5 reuse trap); leaving the template method overridable so a subclass can skip the wrapping; putting varying steps as `virtual` with default bodies instead of `abstract` hooks (invites silent partial overrides).
+*Follow-up:* "Why not compose the varying steps as injected strategies instead?" (you can for the steps; inheritance still owns the un-bypassable skeleton — the hybrid in §11 Expert exercise does both).
+
+**A3. Q: Explain how you would refactor a deep (4+ level) inheritance hierarchy exhibiting fragile-base-class symptoms, without a risky all-at-once rewrite.**
+*Ideal answer:* Working from the deepest level up, classify each derived class's overrides: genuine "is-a" specialization (keep) versus accumulated ad-hoc overrides that are really a "has-a"/strategy variation trapped in the hierarchy (the target). Extract the strategy-like variations into composed, injected interfaces one class at a time, behind characterization tests that capture current behavior before each extraction. Flatten depth incrementally as overrides move out, never attempting a single redesign that would put every leaf at risk simultaneously.
+*Why correct:* It gives a classification criterion (is-a vs trapped-strategy), a safe order (deepest first, one at a time), and a safety net (characterization tests) — an incremental "expand, don't break" migration.
+*Common mistakes:* Extracting the money-moving core first (highest risk, least independent); "big bang" rewrite; classifying by method name rather than by whether the override represents genuine specialization.
+*Follow-up:* "How do you pick which class to extract first?" (the shallowest genuinely-independent concern with the clearest boundary and its own change cadence — e.g. formatting, notifications).
+
+**A4. Q: How would you write an automated test designed to catch LSP violations across an entire inheritance hierarchy, generalizing beyond reasoning about each subclass individually?**
+*Ideal answer:* A shared, parameterized **contract test suite** written purely in terms of the base type's documented postconditions/invariants ("discount never exceeds order total", "double `Dispose` never throws"), run *identically* against every concrete subclass via the framework's parameterized/abstract-base-test mechanism (one concrete test subclass per implementation, or a `MethodSource` of factories). Any subclass that fails a base-contract test is a mechanically detected LSP violation.
+*Why correct:* It moves assertions from per-implementation behavior to the *contract*, which is the only kind of test that can detect substitutability breakage; and it's re-runnable automatically as new subclasses are added.
+*Common mistakes:* Testing each subclass only against its own expected outputs; writing the contract test but instantiating one subclass; asserting implementation details (which strategy ran) instead of contract outcomes.
+*Follow-up:* "A new subclass is added six months later — what makes the test cover it?" (registering it as one more parameterization is the whole cost; nothing else changes).
+
+**A5. Q: Explain a scenario where an interface (not a class hierarchy) still suffers an LSP-like violation, despite interfaces having no shared implementation to inherit incorrectly.**
+*Ideal answer:* When the interface's documented contract exceeds its signatures. `IRepository<T>.GetByIdAsync` documented to return `null` for a missing id, never throw — an implementation that throws `NotFoundException` for a missing id compiles and satisfies the *signature* but breaks every caller written to the documented behavior (expecting `null`, handling it gracefully). Substitutability is a property of behavior, not of whether code is inherited.
+*Why correct:* It shows LSP is about the full behavioral contract of *any* substitutable abstraction, and gives a concrete caller that breaks.
+*Common mistakes:* Believing "no shared implementation" means "no LSP risk"; not documenting the behavioral contract, so there's nothing to violate *or* to test against.
+*Follow-up:* "How do you enforce the `null`-not-throw contract across implementations?" (a shared contract test — A4 — plus the contract written into the interface's XML doc / Javadoc).
+
+**A6. Q: How would you decide whether "Manager" (needs most of `Employee`'s behavior plus extra capabilities) should be `Manager : Employee` or `Manager` composing an `Employee`?**
+*Ideal answer:* Apply the LSP test: should every piece of code that operates on `Employee` remain correct with a `Manager` substituted? If yes in every behaviorally-relevant sense the codebase cares about, inheritance is defensible. If a `Manager`'s extra responsibilities create places where treating it as "just an Employee" is wrong or needs special-casing elsewhere, that's the signal to compose (hold employee data + add manager behavior) rather than force an is-a that doesn't hold.
+*Why correct:* It uses substitutability (not "shares fields") as the deciding criterion and names the observable symptom of a bad fit (special-casing appearing at call sites).
+*Common mistakes:* Choosing inheritance because `Manager` "has a name and an ID too"; ignoring that org-chart modelling (`Manager` *has* reports who are `Employee`s) is composition, not subtyping.
+*Follow-up:* "Payroll iterates `List<Employee>` and calls `CalculatePay()` — does `Manager` fit?" (only if a manager's pay calc is genuinely the same contract; bonuses/equity often make it not).
+
+**A7. Q: Explain why "the derived class only adds new methods, never overrides existing ones" is not sufficient to guarantee LSP compliance.**
+*Ideal answer:* LSP covers the whole behavioral contract, not just overridden methods. An additive subclass can still violate it by introducing a *stronger precondition* (a constructor that rejects inputs the base accepts, so a factory constructing base-typed objects now fails for this subtype), a new invariant that conflicts with base-class assumptions, or a new method whose side effects break an invariant callers rely on.
+*Why correct:* It names the specific non-override violation mechanisms (strengthened preconditions, conflicting invariants) that "no overrides" doesn't rule out.
+*Common mistakes:* Treating "additive-only" as automatically safe; forgetting constructors and invariants are part of the contract.
+*Follow-up:* "Give a one-line example of a strengthened precondition breaking a polymorphic caller." (subtype ctor requires a non-null `Region`; a generic factory that constructs the base with `Region = null` throws only for this subtype).
+
+**A8. Q: Design a strategy for safely introducing a new interface-based composition point into an existing, working inheritance hierarchy without breaking existing subclasses.**
+*Ideal answer:* Add the new interface as an *additional*, optional composed dependency on the base class — constructor-injected with a default implementation that preserves current behavior — without removing the inherited-and-overridden path. Existing subclasses keep working unchanged (nothing was removed); new code targets the composition point. Then migrate subclasses' logic into the composed mechanism one at a time, removing the old override path only after every subclass is migrated and validated.
+*Why correct:* It's an additive, non-breaking (expand → migrate → contract) migration: both paths coexist until the old one is provably unused.
+*Common mistakes:* Removing the inherited path in the same change (breaks unmigrated subclasses); no default implementation (forces every subclass to change at once); migrating all subclasses in one PR.
+*Follow-up:* "How do you know the old override path is safe to delete?" (no subclass overrides it any more, and a contract test confirms the composed path produces equivalent behavior).
+
+**A9. Q: A team argues "never use inheritance at all, only composition, as an absolute rule." Evaluate this as a Principal Engineer.**
+*Ideal answer:* Push back on the absolutism. Composition-over-inheritance is a strong default, not a zero-exception rule: the template-method pattern (A2) and genuine stable is-a relationships with shared, non-bypassable algorithm structure are legitimate, LSP-compliant inheritance that composition expresses more awkwardly (every caller must remember to sequence the shared steps). Recommend the actual discipline — default to composition; use inheritance deliberately, only for LSP-verified is-a with stable shared behavior — because a blanket ban trades a small, checkable LSP risk for a guaranteed correctness burden on every caller in the cases it doesn't fit.
+*Why correct:* It rejects both dogmas, names a concrete legitimate inheritance case, and states the cost of the blanket rule (worse code in its non-fitting cases).
+*Common mistakes:* Agreeing with the absolute rule to seem principled; or defending inheritance broadly — the answer is "default one way, with a named, narrow exception."
+*Follow-up:* "How would you encode this as a team standard without it becoming a lint rule that gets gamed?" (design-review LSP check + `sealed`/`final`-by-default + an override-ratio heuristic that flags a hierarchy for review — Expert Q10).
+
+**A10. Q: As a Principal conducting an architecture review, how would you evaluate a proposed new class hierarchy for LSP compliance and inheritance-vs-composition *before* it's built, rather than discovering issues after the fact (as in §4)?**
+*Ideal answer:* Require the proposal to state the base type's *full behavioral contract* — preconditions, postconditions, invariants — not just method signatures. Then, for each proposed subclass, walk its compliance with every part of that contract, probing each override with: "what does this change about the base's behavior, and can you name an existing or plausible-future caller that relies on the behavior you're changing?" Where the answer reveals genuine behavioral divergence rather than pure specialization, recommend composition/strategy instead — structurally preventing the violation from being built.
+*Why correct:* It makes the review question standard and specific (contract first, then per-override probing), which is exactly the question that would have caught §4 at design time.
+*Common mistakes:* Reviewing the class diagram and method names only; accepting "it compiles and tests pass" as design validation; asking about overrides but not about the callers that depend on the behavior being overridden.
+*Follow-up:* "The author can't name a caller that relies on the behavior — does that make the override safe?" (no — plausible-future callers count; if the divergence is real, compose).
 
 ### Expert (FinTech Principal Panel)
 
@@ -252,39 +440,58 @@ public abstract class ReportGenerator
 
 ### Easy — Fix an LSP violation by removing an incompatible override
 ```csharp
-// BEFORE: violates LSP -- ReadOnlyList's Add silently does nothing, breaking callers
+// C# — BEFORE: violates LSP. ReadOnlyList.Add silently does nothing, breaking callers
 // that assume Add actually adds an item (the base List<T> contract).
-public class ReadOnlyList<T>: List<T>
+public class ReadOnlyList<T> : List<T>
 {
     public new void Add(T item) { /* no-op, silently ignores */ }
 }
 
-// AFTER: don't inherit from List<T> at all -- compose it, expose only read operations
+// AFTER: don't inherit from List<T> at all -- compose it, expose only read operations,
 // making the type's actual (narrower) contract honest and impossible to misuse.
-public class ReadOnlyList<T>: IReadOnlyList<T>
+public sealed class ReadOnlyList<T> : IReadOnlyList<T>
 {
     private readonly List<T> _items;
-    public ReadOnlyList(IEnumerable<T> items) => _items = items.ToList;
+    public ReadOnlyList(IEnumerable<T> items) => _items = items.ToList();
     public T this[int index] => _items[index];
     public int Count => _items.Count;
-    public IEnumerator<T> GetEnumerator => _items.GetEnumerator;
-    IEnumerator IEnumerable.GetEnumerator => GetEnumerator;
+    public IEnumerator<T> GetEnumerator() => _items.GetEnumerator();
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+}
+```
+```java
+// Java — BEFORE: same LSP violation. Overriding add() to no-op breaks the List<T> contract
+// (and inheriting ArrayList also leaks addAll/set/remove that all lie).
+public class ReadOnlyList<T> extends ArrayList<T> {
+    @Override public boolean add(T item) { return false; /* silently ignores */ }
+}
+
+// AFTER: implement the read-only interface only; delegate to a private copy.
+// (In practice: prefer List.copyOf(items) directly and skip the wrapper class.)
+public final class ReadOnlyList<T> extends AbstractList<T> {
+    private final List<T> items;
+    public ReadOnlyList(Collection<? extends T> items) { this.items = List.copyOf(items); }
+    @Override public T get(int index) { return items.get(index); }
+    @Override public int size() { return items.size(); }
+    // AbstractList's add/set/remove already throw UnsupportedOperationException — the
+    // narrower contract is honest, and List.copyOf means the source can't mutate it either.
 }
 ```
 
 ### Medium — Replace an inheritance-based discount hierarchy with composition (the fix)
 ```csharp
+// C#
 public interface IDiscountStrategy { decimal ComputeDiscount(Order order); }
-public class StandardDiscountStrategy: IDiscountStrategy
+public sealed class StandardDiscountStrategy : IDiscountStrategy
 {
     public decimal ComputeDiscount(Order order) => order.Total * 0.05m;
 }
-public class PriorityDiscountStrategy: IDiscountStrategy
+public sealed class PriorityDiscountStrategy : IDiscountStrategy
 {
     public decimal ComputeDiscount(Order order) => Math.Max(order.Total * 0.10m, 5.00m);
 }
 
-public class Customer
+public sealed class Customer
 {
     private readonly IDiscountStrategy _discountStrategy;
     public Customer(IDiscountStrategy discountStrategy) => _discountStrategy = discountStrategy;
@@ -296,47 +503,108 @@ public class Customer
     }
 }
 ```
+```java
+// Java — identical design. BigDecimal for money (never double); strategy injected, not inherited.
+public interface DiscountStrategy { BigDecimal computeDiscount(Order order); }
+
+public final class StandardDiscountStrategy implements DiscountStrategy {
+    public BigDecimal computeDiscount(Order order) {
+        return order.total().multiply(new BigDecimal("0.05"));
+    }
+}
+public final class PriorityDiscountStrategy implements DiscountStrategy {
+    public BigDecimal computeDiscount(Order order) {
+        return order.total().multiply(new BigDecimal("0.10")).max(new BigDecimal("5.00"));
+    }
+}
+
+public final class Customer {
+    private final DiscountStrategy discountStrategy;
+    public Customer(DiscountStrategy discountStrategy) { this.discountStrategy = discountStrategy; }
+
+    public BigDecimal applyDiscount(Order order) {
+        BigDecimal raw = discountStrategy.computeDiscount(order);
+        return raw.min(order.total()); // the invariant lives in ONE place, not in every strategy
+    }
+}
+```
 
 ### Hard — Parameterized LSP contract test across a hierarchy (Advanced Q4)
 ```csharp
-public abstract class ShapeContractTests<TShape> where TShape: Shape
+// C# (xUnit) — the base-contract test is written ONCE, run against every subtype.
+public abstract class ShapeContractTests<TShape> where TShape : Shape
 {
     protected abstract TShape CreateShapeWithArea(double expectedArea);
 
     [Fact]
-    public void Area_Should_Never_Be_Negative
+    public void Area_Should_Never_Be_Negative()
     {
         var shape = CreateShapeWithArea(10.0);
         Assert.True(shape.Area >= 0, "Area contract violated: Area returned a negative value.");
     }
 }
 
-public class CircleContractTests: ShapeContractTests<Circle>
+public class CircleContractTests : ShapeContractTests<Circle>
 {
-    protected override Circle CreateShapeWithArea(double expectedArea) => new Circle { Radius = Math.Sqrt(expectedArea / Math.PI) };
+    protected override Circle CreateShapeWithArea(double area) => new Circle(Math.Sqrt(area / Math.PI));
 }
-public class SquareContractTests: ShapeContractTests<Square>
+public class SquareContractTests : ShapeContractTests<Square>
 {
-    protected override Square CreateShapeWithArea(double expectedArea) => new Square { Side = Math.Sqrt(expectedArea) };
+    protected override Square CreateShapeWithArea(double area) => new Square(Math.Sqrt(area));
 }
-// Both CircleContractTests and SquareContractTests automatically inherit and run the SAME
-// base-contract test -- any future Shape subclass violating the "Area is never negative"
-// contract is caught by simply adding one more contract-test subclass, not hand-writing a new test.
+// Any future Shape subclass that breaks "Area is never negative" is caught by adding ONE
+// contract-test subclass, not by hand-writing a fresh test.
+```
+```java
+// Java (JUnit 5) — same idea; abstract test base + one concrete subclass per implementation.
+abstract class ShapeContractTest<T extends Shape> {
+    protected abstract T createShapeWithArea(double expectedArea);
+
+    @Test
+    void area_should_never_be_negative() {
+        T shape = createShapeWithArea(10.0);
+        assertTrue(shape.area() >= 0, "Area contract violated: area() returned a negative value.");
+    }
+}
+
+class CircleContractTest extends ShapeContractTest<Circle> {
+    @Override protected Circle createShapeWithArea(double area) { return new Circle(Math.sqrt(area / Math.PI)); }
+}
+class SquareContractTest extends ShapeContractTest<Square> {
+    @Override protected Square createShapeWithArea(double area) { return new Square(Math.sqrt(area)); }
+}
+// Alternatively a single @ParameterizedTest with a MethodSource of Supplier<Shape> factories —
+// same guarantee: the base type's documented contract is asserted against every implementation.
 ```
 
 ### Expert — Template-method pattern with a composed, swappable step (hybrid design)
 ```csharp
+// C#
 public abstract class ReportGenerator
 {
     private readonly IReportFormatter _formatter; // composition for the genuinely variable part
     protected ReportGenerator(IReportFormatter formatter) => _formatter = formatter;
 
-    public string Generate // fixed algorithm skeleton -- inheritance's strength
+    public string Generate() // fixed algorithm skeleton -- inheritance's strength
     {
-        var data = FetchData; // subclass-specific, is-a-variation (inheritance appropriate)
-        return _formatter.Format(data); // swappable at runtime (composition appropriate)
+        var data = FetchData();          // subclass-specific, is-a-variation (inheritance appropriate)
+        return _formatter.Format(data);  // swappable at runtime (composition appropriate)
     }
-    protected abstract IEnumerable<object> FetchData;
+    protected abstract IEnumerable<object> FetchData();
+}
+```
+```java
+// Java — final template method (locks the skeleton), abstract hook for the is-a step,
+// injected collaborator for the runtime-swappable step.
+public abstract class ReportGenerator {
+    private final ReportFormatter formatter;         // composition for the variable part
+    protected ReportGenerator(ReportFormatter formatter) { this.formatter = formatter; }
+
+    public final String generate() {                 // 'final' == a subclass cannot skip/reorder the skeleton
+        List<Object> data = fetchData();             // subclass-specific hook
+        return formatter.format(data);               // swappable strategy
+    }
+    protected abstract List<Object> fetchData();
 }
 ```
 **Discussion**: This deliberately combines both tools where each is actually the better fit — `FetchData` varies by genuine report-type specialization (an is-a relationship, appropriately expressed via inheritance's override mechanism), while the formatting strategy is swappable independent of report type (appropriately expressed via composition) — a concrete demonstration that "composition over inheritance" and "inheritance is sometimes right" aren't in tension when applied to the specific part of a design each is actually suited for, directly synthesizing Advanced Q2 and Advanced Q9's nuanced guidance into one cohesive example.
@@ -481,6 +749,8 @@ sequenceDiagram
 **Risk analysis and long-term maintainability.** The single biggest long-term risk this module's design pattern addresses is *decay* — a clean composed-strategy design can still decay back toward the fragile-base-class/God-object failure modes it was built to avoid (Expert Q7's override-ratio drift, §14's silently-reintroduced shared mutable state) if the invariants it depends on (statelessness, narrow interface contracts, sealed-by-default) aren't kept explicit and periodically re-verified — good architecture is not a one-time decision but a set of invariants that must remain continuously true as the system evolves, which is precisely why this module pairs every design principle with both a production incident and a concrete, ongoing mechanism (analyzer rule, review checklist, contract test) for keeping the invariant true going forward.
 
 ## 18. Revision
+**Language note**: every principle here is a property of type relationships, not of C# — §2.6 gives the C#↔Java mapping and the code samples throughout are shown in both. At the FinTech Principal bar you are expected to express LSP, composition-over-inheritance, capability-interface segregation, and invariant-protecting construction fluently in *either* idiom; the one divergence worth internalising is that Java is virtual-by-default, so "seal / `final` concrete classes by default" is a stronger, more load-bearing discipline there (Effective Java Item 19) than in opt-in-virtual C#.
+
 **Key takeaways**: LSP requires genuine behavioral-contract preservation (preconditions, postconditions, invariants), not just compile-time substitutability. The fragile base class problem is fundamentally a coupling-to-implementation-detail issue, distinct from ordinary API coupling. Composition minimizes coupling to a held type's public interface and allows runtime swappability; inheritance is appropriate specifically for genuine, stable is-a relationships (template-method patterns) where sharing algorithm structure automatically is the actual goal. Centralize invariant enforcement in one location rather than trusting every subclass/strategy implementation to independently uphold it — this structurally prevents an entire class of LSP-violation bugs, not just one instance.
 
 ---

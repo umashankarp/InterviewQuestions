@@ -17,13 +17,25 @@ Nearly universally — several of these patterns (Strategy, Observer, Iterator) 
 
 ### How does it work (30,000-ft view)?
 ```csharp
-// Strategy, expressed idiomatically via a C# interface + DI (not a classic GoF class hierarchy)
+// C# — Strategy via an interface + DI (not a classic GoF class hierarchy)
 public interface IShippingCostStrategy { decimal Calculate(Order order); }
-public class OrderService
+public sealed class OrderService
 {
     private readonly IShippingCostStrategy _shippingStrategy; // swappable algorithm
     public OrderService(IShippingCostStrategy shippingStrategy) => _shippingStrategy = shippingStrategy;
 }
+```
+```java
+// Java — Strategy is a FUNCTIONAL interface; the "implementation" is often just a lambda.
+// (This is the biggest behavioral-pattern idiom gap between the languages — see §2.6.)
+@FunctionalInterface
+public interface ShippingCostStrategy { BigDecimal calculate(Order order); }
+
+public final class OrderService {
+    private final ShippingCostStrategy shippingStrategy;
+    public OrderService(ShippingCostStrategy shippingStrategy) { this.shippingStrategy = shippingStrategy; }
+}
+// new OrderService(order -> new BigDecimal("5.99"));   // no named class needed
 ```
 
 ---
@@ -44,6 +56,29 @@ Chain of Responsibility passes a request along a chain of potential handlers, ea
 
 ### 2.5 State — Behavior Varying by Internal State, and Its Records-Based Alternative
 The classic State pattern models an object whose behavior changes based on its internal state by delegating to a swappable "current state" object (each state implementing a shared interface with state-specific behavior) — the sealed-record-hierarchy-plus-exhaustive-switch design (`OrderState` → `Pending`/`Paid`/`Shipped`/`Cancelled`) is a **modern, idiomatic C# alternative** to the classic State pattern, already covered in depth there, trading State's "each state is a swappable, polymorphic object" mechanism for "each state is an immutable record, transitions are pure functions with compiler-enforced exhaustiveness" — both solve the same underlying problem; which is preferable depends on whether compile-time exhaustiveness (records) or genuine polymorphic extensibility (classic State pattern, if new states must be pluggable by external code without recompiling the core logic) is the more valuable property for a given domain, directly echoing the own discussion of this exact trade-off.
+
+### 2.6 Behavioral Patterns in C# and Java — Where the Idioms Genuinely Diverge
+
+Behavioral patterns are the ones most *absorbed into language features*, and C# and Java absorbed different ones. A FinTech interviewer at a Java shop will not accept "we use C# events for Observer" — you need the Java answer.
+
+| Pattern | C# idiom | Java idiom |
+|---|---|---|
+| **Strategy** | inject an `interface` implementation (a named class, usually via DI); or a `Func<...>` | a **`@FunctionalInterface`** — the "implementation" is typically a **lambda or method reference**, no named class; `Function<Order,BigDecimal>` / `Comparator` / `Predicate` are Strategy |
+| **Observer** | **`event` + delegate** — a first-class language feature; `+=` / `-=` / `Invoke` | **no language events.** Options: a hand-rolled `List<Listener>` + `notifyAll`; `java.beans.PropertyChangeSupport`/`PropertyChangeListener` (Swing/bean world); **`java.util.concurrent.Flow`** (JDK 9, reactive-streams SPI) or a library (RxJava, Project Reactor, `Flow` via `SubmissionPublisher`) for backpressure-aware pub/sub. **`java.util.Observable`/`Observer` were deprecated in Java 9** — never propose them |
+| **Command** | an `ICommand` interface with `Execute()`; MediatR `IRequest`/`IRequestHandler` | a `Runnable` / `Callable<T>` / a `@FunctionalInterface`; an explicit `Command` interface when you need `undo()`; the "request object + handler" shape is done with an explicit interface or a library (Axon, Spring's `ApplicationEventPublisher` for events) |
+| **Chain of Responsibility** | ASP.NET Core middleware (`RequestDelegate` pipeline); `IEndpointFilter` chain | **Servlet `Filter`** chain; Spring `HandlerInterceptor`; a hand-built linked list of handlers; `java.util.function.Function::andThen` composition |
+| **Template Method** | `abstract` base with an overridable `protected` step; often a `virtual` hook | identical — `abstract` base with abstract hook methods; mark the template method **`final`** so a subclass can't skip the skeleton (a compile-time guarantee C#'s opt-in-virtual doesn't need to state) |
+| **State** | classic polymorphic state objects, **or** `sealed record` hierarchy + exhaustive `switch` | classic polymorphic state objects, **or** `sealed interface OrderState permits Pending, Paid, ...` + exhaustive `switch` pattern matching (Java 21); an `enum` with per-constant method overrides for a small fixed state set |
+| **Iterator** | `IEnumerable<T>` / `IEnumerator<T>`; `yield return` generators; `foreach` | `Iterable<T>` / `Iterator<T>`; the enhanced `for` loop; **no `yield`** — a generator is a hand-written `Iterator`, or a `Stream` (`Stream.iterate`, `Stream.generate`), or a `Spliterator` |
+| **Mediator** | MediatR (`IMediator.Send`/`Publish`) is near-ubiquitous | no dominant equivalent; Spring's `ApplicationEventPublisher` for the publish side, or an explicit mediator class; libraries exist but none is standard |
+
+**The two that will trip up a C#-only candidate in a Java interview:**
+
+1. **Observer.** There is no `event` keyword. If asked "how does Observer look in Java," the strong answer is: for in-process, low-volume notification, a hand-rolled listener list or `PropertyChangeSupport`; for anything with volume, ordering, or backpressure concerns, **`java.util.concurrent.Flow`** (`SubmissionPublisher` as the subject, `Flow.Subscriber` as the observer, with `request(n)` backpressure) or Project Reactor / RxJava. And you must know `java.util.Observable` is deprecated and why (no generics, `setChanged()` foot-gun, extends-not-implements forces single inheritance).
+
+2. **Strategy.** In Java 8+, "create a Strategy" often means "pass a lambda to a method that takes a `Function`/`Comparator`/`Predicate`" — the pattern is so absorbed into functional interfaces that writing a named `class StandardShipping implements ShippingCostStrategy` can read as over-ceremony unless the strategy carries state or is DI-managed. The C# story is similar with `Func<>`, but named-class-per-strategy is more common in idiomatic C# codebases.
+
+**Command (with `undo`), Chain of Responsibility, Template Method, and the classic polymorphic State pattern port line-for-line** — the design intent is identical; only Observer and lambda-Strategy require a genuinely different Java answer.
 
 ## 3. Visual Architecture
 ```mermaid
@@ -296,53 +331,90 @@ public class DurableCommandDispatcher
 
 ### Easy — Strategy pattern for shipping-cost calculation
 ```csharp
+// C#
 public interface IShippingCostStrategy { decimal Calculate(Order order); }
-public class StandardShipping: IShippingCostStrategy { public decimal Calculate(Order order) => 5.99m; }
-public class ExpressShipping: IShippingCostStrategy { public decimal Calculate(Order order) => 19.99m; }
+public sealed class StandardShipping : IShippingCostStrategy { public decimal Calculate(Order o) => 5.99m; }
+public sealed class ExpressShipping  : IShippingCostStrategy { public decimal Calculate(Order o) => 19.99m; }
 
-public class CheckoutService
+public sealed class CheckoutService
 {
     private readonly IShippingCostStrategy _shippingStrategy;
     public CheckoutService(IShippingCostStrategy shippingStrategy) => _shippingStrategy = shippingStrategy;
     public decimal ComputeTotal(Order order) => order.Subtotal + _shippingStrategy.Calculate(order);
 }
 ```
+```java
+// Java — Strategy as a functional interface. Named classes still fine, but lambdas are idiomatic.
+@FunctionalInterface
+public interface ShippingCostStrategy { BigDecimal calculate(Order order); }
+
+public final class CheckoutService {
+    private final ShippingCostStrategy shippingStrategy;
+    public CheckoutService(ShippingCostStrategy shippingStrategy) { this.shippingStrategy = shippingStrategy; }
+    public BigDecimal computeTotal(Order order) {
+        return order.subtotal().add(shippingStrategy.calculate(order));
+    }
+}
+// var standard = new CheckoutService(o -> new BigDecimal("5.99"));
+// var express  = new CheckoutService(o -> new BigDecimal("19.99"));
+```
 
 ### Medium — Chain of Responsibility fixing the approval-tier incident
 ```csharp
-public interface IApprovalHandler
+// C#
+public abstract class ApprovalHandlerBase
 {
-    IApprovalHandler? Next { get; set; }
-    ApprovalResult Handle(decimal amount);
-}
-
-public abstract class ApprovalHandlerBase: IApprovalHandler
-{
-    public IApprovalHandler? Next { get; set; }
+    public ApprovalHandlerBase? Next { get; set; }
     public abstract ApprovalResult Handle(decimal amount);
     protected ApprovalResult PassToNext(decimal amount) =>
-        Next?.Handle(amount)?? throw new InvalidOperationException("No handler found for this amount.");
+        Next?.Handle(amount) ?? throw new InvalidOperationException("No handler found for this amount.");
 }
 
-public class AutoApproveHandler: ApprovalHandlerBase
+public sealed class AutoApproveHandler : ApprovalHandlerBase
 {
     public override ApprovalResult Handle(decimal amount) =>
-        amount < 1000? ApprovalResult.AutoApproved: PassToNext(amount);
+        amount < 1000 ? ApprovalResult.AutoApproved : PassToNext(amount);
 }
-public class ManagerApprovalHandler: ApprovalHandlerBase
+public sealed class ManagerApprovalHandler : ApprovalHandlerBase
 {
     public override ApprovalResult Handle(decimal amount) =>
-        amount < 10000? ApprovalResult.RequiresApproval("Manager"): PassToNext(amount);
+        amount < 10000 ? ApprovalResult.RequiresApproval("Manager") : PassToNext(amount);
 }
-// Adding a new tier: insert ONE new handler class into the chain construction list --
-// no modification to AutoApproveHandler or ManagerApprovalHandler's existing, tested code.
+// New tier == one new handler class inserted into the chain; existing handlers untouched.
+```
+```java
+// Java — same structure. (A Servlet Filter chain or Spring HandlerInterceptor is this pattern
+// provided by the framework; hand-rolled here to match the C# shape.)
+public abstract class ApprovalHandlerBase {
+    protected ApprovalHandlerBase next;
+    public ApprovalHandlerBase setNext(ApprovalHandlerBase next) { this.next = next; return next; }
+    public abstract ApprovalResult handle(BigDecimal amount);
+    protected ApprovalResult passToNext(BigDecimal amount) {
+        if (next == null) throw new IllegalStateException("No handler found for this amount.");
+        return next.handle(amount);
+    }
+}
+
+public final class AutoApproveHandler extends ApprovalHandlerBase {
+    private static final BigDecimal LIMIT = new BigDecimal("1000");
+    public ApprovalResult handle(BigDecimal amount) {
+        return amount.compareTo(LIMIT) < 0 ? ApprovalResult.autoApproved() : passToNext(amount);
+    }
+}
+public final class ManagerApprovalHandler extends ApprovalHandlerBase {
+    private static final BigDecimal LIMIT = new BigDecimal("10000");
+    public ApprovalResult handle(BigDecimal amount) {
+        return amount.compareTo(LIMIT) < 0 ? ApprovalResult.requiresApproval("Manager") : passToNext(amount);
+    }
+}
 ```
 
 ### Hard — Parameterized boundary test across the full chain (Advanced Q1)
 ```csharp
+// C# (xUnit)
 public class ApprovalChainBoundaryTests
 {
-    private readonly IApprovalHandler _chain = BuildChain; // AutoApprove -> Manager -> Director -> VP
+    private readonly ApprovalHandlerBase _chain = BuildChain(); // AutoApprove -> Manager -> Director -> VP
 
     [Theory]
     [InlineData(999, "AutoApproved")]
@@ -351,44 +423,99 @@ public class ApprovalChainBoundaryTests
     [InlineData(10000, "Director")]
     [InlineData(99999, "Director")]
     [InlineData(100000, "VP")]
-    public void Chain_Should_Route_To_Correct_Tier_At_Every_Boundary(decimal amount, string expectedTier)
+    public void Chain_Routes_To_Correct_Tier_At_Every_Boundary(decimal amount, string expectedTier)
     {
         var result = _chain.Handle(amount);
-        Assert.Equal(expectedTier, result.RequiredApprover?? "AutoApproved");
+        Assert.Equal(expectedTier, result.RequiredApprover ?? "AutoApproved");
     }
 }
-// This SINGLE test suite, re-run whenever a new handler is inserted, mechanically catches
-// exactly the off-by-one boundary error that caused the original production incident.
+```
+```java
+// Java (JUnit 5)
+class ApprovalChainBoundaryTest {
+    private final ApprovalHandlerBase chain = buildChain(); // AutoApprove -> Manager -> Director -> VP
+
+    static Stream<Arguments> boundaries() {
+        return Stream.of(
+            arguments(new BigDecimal("999"),    "AutoApproved"),
+            arguments(new BigDecimal("1000"),   "Manager"),
+            arguments(new BigDecimal("9999"),   "Manager"),
+            arguments(new BigDecimal("10000"),  "Director"),
+            arguments(new BigDecimal("99999"),  "Director"),
+            arguments(new BigDecimal("100000"), "VP"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("boundaries")
+    void routes_to_correct_tier_at_every_boundary(BigDecimal amount, String expectedTier) {
+        ApprovalResult result = chain.handle(amount);
+        assertEquals(expectedTier, result.requiredApprover().orElse("AutoApproved"));
+    }
+}
+// One suite, re-run whenever a handler is inserted — mechanically catches the off-by-one
+// boundary error that caused the original incident.
 ```
 
 ### Expert — Command pattern with undo/redo stacks (Advanced Q2)
 ```csharp
-public class CommandManager
+// C#
+public interface ICommand { void Execute(); void Undo(); }
+
+public sealed class CommandManager
 {
-    private readonly Stack<ICommand> _undoStack = new;
-    private readonly Stack<ICommand> _redoStack = new;
+    private readonly Stack<ICommand> _undo = new();
+    private readonly Stack<ICommand> _redo = new();
 
     public void ExecuteAndTrack(ICommand command)
     {
-        command.Execute;
-        _undoStack.Push(command);
-        _redoStack.Clear; // a new action invalidates any previously-available redo history
+        command.Execute();
+        _undo.Push(command);
+        _redo.Clear(); // a new action invalidates any redo history
     }
 
-    public void Undo
+    public void Undo()
     {
-        if (_undoStack.Count == 0) return;
-        var command = _undoStack.Pop;
-        command.Undo;
-        _redoStack.Push(command);
+        if (_undo.Count == 0) return;
+        var c = _undo.Pop();
+        c.Undo();
+        _redo.Push(c);
     }
 
-    public void Redo
+    public void Redo()
     {
-        if (_redoStack.Count == 0) return;
-        var command = _redoStack.Pop;
-        command.Execute;
-        _undoStack.Push(command);
+        if (_redo.Count == 0) return;
+        var c = _redo.Pop();
+        c.Execute();
+        _undo.Push(c);
+    }
+}
+```
+```java
+// Java — explicit Command interface (needs undo(), so not a bare Runnable). Deque as a stack.
+public interface Command { void execute(); void undo(); }
+
+public final class CommandManager {
+    private final Deque<Command> undo = new ArrayDeque<>();
+    private final Deque<Command> redo = new ArrayDeque<>();
+
+    public void executeAndTrack(Command command) {
+        command.execute();
+        undo.push(command);
+        redo.clear(); // a new action invalidates any redo history
+    }
+
+    public void undo() {
+        if (undo.isEmpty()) return;
+        Command c = undo.pop();
+        c.undo();
+        redo.push(c);
+    }
+
+    public void redo() {
+        if (redo.isEmpty()) return;
+        Command c = redo.pop();
+        c.execute();
+        undo.push(c);
     }
 }
 ```
@@ -591,6 +718,8 @@ sequenceDiagram
 ---
 
 ## 18. Revision
+**Language note**: §2.6 has the full C#↔Java behavioral-pattern mapping; code samples are shown in both. The two that trip up a C#-only candidate in a Java interview: (1) **Observer** — there is no `event` keyword; the Java answer is a hand-rolled listener list / `PropertyChangeSupport` for small in-process cases, or **`java.util.concurrent.Flow`** (`SubmissionPublisher` + `Flow.Subscriber` with `request(n)` backpressure) / Reactor / RxJava for anything with volume — and `java.util.Observable` is **deprecated** (Java 9); (2) **Strategy** — in Java 8+ it's usually a `@FunctionalInterface` satisfied by a **lambda**, not a named class. Command-with-undo, Chain of Responsibility, Template Method (mark it `final`), and the classic polymorphic State pattern port line-for-line.
+
 **Key takeaways**: Strategy is already the de facto C# idiom for "inject an interface implementation" — recognize the connection, don't treat it as new theory. C# events are Observer, natively implemented by the language. Chain of Responsibility is the middleware pipeline's underlying pattern, and the correct fix for a growing, ordered conditional-case set (replacing a fragile nested if/else or switch statement, directly paralleling the OCP-violation lesson). Command encapsulates a request as an object specifically to enable queuing/logging/undo. State's classic polymorphic form suits genuine runtime/external extensibility; the records-based alternative suits fixed, compile-time-verifiable case sets — the same trade-off recurring across this course's discriminated-union discussions.
 
 ---

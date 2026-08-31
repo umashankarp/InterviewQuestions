@@ -17,16 +17,27 @@ Every non-trivial codebase; the depth matters for applying these principles with
 
 ### How does it work (30,000-ft view)?
 ```csharp
-// Violates SRP: OrderProcessor both computes business logic AND handles persistence AND sends email
+// C# — Violates SRP: OrderProcessor computes business logic AND persists AND sends email
 public class OrderProcessor
 {
-    public void Process(Order order) { /* validate, save to DB, send email -- three responsibilities */ }
+    public void Process(Order order) { /* validate, save to DB, send email -- three reasons to change */ }
 }
 
 // SRP-compliant: each class has ONE reason to change
-public class OrderValidator { public bool IsValid(Order order) =>...; }
-public class OrderRepository { public Task SaveAsync(Order order) =>...; }
-public class OrderNotifier { public Task NotifyAsync(Order order) =>...; }
+public interface IOrderValidator  { bool IsValid(Order order); }
+public interface IOrderRepository  { Task SaveAsync(Order order); }
+public interface IOrderNotifier    { Task NotifyAsync(Order order); }
+```
+```java
+// Java — same split. The principle is identical; only the syntax (no properties, Streams, checked
+// exceptions, CompletableFuture instead of Task) changes. See §2.6 for the full mapping.
+public class OrderProcessor {
+    public void process(Order order) { /* validate, save, notify -- three reasons to change */ }
+}
+
+public interface OrderValidator { boolean isValid(Order order); }
+public interface OrderRepository { CompletableFuture<Void> save(Order order); }
+public interface OrderNotifier  { CompletableFuture<Void> notify(Order order); }
 ```
 
 ---
@@ -46,7 +57,32 @@ No client should be forced to depend on methods it doesn't use — a large, mult
 DIP states: **high-level modules should not depend on low-level modules; both should depend on abstractions** — a business-logic class (`OrderService`) should depend on an `IOrderRepository` interface, not directly on a concrete `SqlOrderRepository` class, inverting the naive dependency direction (business logic depending on data-access details) into both depending on a shared abstraction the business logic itself defines the shape of. **Dependency Injection** is the **mechanism** commonly used to *supply* the concrete implementation satisfying that abstraction at runtime — DIP is the *design principle*; DI is one (very common, but not the only) *technique* for satisfying it. This distinction — frequently blurred, with candidates using the terms interchangeably — is a genuine, testable interview differentiator.
 
 ### 2.5 How the Five Principles Interact and Sometimes Tension Against Each Other
-SRP and OCP work together (small, focused classes are easier to extend without modification); ISP and DIP work together (small interfaces make it easier for high-level modules to depend only on the abstraction slice they actually need); but LSP can tension against OCP (extending a hierarchy with a new subclass that technically satisfies OCP's "no modification needed" while violating LSP's behavioral-contract requirement, exactly the incident) — recognizing that these principles are not five independent, additive rules but an interacting system requiring holistic judgment is itself a Staff/Principal-level signal.
+SRP and OCP work together (small, focused classes are easier to extend without modification); ISP and DIP work together (small interfaces make it easier for high-level modules to depend only on the abstraction slice they actually need); but LSP can tension against OCP (extending a hierarchy with a new subclass that technically satisfies OCP's "no modification needed" while violating LSP's behavioral-contract requirement — the OOP module's §4 `PriorityCustomer` case, and Advanced Q6's `Penguin : Bird`) — recognizing that these principles are not five independent, additive rules but an interacting system requiring holistic judgment is itself a Staff/Principal-level signal.
+
+### 2.6 SOLID in C# and Java — the Same Judgment, Different Machinery
+
+All five principles are about *coupling and responsibility boundaries*, which are language-independent. A Java-shop interviewer asks the identical questions; only the vocabulary and a few structural details shift.
+
+| Principle / mechanism | C# | Java |
+|---|---|---|
+| **SRP** split | classes / `partial` types; `record` for data holders | classes; `record` (Java 16+) for data holders — no semantic difference |
+| **OCP** via strategy + registry | `interface IFeeRule` + `IEnumerable<IFeeRule>` injected; `Dictionary<string,IFeeRule>` | `interface FeeRule` + `List<FeeRule>` injected; `Map<String,FeeRule>`; or the **`ServiceLoader`** SPI / a Spring `List<FeeRule>` autowire for plugin-style registration |
+| **OCP** deliberate violation (exhaustive union) | `abstract record` + `switch` expression, compiler exhaustiveness | `sealed interface ... permits ...` (17+) + `switch` pattern matching exhaustiveness (21) |
+| **LSP** guardrail on error contract | base method's exceptions are unchecked — LSP compliance is by documentation + contract test | a subtype **cannot** add a checked exception the interface method didn't declare (`throws`) — a compile-time partial LSP guarantee C# lacks; the flip side is the "wrap in `RuntimeException`" smell |
+| **ISP** split | `IReadableRepository<T>` / `IWritableRepository<T>` / `IBulkImportable<T>` | identical: `ReadableRepository<T>` / `WritableRepository<T>` / `BulkImportable<T>`; Java's `default` methods (8+) let you evolve an interface without breaking implementers, same as C# 8 default interface methods |
+| **DIP** wiring | `Microsoft.Extensions.DependencyInjection`; or manual composition root (Expert exercise) | **Spring** / Guice / Dagger; or manual composition root — the principle is unchanged, and "poor man's DI" (constructor-wire everything in `main`) satisfies DIP with zero framework in *both* languages |
+| **DIP** for external systems | domain-owned `IPaymentGateway` + per-vendor adapter | domain-owned `PaymentGateway` interface + per-vendor adapter; hexagonal ports-and-adapters is the same shape |
+| Constructor injection idiom | primary constructors (C# 12) or explicit ctor | explicit ctor; **avoid field injection** (`@Autowired` on a field) — it defeats `final` and hides the dependency, the Java-specific anti-pattern equivalent of a service-locator |
+| Read-only exposure (ISP-as-least-privilege) | return `IReadOnlyList<T>` | return `List.copyOf(...)`; `Collections.unmodifiableList` still types as `List<T>` so it fails at *runtime*, not compile time |
+
+**Where the languages genuinely differ for SOLID:**
+
+- **DIP + checked exceptions (Java only).** An interface designed DIP-style — `interface Ledger { void post(Entry e); }` — that later needs an implementation which does I/O forces a choice: declare `throws LedgerException` on the interface (leaking an implementation concern into the abstraction — a DIP/anti-corruption smell, Expert Q6) or wrap in an unchecked exception in every adapter. The disciplined answer is the same as C#: the interface throws a *domain* exception (`throws SettlementRejected`) it owns, and adapters translate. C# sidesteps the syntax but faces the identical design question.
+- **OCP registration mechanics.** Java has `ServiceLoader` (a JDK SPI) and Spring's "inject `List<T>` of every bean implementing `T`" — both give you the "add a class, no core edit" property more idiomatically than hand-rolling a `Dictionary`. C#'s equivalent is `services.AddSingleton<IFeeRule, X>()` per implementation (or an assembly-scanning helper). The *principle* — the core iterates a registry, never a `switch` — is identical.
+- **ISP-as-least-privilege is slightly weaker in Java at the collection boundary** (runtime-throwing unmodifiable wrappers vs. compile-time-absent mutators on `IReadOnlyList<T>`), so a Java codebase leans harder on `List.copyOf` and on *never* returning the internal field.
+- **`sealed` means different things.** C# `sealed` = "no subclass" (a devirtualization + fragile-base-class lever). Java `sealed` (17+) = "only *these named* subclasses" — a tool for building the closed, exhaustive hierarchy that is the *deliberate OCP violation* of §2.2. Java's "no subclass at all" is `final`.
+
+**Everything else — SRP's "one reason to change", OCP's registry-not-switch, ISP's split-by-consumer-need, DIP's direction-of-dependency, and the tensions between them (OCP vs. LSP, over-applied DIP) — is word-for-word portable.** The Expert Q&A scenarios (settlement-core governance, fee-rule engine, `NotImplementedException`/`NotImplementedException`-equivalent trap, "DIP in letter not spirit") all translate directly; a Java implementer stubs with `throw new UnsupportedOperationException()` where the C# version throws `NotImplementedException`, and the design defect (a fat interface promising an unsupported capability) is identical.
 
 ## 3. Visual Architecture
 ```mermaid
@@ -83,7 +119,7 @@ classDiagram
 - Recognize DIP as the design principle and DI as one implementation technique — don't conflate the two when explaining architecture decisions.
 
 ## 6. Anti-patterns
-- A monolithic class/switch statement handling an open-ended, growing set of cases, where adding a new case risks affecting existing ones (the incident).
+- A monolithic class/switch statement handling an open-ended, growing set of cases, where adding a new case risks affecting existing ones (the §4 notification-service incident).
 - Splitting classes so granularly (one method per class) that the codebase becomes harder, not easier, to navigate — an SRP over-application.
 - A single large interface forcing every implementation to stub out irrelevant methods.
 - High-level business logic directly instantiating/depending on concrete low-level classes (`new SqlOrderRepository`), rather than depending on an abstraction.
@@ -125,50 +161,180 @@ classDiagram
 ## 10. Interview Questions
 
 ### Basic (10)
-1. **Q: What does SOLID stand for?** **A:** Single Responsibility, Open/Closed, Liskov Substitution, Interface Segregation, Dependency Inversion.
-2. **Q: What is the Single Responsibility Principle?** **A:** A class should have only one reason to change — "reason to change" meaning one *actor/stakeholder* whose requirements drive modifications; a class serving both accounting rules and report formatting has two masters and will be broken by either's evolution.
-3. **Q: What is the Open/Closed Principle?** **A:** Modules should be open for extension but closed for modification.
-4. **Q: What is the Interface Segregation Principle?** **A:** No client should be forced to depend on methods it doesn't use.
-5. **Q: What is the Dependency Inversion Principle?** **A:** High-level modules shouldn't depend on low-level modules; both should depend on abstractions.
-6. **Q: Is Dependency Injection the same thing as Dependency Inversion?** **A:** No — DIP is the design principle; DI is a common technique/mechanism for satisfying it.
-7. **Q: Which SOLID principle did already cover in depth?** **A:** Liskov Substitution Principle.
-8. **Q: What's a common symptom of an SRP violation?** **A:** A class changes for multiple, unrelated reasons (e.g., both a business-rule change and a formatting change require touching the same class).
-9. **Q: What's a common way to achieve OCP compliance?** **A:** Using polymorphism/interfaces — adding a new implementing class instead of modifying existing dispatch logic.
-10. **Q: What's a symptom of an ISP violation?** **A:** An implementing class has to stub out/throw `NotImplementedException` for methods it doesn't actually support.
+
+**B1. Q: What does SOLID stand for?**
+*Ideal answer:* Single Responsibility, Open/Closed, Liskov Substitution, Interface Segregation, Dependency Inversion — five object-oriented design principles for managing coupling and responsibility boundaries as a codebase grows.
+*Common mistake:* Reciting the letters without being able to say what each one *manages* (a class's reasons to change, extensibility, substitutability, unwanted interface coupling, dependency direction).
+*Follow-up:* "Which two most often work together, and which two can conflict?" (SRP+OCP and ISP+DIP reinforce; OCP vs LSP can conflict — §2.5).
+
+**B2. Q: What is the Single Responsibility Principle?**
+*Ideal answer:* A class should have only one *reason to change* — one actor or stakeholder whose evolving requirements drive its modifications. A class serving both accounting rules and report formatting has two masters and will be broken by either's evolution.
+*Common mistake:* Stating it as "a class should do one thing" — that framing invites over-splitting into meaningless fragments (Intermediate Q1); the unit is a *stakeholder/reason*, not a *task*.
+*Follow-up:* "Two calculation methods that look structurally identical — same responsibility?" (only if they change for the same business reason; tax calc vs display formatting don't).
+
+**B3. Q: What is the Open/Closed Principle?**
+*Ideal answer:* A module should be open for extension but closed for modification — you add new behavior by adding new code (a new class implementing an existing interface), not by editing existing, already-tested source (a new `switch` branch).
+*Common mistake:* Reading "closed for modification" as "never change the file" — bug fixes are fine; it's specifically about not editing working logic to add a *new case*.
+*Follow-up:* "When is deliberately violating OCP the right call?" (a sealed exhaustive hierarchy — you *want* the compiler to force you to handle a new case everywhere — Intermediate Q3).
+
+**B4. Q: What is the Interface Segregation Principle?**
+*Ideal answer:* No client should be forced to depend on members it doesn't use. Split a broad interface into focused ones matching genuine distinct consumer needs, so a change to one slice doesn't recompile/retest consumers of another.
+*Common mistake:* Minimizing every interface to one method regardless of whether that reflects real separate use cases (Intermediate Q6).
+*Follow-up:* "How is ISP a security principle?" (least privilege — a consumer typed on `IReadableRepository<T>` structurally cannot call `Delete`).
+
+**B5. Q: What is the Dependency Inversion Principle?**
+*Ideal answer:* High-level modules shouldn't depend on low-level modules; both should depend on abstractions — and the abstraction should be shaped by the high-level module's needs, not the low-level module's API.
+*Common mistake:* Stopping at "depend on interfaces" without the second half (the abstraction is *owned by* and *shaped for* the high-level module) — that's what distinguishes DIP-in-spirit from DIP-in-letter (Expert Q6).
+*Follow-up:* "Your `IAuditLogger` mirrors a SIEM vendor's API shape — is that DIP?" (mechanically yes, substantively no — swapping vendors still touches call sites).
+
+**B6. Q: Is Dependency Injection the same thing as Dependency Inversion?**
+*Ideal answer:* No. DIP is the design principle (which way source dependencies point). DI is one common *mechanism* for supplying the concrete implementation that satisfies the abstraction at runtime — a container, or manual "poor man's DI" in a composition root. You can satisfy DIP with no container at all.
+*Common mistake:* Using the terms interchangeably — a genuine, testable interview differentiator.
+*Follow-up:* "Show DIP satisfied with zero framework." (constructor-wire concretes to abstractions in `main`/`Program.cs` — §11 Expert exercise).
+
+**B7. Q: Which SOLID principle did the OOP module (09) already cover in depth?**
+*Ideal answer:* Liskov Substitution — its `PriorityCustomer` incident, the Square/Rectangle trap, and behavioral-contract preservation are all LSP, so this module builds on that rather than re-deriving it.
+*Common mistake:* Not connecting the two modules — LSP is the one SOLID letter with a full prior treatment.
+*Follow-up:* "Where does LSP tension against another SOLID principle?" (OCP — an OCP-compliant new subclass can still violate LSP; Advanced Q6).
+
+**B8. Q: What's a common symptom of an SRP violation?**
+*Ideal answer:* One class needs to change for multiple unrelated reasons — a business-rule change and a report-layout change both require touching it — so its git history shows commits from several different feature areas, and every change risks the others.
+*Common mistake:* Judging by line count ("the class is big") rather than by whether the reasons-to-change are independent.
+*Follow-up:* "In a regulated system, why is this a *risk* concern, not just tidiness?" (a low-stakes reporting tweak drags the money-moving core into re-review/re-certification — §Expert Q3).
+
+**B9. Q: What's a common way to achieve OCP compliance?**
+*Ideal answer:* Polymorphism via an interface plus a registry: the core iterates a collection of implementations resolved at startup, and a new case is a new class + one registration line — the core is never edited.
+*Common mistake:* Thinking a `switch` on an enum "is fine because it's small" — the risk is what it becomes after N feature PRs each add "just one more case" (Advanced Q7).
+*Follow-up:* "Java idiom for the registry?" (`ServiceLoader`, or Spring autowiring `List<T>` of every implementation — §2.6).
+
+**B10. Q: What's a symptom of an ISP violation?**
+*Ideal answer:* An implementation is forced to stub out or throw (`NotImplementedException` in C#, `UnsupportedOperationException` in Java) for interface members it can't meaningfully support — the interface promised a capability not every implementer has.
+*Common mistake:* "Fix it with a better exception message" — the fix is to segregate the interface so the false promise doesn't exist (Expert Q4).
+*Follow-up:* "Why is a stub that silently returns `null`/`0` arguably worse than one that throws?" (the caller gets a plausible wrong answer instead of a loud failure).
 
 ### Intermediate (10)
-1. **Q: Why is "a class should do one thing" a risky, oversimplified restatement of SRP?** **A:** Taken literally, it can lead to over-splitting classes into meaninglessly tiny pieces — the more precise formulation ("one reason to change," tied to independently-varying stakeholders/concerns) better captures when splitting is actually warranted versus unnecessary.
-2. **Q: Why does a large switch statement handling a growing set of cases violate OCP specifically?** **A:** Adding a new case requires modifying the existing, already-tested switch statement's source code, rather than adding new code without touching what already works — exactly the "closed for modification" violation OCP is meant to prevent.
-3. **Q: Why can a sealed, discriminated-union-style hierarchy with exhaustive switches be considered a deliberate OCP violation, and why might that be the right choice anyway?** **A:** Adding a new case genuinely does require modifying every exhaustive switch handling that hierarchy — a real OCP violation — but this trade-off is deliberately accepted because the domain benefits more from compiler-enforced exhaustiveness (catching a missed case at compile time) than from OCP's modification-avoidance benefit, illustrating that OCP isn't an absolute rule but one consideration to weigh against others.
-4. **Q: Why does splitting a large `IRepository` interface into `IReadableRepository`/`IWritableRepository` address both ISP and, indirectly, support DIP better?** **A:** ISP is directly addressed since consumers now depend only on the read or write slice they actually need; DIP is indirectly supported because a high-level module depending on the narrower, focused abstraction is more precisely and minimally coupled than depending on the full, broad interface's entire surface.
-5. **Q: Why is DIP described as inverting the "naive" dependency direction, specifically?** **A:** Without DIP, a natural, naive design has business logic directly depending on and calling into data-access/infrastructure code (a "top-down" dependency); DIP inverts this so that both the business logic and the infrastructure code depend on a shared abstraction (often defined by/for the business logic's needs), meaning the infrastructure layer now depends on an abstraction the business layer defines, not the other way around.
-6. **Q: Why might over-applying ISP lead to interface proliferation that itself becomes a maintainability problem?** **A:** Splitting every interface into extremely narrow, single-method pieces can scatter related behavior across so many small interfaces that understanding a type's full capability requires assembling many fragments — ISP should split along genuinely distinct consumer-need boundaries, not mechanically minimize every interface to one method regardless of whether that reflects real, separate use cases.
-7. **Q: How does the production incident demonstrate that OCP violations are not merely stylistic concerns?** **A:** A modification to add a new notification channel inadvertently broke an existing, unrelated channel's functionality (SMS) because both lived in the same shared, modification-requiring switch statement — a concrete, demonstrated production bug directly caused by the OCP violation, not just a hypothetical maintainability concern.
-8. **Q: Why does SRP's "reason to change" framing require identifying stakeholders, not just code structure?** **A:** Two pieces of logic can look structurally similar (both are "calculation" methods) while actually varying for entirely different business reasons (tax law changes vs. marketing's formatting preferences) — SRP is about *why* code changes, which requires understanding the business/organizational context driving those changes, not just the code's syntactic shape.
-9. **Q: Why does the Dependency Inversion Principle apply even in codebases that don't use a formal DI container?** **A:** DIP is about the *direction of source-code dependencies* (which module's code references which), independent of *how* a concrete implementation is ultimately supplied — a codebase could satisfy DIP via manual "poor man's DI" (constructing and passing dependencies explicitly in a composition root) without any DI container at all, as long as high-level modules still depend only on abstractions.
-10. **Q: Why is it valuable to recognize that SOLID principles can tension against each other, rather than treating them as five independent, always-compatible rules?** **A:** Real design decisions frequently require choosing which principle's benefit matters more for a specific situation (the OCP-vs-exhaustiveness trade-off) — presenting them as always-harmonious slogans misses the genuine engineering judgment SOLID is meant to develop, and a Staff/Principal-level engineer should be able to articulate these tensions explicitly, not just recite the five letters.
+
+**I1. Q: Why is "a class should do one thing" a risky restatement of SRP?**
+*Ideal answer:* Taken literally it drives you to split classes into meaningless one-method fragments, scattering cohesive logic across many files so understanding a capability means reassembling pieces. The precise formulation — "one reason to change," tied to one independently-varying stakeholder/concern — tells you *when* a split reduces coupling versus when it just relocates it.
+*Why correct:* It names the concrete failure of the loose framing (fragment proliferation) and the criterion the precise framing supplies (independent reason-to-change).
+*Common mistakes:* Defending "do one thing" as a fine simplification; or over-correcting into "never split" — the point is splitting along *stakeholder* boundaries.
+*Follow-up:* "You split `OrderValidator` into field- and business-rule validators — how do you check the split is real?" (do they change independently, or always together for the same policy change? — Advanced Q5).
+
+**I2. Q: Why does a large `switch` handling a growing case set violate OCP specifically?**
+*Ideal answer:* Every new case requires editing the existing, already-tested `switch` — modifying working logic rather than adding isolated new code. That shared, frequently-edited structure is where "a change to one case breaks an adjacent case" bugs come from (the §4 incident), because "unrelated" isn't true when everything lives in one method.
+*Why correct:* It ties the violation to the concrete mechanism (edit-to-extend) and to the demonstrated failure mode (adjacent-case breakage).
+*Common mistakes:* Saying a `switch` is "just slower" (it isn't the point); or claiming any `switch` violates OCP (a `switch` over a *fixed, closed* set is fine).
+*Follow-up:* "How do you tell at review time which `switch` is an OCP risk?" (its case set is expected to grow, and git shows multiple feature PRs each adding a branch — Advanced Q7).
+
+**I3. Q: Why can a sealed, exhaustive-switch hierarchy be a *deliberate* OCP violation, and why is that sometimes right?**
+*Ideal answer:* Adding a new case genuinely forces editing every exhaustive `switch` over that hierarchy — a real OCP violation. It's accepted deliberately because the domain values *compiler-enforced exhaustiveness* (a missed case is a compile error, not a production `default:` fallthrough) more than modification-avoidance. It's the clearest example that SOLID principles trade off and require judgment.
+*Why correct:* It states the violation honestly and names the specific benefit bought in exchange (compile-time exhaustiveness) and when that benefit dominates (a fixed, correctness-critical case set).
+*Common mistakes:* Claiming it's not "really" an OCP violation; or using it where the case set is genuinely open/plugin-extensible (then OCP's extensibility matters more).
+*Follow-up:* "Same trade-off shows up in Chain of Responsibility vs exhaustive switch — which do you pick for a fixed approval-tier set?" (exhaustive switch — you want the compiler to catch a missed tier).
+
+**I4. Q: Why does splitting `IRepository` into `IReadableRepository`/`IWritableRepository` help both ISP and DIP?**
+*Ideal answer:* ISP directly: a read-only consumer depends only on the read slice, so a change to `BulkImport`'s signature doesn't recompile it. DIP indirectly: a high-level module depending on the narrower abstraction is *more precisely* inverted — it's coupled to exactly the capability its own responsibility needs, not to a broad surface it happens to be handed.
+*Why correct:* It separates the two effects (recompile blast radius vs precision of the inversion) rather than treating them as the same thing.
+*Common mistakes:* Saying it's "just cleaner"; or claiming a runtime performance benefit (there is none — the value is build-time and clarity).
+*Follow-up:* "Where does a third interface (`IBulkImportable<T>`) come from?" (a capability not every repo has — so callers that need it are typed on it and non-bulk repos simply don't implement it — Expert Q4).
+
+**I5. Q: Why is DIP described as *inverting* the "naive" dependency direction?**
+*Ideal answer:* The naive design has business logic depend on and call into data-access/infrastructure code — a top-down dependency. DIP flips it: both layers depend on an abstraction, and that abstraction is defined by/for the business logic's needs, so the infrastructure layer now depends on a contract the business layer owns — the reverse of the naive arrow.
+*Why correct:* It identifies *what* is inverted (which layer defines and which layer conforms to the abstraction), not just "add an interface."
+*Common mistakes:* Thinking DIP just means "add an interface between the layers" without noting the abstraction is owned upward; leaving the interface shaped by the infrastructure (a leaky abstraction — Expert Q6).
+*Follow-up:* "What architecture does consistently applying this at the system boundary produce?" (hexagonal / ports-and-adapters — Expert Q2).
+
+**I6. Q: Why can over-applying ISP become its own maintainability problem?**
+*Ideal answer:* Split every interface to one method regardless of use cases and a type's real capability is scattered across a dozen tiny interfaces — understanding what it does means assembling fragments, and a cohesive operation gets artificially divided. ISP splits along *genuine distinct consumer needs*, not mechanically.
+*Why correct:* It names the symptom (fragmented capability, hard to see the whole) and the correct boundary (real consumer-need seams).
+*Common mistakes:* Treating "more interfaces" as monotonically better; ignoring that a consumer needing five of six tiny interfaces gained nothing.
+*Follow-up:* "How do you find the right seam?" (group by which *set* of members actual distinct consumers use together).
+
+**I7. Q: How does the §4 incident show OCP violations aren't merely stylistic?**
+*Ideal answer:* Adding a Slack channel to a shared `switch` introduced an off-by-one in the fallthrough that silently stopped SMS notifications for days — the SMS code path itself was never touched. A concrete production outage caused directly by the shared, modification-requiring structure, not a hypothetical.
+*Why correct:* It gives the causal chain (edit one case → break an adjacent untouched case) and the real consequence (silent multi-day outage found by a customer).
+*Common mistakes:* Describing it as "hard to maintain" without the concrete breakage; blaming the individual bug rather than the structure that made it possible.
+*Follow-up:* "The fix is per-channel classes — what new failure mode does *that* introduce?" (independently-correct handlers can still compose wrongly — the sibling behavioral-patterns module's double-discount incident).
+
+**I8. Q: Why does SRP's "reason to change" framing require identifying stakeholders, not just code structure?**
+*Ideal answer:* Two methods can be structurally identical (both "calculations") yet change for entirely different reasons — tax law vs marketing's layout preference. SRP is about *why* code changes, which is an organizational fact, not a syntactic one; you can't see it in the code shape alone.
+*Why correct:* It grounds the principle in change-drivers (external, human) rather than code metrics.
+*Common mistakes:* Grouping by technical similarity ("all the calculation methods together"); assuming the current file structure reflects responsibility boundaries.
+*Follow-up:* "How do you discover the stakeholders for an unfamiliar class?" (look at who requests changes to it in the issue tracker / git history — the reasons-to-change are empirically visible).
+
+**I9. Q: Why does DIP apply even without a DI container?**
+*Ideal answer:* DIP constrains the *direction of source-code dependencies* — which module references which — independent of the wiring mechanism. Manual "poor man's DI" (construct concretes and pass them into constructors at a composition root) satisfies DIP fully, as long as high-level modules reference only abstractions.
+*Why correct:* It separates the principle (dependency direction) from the tooling (containers), which is the exact DIP-vs-DI distinction.
+*Common mistakes:* Believing "we don't use DI" means "we can't do DIP"; or thinking a container is required for testability (it isn't — constructor injection alone suffices).
+*Follow-up:* "What does a container buy you over manual wiring, then?" (lifetime management, wiring at scale, decorator/interception plumbing — not DIP compliance itself).
+
+**I10. Q: Why is it valuable to recognize that SOLID principles tension against each other?**
+*Ideal answer:* Real decisions require choosing which principle's benefit matters more for a specific case — OCP's modification-avoidance vs a sealed hierarchy's compile-time exhaustiveness; DIP's substitutability vs the cost of an abstraction that will never be substituted. Presenting SOLID as five always-harmonious rules hides the judgment it exists to build, and a Staff/Principal engineer is expected to articulate the tensions explicitly.
+*Why correct:* It reframes SOLID from a checklist to an interacting system requiring trade-off judgment, and names concrete tensions.
+*Common mistakes:* Treating the five as independent and additive; scoring "SOLID compliance" as a single number (Advanced Q9).
+*Follow-up:* "Give a case where you'd knowingly violate one SOLID principle to uphold another." (accept the sealed-hierarchy OCP violation to get exhaustiveness on a correctness-critical fixed case set).
 
 ### Advanced (10)
-1. **Q: Diagnose the notification-service OCP violation from first principles, and design the code-review practice preventing recurrence for future growing-case-set scenarios.**
- **A:** Root cause: an open-ended, growing set of cases (notification channels) implemented as a single, shared, modification-requiring dispatch structure (a switch statement) rather than a polymorphic, independently-extensible design. Safeguard: a code-review heuristic flagging any switch/if-chain whose case set is expected to grow over time (new payment methods, new notification channels, new file-format exporters) as a signal to consider a polymorphic/strategy-pattern refactor **before** the case set grows large enough for this exact "modifying one case affects another" risk to materialize, rather than waiting for an incident to prompt the refactor reactively.
-2. **Q: Explain precisely how the Interface Segregation Principle and the Dependency Inversion Principle work together in a well-designed layered architecture, using a concrete example beyond a simple repository split.**
- **A:** Consider an `IOrderNotifier` interface a high-level `OrderService` depends on (DIP) — if it's segregated correctly (ISP) into exactly the notification capability `OrderService` actually needs (`NotifyOrderPlaced(order)`) rather than a broad `INotificationService` also including unrelated capabilities (`SendMarketingEmail`, `SendPasswordReset`), `OrderService`'s dependency is both **inverted** (depends on an abstraction, not a concrete notifier) and **minimally coupled** (depends on exactly the slice of notification capability relevant to its own responsibility) — the two principles compound: DIP ensures the *direction* of dependency is correct; ISP ensures the *abstraction itself* is appropriately narrow, together producing a dependency that's both correctly-directed and minimally-scoped.
-3. **Q: Design a refactoring strategy for the incident's fix that avoids a risky, all-at-once "big bang" rewrite of the entire notification dispatch mechanism.**
- **A:** Extract one notification channel (the most recently problematic, or the simplest) into its own `INotificationChannel` implementation first, leaving the remaining channels in the existing switch statement temporarily, with the dispatcher checking the new interface-based channels first and falling back to the legacy switch for anything not yet migrated — incrementally extract each remaining channel into its own class over subsequent, independently-reviewable changes, removing the legacy switch statement entirely only once every channel has been migrated — directly the same incremental, "expand, don't break" migration pattern recurring throughout this course, applied here to an OCP refactor specifically.
-4. **Q: Explain a scenario where naively applying DIP (introducing an abstraction for every dependency) adds unnecessary complexity without a corresponding benefit.**
- **A:** A class that will only ever have one, stable, unlikely-to-change concrete dependency (e.g., a wrapper around `DateTime.UtcNow` for testability is a legitimate, common exception, but a wrapper around a genuinely stable, unlikely-to-vary utility like `Math.Round` with no plausible alternative implementation or testing need) gains no real benefit from an introduced `IRoundingStrategy` abstraction — the abstraction adds an extra layer of indirection and a file/interface to maintain without ever being substituted with a different implementation in practice; DIP is justified specifically when there's a genuine need for substitutability (testing, multiple real implementations, decoupling from an external system) — applying it reflexively to every single dependency regardless of actual variability need is the "premature abstraction" anti-pattern this course has repeatedly warned against (the opening guidance, restated here).
-5. **Q: How would you reason about whether a proposed class split satisfies genuine SRP compliance versus merely scattering related logic across multiple files without an actual coupling-reduction benefit?**
- **A:** Verify each resulting class can genuinely be modified, tested, and reasoned about **independently** of the others for its own specific reason-to-change — if two "split" classes still need to change together in lockstep for the same underlying reason (e.g., splitting `OrderValidator` into `OrderFieldValidator` and `OrderBusinessRuleValidator` when both actually always change together whenever the single underlying validation policy changes), the split hasn't achieved genuine independence, it's merely relocated the same coupling across more files — true SRP compliance is measured by independent-changeability, not merely by file/class count.
-6. **Q: Explain how the Liskov Substitution Principle and the Open/Closed Principle can come into direct conflict, using a concrete scenario beyond the discriminated-union example.**
- **A:** A codebase adds a new `Penguin: Bird` subclass to an existing, OCP-compliant hierarchy (extending without modifying any existing code, satisfying OCP) — but if the base `Bird` class's contract implicitly assumes `Fly` is always meaningfully callable (as much pre-existing calling code might reasonably assume for a `Bird`), `Penguin`'s override (throwing `NotSupportedException`, or silently doing nothing) satisfies OCP's "no modification needed" while violating LSP's "substitutable without altering correctness" — this is precisely why OCP's "closed for modification, open for extension" framing, taken alone, doesn't guarantee a *correct* extension, only a *non-modifying* one; LSP must be independently verified for any OCP-compliant extension, exactly the tension recurring in the sealed-hierarchy trade-off, now shown via a different, classic example.
-7. **Q: Design a metric or code-review signal that would have flagged the notification-service class as an OCP-risk candidate before the incident occurred.**
- **A:** Track cyclomatic complexity/branch count growth over time for dispatch-shaped methods (switch statements, long if-else chains) specifically — a method whose branch count has grown across multiple, unrelated PRs (each adding "just one more case") is a strong, mechanically-detectable signal of exactly the accumulating-shared-structure risk this incident demonstrates; flagging any dispatch method exceeding a branch-count threshold, combined with evidence of it being modified by multiple different feature PRs over time, as a refactor candidate **before** the case set grows large enough for an incident like the to occur, converts a reactive, incident-driven fix into a proactive, metric-driven one.
-8. **Q: Explain why the Dependency Inversion Principle is foundational to unit testing, beyond just "it lets you use mocks."**
- **A:** Without DIP, a high-level module directly instantiating its low-level dependencies (`new SqlOrderRepository` inside `OrderService`) has no way to substitute a test double **at all** without modifying `OrderService`'s own source code — DIP's abstraction-based design is what makes substituting a test double (a mock/stub/fake implementing the same interface) possible without touching the class under test, which is the actual mechanical prerequisite for isolated unit testing, not merely a convenience mocking frameworks happen to rely on.
-9. **Q: A team proposes measuring "SOLID compliance" via a static-analysis tool counting interface implementations, class sizes, and dependency-injection usage as a single composite score, gated in CI. Evaluate this as a Principal Engineer.**
- **A:** Push back on reducing SOLID to a purely mechanical, composite metric — as Advanced Q4/Q5 demonstrate, genuine SOLID compliance requires judgment about actual variability/coupling-reduction benefit, which a static count of interfaces/class sizes cannot distinguish from superficial, benefit-free abstraction proliferation (an anti-pattern in its own right, per Advanced Q4); recommend targeted, judgment-requiring code-review practices (the branch-count/dispatch-growth signal from Advanced Q7, explicit SRP "reason to change" discussion in reviews) over a single automated composite score that could easily reward over-engineering (many tiny classes, unnecessary interfaces) as highly as it rewards genuine SOLID compliance.
-10. **Q: As a Principal Engineer, how would you teach SOLID to a team in a way that builds genuine design judgment rather than slogan-level pattern-matching, directly addressing this module's recurring theme?**
- **A:** Teach each principle paired with both a concrete production incident it would have prevented (this module's for OCP, the for LSP) **and** a concrete scenario where over-applying it creates unnecessary complexity (Advanced Q4's DIP-overuse example, the over-splitting SRP concern) — presenting both the failure-to-apply and the over-application failure modes together, rather than teaching each principle only as an unconditionally-good practice, is what builds the actual engineering judgment (when does this principle's benefit outweigh its complexity cost, for *this* specific situation) that distinguishes a Principal Engineer's application of SOLID from a junior engineer's mechanical recitation of the five letters.
+
+**A1. Q: Diagnose the §4 notification-service OCP violation from first principles, and design the code-review practice that prevents recurrence for future growing-case-set scenarios.**
+*Ideal answer:* Root cause: an open-ended, growing set of cases (notification channels) implemented as one shared, modification-requiring dispatch structure (a `switch`), so adding a case meant editing working logic and an off-by-one in the fallthrough silently broke an untouched channel. Safeguard: a review heuristic that flags any `switch`/if-chain whose case set is *expected to grow* (payment methods, channels, exporters) as a strategy-pattern-refactor candidate *before* it grows large enough for adjacent-case breakage — proactive, not incident-driven.
+*Why correct:* It separates the structural cause (edit-to-extend on a shared method) from the trigger bug, and the safeguard targets the growth signal at review time rather than waiting for an outage.
+*Common mistakes:* Prescribing "more tests on the switch" (doesn't remove the shared-structure risk); refactoring *every* switch (a closed set is fine).
+*Follow-up:* "What mechanical signal complements the human heuristic?" (branch-count growth on a dispatch method across multiple unrelated feature PRs — Advanced Q7).
+
+**A2. Q: Explain precisely how ISP and DIP work together in a layered architecture, with a concrete example beyond a repository split.**
+*Ideal answer:* A high-level `OrderService` depends on `IOrderNotifier` (DIP — depends on an abstraction, not a concrete notifier). If that interface is segregated (ISP) to exactly `NotifyOrderPlaced(order)` rather than a broad `INotificationService` with `SendMarketingEmail`/`SendPasswordReset`, the dependency is both correctly *directed* (DIP) and minimally *scoped* (ISP) — `OrderService` can't accidentally reach unrelated notification capability, and a change to marketing email doesn't touch it.
+*Why correct:* It shows the two principles compounding on one dependency — DIP fixes direction, ISP fixes breadth — with a non-repository example.
+*Common mistakes:* Conflating the two ("small interface" is ISP, not DIP); making the notifier interface broad because "it's all notification."
+*Follow-up:* "Who defines `IOrderNotifier`'s shape — the ordering module or the notification module?" (the ordering module — DIP: the consumer owns the abstraction).
+
+**A3. Q: Design a refactoring strategy for the §4 fix that avoids a "big bang" rewrite of the notification dispatch mechanism.**
+*Ideal answer:* Extract one channel (the riskiest or simplest) into its own `INotificationChannel` implementation; the dispatcher checks interface-based channels first and falls back to the legacy `switch` for anything not yet migrated. Extract the rest one at a time in independently-reviewable changes, deleting the legacy `switch` only once every channel has moved. An "expand, don't break" migration.
+*Why correct:* Both paths coexist, each step is small and reviewable, and the old path is removed only when provably unused.
+*Common mistakes:* Rewriting all channels at once; deleting the `switch` before migration is complete; not having the dispatcher route to the new path first.
+*Follow-up:* "How do you verify a migrated channel is behavior-equivalent before deleting its old branch?" (a characterization test capturing the old branch's output, run against the new class).
+
+**A4. Q: Explain a scenario where naively applying DIP (an abstraction for every dependency) adds complexity with no benefit.**
+*Ideal answer:* Wrapping a genuinely stable, single-implementation utility with no testing or substitution need — an `IRoundingStrategy` over `Math.Round`, or an `IClock`-style wrapper where there's truly no test that cares about time. You've added an interface, a file, and an indirection that is never substituted. DIP earns its cost only where substitutability is real: testing, multiple implementations, or decoupling from an external system.
+*Why correct:* It names the criterion (genuine substitutability need) and a concrete over-abstraction that fails it — the premature-abstraction anti-pattern.
+*Common mistakes:* Citing `DateTime.UtcNow`/`IClock` as the bad example (that one *is* usually justified for testability); abstracting everything "to be safe."
+*Follow-up:* "How do you decide at design time whether an abstraction will be substituted?" (is there a named second implementation or a test that needs a fake *now* or clearly soon — if not, inline it and add the interface when the need appears).
+
+**A5. Q: How do you tell genuine SRP compliance from merely scattering related logic across more files?**
+*Ideal answer:* Check that each resulting class can be modified, tested, and reasoned about *independently* for its own reason-to-change. If two "split" classes always change together for the same underlying policy change (field- and business-rule validators that both move whenever the validation policy moves), the split relocated coupling without reducing it. SRP compliance is measured by independent-changeability, not class count.
+*Why correct:* It gives an operational test (do they change independently?) rather than a structural one (are there more files?).
+*Common mistakes:* Counting classes/lines as the metric; splitting by technical layer instead of by reason-to-change.
+*Follow-up:* "You're not sure if two concerns are independent — how do you find out?" (look at whether historical changes to each came from different requesters/areas; if always the same, they're one responsibility).
+
+**A6. Q: Explain how LSP and OCP come into direct conflict, with a concrete scenario beyond the discriminated-union example.**
+*Ideal answer:* Add `Penguin : Bird` to an OCP-compliant hierarchy — you extended without modifying existing code, so OCP is satisfied. But if `Bird`'s contract implies `Fly()` is always meaningfully callable and callers rely on that, `Penguin.Fly()` throwing (or silently no-op) satisfies OCP's "no modification" while violating LSP's "substitutable without altering correctness." OCP guarantees a *non-modifying* extension, never a *correct* one — LSP must be verified independently for every OCP-compliant addition.
+*Why correct:* It shows the same act (add a subclass) can pass one principle and fail the other, and states the general lesson (OCP ≠ correctness).
+*Common mistakes:* Thinking "OCP-compliant" implies "safe"; fixing `Penguin` by weakening `Bird`'s contract for everyone.
+*Follow-up:* "How would you model flightless birds without the violation?" (a capability interface `IFlying` that only flying birds implement — ISP + composition, the same fix as the OOP module's `IRefundable`).
+
+**A7. Q: Design a metric or review signal that would have flagged the notification-service class as an OCP risk *before* the incident.**
+*Ideal answer:* Track branch-count / cyclomatic-complexity growth over time on dispatch-shaped methods specifically. A `switch` whose branch count has climbed across multiple *unrelated* feature PRs (each adding one case) is a mechanically detectable instance of the accumulating-shared-structure risk. Flag any dispatch method past a branch threshold *and* modified by N distinct feature PRs as a refactor candidate — converting a reactive fix into a proactive one.
+*Why correct:* It combines two cheap signals (branch count + PR diversity over time) that together identify a growing shared dispatch structure, and it's automatable.
+*Common mistakes:* A raw complexity gate with no time/PR-diversity dimension (fires on legitimately-complex closed logic too); waiting for the incident.
+*Follow-up:* "Would you make this a hard CI gate?" (no — a review flag; a hard gate gets gamed by splitting the switch cosmetically without fixing the coupling — Advanced Q9).
+
+**A8. Q: Explain why DIP is foundational to unit testing beyond "it lets you use mocks."**
+*Ideal answer:* Without DIP, a high-level module that does `new SqlOrderRepository()` internally has *no seam* to substitute a test double without editing the class under test. DIP's constructor-injected abstraction is the mechanical prerequisite that makes an isolated unit test possible at all — mocking frameworks are a convenience layered on top of that seam, not the thing that creates it.
+*Why correct:* It identifies the seam (constructor + abstraction) as the enabler and frames mocks as secondary.
+*Common mistakes:* Crediting the mocking framework; thinking you can test around a `new` with reflection/DI-magic (fragile, and still coupled).
+*Follow-up:* "So do you need Moq/Mockito?" (no — a hand-written fake implementing the interface works; the framework just reduces boilerplate).
+
+**A9. Q: A team proposes a CI-gated composite "SOLID compliance score" (counting interfaces, class sizes, DI usage). Evaluate this as a Principal.**
+*Ideal answer:* Push back. Genuine SOLID compliance requires judgment about *actual* variability and coupling-reduction benefit (Advanced Q4/Q5), which a static count can't distinguish from benefit-free abstraction proliferation — a codebase of 200 one-method interfaces would *score well* while being worse. Recommend targeted, judgment-requiring review practices instead: the branch-count/dispatch-growth signal (A7), explicit "reason to change" discussion in design review, LSP contract checks. A single mechanical score rewards over-engineering as readily as good design and gets gamed.
+*Why correct:* It names the specific failure (score can't tell good abstraction from proliferation), gives a concrete counterexample, and offers the judgment-based alternative.
+*Common mistakes:* Endorsing the score "as a rough signal" (it actively misleads); proposing no alternative.
+*Follow-up:* "Is *any* mechanical SOLID signal worth gating?" (narrow ones as *warnings*, not gates — e.g. a new `NotImplementedException` in an interface impl, a dispatch method past a branch+PR-diversity threshold).
+
+**A10. Q: As a Principal, how would you teach SOLID to build genuine design judgment rather than slogan-matching?**
+*Ideal answer:* Teach each principle paired with *both* a concrete production incident it would have prevented (this module's §4 for OCP; the OOP module's §4 `PriorityCustomer` case for LSP) *and* a concrete scenario where over-applying it adds needless complexity (A4's DIP over-abstraction; the over-splitting SRP concern). Presenting the failure-to-apply and the over-application failure modes together is what builds the "does this principle's benefit outweigh its cost *here*" judgment that separates a Principal's use of SOLID from rote recitation.
+*Why correct:* It prescribes teaching both directions of each principle (under- and over-application) with concrete incidents, which is what develops calibrated judgment.
+*Common mistakes:* Teaching each principle only as an unconditional good; using toy examples with no incident behind them.
+*Follow-up:* "How do you check the teaching worked?" (in design reviews, do engineers cite the trade-off — 'we accept this OCP violation because…' — rather than just 'that's not SOLID').
 
 ### Expert (FinTech Principal Panel)
 
@@ -220,7 +386,7 @@ classDiagram
 
 ### Easy — Fix an SRP violation by separating independently-varying concerns
 ```csharp
-// BEFORE: two independently-varying concerns (tax calculation, report formatting) in one class
+// C# — BEFORE: two independently-varying concerns (tax calc, display formatting) in one class
 public class InvoiceProcessor
 {
     public decimal CalculateTax(Invoice invoice) => invoice.Subtotal * GetTaxRate(invoice.Region);
@@ -228,51 +394,96 @@ public class InvoiceProcessor
 }
 
 // AFTER: split along "reason to change" -- tax law changes independently of display formatting
-public class TaxCalculator { public decimal CalculateTax(Invoice invoice) => invoice.Subtotal * GetTaxRate(invoice.Region); }
-public class InvoiceFormatter { public string FormatForDisplay(Invoice invoice) => $"Invoice #{invoice.Id}: ${invoice.Total:F2}"; }
+public sealed class TaxCalculator   { public decimal CalculateTax(Invoice i) => i.Subtotal * GetTaxRate(i.Region); }
+public sealed class InvoiceFormatter { public string FormatForDisplay(Invoice i) => $"Invoice #{i.Id}: ${i.Total:F2}"; }
+```
+```java
+// Java — BEFORE
+public class InvoiceProcessor {
+    public BigDecimal calculateTax(Invoice i) { return i.subtotal().multiply(taxRate(i.region())); }
+    public String formatForDisplay(Invoice i) { return "Invoice #" + i.id() + ": " + i.total().toPlainString(); }
+}
+
+// AFTER — tax law and marketing's formatting preference are different masters
+public final class TaxCalculator {
+    public BigDecimal calculateTax(Invoice i) { return i.subtotal().multiply(taxRate(i.region())); }
+}
+public final class InvoiceFormatter {
+    public String formatForDisplay(Invoice i) { return "Invoice #" + i.id() + ": " + i.total().toPlainString(); }
+}
 ```
 
 ### Medium — Fix an OCP violation with a strategy-pattern refactor
 ```csharp
+// C#
 public interface INotificationChannel
 {
     string ChannelName { get; }
     Task SendAsync(Notification notification);
 }
 
-public class EmailChannel: INotificationChannel
+public sealed class EmailChannel : INotificationChannel
 {
     public string ChannelName => "Email";
-    public Task SendAsync(Notification notification) => /* email-specific logic */ Task.CompletedTask;
+    public Task SendAsync(Notification n) => /* email-specific logic */ Task.CompletedTask;
 }
-public class SmsChannel: INotificationChannel
+public sealed class SmsChannel : INotificationChannel
 {
     public string ChannelName => "SMS";
-    public Task SendAsync(Notification notification) => /* SMS-specific logic, UNTOUCHED by future additions */ Task.CompletedTask;
+    public Task SendAsync(Notification n) => /* SMS logic -- UNTOUCHED by future additions */ Task.CompletedTask;
 }
 
-public class NotificationDispatcher
+public sealed class NotificationDispatcher
 {
     private readonly IEnumerable<INotificationChannel> _channels; // resolved via DI
     public NotificationDispatcher(IEnumerable<INotificationChannel> channels) => _channels = channels;
 
-    public async Task DispatchAsync(Notification notification)
+    public Task DispatchAsync(Notification n)
     {
-        var channel = _channels.FirstOrDefault(c => c.ChannelName == notification.PreferredChannel);
-        if (channel is not null) await channel.SendAsync(notification);
+        var channel = _channels.FirstOrDefault(c => c.ChannelName == n.PreferredChannel);
+        return channel?.SendAsync(n) ?? Task.CompletedTask;
     }
 }
-// Adding Slack support: ONE new class (SlackChannel), ONE registration line -- ZERO modification
-// to EmailChannel or SmsChannel's existing, working code.
+// Adding Slack: ONE new class + ONE registration line. ZERO edits to Email/Sms channels.
+```
+```java
+// Java — the "inject a List of every implementation" pattern (Spring autowires it;
+// or build it by hand / via ServiceLoader) is the idiomatic OCP registry.
+public interface NotificationChannel {
+    String channelName();
+    CompletableFuture<Void> send(Notification n);
+}
+
+public final class EmailChannel implements NotificationChannel {
+    public String channelName() { return "Email"; }
+    public CompletableFuture<Void> send(Notification n) { /* email logic */ return CompletableFuture.completedFuture(null); }
+}
+public final class SmsChannel implements NotificationChannel {
+    public String channelName() { return "SMS"; }
+    public CompletableFuture<Void> send(Notification n) { /* SMS logic — untouched by additions */ return CompletableFuture.completedFuture(null); }
+}
+
+public final class NotificationDispatcher {
+    private final Map<String, NotificationChannel> byName;
+    public NotificationDispatcher(List<NotificationChannel> channels) {
+        this.byName = channels.stream()
+            .collect(Collectors.toUnmodifiableMap(NotificationChannel::channelName, c -> c));
+    }
+    public CompletableFuture<Void> dispatch(Notification n) {
+        NotificationChannel c = byName.get(n.preferredChannel());
+        return c != null ? c.send(n) : CompletableFuture.completedFuture(null);
+    }
+}
+// Adding SlackChannel: a new class; Spring picks it up automatically, or one line in the wiring.
 ```
 
 ### Hard — Fix an ISP violation by splitting a fat repository interface
 ```csharp
-// BEFORE: forces every implementation/consumer to depend on the ENTIRE surface
+// C# — BEFORE: forces every implementation/consumer to depend on the ENTIRE surface
 public interface IRepository<T>
 {
     Task<T?> GetByIdAsync(string id);
-    Task<IEnumerable<T>> GetAllAsync;
+    Task<IReadOnlyList<T>> GetAllAsync();
     Task AddAsync(T item);
     Task UpdateAsync(T item);
     Task DeleteAsync(string id);
@@ -283,9 +494,9 @@ public interface IRepository<T>
 public interface IReadableRepository<T>
 {
     Task<T?> GetByIdAsync(string id);
-    Task<IEnumerable<T>> GetAllAsync;
+    Task<IReadOnlyList<T>> GetAllAsync();
 }
-public interface IWritableRepository<T>: IReadableRepository<T>
+public interface IWritableRepository<T> : IReadableRepository<T>
 {
     Task AddAsync(T item);
     Task UpdateAsync(T item);
@@ -296,34 +507,78 @@ public interface IBulkImportable<T>
     Task BulkImportAsync(IEnumerable<T> items);
 }
 // A read-only reporting service depends ONLY on IReadableRepository<T> -- never recompiled/retested
-// when BulkImportAsync's signature changes, since it doesn't even know that method exists.
+// when BulkImportAsync changes, and structurally cannot call DeleteAsync (ISP == least privilege).
+```
+```java
+// Java — same segregation. RiskLimitRepository simply does NOT implement BulkImportable<T>,
+// so the batch job that needs bulk import is typed on List<BulkImportable<T>> and can never
+// be handed a repo that would throw UnsupportedOperationException at runtime.
+public interface ReadableRepository<T> {
+    Optional<T> findById(String id);
+    List<T> findAll();
+}
+public interface WritableRepository<T> extends ReadableRepository<T> {
+    void add(T item);
+    void update(T item);
+    void delete(String id);
+}
+public interface BulkImportable<T> {
+    void bulkImport(Collection<T> items);
+}
+
+// A reporting service:
+public final class LimitReport {
+    private final ReadableRepository<RiskLimit> repo;   // read-only slice only
+    public LimitReport(ReadableRepository<RiskLimit> repo) { this.repo = repo; }
+    // 'repo' has no delete()/bulkImport() in scope at all — the narrow type IS the boundary.
+}
 ```
 
 ### Expert — Demonstrate DIP with a composition root, no DI container required (Advanced Q9)
 ```csharp
-// Business logic (high-level module) depends ONLY on abstractions -- DIP satisfied
-// regardless of HOW the concrete implementations are ultimately supplied.
+// C# — business logic depends ONLY on abstractions; the wiring MECHANISM is irrelevant to DIP.
 public interface IOrderRepository { Task SaveAsync(Order order); }
-public interface IPaymentGateway { Task<bool> ChargeAsync(decimal amount); }
+public interface IPaymentGateway  { Task<bool> ChargeAsync(decimal amount); }
 
-public class OrderService
+public sealed class OrderService
 {
     private readonly IOrderRepository _repository;
     private readonly IPaymentGateway _gateway;
     public OrderService(IOrderRepository repository, IPaymentGateway gateway)
-    {
-        _repository = repository; _gateway = gateway;
-    }
+        => (_repository, _gateway) = (repository, gateway);
+
     public async Task PlaceOrderAsync(Order order)
     {
         if (await _gateway.ChargeAsync(order.Total)) await _repository.SaveAsync(order);
     }
 }
 
-// "Poor man's DI" -- manual composition root, NO DI container library at all:
-var repository = new SqlOrderRepository(connectionString);
-var gateway = new StripeGateway(apiKey);
-var orderService = new OrderService(repository, gateway); // manually wired, but DIP is STILL satisfied
+// "Poor man's DI" -- manual composition root, NO container library:
+var repository   = new SqlOrderRepository(connectionString);
+var gateway      = new StripeGateway(apiKey);
+var orderService = new OrderService(repository, gateway); // hand-wired, DIP STILL satisfied
+```
+```java
+// Java — identical. OrderService imports neither JdbcOrderRepository nor StripeGateway.
+public interface OrderRepository { void save(Order order); }
+public interface PaymentGateway  { boolean charge(BigDecimal amount); }
+
+public final class OrderService {
+    private final OrderRepository repository;
+    private final PaymentGateway gateway;
+    public OrderService(OrderRepository repository, PaymentGateway gateway) {
+        this.repository = repository;
+        this.gateway = gateway;
+    }
+    public void placeOrder(Order order) {
+        if (gateway.charge(order.total())) repository.save(order);
+    }
+}
+
+// Composition root in main() — no Spring, no Guice:
+OrderRepository repository   = new JdbcOrderRepository(dataSource);
+PaymentGateway  gateway      = new StripeGateway(apiKey);
+OrderService    orderService = new OrderService(repository, gateway); // DIP satisfied, framework-free
 ```
 **Discussion**: `OrderService`'s source code has zero reference to `SqlOrderRepository`/`StripeGateway` at all — DIP is fully satisfied here despite using no DI container, framework, or `Microsoft.Extensions.DependencyInjection` whatsoever, directly demonstrating Advanced Q9's point that DIP is about dependency *direction*, entirely independent of the *mechanism* (a full DI container, manual composition, or any other wiring approach) used to supply concrete implementations at the application's entry point.
 
@@ -467,6 +722,8 @@ sequenceDiagram
 **Risk analysis and long-term maintainability.** The single largest long-term risk in any registry/strategy-based OCP design is exactly what this incident demonstrates: individual-unit correctness (per-rule LSP/OCP compliance) silently does not imply aggregate correctness, and that gap doesn't announce itself until two independently-correct units happen to interact — the durable mitigation is never "review more carefully" (Option C's failure mode) but building a standing, automated mechanism that scales with the system rather than with any individual engineer's attention span, which is precisely why this module pairs SRP/OCP/ISP/DIP's benefits with an equally explicit account of what each principle does *not* guarantee.
 
 ## 18. Revision
+**Language note**: SOLID is about coupling and responsibility boundaries — nothing in it is C#-specific. §2.6 gives the full C#↔Java mapping and every code sample here is shown in both. The Java-specific points worth carrying into an interview: (1) inject a `List<T>` of every implementation (Spring autowire / `ServiceLoader`) as the idiomatic OCP registry; (2) `final class` = "no subclass", Java `sealed` = "only these subclasses" (the deliberate-OCP-violation tool); (3) checked exceptions give a partial compile-time LSP guarantee C# lacks, at the cost of the "wrap in `RuntimeException`" smell; (4) `Collections.unmodifiableList` throws at runtime, `List.copyOf` is a true immutable copy — prefer the latter for the ISP-as-least-privilege boundary; (5) avoid field injection (`@Autowired` on a field) — it hides the dependency and defeats `final`.
+
 **Key takeaways**: SRP = "one reason to change" (tied to independently-varying stakeholders), not literally "does one thing." OCP = extend via new code (polymorphism), not by modifying existing, shared dispatch logic — violated OCP has demonstrated, concrete production-bug risk, not just aesthetic cost. ISP = split interfaces along genuine, distinct consumer-need boundaries, not mechanically to one method each. DIP = dependency *direction* (high-level and low-level both depend on abstractions) — distinct from Dependency Injection, which is one *mechanism* (among several, including manual composition) for supplying concrete implementations. The five principles can tension against each other (OCP vs. LSP, the exhaustiveness trade-off) — genuine mastery requires judgment about these interactions, not rote recitation.
 
 ---
