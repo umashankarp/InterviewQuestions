@@ -56,130 +56,162 @@ Concurrency defects are the most expensive bug class in production because they 
 
 ## 2. Beginner (10 Q&A)
 
-**Q1. What does the .NET memory model actually permit, and why does that surprise people?**
-**A:** It permits the compiler, the JIT and the CPU to reorder reads and writes, and to keep values in registers rather than re-reading memory, provided single-threaded semantics are preserved. That means another thread can observe operations in an order that is impossible to derive from the source, or never observe a write at all. It surprises people because the code reads sequentially and because x64's relatively strong hardware model hides many violations — so the bug lies dormant until the code runs on ARM64 or the JIT makes a different inlining decision.
-*Follow-up: Give me a two-thread example where both threads can read a stale value with no synchronisation.*
+**Q1. This exits fine in Debug and hangs forever in Release. Why?**
+```csharp
+private bool _stop;
+void Worker()  { while (!_stop) { DoWork(); } }
+void Stop()    => _stop = true;
+```
+**A:** Nothing in the loop writes `_stop`, so the JIT is free to hoist the read into a register and you spin on a stale copy forever. Debug doesn't optimise, so it re-reads memory each iteration and happens to work. Fix is `volatile`, `Volatile.Read`, `Interlocked`, or a lock. "Works in Debug, hangs in Release" is the tell for a memory-model bug — it's not a compiler fault.
+*Follow-up: Does making it `volatile` also make `_counter++` safe?*
 
-**Q2. What does `volatile` guarantee, and what does it not?**
-**A:** It prevents the compiler and JIT from caching the field in a register and enforces acquire semantics on reads and release semantics on writes, so a `volatile` read cannot be reordered with subsequent operations and a `volatile` write cannot be reordered with preceding ones. That makes it correct for the flag-polling case. What it does **not** give you is atomicity of compound operations: `volatile int i; i++` is still a read-modify-write race, because volatility affects visibility and ordering, not indivisibility.
-*Follow-up: When would you use `Volatile.Read`/`Volatile.Write` instead of declaring the field `volatile`?*
+**Q2. `_count` is `volatile`. Is this thread-safe?**
+```csharp
+private volatile int _count;
+public void Add() => _count++;
+```
+**A:** No. `volatile` gives you visibility and ordering, not atomicity. `_count++` is read, add, write — three operations, and two threads can interleave so one increment is lost. Use `Interlocked.Increment(ref _count)`, which is a single atomic instruction. This is the most common misunderstanding of `volatile`: it stops the value being cached in a register, it doesn't make a compound operation indivisible.
+*Follow-up: Which operations *are* atomic without any synchronisation?*
 
-**Q3. Which operations are atomic in .NET without any synchronisation?**
-**A:** Reads and writes of reference types and of primitive types up to the platform's native word size — so `int` and reference assignments are atomic, and you will never observe a half-written value. `long` and `double` are **not** guaranteed atomic on 32-bit platforms, which is why `Interlocked.Read` exists. Crucially, atomicity is not thread safety: an atomic read followed by an atomic write is still a race, because another thread can act in between. Most real bugs are compound operations, not torn values.
-*Follow-up: `bool` is atomic, so why does a `bool` flag still need `volatile`?*
-
-**Q4. What does `lock` compile to, and what are the rules for the lock object?**
-**A:** It compiles to `Monitor.Enter` with a `try`/`finally` calling `Monitor.Exit`, so the lock is always released even on exception. `Monitor` is reentrant, meaning the same thread can acquire it again without deadlocking. The lock object must be a private, readonly reference type instance that nothing outside your class can reach — locking on `this`, on a `Type`, or on a string (which may be interned and shared process-wide) lets unrelated code participate in your lock and deadlock you for reasons you cannot see.
+**Q3. What's wrong with the lock object here?**
+```csharp
+public void Update() {
+    lock (this) { /* ... */ }
+}
+```
+**A:** `this` is publicly reachable, so any other code holding a reference to your object can take the same lock — including code you've never seen. That's a deadlock you can't diagnose from your own source. Same problem with `lock(typeof(Foo))` and locking on a string, which may be interned and shared process-wide. Always lock a `private readonly object`.
 *Follow-up: Why can't you lock on a value type?*
 
-**Q5. What is `Interlocked` for and what is compare-and-swap?**
-**A:** `Interlocked` provides atomic read-modify-write operations — increment, add, exchange, and compare-exchange — implemented as single CPU instructions, so they are far cheaper than taking a lock. `CompareExchange` is the general primitive: it atomically sets a location to a new value *only if* it currently holds an expected value, returning what was there. That enables lock-free algorithms via a retry loop: read the current value, compute the new one, and CAS it in, looping if another thread changed it meanwhile.
-*Follow-up: Write the CAS loop for atomically multiplying a shared `int` by a factor.*
+**Q4. What does `Interlocked.CompareExchange` do, and what's it for?**
+**A:** It atomically sets a location to a new value only if it currently holds the value you expected, and returns whatever was actually there. That's the building block for lock-free updates: read the current value, compute the new one, CAS it in, and loop if someone else changed it in between. It's a single CPU instruction, so it's far cheaper than taking a lock — which is why `Interlocked` is the right tool for single-variable updates and a lock is the right tool for a critical section over several fields.
+*Follow-up: Write the CAS loop for atomically multiplying a shared `int`.*
 
-**Q6. Name the distinct concurrency failure modes and how they differ.**
-**A:** A **race condition** is a correctness failure where the outcome depends on timing. A **deadlock** is two or more threads each waiting for a lock another holds, so none proceeds. **Livelock** is threads actively responding to each other without making progress. **Starvation** is a thread never getting scheduled or never acquiring a contended lock. A **lock convoy** is throughput collapse when many threads queue on one lock and context-switching dominates. They matter separately because their diagnoses differ: a deadlock shows blocked threads in a dump, whereas a convoy shows high CPU and low throughput.
-*Follow-up: How would you tell a lock convoy from ordinary lock contention?*
+**Q5. Is this safe?**
+```csharp
+if (!_dict.ContainsKey(key))
+    _dict.TryAdd(key, value);   // _dict is ConcurrentDictionary
+```
+**A:** No. Each call is individually thread-safe, but check-then-act across two calls is a race — two threads can both pass the `ContainsKey`. The concurrent collection makes operations atomic, not your *use* of them. Use `TryAdd` on its own, or `GetOrAdd`/`AddOrUpdate`, which do the check and the act as one operation. This mistake is common precisely because the type's name suggests the problem is already solved.
+*Follow-up: You need to update a value based on its current value. Which method, and what's the catch?*
 
-**Q7. Is `ConcurrentDictionary` enough to make code thread-safe?**
-**A:** It makes each individual operation thread-safe, which is not the same as making your *use* of it safe. `if (!dict.ContainsKey(k)) dict[k] = v` is still a race, because two threads can both pass the check. The safe patterns are the atomic composite methods — `TryAdd`, `GetOrAdd`, `AddOrUpdate`, `TryRemove` — which perform the check and the act as one operation. This check-then-act mistake on a concurrent collection is extremely common precisely because the type's name suggests the problem is solved.
-*Follow-up: You need to atomically update a value based on its current value. Which method, and what's the catch?*
+**Q6. Why won't this compile, and what do you use instead?**
+```csharp
+lock (_gate) {
+    await _repo.SaveAsync();
+}
+```
+**A:** `Monitor` locks have thread affinity — the thread that entered must exit — and a continuation after `await` may resume on a different thread, so the compiler rejects it outright. Use `SemaphoreSlim(1,1)` with `await _sem.WaitAsync()` and release in a `finally`. Two things to know: it isn't reentrant, so a nested acquisition of the same semaphore deadlocks; and holding *any* lock across an await is worth avoiding anyway, because you're holding it for a network round trip.
+*Follow-up: Your critical section calls a method that also takes the same semaphore. What happens?*
 
-**Q8. Why can't you `await` inside a `lock`, and what do you use instead?**
-**A:** `Monitor` locks have thread affinity — the thread that entered must be the thread that exits — but a continuation after `await` may resume on a different thread, so the compiler forbids it outright. The correct primitive is `SemaphoreSlim(1, 1)` with `WaitAsync`, which is not thread-affine and can be released by whichever thread completes the work. The release must go in a `finally`, and you should be aware that this is mutual exclusion without reentrancy, so a nested acquisition deadlocks.
-*Follow-up: Your async critical section calls another method that also takes the same semaphore. What happens?*
+**Q7. Name the concurrency failure modes and how they differ.**
+**A:** A race condition is a correctness failure where the outcome depends on timing. A deadlock is threads waiting on locks each other holds, so nothing progresses. Livelock is threads actively reacting to each other without making progress. Starvation is a thread never getting scheduled or never winning a contended lock. A lock convoy is throughput collapsing because many threads queue on one lock and context switching dominates. They matter separately because the diagnosis differs — a deadlock shows blocked threads in a dump; a convoy shows high CPU and low throughput.
+*Follow-up: How would you tell a convoy from ordinary contention?*
 
-**Q9. When is `Parallel.ForEach` the right tool, and when is it wrong?**
-**A:** Right for CPU-bound work over a large collection where each item's work is substantial enough to outweigh partitioning and coordination overhead — image processing, computation over a large array. Wrong for I/O-bound work, where it burns pool threads on waiting and `Task.WhenAll` over async operations is strictly better. It is also wrong for very cheap per-item work, where the overhead exceeds the work, and for anything mutating shared state without synchronisation, which it makes trivially easy to get wrong.
-*Follow-up: How would you limit `Parallel.ForEach` so it doesn't starve the thread pool of workers for the rest of the app?*
+**Q8. What's the risk in this cache?**
+```csharp
+_cache.GetOrAdd(key, k => new DbConnection(cs));
+```
+**A:** `GetOrAdd`'s value factory is not guaranteed to run once. Under concurrency several threads can invoke it for the same key, and only one result is stored — the rest are discarded. With a pure, cheap factory that's just wasted work. Here you're opening connections and throwing them away unclosed. Wrap the value in a `Lazy<T>` so the factory creating the `Lazy` is cheap and the expensive construction is guarded by the lazy's own synchronisation.
+*Follow-up: Which `LazyThreadSafetyMode` would you pick, and why?*
 
-**Q10. What is false sharing?**
-**A:** When two independent variables happen to occupy the same CPU cache line, every write to one invalidates the other's cached copy on every other core, so threads that share no data still contend at the hardware level. The classic case is an array of per-thread counters: logically independent, physically adjacent, and throughput actually decreases as you add threads. The fix is padding so each hot variable occupies its own cache line, or restructuring so each thread accumulates locally and combines at the end.
-*Follow-up: How would you detect false sharing rather than guess at it?*
+**Q9. What's false sharing?**
+**A:** Two independent variables landing on the same CPU cache line, so a write to one invalidates the other's cached copy on every core — threads that share no data still contend at the hardware level. The classic case is an array of per-thread counters: logically independent, physically adjacent, and throughput actually *drops* as you add threads. Fix is padding so each hot variable owns its cache line, or having each thread accumulate locally and combine at the end.
+*Follow-up: How would you detect it rather than guess?*
+
+**Q10. `ThreadLocal<T>`, `[ThreadStatic]`, or `AsyncLocal<T>` — which and when?**
+**A:** `[ThreadStatic]` and `ThreadLocal<T>` give per-thread storage, correct for genuinely thread-affine state like a per-thread buffer. They're wrong in async code, because a continuation can resume on a different thread and the value silently disappears. `AsyncLocal<T>` flows with `ExecutionContext` across awaits and thread hops — that's how trace context survives an `await`. Note it flows *down* only: a change made in a called method isn't visible to the caller.
+*Follow-up: Where does `AsyncLocal` flow break, and what's the consequence in a multi-tenant service?*
 
 ---
 
 ## 3. Intermediate (10 Q&A)
 
-**Q1. A background flag loop works in Debug and hangs in Release. Explain precisely.**
-**A:** In Debug the JIT does little optimisation, so each loop iteration re-reads the field from memory and eventually sees the other thread's write. In Release the JIT can prove the loop body does not modify the field, hoist the read out of the loop into a register, and turn it into an infinite loop testing a stale value — a legal optimisation under the memory model because the model says nothing about the field without synchronisation. The fixes are `volatile`, `Volatile.Read`, `Interlocked`, or a lock; the underlying lesson is that "it worked in Debug" is evidence of a memory-model bug, not of a compiler fault.
-*Follow-up: Would a `CancellationToken` have avoided this, and why?*
+**Q1. How do you choose between `lock`, `Interlocked`, `SemaphoreSlim` and `ReaderWriterLockSlim`?**
+**A:** `Interlocked` for a single-variable atomic update — cheapest, lock-free. `lock` for a short critical section over several fields; it's fast, reentrant, and the right default. `SemaphoreSlim` when you need to limit concurrency to N rather than 1, or when the critical section contains an `await`. `ReaderWriterLockSlim` only when reads massively outnumber writes *and* the section is long enough to amortise its higher acquisition cost — for short sections it's usually slower than `lock`, which surprises people who pick it by name.
+*Follow-up: You have a read-mostly dictionary. Would you actually reach for `ReaderWriterLockSlim`?*
 
-**Q2. How do you choose between `lock`, `Interlocked`, `SemaphoreSlim` and `ReaderWriterLockSlim`?**
-**A:** `Interlocked` for single-variable atomic updates — cheapest by far and lock-free. `lock` for a short critical section over multiple fields; it is fast, reentrant and the right default. `SemaphoreSlim` when you need to limit concurrency to N rather than 1, or when the critical section contains an `await`. `ReaderWriterLockSlim` only when reads massively outnumber writes *and* the critical section is long enough to amortise its higher acquisition cost — for short sections it is usually slower than `lock`, which surprises people who reach for it by name.
-*Follow-up: You have a read-mostly dictionary. Would you use `ReaderWriterLockSlim` or something else entirely?*
-
-**Q3. Walk me through diagnosing a production deadlock.**
-**A:** Take a process dump and examine the threads: a deadlock shows threads blocked in `Monitor.Wait`/`Enter` with a cycle in what each holds and wants, which `!syncblk` or the equivalent tooling will show directly. Then map the cycle back to the code paths and look for inconsistent lock ordering — the usual cause. The immediate mitigation is a restart; the fix is to establish a global lock ordering, reduce the number of locks held simultaneously, or eliminate the second lock entirely by restructuring the data. I would also add a lock-acquisition timeout in diagnostics builds so the failure is loud rather than a hang.
+**Q2. Production deadlock. Walk me through diagnosing it.**
+**A:** Take a dump and look at the threads — a deadlock shows threads blocked in `Monitor.Enter` with a cycle in what each holds and wants; `!syncblk` shows it directly. Map the cycle back to the code and you'll almost always find inconsistent lock ordering: one path takes A then B, another takes B then A. Immediate mitigation is a restart. The fix is a global lock ordering, holding fewer locks at once, or restructuring the data so the second lock disappears. I'd also add lock-acquisition timeouts in diagnostic builds so it fails loudly instead of hanging.
 *Follow-up: The two locks are in different libraries and you can't change the order. Now what?*
 
-**Q4. `ConcurrentDictionary.GetOrAdd` — what's the trap?**
-**A:** The value factory is **not** guaranteed to run exactly once for a key: under concurrency several threads can invoke it simultaneously, and only one result is stored while the others are discarded. If the factory is pure and cheap that is merely wasteful; if it opens a connection, starts a background task, or registers something, you have created leaked resources or duplicate work with no error. The fix is `GetOrAdd` with a `Lazy<T>` value so the factory is invoked once by the lazy's own synchronisation, or explicit locking when the construction has side effects.
-*Follow-up: Show me the `Lazy<T>` pattern and say which `LazyThreadSafetyMode` you'd choose.*
+**Q3. What's the bug, and why does it only show up under load?**
+```csharp
+public static Config Current;
+void Reload() { Current = new Config(_settings); }
+```
+**A:** Publishing a reference without a release barrier. Another thread can see the non-null `Current` reference *before* the constructor's writes to the object's fields are visible, so it reads a `Config` with default values. It only appears under concurrency, on weaker memory models, and after the JIT has optimised — which is why it survives testing. Make the field `volatile`, or publish with `Volatile.Write`/`Interlocked.Exchange`, or build it with `Lazy<T>`.
+*Follow-up: Write double-checked locking correctly and point at the line most people get wrong.*
 
-**Q5. How do you safely publish a fully-constructed object to a shared field?**
-**A:** The hazard is that without a release barrier, the reference assignment can be observed by another thread before the constructor's writes to the object's fields, so a reader sees a non-null reference to an object with default values. Assigning to a `volatile` field, or using `Volatile.Write`/`Interlocked.Exchange`, provides the release semantics that order the constructor's writes before the publication. In practice, publishing immutable objects and using `Lazy<T>` or a lock avoids hand-rolling this — the double-checked locking pattern exists precisely because getting this right by hand is subtle.
-*Follow-up: Write double-checked locking correctly and point at the line that most implementations get wrong.*
+**Q4. When would you choose immutability over locking?**
+**A:** Whenever the data is read far more than written and can be rebuilt cheaply — configuration, lookup tables, routing rules, cached snapshots. Readers take the current reference and use it with no synchronisation at all, because an immutable object can't change under them; a writer builds a new instance and publishes it with one atomic reference assignment. Wait-free reads and a much simpler mental model than fine-grained locking. The cost is an allocation per update, so it suits read-mostly data rather than high-frequency mutation.
+*Follow-up: Two related snapshots must be swapped together atomically. How?*
 
-**Q6. When would you choose immutability over locking?**
-**A:** Whenever the data is read far more often than written and can be rebuilt cheaply — configuration, lookup tables, routing rules, cached snapshots. Readers then take the current reference and use it with no synchronisation at all, because an immutable object cannot change under them, and a writer publishes a new instance with a single atomic reference assignment. That gives wait-free reads and a far simpler mental model than fine-grained locking. The cost is allocation per update, so it suits read-mostly data and not high-frequency mutation.
-*Follow-up: Two related snapshots must be swapped together atomically. How do you do that?*
+**Q5. You add cores and the system gets slower. What are you looking for?**
+**A:** Contention, not capacity. Three candidates: a hot lock producing a convoy, where threads spend their time context-switching rather than working; false sharing, where logically independent variables share a cache line; and oversubscription, where too many threads mean context switches dominate. I'd compare CPU time against wall time, look at lock-contention counters and context-switch rates, and profile for cache-line contention. The general principle is that scaling comes from reducing *sharing*, not from adding threads.
+*Follow-up: Contention counters show one lock at 80%. What are your options, in order?*
 
-**Q7. How do you build a bounded producer/consumer pipeline?**
-**A:** `Channel<T>` with a bounded capacity and an explicit full-mode policy, a small set of consumer tasks, and backpressure propagated to the producer rather than absorbed. Bounded is the critical decision: an unbounded channel converts a throughput mismatch into an out-of-memory crash, which destroys in-flight work rather than slowing it. The full-mode choice — wait (backpressure), drop oldest (favour freshness), drop write (shed load) — is a product decision that should be made explicitly. Queue depth and consumer lag then become the primary health metrics.
-*Follow-up: When would you reach for TPL Dataflow instead of `Channel<T>`?*
+**Q6. Build me a bounded producer/consumer pipeline.**
+**A:** `Channel<T>` with a bounded capacity, an explicit full-mode policy, a small set of consumer tasks, and backpressure propagated to the producer rather than absorbed. Bounded is the decision that matters — unbounded turns a throughput mismatch into an out-of-memory crash, which destroys in-flight work rather than slowing it. The full-mode choice is a product decision: `Wait` applies backpressure, `DropOldest` favours freshness, `DropWrite` sheds load. Queue depth and consumer lag become your primary health metrics.
+*Follow-up: When would you reach for TPL Dataflow instead?*
 
-**Q8. What are the thread-safety modes of `Lazy<T>` and how do you choose?**
-**A:** `ExecutionAndPublication` is the default and guarantees the factory runs exactly once, at the cost of locking during initialisation — the right choice when construction has side effects or is expensive. `PublicationOnly` lets several threads run the factory concurrently and publishes the first to finish, discarding the rest; appropriate when the factory is cheap and pure and you want no lock contention. `None` is unsynchronised and only valid for confirmed single-threaded use. The mode matters because it is the same trade-off as `GetOrAdd`'s factory, made explicit.
+**Q7. `Lazy<T>` thread-safety modes — which do you pick?**
+**A:** `ExecutionAndPublication` (the default) guarantees the factory runs exactly once, at the cost of a lock during initialisation — right when construction is expensive or has side effects. `PublicationOnly` lets several threads run the factory concurrently and publishes the first to finish, discarding the rest — fine when the factory is cheap and pure and you want no lock contention. `None` is unsynchronised and only valid for confirmed single-threaded use. It's the same trade-off as `GetOrAdd`'s factory, made explicit.
 *Follow-up: With `PublicationOnly`, the discarded instances are `IDisposable`. What do you do?*
 
-**Q9. `ThreadLocal<T>` versus `AsyncLocal<T>` versus `[ThreadStatic]` — when does each apply?**
-**A:** `[ThreadStatic]` and `ThreadLocal<T>` give per-thread storage, which is correct for genuinely thread-affine state such as a per-thread buffer or a random instance. They are wrong in async code, because a continuation can resume on a different thread and the value silently disappears. `AsyncLocal<T>` flows with the `ExecutionContext` across awaits and thread hops, which is how trace context and correlation IDs survive — but it flows *down* only, so a change made in a called method is not visible to the caller.
-*Follow-up: Where does `AsyncLocal` flow break down, and what's the consequence in a multi-tenant service?*
+**Q8. When is `Parallel.ForEach` wrong?**
+**A:** For I/O-bound work — it burns pool threads on waiting where `Task.WhenAll` over async operations consumes none. For very cheap per-item work, where partitioning and coordination cost more than the work. And for anything mutating shared state without synchronisation, which it makes trivially easy to get wrong. It's right for CPU-bound work over a large collection where each item's work is substantial. Also worth setting `MaxDegreeOfParallelism`, or a background batch will starve the pool of threads for the request path sharing the process.
+*Follow-up: How does that interact with GC pauses on the request path?*
 
-**Q10. How do you actually test concurrent code?**
-**A:** Not with ordinary unit tests, which run one interleaving and prove almost nothing. What works is stress testing — run the operation from many threads for many iterations and assert on an *invariant* rather than a single outcome, such as a counter equalling the number of increments or a collection containing exactly the expected set. Add deliberate delays or `Thread.Yield` at suspected windows to widen the race, and run under load in a soak test where pool behaviour emerges. I would also treat any intermittently-failing test as a real defect rather than flakiness, because in concurrent code it almost always is one.
+**Q9. How do you actually test concurrent code?**
+**A:** Not with ordinary unit tests — they run one interleaving and prove almost nothing. Stress tests: run the operation from many threads for many iterations and assert on an *invariant*, like a counter equalling the number of increments, rather than a single outcome. Add `Thread.Yield` or deliberate delays at suspected windows to widen the race. Run under sustained load in a soak test so pool behaviour emerges. And treat any intermittently failing test as a real defect rather than flakiness, because in concurrent code it almost always is one.
 *Follow-up: A stress test fails once in 10,000 runs. How do you get from that to a root cause?*
+
+**Q10. What's your position on writing lock-free data structures in application code?**
+**A:** Use `Interlocked` for single-variable atomics freely — simple, well-understood, correct. Beyond that, hand-written lock-free structures are a specialist activity: extremely hard to reason about, nearly impossible to test exhaustively, and their bugs are the worst kind — rare, non-deterministic, and showing up as corrupted data rather than a crash. Use the BCL's concurrent collections, written and validated by people who do this professionally. A proposal to hand-roll one needs an exceptional measured justification plus a plan for who verifies it in five years.
+*Follow-up: A team has a custom lock-free ring buffer benchmarked 3x faster. How do you evaluate it?*
 
 ---
 
 ## 4. Expert / Architect (10 Q&A)
 
-**Q1. Your service is being migrated from x64 to ARM64 instances. What concurrency risk does that introduce?**
-**A:** ARM64 has a weaker memory model than x64: it permits reorderings that x64's hardware effectively prevents, so latent missing-barrier bugs that were masked for years can start manifesting. That means code with data races which "has always worked" is genuinely at risk, and the failures will be rare, non-deterministic and hard to attribute to the migration. I would treat it as a real workstream: audit shared mutable statics and lock-free code, add barriers or locks where reasoning is not airtight, run extended stress tests on ARM hardware specifically, and canary the migration with elevated error monitoring rather than treating it as a like-for-like instance swap.
-*Follow-up: How would you find candidate code to audit, given a data race has no syntactic signature?*
+**Q1. You're moving the fleet from x64 to ARM64 instances. What concurrency risk does that introduce?**
+**A:** ARM64 has a weaker memory model than x64 — it permits reorderings that x64's hardware effectively prevents — so latent missing-barrier bugs that have been masked for years can start manifesting. Code with data races that "has always worked" is genuinely at risk, and the failures will be rare, non-deterministic and hard to attribute to the migration. I'd treat it as a real workstream: audit shared mutable statics and any lock-free code, add barriers or locks wherever the reasoning isn't airtight, run extended stress tests on ARM hardware specifically, and canary with elevated monitoring rather than treating it as a like-for-like instance swap.
+*Follow-up: A data race has no syntactic signature. How would you find candidates to audit?*
 
 **Q2. How do you decide between shared mutable state with locking, immutable snapshots, and partitioning?**
-**A:** Partitioning first where the domain allows it, because state that only one thread touches needs no synchronisation at all and scales linearly — sharding work by key is the highest-leverage move available. Immutable snapshots next for read-mostly data, giving lock-free reads and a simple model at the cost of allocation on update. Locking last, and then with the smallest possible critical section. The reason for that order is that locks do not scale: contention grows superlinearly with thread count, so a design whose correctness depends on a hot lock has a throughput ceiling no hardware will lift.
-*Follow-up: The domain resists partitioning because of a global invariant. How would you attack that?*
+**A:** Partitioning first wherever the domain allows it, because state only one thread touches needs no synchronisation at all and scales linearly — sharding work by key is the highest-leverage move available. Immutable snapshots next for read-mostly data: lock-free reads, simple model, allocation on update. Locking last, and then with the smallest possible critical section. That order matters because locks don't scale — contention grows superlinearly with thread count, so a design whose correctness depends on a hot lock has a throughput ceiling no hardware will lift.
+*Follow-up: The domain resists partitioning because of a global invariant. How do you attack that?*
 
-**Q3. Adding cores made the system slower. Walk me through the diagnosis.**
-**A:** Negative scaling points to contention rather than capacity. The candidates are a hot lock producing a convoy, where threads spend their time context-switching rather than working; false sharing, where logically independent variables share a cache line; and excessive parallelism oversubscribing the pool so context switches dominate. I would look at CPU time versus wall time, lock contention counters, and context-switch rates, and profile at the hardware level for cache-line contention. The fix depends on which it is — partition the data, pad the fields, or reduce the degree of parallelism — but the general principle is that scaling requires reducing sharing, not adding threads.
-*Follow-up: Contention counters show one lock accounts for 80% of it. What's your sequence of options?*
-
-**Q4. What is your position on lock-free programming in application code?**
-**A:** Use `Interlocked` for single-variable atomics freely — it is simple, well-understood and correct. Beyond that, hand-written lock-free data structures are a specialist activity: they are extremely hard to reason about, nearly impossible to test exhaustively, and their bugs are the worst kind — rare, non-deterministic, and manifesting as corrupted data rather than a crash. My position is to use the BCL's concurrent collections, which are written and validated by people who do this professionally, and to treat a proposal to write a custom lock-free structure as requiring an exceptional, measured justification plus a plan for how it will be verified and by whom in five years.
-*Follow-up: A team has written a custom lock-free ring buffer and benchmarked it as 3x faster. How do you evaluate it?*
-
-**Q5. How do you set concurrency standards across an organisation?**
-**A:** Encode them rather than publish them: analyzers banning `lock(this)`, `lock(typeof)`, and locking on strings; a shared library providing the sanctioned primitives (bounded channels, async locks, rate limiters) so teams do not hand-roll them; and templates that start with the right patterns. Then a small set of firm rules with reasons — private lock objects, no locks held across awaits or I/O, no shared mutable statics without an explicit review, immutable by default for anything shared. I would also require concurrency-relevant code to name its thread-safety contract in a comment, because an unstated contract is one future maintainers will violate.
+**Q3. How would you set concurrency standards across an organisation?**
+**A:** Encode them rather than publish them. Analyzers banning `lock(this)`, `lock(typeof)` and locking on strings. A shared library providing the sanctioned primitives — bounded channels, async locks, rate limiters — so nobody hand-rolls them. Templates that start with the right patterns. Then a small set of firm rules with reasons attached: private lock objects, no locks held across awaits or I/O, no shared mutable statics without an explicit review, immutable by default for anything shared. I'd also require concurrency-relevant types to state their thread-safety contract in a comment, because an unstated contract is one future maintainers will violate.
 *Follow-up: How would you enforce "no lock held across an await" mechanically?*
 
-**Q6. How does concurrency design interact with the GC and with latency budgets?**
-**A:** Several ways that are easy to miss. The GC suspends all managed threads at safe points, so a thread in a tight loop with no safe point delays every collection and therefore every thread. Per-thread allocation in parallel work multiplies gen0 pressure, so a parallel loop can trade CPU gains for collection pauses. Thread stacks are 1 MB reserved each, so an exploded thread count is a memory problem before it is a scheduling one. And lock contention shows as latency, not CPU, which is why a service can be slow at low CPU utilisation. Concurrency and memory behaviour have to be reasoned about together.
-*Follow-up: A parallel batch job increased throughput but doubled P99 on the request path sharing the process. What happened?*
+**Q4. How does concurrency design interact with the GC and with latency budgets?**
+**A:** Several ways people miss. The GC suspends all managed threads at safe points, so a thread in a tight loop without one delays every collection and therefore every thread. Per-thread allocation in parallel work multiplies gen0 pressure, so a parallel loop can trade CPU gains for collection pauses on the request path sharing the process. Thread stacks are 1 MB reserved each, so an exploded thread count is a memory problem before it's a scheduling one. And lock contention shows up as *latency*, not CPU — which is why a service can be slow at low utilisation. You have to reason about concurrency and memory together.
+*Follow-up: A parallel batch job improved throughput and doubled P99 on the request path. What happened?*
 
-**Q7. How would you design a high-throughput component that must maintain a global invariant?**
-**A:** Start by testing whether the invariant is genuinely global, because most are not — a per-key or per-partition invariant permits sharding, which is the design that actually scales. Where it truly is global, the options are a single-writer design where one thread owns the state and others submit work through a queue (removing synchronisation entirely from the hot path), an `Interlocked`-based atomic where the invariant is a single value, or accepting an approximate value with periodic reconciliation. I would push hard on the business meaning of the invariant, since "must be exact and immediately visible" is often assumed rather than required, and it is the constraint that forces the expensive design.
-*Follow-up: The business confirms it must be exact and immediate. What do you build?*
+**Q5. Design a high-throughput component that must maintain a global invariant.**
+**A:** First test whether the invariant is genuinely global — most aren't, and a per-key or per-partition invariant permits sharding, which is the design that actually scales. Where it truly is global, the options are a single-writer design where one thread owns the state and others submit work through a queue (removing synchronisation from the hot path entirely), an `Interlocked` atomic if the invariant is a single value, or an approximate value with periodic reconciliation. I'd push hard on the business meaning first, because "must be exact and immediately visible" is usually assumed rather than required, and it's the constraint that forces the expensive design.
+*Follow-up: The business confirms exact and immediate. What do you build?*
 
-**Q8. How do you handle a legacy codebase with pervasive shared mutable statics?**
-**A:** Inventory first — find the statics and classify them as immutable (harmless), effectively-immutable-after-startup (low risk, worth confirming), and genuinely mutable at runtime (the real problem). Attack the third group by risk: those touched on request paths, those carrying per-request or per-tenant data (which are correctness and isolation bugs, not just races), and those whose corruption would be silent. Convert them to injected scoped services or immutable snapshots rather than adding locks, because adding locks preserves the coupling and adds contention. I would add an analyzer to prevent new ones while the burn-down proceeds.
-*Follow-up: One static is a cache that everything depends on and cannot be removed quickly. What's the interim?*
+**Q6. You've inherited a codebase full of shared mutable statics. How do you approach it?**
+**A:** Inventory and classify first: immutable (harmless), effectively-immutable-after-startup (low risk, worth confirming), and genuinely mutable at runtime (the real problem). Attack the third group by risk — those on request paths, those carrying per-request or per-tenant data (which are isolation bugs, not just races), and those whose corruption would be silent. Convert them to injected scoped services or immutable snapshots rather than adding locks, because adding locks preserves the coupling and adds contention. Add an analyzer to stop new ones while the burn-down runs.
+*Follow-up: One static is a cache everything depends on and can't be removed quickly. What's the interim?*
 
-**Q9. What would make you choose an actor or single-threaded model over shared-memory concurrency?**
-**A:** When the domain partitions naturally per entity and the alternative is hand-rolling locks around each entity's state — an actor model turns synchronisation into message ordering, which is far easier to reason about and to test. It also suits stateful, long-lived entities where the state machine matters more than throughput. The costs are real: a model the team must learn, harder debugging, and a runtime dependency that must be maintained for the system's life. I would default to `Channel`-based single-writer components, which give most of the benefit with no framework, and reserve a full actor runtime for domains where per-entity state and supervision are genuinely the core problem.
-*Follow-up: You inherit a system using a hand-rolled actor abstraction nobody understands. Do you migrate it?*
+**Q7. What would make you choose an actor or single-threaded model over shared memory?**
+**A:** When the domain partitions naturally per entity and the alternative is hand-rolling locks around each entity's state — an actor model turns synchronisation into message ordering, which is far easier to reason about and test. Also when the state machine per entity matters more than raw throughput. The costs are real: a model the team must learn, harder debugging, a runtime dependency maintained for the system's life. My default is `Channel`-based single-writer components, which give most of the benefit with no framework, and I'd reserve a full actor runtime for domains where per-entity state and supervision genuinely are the core problem.
+*Follow-up: You inherit a hand-rolled actor abstraction nobody understands. Do you migrate it?*
+
+**Q8. How do you make concurrency bugs findable before production?**
+**A:** Accept that ordinary tests won't find them and build the layers that will: stress tests asserting invariants under parallel execution, soak tests long enough for pool and contention behaviour to emerge, fault and latency injection at dependency boundaries, and — where it matters most — running those on the actual target hardware, because the memory model differs. Then in production, the observability that makes contention visible: lock contention counters, thread-pool queue depth, context-switch rates. The organisational piece is treating an intermittent failure as a defect rather than as flakiness to be retried away, which is the single most common way these bugs get shipped.
+*Follow-up: A test is quarantined as flaky. How do you decide whether it's a real race?*
+
+**Q9. How do you weigh a lock-free or highly-optimised concurrent design against maintainability?**
+**A:** By who pays and for how long. The author pays once; everyone who maintains it pays forever, and in concurrent code the maintenance cost is not just comprehension — it's the risk that a well-intentioned change silently breaks an invariant nobody documented. So the bar rises with the subtlety of the technique: `Interlocked` needs no justification, a custom lock-free structure needs a measured problem, containment behind a small interface, adversarial tests, and a named owner. And I'd want the simpler version kept and benchmarked alongside, so the decision can be revisited when the hardware or the workload changes.
+*Follow-up: Two years on, the owner has left and the benchmark no longer runs. What should have been in place?*
 
 **Q10. What separates an excellent answer from an adequate one on a concurrency design question?**
-**A:** An adequate answer adds a lock in the right place. An excellent one first asks whether the state needs to be shared at all, and reaches for partitioning or immutability before synchronisation; states the thread-safety contract explicitly rather than leaving it implicit; identifies which operations are compound and therefore racy despite atomic parts; names the specific failure mode it is preventing rather than saying "thread safety"; considers the throughput consequence of contention, not just correctness; and says how the design would be verified, knowing that ordinary tests will not find the bug. The distinguishing quality is treating correctness under *arbitrary interleaving* as the requirement, rather than reasoning about the interleaving they happened to imagine.
-*Follow-up: Given that framing, what's the first question you'd ask about any shared field you encounter in a code review?*
+**A:** An adequate answer puts a lock in the right place. An excellent one first asks whether the state needs to be shared at all, and reaches for partitioning or immutability before synchronisation; states the thread-safety contract explicitly rather than leaving it implicit; spots which operations are compound and therefore racy despite atomic parts; names the specific failure mode being prevented rather than saying "thread safety"; considers the throughput consequence of contention, not just correctness; and says how the design would be verified, knowing ordinary tests won't find the bug. The distinguishing quality is treating correctness under *arbitrary interleaving* as the requirement, rather than reasoning about the interleaving they happened to imagine.
+*Follow-up: Given that, what's the first question you'd ask about any shared field you find in a code review?*
+
+---

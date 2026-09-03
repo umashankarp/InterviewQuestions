@@ -1,7 +1,7 @@
 # Module 50 — Microservices: Resilience Patterns, Distributed Observability & the Sidecar Model
 
 > Domain: Microservices | Level: Intermediate → Expert | Prerequisite: [[01-Decomposition-Communication-Strangler-Fig]], [[../16-Distributed-Systems/02-Failure-Detection-Idempotency-Outbox]], [[../02-DotNet-AspNetCore/06-HealthChecks-Observability]]
-> Forward reference: [[../39-Service-Mesh/01-Service-Mesh-Fundamentals]] (a later dedicated module covers Istio/Linkerd-specific sidecar-proxy implementations in depth — this module covers the resilience/observability *patterns* a service mesh implements, conceptually, before that dedicated treatment)
+> Forward reference: [[../39-Service-Mesh/01-MultiCluster-MultiMesh-Federation-AdoptionGovernance]] (a later dedicated module covers Istio/Linkerd-specific sidecar-proxy implementations in depth — this module covers the resilience/observability *patterns* a service mesh implements, conceptually, before that dedicated treatment)
 
 ---
 

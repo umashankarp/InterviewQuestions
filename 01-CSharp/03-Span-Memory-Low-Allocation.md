@@ -46,136 +46,159 @@ Used correctly on a genuinely hot path, it removes an entire category of work: f
 
 ## 2. Beginner (10 Q&A)
 
+**Q1. What's the difference between these two, and why does it matter?**
+```csharp
+string a = text.Substring(10, 5);
+ReadOnlySpan<char> b = text.AsSpan(10, 5);
+```
+**A:** The first allocates a new string and copies five characters. The second allocates nothing — it's a reference to position 10 in the existing string plus a length. On a parsing path that runs millions of times, that's the difference between constant gen0 churn and none. The catch is the span can't outlive the frame it's in, so you can't return it from an async method or store it in a field.
+*Follow-up: Why can't a `Span<T>` be a field on a class?*
 
-**Q1. What is a `Span<T>`, precisely, and what problem does it solve?**
-**A:** It is a `ref struct` holding a reference to the start of a contiguous block of memory plus a length — a *view*, not a container. It solves the problem that C# previously had no way to represent "part of a buffer" without either copying it (`Substring`, `Array.Copy`, LINQ's `Skip`/`Take`) or descending into `unsafe` pointers. With `Span<T>` you can slice an array, a `stackalloc` buffer, or a string uniformly and pass the slice around with zero allocation and zero copying, while keeping bounds checking and type safety. That uniformity is why the same parsing method can accept a slice of a network buffer or a slice of a string.
-*Follow-up: How does a method that takes `ReadOnlySpan<char>` avoid the allocation that `Substring` would have caused?*
+**Q2. Why won't this compile?**
+```csharp
+async Task ProcessAsync(byte[] data) {
+    Span<byte> s = data;
+    await _sink.WriteAsync(data);
+    s[0] = 1;
+}
+```
+**A:** `Span<T>` is a `ref struct` — stack-only. An async method's locals get lifted into a state machine on the heap when it suspends, and a span can't live on the heap because it may point at the stack. So the compiler rejects a span local that's alive across an `await`. That's the language telling you your lifetime assumption is wrong; use `Memory<byte>` and take `.Span` at the point of synchronous use.
+*Follow-up: What does `.Span` on a `Memory<T>` actually cost?*
 
-**Q2. Why is `Span<T>` a `ref struct`, and what does that constraint forbid?**
-**A:** Because it can point at the stack — a `stackalloc` buffer or a local — and letting such a reference outlive its frame would be a use-after-free. The `ref struct` constraint therefore keeps it stack-only: it cannot be a field of a class, boxed, captured by a lambda, used as a generic type argument in most positions, stored in an array, or held across an `await` or `yield`. Those are not arbitrary restrictions; each one is a case where the value could outlive the memory it points at. When you hit one of them, the compiler is telling you your lifetime assumption is wrong, and the answer is usually `Memory<T>`.
-*Follow-up: The compiler rejects a `Span<T>` local in an async method even before any `await`. Why?*
+**Q3. What's the danger here?**
+```csharp
+Span<byte> buffer = stackalloc byte[request.Length];
+```
+**A:** `request.Length` is caller-controlled. A request claiming a huge length blows the stack, and stack overflow is not a catchable exception in .NET — the process dies immediately, with no graceful degradation and no telemetry. That's a remote crash primitive on a public endpoint. The safe pattern is a small constant threshold: `stackalloc` below it, rent from `ArrayPool<T>` above it.
+*Follow-up: What's a sensible threshold, and why is `stackalloc` inside a loop dangerous even at a small size?*
 
-**Q3. When do you use `Memory<T>` instead of `Span<T>`?**
-**A:** When the buffer must be stored or must survive an asynchronous boundary — a field on a class, a queued work item, a parameter to an async method. `Memory<T>` is a normal struct, so it can live on the heap, and you convert it to a `Span<T>` via `.Span` at the point of synchronous use. The practical pattern is `Memory<T>` for the plumbing and ownership, `Span<T>` for the tight synchronous work inside. The cost is that `.Span` is not free — it involves a check and construction — so you take it once outside a loop rather than per iteration.
-*Follow-up: Who owns the lifetime of the buffer behind a `Memory<T>`, and how does that go wrong with pooling?*
+**Q4. Review this.**
+```csharp
+var buf = ArrayPool<byte>.Shared.Rent(1024);
+Process(buf, 1024);
+ArrayPool<byte>.Shared.Return(buf);
+```
+**A:** Three problems. No `try`/`finally`, so an exception in `Process` leaks the buffer permanently. `Rent(1024)` can return a *larger* array, so passing `1024` is right here but `buf.Length` would have been wrong — you must track the logical length yourself. And if that buffer held tenant data, it goes back to the pool with the data still in it for the next renter to read; return with `clearArray: true` or clear it yourself.
+*Follow-up: What actually happens if you use the buffer after returning it, and why is that so hard to reproduce?*
 
-**Q4. What does `stackalloc` do, and what is the failure mode you must design against?**
-**A:** It allocates a block on the current stack frame, freed automatically when the method returns — no heap allocation and no GC involvement. The failure mode is stack overflow, which is not a catchable exception in .NET: the process dies immediately, with no graceful degradation and no useful telemetry. So `stackalloc` size must be small and, critically, must never be derived from untrusted or unbounded input — a request field that says "length 10,000,000" becomes a remote crash. The standard safe pattern is a small constant threshold with `stackalloc` below it and a pooled array above it.
-*Follow-up: What's a sensible threshold, and why is a `stackalloc` inside a loop dangerous even at a small size?*
+**Q5. When do you use `Memory<T>` instead of `Span<T>`?**
+**A:** When the buffer has to be stored or survive an `await` — a field on a class, a queued work item, a parameter to an async method. `Memory<T>` is a normal struct so it can live on the heap; you convert to `Span<T>` at the point of synchronous use. The usual shape is `Memory<T>` for plumbing and ownership, `Span<T>` for the tight synchronous work inside — and take the `.Span` once outside a loop rather than per iteration.
+*Follow-up: Who owns the lifetime of the buffer behind a `Memory<T>`?*
 
-**Q5. What does `ArrayPool<T>` do, and what is the minimum discipline for using it correctly?**
-**A:** It hands out reusable arrays so that repeatedly-needed buffers are not allocated and collected each time — particularly valuable above the 85 KB LOH threshold. The discipline is: rent, use, return in a `finally` so an exception cannot leak the buffer; never touch the array after returning it; never return the same array twice; and remember `Rent(n)` may give you an array *larger* than `n`, so you must track the logical length yourself rather than trusting `array.Length`. If the buffer held sensitive or tenant-scoped data, return with `clearArray: true` or clear it yourself.
-*Follow-up: What actually happens if a buffer is used after being returned, and why is that bug so hard to reproduce?*
+**Q6. Does using `Span<T>` make code faster?**
+**A:** Not intrinsically — it makes code allocate less and copy less. If the path wasn't allocation- or copy-bound, converting it changes nothing measurable while making it harder to read. Spans also add a bounds check per access, though the JIT often eliminates those in simple loops. So the honest answer is that it removes a category of work, and whether removing that category matters depends entirely on whether it was a meaningful share of the profile.
+*Follow-up: Name a case where converting to spans measurably hurt.*
 
-**Q6. How does `Span<T>` interact with strings?**
-**A:** A `string` is immutable contiguous UTF-16, so it converts to `ReadOnlySpan<char>` for free via `AsSpan()`, and slicing that span is a zero-allocation operation where `Substring` would have allocated a new string. This is why parsing code should take `ReadOnlySpan<char>` rather than `string`: a caller can pass a slice of a much larger buffer without materialising it. You get `ReadOnlySpan<char>`, never `Span<char>`, because strings are immutable — anything that appears to mutate one through a span is a correctness disaster waiting for interned strings.
-*Follow-up: Where does `string.Create` fit, and what problem does it solve that `AsSpan` doesn't?*
+**Q7. What is `ReadOnlySequence<T>` and why does it exist?**
+**A:** Data that's logically contiguous but physically split across buffer segments — which is exactly what comes off a socket, where one message arrives across several reads. `Span<T>` can't express that because it requires contiguity. It's the currency of `System.IO.Pipelines`, and its existence is why a production parser has to handle a value straddling a segment boundary rather than assuming a whole message is present.
+*Follow-up: How do you parse a fixed-length header that spans two segments without copying the whole sequence?*
 
-**Q7. What is the difference between `readonly struct`, `in` parameters, and `ref` parameters?**
-**A:** `readonly struct` guarantees the type has no mutable state, which lets the compiler pass it by reference without defensive copies. `in` passes a struct by readonly reference to avoid copying a large value — but if the struct is *not* declared `readonly`, the compiler inserts a defensive copy on every member access, so `in` on a non-readonly struct can be slower than passing by value. `ref` passes by mutable reference. The interview-relevant point is the interaction: `in` plus a non-`readonly struct` is a classic silent pessimisation that only shows up in a profile.
+**Q8. What's the trap with `in` parameters?**
+```csharp
+public void Process(in Matrix4x4 m) { var x = m.M11; }
+```
+**A:** `in` passes by readonly reference to avoid copying a large struct — but if the struct isn't declared `readonly`, the compiler inserts a *defensive copy* on every member access, because it can't prove the member won't mutate. So `in` on a non-readonly struct can be slower than passing by value. That's a silent pessimisation that only shows up in a profile. Mark the struct `readonly` and the copies disappear.
 *Follow-up: How large does a struct need to be before `in` is worth considering at all?*
 
-**Q8. Does using `Span<T>` make code faster?**
-**A:** Not intrinsically — it makes code *allocate less and copy less*. If the path was not allocation- or copy-bound, converting it to spans changes nothing measurable while making it harder to read. Spans also add a small bounds-check cost per access, though the JIT can often eliminate those in simple loops. The honest framing is that `Span<T>` removes a category of work; whether removing that category matters depends entirely on whether it was a meaningful share of the profile, which is a question only measurement answers.
-*Follow-up: Name a realistic case where converting to spans measurably hurt performance.*
+**Q9. How does `Span<T>` interact with strings?**
+**A:** A `string` is immutable contiguous UTF-16, so `AsSpan()` gives you a `ReadOnlySpan<char>` for free and slicing it allocates nothing where `Substring` would. That's why parsing code should take `ReadOnlySpan<char>` rather than `string` — a caller can pass a slice of a much larger buffer without materialising it. You only ever get `ReadOnlySpan<char>`, never `Span<char>`, because mutating an interned string would be a disaster.
+*Follow-up: Where does `string.Create` fit in?*
 
-**Q9. What is `ReadOnlySequence<T>` and why does it exist?**
-**A:** It represents data that is logically contiguous but physically split across multiple buffer segments — exactly what you get from a network socket, where a single message arrives across several reads. A `Span<T>` cannot express that because it requires contiguity, so `ReadOnlySequence<T>` gives you an enumerable chain of memory blocks with slicing over the whole logical range. It is the currency of `System.IO.Pipelines`, and its existence is the reason production parsers must handle a value split across a segment boundary rather than assuming a whole message is present.
-*Follow-up: How do you parse a fixed-length header that straddles two segments without copying the whole sequence?*
-
-**Q10. What does `System.IO.Pipelines` do that a `Stream` plus a byte array does not?**
-**A:** It separates the reader and writer with a shared pooled buffer pool and gives you built-in backpressure — the writer is throttled when the reader falls behind — plus correct handling of partial messages, so you stop hand-writing "did I get a whole frame yet" buffer-shuffling code. The classic `Stream` pattern allocates a buffer per read, copies on every resize, and leaks subtle framing bugs at segment boundaries. Pipelines is what Kestrel uses, and the reason to reach for it is protocol parsing at high throughput, not ordinary application I/O where a `Stream` is perfectly adequate and much simpler.
-*Follow-up: What does `PipeReader.AdvanceTo` with separate `consumed` and `examined` positions mean, and what breaks if you get it wrong?*
+**Q10. What does `System.IO.Pipelines` give you over a `Stream` and a byte array?**
+**A:** Pooled buffers, built-in backpressure so the writer is throttled when the reader falls behind, and correct handling of partial messages — so you stop hand-writing "did I get a whole frame yet" buffer-shuffling code. The classic `Stream` pattern allocates a buffer per read, copies on resize, and leaks subtle framing bugs at boundaries. It's what Kestrel uses. Reach for it for high-throughput protocol parsing, not ordinary application I/O where a `Stream` is simpler and perfectly adequate.
+*Follow-up: What do `consumed` and `examined` mean in `AdvanceTo`, and what breaks if you get them wrong?*
 
 ---
 
 ## 3. Intermediate (10 Q&A)
 
+**Q1. You're asked to make a hot JSON-parsing path allocation-free. How do you decide whether that's even the right goal?**
+**A:** Establish that allocation is actually the cost first — `MemoryDiagnoser` for bytes per operation, GC counters to see whether that allocation is translating into collection pressure or promotion. Very often the parse allocates in gen0, dies immediately, and costs almost nothing, while the real time is I/O or downstream object mapping. If it is material, the cheap wins come first: use `Utf8JsonReader` over the raw bytes instead of deserialising to intermediate objects, avoid materialising strings for fields you only compare, pool the buffers. Rewriting the whole path into spans is the last step, not the first.
+*Follow-up: The benchmark shows 4 KB allocated per parse. Is that a problem?*
 
-**Q1. You are asked to make a hot JSON-parsing path allocation-free. How do you decide whether that is even the right goal?**
-**A:** First I would establish that allocation is actually the cost, using a memory profiler or BenchmarkDotNet with `MemoryDiagnoser` to see allocated bytes per operation and the GC counters to see whether that allocation is translating into collection pressure or promotion. Very often the parse allocates in gen0, dies immediately, and costs almost nothing — while the real time is in I/O or in downstream object mapping. If allocation *is* material, the cheapest wins usually come first: reuse a `Utf8JsonReader` over the raw bytes rather than deserialising to intermediate objects, avoid `string` materialisation for fields you only compare, and pool the buffers. Rewriting the whole path into spans is the last step, not the first.
-*Follow-up: The benchmark shows 4 KB allocated per parse. Is that a problem? What else do you need to know?*
-
-**Q2. Walk me through the buffer-management pattern you'd use for a method that needs a scratch buffer of caller-determined size.**
-**A:** A threshold pattern: if the requested size is below a small constant, `stackalloc` it; otherwise rent from `ArrayPool<T>.Shared` and wrap the rented array in a span of the exact logical length. The rented path goes in a `try`/`finally` so the buffer is returned even on exception, and the returned length is tracked separately because `Rent` over-delivers. The threshold exists precisely because the size is caller-determined — an unbounded `stackalloc` is a crash primitive. This pattern appears throughout the BCL for exactly this reason and is worth recognising on sight.
+**Q2. Write me the buffer pattern for a method that needs a scratch buffer of caller-determined size.**
+**A:** Threshold: below a small constant, `stackalloc`; above it, rent from `ArrayPool<T>` and slice to the exact logical length. The rented path goes in `try`/`finally` so an exception can't leak it, and you track the length separately because `Rent` over-delivers. The threshold exists precisely *because* the size is caller-controlled — an unbounded `stackalloc` is a crash primitive. This shape appears throughout the BCL for exactly this reason.
 *Follow-up: What changes if the method is async?*
 
-**Q3. What is the most common `ArrayPool` bug you have seen, and how does it manifest?**
-**A:** Use-after-return: a buffer is returned to the pool while some other object still holds a `Memory<T>` or array reference to it, and later that memory is handed to an unrelated caller. The manifestation is data corruption that looks impossible — one request seeing fragments of another's payload, intermittent and unreproducible, and dependent on load because it needs the pool to actually recycle. It is genuinely dangerous in a multi-tenant system, because it is a data-leak bug rather than a crash. The prevention is strict ownership: exactly one component owns rent-and-return, and no rented buffer escapes that scope without an explicit, documented handover.
-*Follow-up: How would you detect this class of bug in test rather than in production?*
+**Q3. What's the most damaging `ArrayPool` bug you'd expect to see?**
+**A:** Use-after-return — a buffer goes back to the pool while some other object still holds a `Memory<T>` over it, and later that memory is handed to an unrelated caller. It shows up as data corruption that looks impossible: one request seeing fragments of another's payload, intermittent, unreproducible, and load-dependent because it needs the pool to actually recycle. In a multi-tenant system that's a confidentiality incident, not a bug. Prevention is strict ownership — exactly one component owns rent-and-return, and no rented buffer escapes that scope without a documented handover.
+*Follow-up: How would you catch that class of bug in test rather than production?*
 
-**Q4. `ArrayPool<T>.Shared` versus a custom `ArrayPool<T>.Create()` — when would you configure your own?**
-**A:** `Shared` is the right default: it is well-tuned, per-core striped to reduce contention, and free to use. I would create my own when I need buffers larger than the shared pool's maximum, when I want a bounded number of retained buffers for predictable memory rather than the shared pool's heuristics, or when I want isolation so a noisy component cannot evict another's buffers. The trade is that a custom pool is memory you now own and must reason about — an unbounded custom pool is simply a leak with a friendly name — so I would only do it with a measured reason and an explicit cap.
+**Q4. When would you write your own pool instead of using `ArrayPool<T>.Shared`?**
+**A:** When you need buffers larger than the shared pool's maximum, when you want a bounded number of retained buffers for predictable memory rather than the shared pool's heuristics, or when you want isolation so a noisy component can't evict another's buffers. The trade is that a custom pool is memory you now own — an unbounded one is a leak with a friendly name — so only with a measured reason and an explicit cap.
 *Follow-up: How do you size the cap, and what metric tells you it's wrong?*
 
-**Q5. When would you *not* use `Span<T>`, even on a path that allocates?**
-**A:** When the allocation is not on a hot path, when the code will be maintained by people who will fight the `ref struct` rules, and — most importantly — when the surrounding code is async, because the constraint that spans cannot cross an `await` forces awkward restructuring for no benefit. I would also avoid it in public API surfaces that consumers will find hard to satisfy, and anywhere the result is code that no longer states its intent. The general principle is that `Span<T>` is a hot-path tool; applying it to warm or cold paths spends readability, which is the scarcer resource in a long-lived codebase.
-*Follow-up: A team has adopted spans throughout their service layer. What would you look for before asking them to revert it?*
+**Q5. When would you *not* use `Span<T>` even on a path that allocates?**
+**A:** When the allocation isn't on a hot path; when the surrounding code is async, because spans can't cross an `await` and you'd be restructuring for no benefit; when the code will be maintained by people who'll fight the `ref struct` rules; and in public API surfaces consumers will find hard to satisfy. `Span<T>` is a hot-path tool — applying it to warm or cold paths spends readability, which is the scarcer resource in a long-lived codebase.
+*Follow-up: A team has adopted spans throughout their service layer. What would you look at before asking them to revert?*
 
-**Q6. How would you eliminate the intermediate string allocations in a formatting-heavy path?**
-**A:** Format directly into a buffer rather than composing strings: `Utf8Formatter`/`Utf8Parser` or the `TryFormat`/`ISpanFormattable` APIs write into a `Span<byte>` or `Span<char>` without producing intermediate strings, and `string.Create` builds a final string in one allocation with a span-based callback rather than concatenating. If the output is going to a UTF-8 sink such as a socket or a log pipeline, staying in UTF-8 the whole way avoids the transcoding entirely — that is what `u8` literals and `Utf8` APIs are for. The single biggest realistic win in most services is not string mechanics at all but interpolated-string logging that formats messages which are then filtered out by level.
-*Follow-up: How do the compiler's interpolated-string handlers solve that logging case?*
+**Q6. How would you eliminate the intermediate strings here?**
+```csharp
+var msg = "Order " + id + " total " + amount.ToString("C");
+socket.Send(Encoding.UTF8.GetBytes(msg));
+```
+**A:** Format directly into a buffer instead of composing strings — `TryFormat`/`ISpanFormattable` writing into a `Span<char>`, or `Utf8Formatter` straight into a `Span<byte>` since the sink is UTF-8 anyway. Staying in UTF-8 end to end skips the transcoding entirely, which is what `u8` literals and the `Utf8` APIs are for. Worth saying though: in most services the biggest realistic win isn't this at all — it's interpolated log messages being built for levels that get filtered out.
+*Follow-up: How do interpolated-string handlers solve that logging case?*
 
 **Q7. How do you benchmark low-allocation changes credibly?**
-**A:** BenchmarkDotNet with `MemoryDiagnoser` for allocated bytes per operation, run on the same hardware, comparing against a committed baseline — and crucially, benchmarking the realistic input distribution, since span optimisations often win on large inputs and lose on the small ones that dominate production. Microbenchmarks alone are not enough: they miss GC effects that only appear under sustained allocation, so I would pair them with a load test watching gen0/gen2 rates and pause times. The failure I most often see is a benchmark that shows a 40% improvement on a path representing 2% of request time, presented as a 40% service improvement.
-*Follow-up: Your benchmark says the new code allocates zero bytes but the service's gen0 rate is unchanged. What happened?*
+**A:** BenchmarkDotNet with `MemoryDiagnoser` against a committed baseline on the same hardware — and benchmark the *realistic input distribution*, because span optimisations often win on large inputs and lose on the small ones that dominate production. Microbenchmarks alone aren't enough: they miss GC effects that only appear under sustained allocation, so pair them with a load test watching gen0/gen2 rates and pause times. The failure I see most is a 40% improvement on a path representing 2% of request time, presented as a 40% service improvement.
+*Follow-up: Your benchmark says zero bytes allocated but the service's gen0 rate is unchanged. What happened?*
 
-**Q8. What is the risk of exposing `Span<T>` or `Memory<T>` in a public library API?**
-**A:** You are exposing a lifetime contract that the type system only partially enforces. `Span<T>` is safe because the compiler prevents storing it, but it makes your API unusable from async callers, which is a significant constraint to impose. `Memory<T>` is the more dangerous one: nothing stops a consumer from holding it after the underlying buffer is returned to a pool or disposed, so ownership must be documented and, ideally, expressed by having the API own the buffer itself or hand back an `IMemoryOwner<T>`. The design question is whether you want callers thinking about buffer lifetimes at all — for most libraries the answer is no, and accepting `ReadOnlySpan<T>` for input while returning owned results is the balanced choice.
-*Follow-up: `IMemoryOwner<T>` versus returning an array the caller must return to a pool — which do you prefer for a public API, and why?*
+**Q8. What's the risk of exposing `Span<T>` or `Memory<T>` in a public library API?**
+**A:** You're exposing a lifetime contract the type system only partly enforces. `Span<T>` is safe because the compiler stops you storing it, but it makes your API unusable from async callers — a significant constraint to impose. `Memory<T>` is the dangerous one: nothing stops a consumer holding it after the buffer is returned to a pool. So either document ownership rigorously, or have the API own the buffer and hand back an `IMemoryOwner<T>`. For most libraries the balanced choice is accepting `ReadOnlySpan<T>` for input and returning owned results.
+*Follow-up: `IMemoryOwner<T>` or return an array the caller must return to a pool — which for a public API?*
 
-**Q9. What does `MemoryMarshal` let you do, and when is that acceptable?**
-**A:** It provides reinterpretation and low-level conversions the safe APIs deliberately forbid — viewing a `Span<byte>` as a `Span<int>`, getting a reference to the first element, treating a struct as its raw bytes. It is acceptable in tightly-scoped, well-tested, performance-critical code such as a binary protocol codec, where the alternative is genuine `unsafe` code and `MemoryMarshal` is the safer of the two. It is not acceptable as a way around a compiler error you did not understand, and it carries real portability hazards: endianness, struct layout and alignment assumptions that hold on your dev machine and fail on ARM. Anything using it should have a comment explaining the invariant and tests that would catch the invariant breaking.
-*Follow-up: You see `MemoryMarshal.Cast<byte, MyStruct>` in a PR parsing a network frame. What do you ask?*
+**Q9. You see `MemoryMarshal.Cast<byte, MyStruct>` in a PR parsing a network frame. What do you ask?**
+**A:** Whether the struct's layout is explicit and whether endianness is handled, because this reinterprets raw bytes as a struct and both assumptions hold on your dev machine and break on ARM or on a big-endian peer. Also whether the input length is validated before the cast, and whether there are tests with malformed and truncated frames. `MemoryMarshal` is legitimate in a tightly-scoped codec — it's safer than raw `unsafe` — but it needs a comment stating the invariant and tests that would catch the invariant breaking.
+*Follow-up: How would you fuzz a span-based binary parser, and what would you assert?*
 
-**Q10. A colleague replaced a readable LINQ pipeline with span-based loops and reports a 3x microbenchmark win. How do you respond?**
-**A:** I would ask what share of end-to-end request time that path represents, because a 3x win on 1% of the profile is a rounding error bought with permanent readability cost. I would also check that the benchmark's input distribution matches production and that the new code handles the edge cases the LINQ version got for free — empty sequences, boundary slices, culture-sensitive comparisons — because that is where hand-rolled span loops typically introduce bugs. If the path genuinely is hot and the win is real, I would want it isolated behind a well-named method with thorough tests and a comment recording *why* the readable version was rejected, so the next maintainer does not "simplify" it back.
-*Follow-up: How do you keep that kind of optimisation from being silently reverted in six months?*
+**Q10. A colleague replaced readable LINQ with span loops and reports a 3x microbenchmark win. Response?**
+**A:** Ask what share of end-to-end request time that path represents — a 3x win on 1% of the profile is a rounding error bought with permanent readability cost. Then check the input distribution matches production, and that the new code handles the edge cases LINQ got for free: empty sequences, boundary slices, culture-sensitive comparisons. If the path genuinely is hot and the win is real, isolate it behind a well-named method with thorough tests and a comment recording *why* the readable version was rejected — otherwise someone simplifies it back in six months.
+*Follow-up: How do you stop that optimisation being silently reverted?*
 
 ---
 
 ## 4. Expert / Architect (10 Q&A)
 
-
 **Q1. When is a low-allocation rewrite the right architectural answer, and when is it the expensive wrong one?**
-**A:** It is right when the live evidence says GC pressure or copying is a leading cost — high gen2 rates traceable to LOH buffer churn, pause times consuming a real share of a tight latency budget, or a per-request byte count that scales with payload size on a high-throughput path. It is the wrong answer when the actual constraint is downstream latency, database round-trips, serialisation format, or an N+1 pattern, all of which are far more common and far cheaper to fix. My rule is that a low-allocation programme needs a profile identifying it as top-two cost, a bounded scope (the hot path, not the codebase), and an owner — otherwise you get a team spending a quarter to save microseconds on a millisecond-scale problem, which is a leadership failure rather than an engineering one.
-*Follow-up: How would you present that trade-off to a director who has already been promised a "performance rewrite"?*
+**A:** Right when live evidence says GC pressure or copying is a leading cost — high gen2 rates traceable to LOH buffer churn, pause times consuming a real share of a tight latency budget, per-request bytes scaling with payload size on a high-throughput path. Wrong when the actual constraint is downstream latency, database round-trips, serialisation format or an N+1 pattern, all of which are far more common and much cheaper to fix. My rule: a low-allocation programme needs a profile naming it as a top-two cost, a bounded scope, and an owner — otherwise a team spends a quarter saving microseconds on a millisecond-scale problem, which is a leadership failure rather than an engineering one.
+*Follow-up: How do you present that to a director who's already been promised a "performance rewrite"?*
 
-**Q2. How would you introduce low-allocation techniques into a team that has never used them, without creating a maintenance liability?**
-**A:** Contain it deliberately: one well-chosen hot path, done properly, with benchmarks committed alongside and a written rationale, so the team has a concrete reference rather than a slogan. I would keep the techniques behind clean, ordinary-looking APIs so the rest of the codebase does not need to know — the parser takes a `ReadOnlySpan<char>` internally but the service layer still sees normal types. Reviews for that code need a specific checklist (return-in-finally, no `stackalloc` on caller-controlled length, clear pooled buffers, no escaping `Memory<T>`), because ordinary review does not catch these bugs. And I would set the expectation explicitly that this is a small, permanent minority of the codebase, not a new house style.
-*Follow-up: A year later, half the codebase uses spans and velocity has dropped. What went wrong and how do you unwind it?*
+**Q2. How do you introduce these techniques to a team without creating a maintenance liability?**
+**A:** Contain it deliberately: one well-chosen hot path, done properly, with benchmarks committed alongside and a written rationale, so the team has a concrete reference rather than a slogan. Keep the techniques behind clean ordinary-looking APIs so the rest of the codebase doesn't need to know — the parser takes `ReadOnlySpan<char>` internally while the service layer still sees normal types. Reviews for that code need a specific checklist (return-in-finally, no caller-controlled `stackalloc`, clear pooled buffers, no escaping `Memory<T>`), because ordinary review doesn't catch these. And set the expectation explicitly that this is a permanent small minority of the codebase, not a new house style.
+*Follow-up: A year later half the codebase uses spans and velocity has dropped. What went wrong?*
 
-**Q3. In a multi-tenant service, what is the security dimension of buffer pooling?**
-**A:** Pooled buffers are shared mutable state that crosses tenant boundaries, so any correctness bug becomes a confidentiality bug: a buffer returned with tenant A's data and rented by tenant B's request leaks data unless it is cleared or fully overwritten. The subtlety is that "fully overwritten" is an easy assumption to get wrong, since `Rent` returns a longer array than requested and the tail retains old contents. My position is that in a regulated or multi-tenant context, pooled buffers carrying customer data are cleared on return by policy, and the small cost is accepted as a control rather than argued each time — which is also far easier to defend in an audit than a per-site performance argument.
-*Follow-up: Clearing large buffers on return is measurably expensive. How would you justify or scope that cost?*
+**Q3. In a multi-tenant service, what's the security dimension of buffer pooling?**
+**A:** Pooled buffers are shared mutable state crossing tenant boundaries, so a correctness bug becomes a confidentiality bug — a buffer returned with tenant A's data and rented by tenant B leaks it unless cleared or fully overwritten. The subtlety is that "fully overwritten" is easy to get wrong, because `Rent` returns a longer array than requested and the tail keeps old contents. In a regulated or multi-tenant context my position is that pooled buffers carrying customer data are cleared on return by policy, and the cost is accepted as a control — which is also far easier to defend in an audit than a per-site performance argument.
+*Follow-up: Clearing large buffers is measurably expensive. How would you scope that?*
 
-**Q4. How do you keep allocation regressions from creeping back into an optimised path over years?**
-**A:** Encode the requirement rather than the intent: BenchmarkDotNet with `MemoryDiagnoser` running in CI against a committed baseline, failing the build when allocated-bytes-per-operation exceeds a threshold, so the guarantee is enforced by the pipeline rather than by memory. I would keep those benchmarks small and stable to limit CI noise, and require any threshold change to be an explicit, reviewed commit that records the reason. Complementing that, GC counters exported from production with alerts on rate-of-change catch regressions the benchmark's inputs miss. The organisational half is ownership: the path needs a named owner, because an unowned gate gets disabled the first time it goes red on a Friday.
+**Q4. How do you stop allocation regressions creeping back into an optimised path over years?**
+**A:** Encode the requirement rather than the intent: `MemoryDiagnoser` benchmarks in CI against a committed baseline, failing the build when allocated-bytes-per-operation exceeds a threshold, so the guarantee is enforced by the pipeline rather than by memory. Keep those benchmarks small and stable to limit CI noise, and require any threshold change to be an explicit reviewed commit with a reason. Complement with production GC counters alerting on rate-of-change, which catches regressions the benchmark's inputs miss. And name an owner — an unowned gate gets disabled the first time it goes red on a Friday.
 *Follow-up: The benchmark is flaky on shared CI runners. What do you change rather than deleting it?*
 
-**Q5. You are designing the internal contracts for a high-throughput market-data pipeline. How do buffer ownership rules shape that design?**
-**A:** Ownership has to be explicit at every boundary, because in a pipeline with pooled buffers the dangerous question is always "who returns this, and when is everyone finished with it." I would define single-owner handoff — a stage either consumes a buffer and returns it, or transfers ownership onward and never touches it again — with no shared ownership and no fan-out of the same buffer to multiple consumers unless it is immutable and reference-counted, which I would avoid unless forced. Where a consumer needs data beyond the handoff, it copies into its own storage deliberately: a copy is far cheaper than an intermittent cross-message corruption. I would write that contract down in the pipeline's design doc, because it is the invariant that new contributors will otherwise violate.
+**Q5. You're designing internal contracts for a high-throughput market-data pipeline. How does buffer ownership shape that?**
+**A:** Ownership has to be explicit at every boundary, because with pooled buffers the dangerous question is always "who returns this, and when is everyone finished". I'd define single-owner handoff: a stage either consumes a buffer and returns it, or transfers ownership onward and never touches it again. No shared ownership, and no fanning the same buffer out to multiple consumers unless it's immutable and reference-counted — which I'd avoid unless forced. Where a consumer needs data beyond the handoff, it copies deliberately, because a copy is far cheaper than an intermittent cross-message corruption. And I'd write that contract down, because it's the invariant new contributors will otherwise violate.
 *Follow-up: One stage is slow and needs to hold buffers longer. How do you handle that without unbounded pool growth?*
 
-**Q6. When should a component drop to `unsafe` or `MemoryMarshal` rather than staying with safe spans, and how do you govern that?**
-**A:** Only where a specific, measured need cannot be met by safe APIs — a hot binary codec, an interop boundary, a vectorised routine the JIT will not produce otherwise — and even then, `MemoryMarshal` and the `Unsafe` helpers before genuine `unsafe` blocks, since they preserve more checking. Governance matters more than the decision: I would require such code to be isolated in a small, clearly-named assembly or folder, reviewed by two people, covered by tests including adversarial inputs, fuzzed if it parses untrusted data, and annotated with the invariants it assumes. `AllowUnsafeBlocks` should be enabled per project, never globally, so its spread is visible in a diff.
-*Follow-up: How would you fuzz a span-based binary parser, and what would you assert?*
+**Q6. When should a component drop to `unsafe` or `MemoryMarshal`, and how do you govern it?**
+**A:** Only where a specific measured need can't be met by safe APIs — a hot binary codec, an interop boundary, a vectorised routine the JIT won't produce — and then `MemoryMarshal` and the `Unsafe` helpers before genuine `unsafe` blocks, since those preserve more checking. Governance matters more than the decision: isolate it in a small clearly-named assembly, two reviewers, tests including adversarial inputs, fuzzing if it parses untrusted data, and comments stating the invariants assumed. `AllowUnsafeBlocks` enabled per project, never globally, so its spread shows up in a diff.
+*Follow-up: How would you fuzz that codec, and what would you assert beyond "doesn't crash"?*
 
-**Q7. What is the cost dimension of low-allocation work at fleet scale, and how do you make that argument to finance?**
-**A:** The argument is that reduced allocation lowers GC CPU and memory headroom requirements, which translates into either smaller instances or higher density per instance — a fleet running at 60% memory because of buffer churn can often run at 35%, which is a real line item. To make it credibly I would quantify current cost, run the change on a canary tier, and measure the achievable instance-size or replica reduction rather than quoting a microbenchmark. The counter-argument I would present honestly is engineering cost: several engineer-weeks plus permanent maintenance drag, so the saving must be recurring and material. For a small fleet the honest answer is usually that a smaller instance type or an obvious caching fix returns more for far less.
-*Follow-up: The change saves 12% memory across 200 instances. How do you decide whether that's worth two engineer-months?*
+**Q7. What's the cost argument for low-allocation work at fleet scale, and how do you make it to finance?**
+**A:** Reduced allocation lowers GC CPU and memory headroom, which translates into smaller instances or higher density — a fleet running at 60% memory because of buffer churn can often run at 35%, and that's a real line item. To make it credibly: quantify current cost, run the change on a canary tier, and measure the achievable instance-size or replica reduction rather than quoting a microbenchmark. The honest counter I'd present is engineering cost — several engineer-weeks plus permanent maintenance drag — so the saving must be recurring and material. For a small fleet, a smaller instance type or an obvious caching fix usually returns more for far less.
+*Follow-up: The change saves 12% memory across 200 instances. Worth two engineer-months?*
 
-**Q8. `System.IO.Pipelines` versus `Stream` for a new protocol implementation — how do you decide, and what does the team inherit?**
-**A:** Pipelines wins when you own the framing of a high-throughput binary or text protocol: pooled buffers, built-in backpressure, and correct handling of messages split across reads, which is precisely the code teams get wrong by hand. The team inherits a genuinely harder programming model — `ReadOnlySequence<T>`, the `consumed`/`examined` distinction, and failure modes that manifest as a stalled connection rather than an exception — so it needs people who will still be around to debug it. For an ordinary HTTP-based service, `Stream` and the framework's own parsing are the right answer and Pipelines is over-engineering. I would decide on message rate and framing complexity, and I would insist on an integration test suite that fragments input at every byte boundary, because that is the only reliable way to catch segment-boundary bugs.
-*Follow-up: A Pipelines-based connection hangs under load with no exception. Where do you look first?*
+**Q8. `System.IO.Pipelines` or `Stream` for a new protocol implementation?**
+**A:** Pipelines when you own the framing of a high-throughput binary or text protocol: pooled buffers, backpressure, and correct handling of messages split across reads — precisely the code teams get wrong by hand. What the team inherits is a genuinely harder programming model — `ReadOnlySequence<T>`, the `consumed`/`examined` distinction, and failures that show up as a stalled connection rather than an exception — so it needs people who'll still be around to debug it. For an ordinary HTTP service, `Stream` and the framework's parsing are right and Pipelines is over-engineering. I'd decide on message rate and framing complexity, and insist on an integration suite that fragments input at every byte boundary.
+*Follow-up: A Pipelines connection hangs under load with no exception. Where do you look first?*
 
-**Q9. How do these techniques change when you target NativeAOT or run in a memory-constrained container?**
-**A:** They become more valuable and more constrained at the same time. More valuable because a tight memory limit turns allocation rate directly into collection frequency, so reducing bytes-per-request buys headroom that cannot be bought with configuration. More constrained because NativeAOT removes runtime code generation, so reflection-based fallbacks common in serialisation must be replaced with source generators — which happens to align well with span-based, generated formatters. Stack sizes also matter more in constrained or heavily-threaded environments, making unbounded `stackalloc` even less acceptable. I would treat "works under a hard heap limit" as an explicit test scenario rather than an assumption.
-*Follow-up: What would you add to CI to prove the service still behaves correctly at half its normal memory limit?*
+**Q9. How do these techniques change under NativeAOT or a hard memory limit?**
+**A:** More valuable and more constrained simultaneously. More valuable because a tight memory limit turns allocation rate directly into collection frequency, so reducing bytes-per-request buys headroom you can't buy with configuration. More constrained because AOT removes runtime code generation, so reflection-based serialisation fallbacks must become source generators — which happens to align well with span-based generated formatters. Stack sizes matter more in constrained or heavily-threaded environments too, making unbounded `stackalloc` even less acceptable. I'd treat "works under a hard heap limit" as an explicit test scenario rather than an assumption.
+*Follow-up: What would you add to CI to prove the service behaves correctly at half its normal memory limit?*
 
-**Q10. A principal engineer proposes rewriting the company's shared serialisation library to be allocation-free. How do you evaluate that proposal?**
-**A:** I would ask what problem it solves for consumers, measured end to end — a shared library's cost is amortised across many services, so a genuine win is leveraged, but so is a genuine regression or a breaking API change. The specific risks are that span-based APIs are viral and may force async consumers into awkward shapes, that ownership contracts leak into every caller, and that a shared library is the worst place to introduce use-after-return bugs because the blast radius is the whole estate. I would want a prototype benchmarked against two or three real consumer workloads, a compatibility story that does not force a big-bang migration, and an explicit owner for the long term. If the honest projection is single-digit percentage improvement for most consumers, I would decline and redirect the effort — and say so plainly, because shared-library rewrites are where good engineers spend quarters producing very little.
-*Follow-up: The prototype shows 40% improvement for one high-volume consumer and none for the other twenty. What do you recommend?*
+**Q10. A principal engineer proposes rewriting the shared serialisation library to be allocation-free. How do you evaluate it?**
+**A:** Ask what problem it solves for consumers, measured end to end — a shared library's cost is amortised across many services, so a genuine win is leveraged, and so is a genuine regression or a breaking API change. The specific risks: span-based APIs are viral and may force async consumers into awkward shapes, ownership contracts leak into every caller, and a shared library is the worst place to introduce use-after-return bugs because the blast radius is the whole estate. I'd want a prototype benchmarked against two or three real consumer workloads, a compatibility story that doesn't force a big-bang migration, and a long-term owner. If the honest projection is single-digit percent for most consumers, I'd decline and say so plainly — shared-library rewrites are where good engineers spend quarters producing very little.
+*Follow-up: The prototype shows 40% for one high-volume consumer and nothing for the other twenty. Recommendation?*
 
 ---
 

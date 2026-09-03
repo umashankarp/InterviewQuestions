@@ -1,6 +1,6 @@
 # Module 179 — System Design: Designing Search, Typeahead & Autocomplete at Scale
 
-> Domain: System Design | Level: Beginner → Expert | Prerequisite: [[01-System-Design-Fundamentals]], [[16-Interview-Execution-Playbook-Estimation-Rubric]] (the clock discipline; §I6's tail-latency arithmetic is load-bearing here), [[17-Designing-URL-Shortener-Distributed-ID-Generation]] (hot keys, cache-loss survival), [[../12-Data-Structures/02-Graphs-Tries-Union-Find.md]] (tries — extended here into FSTs and their on-disk form), [[../16-Distributed-Systems/05-LSM-Trees-BTrees-BloomFilters-StorageEngines.md]] (segment-based storage, which is what a search index actually is), [[../16-Distributed-Systems/06-TailLatency-HedgedRequests-TailAtScale.md]] (scatter-gather is the canonical tail-amplification shape)
+> Domain: System Design | Level: Beginner → Expert | Prerequisite: [[01-System-Design-Fundamentals]], [[16-Interview-Execution-Playbook-Estimation-Rubric]] (the clock discipline; §I6's tail-latency arithmetic is load-bearing here), [[17-Designing-URL-Shortener-Distributed-ID-Generation]] (hot keys, cache-loss survival), [[../12-Data-Structures/02-Graphs-Tries-Union-Find]] (tries — extended here into FSTs and their on-disk form), [[../16-Distributed-Systems/05-LSM-Trees-BTrees-BloomFilters-StorageEngines]] (segment-based storage, which is what a search index actually is), [[../16-Distributed-Systems/06-TailLatency-HedgedRequests-TailAtScale]] (scatter-gather is the canonical tail-amplification shape)
 
 ---
 

@@ -50,136 +50,152 @@ The costly failures here happen before any of your validation runs. Over-posting
 
 ## 2. Beginner (10 Q&A)
 
+**Q1. What's the vulnerability?**
+```csharp
+public class User { public int Id; public string Email; public bool IsAdmin; }
 
-**Q1. Walk me through how a request becomes typed arguments to a handler.**
-**A:** The framework selects an endpoint by routing, then determines a binding source for each parameter — explicitly from a `[From*]` attribute, or inferred: simple types from route values then query string, complex types from the body, registered services from DI. Values are converted using the type's parsing rules, and failures are recorded in `ModelState` for MVC or produce a 400 in minimal APIs. Only after that does your handler run. The key insight is that a substantial amount of untrusted-input processing happens before your first line of code, which is why binding is a security-relevant layer rather than plumbing.
-*Follow-up: What happens when a value can't be converted — does the handler still run?*
+[HttpPost] public IActionResult Register(User user) { _db.Add(user); ... }
+```
+**A:** Over-posting. The binder populates whatever it finds in the payload, so a caller sends `{"email":"...","isAdmin":true}` and grants themselves admin. Binding a domain or persistence entity directly means every field is settable by the client. Fix is an explicit request DTO containing only what a caller may set, mapped deliberately. Attribute-based exclusions rot, because the danger arrives when someone adds a property later and nobody revisits the attribute.
+*Follow-up: The team says DTOs are duplication. Counter-argument?*
 
-**Q2. How does binding-source inference differ between controllers and minimal APIs?**
-**A:** In MVC with `[ApiController]`, complex types are inferred as `[FromBody]` and simple types from route or query. Minimal APIs add a rule that changes behaviour meaningfully: if a type is registered in DI, it is bound from services rather than the body, and types with a `TryParse` or `BindAsync` method bind from route/query or take over binding entirely. That means registering a type in the container can silently change how a parameter binds — a genuinely surprising interaction worth knowing before it costs an afternoon.
-*Follow-up: A parameter that used to bind from the body starts resolving from DI. What changed?*
-
-**Q3. Why can only one parameter be bound from the body?**
-**A:** The request body is a single forward-only stream that is consumed as it is read, so binding a second parameter from it would find nothing left. MVC throws at startup when it detects two `[FromBody]` parameters. The practical consequence is that an endpoint needing several pieces of body data takes one request object containing them, which is better design anyway because it gives the payload a name and a version you can evolve.
-*Follow-up: How would you handle an endpoint that genuinely needs two independent payloads?*
-
-**Q4. What is over-posting and how do you prevent it?**
-**A:** It is when a client supplies fields you did not intend them to set — `IsAdmin`, `Balance`, `TenantId` — because the model being bound contains them and the binder populates whatever it finds. Prevention is structural: bind to a purpose-built request DTO containing only the fields a caller may set, and map to the domain or entity explicitly. Attribute-based exclusions and bind lists exist but are fragile, because the danger comes from someone adding a property later and nobody revisiting the attribute. This is one of the clearest cases where a dedicated DTO is not ceremony but a control.
-*Follow-up: The team argues DTOs are duplication. What's your counter-argument?*
-
-**Q5. How does validation work in controllers versus minimal APIs?**
-**A:** With `[ApiController]`, MVC validates data annotations during binding and automatically returns a 400 with a `ProblemDetails` body when `ModelState` is invalid — so validation happens whether or not you wrote code for it. Minimal APIs have no such automatic step: annotations are ignored unless you add validation yourself, via an endpoint filter, a validation library, or explicit checks. Teams that move endpoints from controllers to minimal APIs and do not notice this have silently removed their input validation, which is one of the more consequential differences between the two models.
+**Q2. What's different about validation here versus a controller?**
+```csharp
+app.MapPost("/orders", (CreateOrder cmd) => Handle(cmd));
+// CreateOrder has [Required] and [Range] attributes
+```
+**A:** Nothing validates it. With `[ApiController]`, MVC validates data annotations during binding and automatically returns a 400 — in minimal APIs the annotations are simply ignored unless you add validation yourself via an endpoint filter or explicit checks. Teams moving endpoints from controllers to minimal APIs and not noticing have silently removed their input validation, with every existing test still passing because tests call the happy path.
 *Follow-up: How would you add consistent validation across all minimal API endpoints?*
 
-**Q6. What does `[ApiController]` actually change?**
-**A:** It enables automatic `ModelState` validation with a 400 response, binding-source inference (complex types from the body, and so on), a requirement that attribute routing is used, and `ProblemDetails` formatting for error responses. It is a bundle of conventions that make API controllers behave consistently, and removing it changes several behaviours at once — most notably, validation stops being automatic, which is the change most likely to go unnoticed. Knowing what it bundles matters when debugging why two controllers behave differently.
-*Follow-up: You need a custom error body instead of `ProblemDetails`. How do you change that without losing the other conventions?*
+**Q3. Why did this parameter stop binding from the body?**
+```csharp
+app.MapPost("/report", (ReportRequest req) => ...);
+// someone added: services.AddScoped<ReportRequest>();
+```
+**A:** Minimal APIs infer binding sources differently from MVC: if a type is registered in DI, it binds from *services* rather than the body. So registering the type — perhaps for an unrelated reason — silently changes how the parameter binds, and the handler starts receiving a container-built instance with none of the request's data. It's a genuinely surprising interaction, and `[FromBody]` makes it explicit.
+*Follow-up: What other minimal-API inference rules differ from MVC?*
 
-**Q7. When would you choose minimal APIs over controllers?**
-**A:** For small, focused services where the endpoint count is modest and the reduced ceremony is real value — internal APIs, webhook receivers, health and admin surfaces, and anything startup-sensitive, since minimal APIs avoid part of the MVC infrastructure. Controllers earn their keep on large API surfaces where conventions, shared filters, attribute-based cross-cutting concerns and a consistent structure matter more than brevity. The decision is about how much consistency the surface needs across how many people, not about performance, where the difference is small.
-*Follow-up: You have 200 endpoints. Does the answer change, and why?*
+**Q4. Why can only one parameter bind from the body?**
+**A:** The body is a single forward-only stream consumed as it's read, so a second parameter would find nothing left. MVC throws at startup if it detects two `[FromBody]` parameters. Practically, an endpoint needing several pieces of body data takes one request object containing them — which is better design anyway, because it gives the payload a name and a version you can evolve.
+*Follow-up: How would you handle an endpoint that genuinely needs two independent payloads?*
 
-**Q8. What is the difference between `IActionResult`, `ActionResult<T>` and `TypedResults`?**
-**A:** `IActionResult` expresses any result but loses the response type, so tooling and OpenAPI cannot infer it. `ActionResult<T>` keeps the success type while still permitting other results, which is why it is the better default in controllers. `TypedResults` in minimal APIs returns concrete result types, giving compile-time checking and automatic OpenAPI metadata, and it makes handlers unit-testable without inspecting a generic result object. The general point is that a strongly-typed result is worth preferring because it makes the contract visible to both the compiler and the documentation.
-*Follow-up: How do you express an endpoint that returns 200, 404 or 409 with typed results?*
+**Q5. What does `[ApiController]` actually change?**
+**A:** It bundles several behaviours: automatic `ModelState` validation returning 400, binding-source inference (complex types from the body), a requirement to use attribute routing, and `ProblemDetails` formatting for errors. Removing it changes all of those at once, and the change most likely to go unnoticed is that validation stops being automatic. Knowing what's in the bundle matters when debugging why two controllers behave differently.
+*Follow-up: You need a custom error body instead of `ProblemDetails`. How, without losing the other conventions?*
 
-**Q9. How do route constraints affect binding and matching?**
-**A:** Constraints such as `{id:int}` or `{code:regex(...)}` are part of *matching*, not validation — a non-matching value means the route does not match, so the client gets a 404 rather than a 400. That distinction matters for API semantics: a malformed identifier reported as "not found" is misleading and makes client debugging harder. Constraints are useful for disambiguating overlapping routes, and less appropriate as a substitute for validation, which should produce a proper error explaining what was wrong.
+**Q6. This route returns 404 for `/orders/abc`. Should it?**
+```csharp
+app.MapGet("/orders/{id:int}", (int id) => ...);
+```
+**A:** That's what it does, because constraints are part of *matching*, not validation — a non-matching value means the route doesn't match at all. Whether it *should* is a design question: telling a client "not found" when they sent a malformed ID is misleading and makes their debugging harder. Constraints are good for disambiguating overlapping routes; they're a poor substitute for validation that explains what was wrong.
 *Follow-up: Two routes overlap and the wrong one is selected. How do you reason about precedence?*
 
-**Q10. What happens when a required value fails to parse?**
-**A:** In MVC the failure is recorded in `ModelState` and, with `[ApiController]`, produces an automatic 400 before the action runs. Without `[ApiController]` the action *does* run with a default value and an invalid `ModelState`, which is exactly how unchecked handlers end up processing zeros and nulls as if they were supplied. In minimal APIs a failed parse of a required parameter returns 400 automatically, but an optional or nullable parameter binds to null and looks identical to "not provided." That ambiguity between "absent" and "unparseable" is worth designing around explicitly.
-*Follow-up: How do you distinguish "field not supplied" from "field supplied as null" in a PATCH request?*
+**Q7. `IActionResult`, `ActionResult<T>`, or `TypedResults`?**
+**A:** `IActionResult` expresses any result but loses the response type, so tooling and OpenAPI can't infer it. `ActionResult<T>` keeps the success type while still permitting other results — the better default in controllers. `TypedResults` in minimal APIs returns concrete result types, giving compile-time checking, automatic OpenAPI metadata, and handlers you can unit-test without inspecting a generic result object. Generally: prefer whichever makes the contract visible to both the compiler and the documentation.
+*Follow-up: How do you express an endpoint returning 200, 404 or 409 with typed results?*
+
+**Q8. What happens if a required value fails to parse?**
+**A:** In MVC with `[ApiController]`, it's recorded in `ModelState` and produces an automatic 400 before the action runs. *Without* `[ApiController]`, the action still runs with a default value and an invalid `ModelState` — which is exactly how unchecked handlers end up processing zeros and nulls as if they were supplied. In minimal APIs a failed parse of a required parameter returns 400, but an optional or nullable parameter binds to null, indistinguishable from "not provided".
+*Follow-up: How do you distinguish "not supplied" from "supplied as null" in a PATCH?*
+
+**Q9. When would you choose minimal APIs over controllers?**
+**A:** Small focused services where the endpoint count is modest and the reduced ceremony is real value — internal APIs, webhook receivers, health and admin surfaces — and anything startup-sensitive, since minimal APIs skip part of the MVC infrastructure. Controllers earn their keep on large surfaces where conventions, shared filters and consistent structure matter more than brevity. It's a question of how much consistency the surface needs across how many people, not of performance, where the difference is small.
+*Follow-up: You have 200 endpoints. Does the answer change?*
+
+**Q10. What's wrong with binding this?**
+```csharp
+app.MapPost("/tags", (List<string> tags) => Save(tags));
+```
+**A:** It's unbounded. The client controls how much memory and CPU one request consumes — send a hundred thousand elements and you get a large allocation and potentially a huge downstream query, with no authentication required if the endpoint is public. You need a maximum request-body size, a configured limit on collection binding, and explicit validation of length in the contract. And it's worth asking whether a bulk operation should be an incidental array parameter at all rather than a documented batch contract with its own limits.
+*Follow-up: A legitimate client needs to submit 50,000 items. How do you design for that?*
 
 ---
 
 ## 3. Intermediate (10 Q&A)
 
-
-**Q1. A date parses correctly in dev and incorrectly in production. What's your hypothesis?**
-**A:** Culture. Binding uses culture-sensitive conversion for some types, so `03/04/2026` is March or April depending on the server's culture, and a decimal separator differs between locales — a dev machine and a container image frequently differ, and `InvariantGlobalization` in a container changes behaviour again. The fix is to make wire formats culture-invariant by contract: ISO-8601 for dates, invariant parsing for numbers, and explicit `DateTimeOffset` rather than `DateTime` so offsets are unambiguous. I would also pin culture explicitly at startup rather than relying on the host, so behaviour is identical everywhere.
+**Q1. A date parses correctly in dev and wrongly in production. Hypothesis?**
+**A:** Culture. Binding uses culture-sensitive conversion for some types, so `03/04/2026` is March or April depending on the server's culture, and decimal separators differ by locale — a dev machine and a container image frequently differ, and `InvariantGlobalization` changes it again. Fix is to make wire formats culture-invariant by contract: ISO-8601 for dates, invariant numeric parsing, `DateTimeOffset` rather than `DateTime` so offsets are unambiguous. I'd also pin culture explicitly at startup rather than inheriting the host's.
 *Follow-up: Why is `DateTimeOffset` better than `DateTime` at an API boundary?*
 
-**Q2. How would you implement a custom binder, and when is that the right answer?**
-**A:** The right answer is usually *not* a custom binder — a `TryParse` or `BindAsync` static method on the type handles most cases in minimal APIs, and a simple type converter handles them in MVC, both with far less machinery. A full custom binder earns its place when binding requires access to services or multiple sources — building a composite object from a header plus a route value plus a claim, for example. The thing to be careful about is that custom binders run on untrusted input outside your normal validation, so they need to fail cleanly with a useful error rather than throwing, and they need tests for malformed input specifically.
+**Q2. When is a custom model binder the right answer?**
+**A:** Usually it isn't — a `TryParse` or `BindAsync` static method on the type covers most cases in minimal APIs, and a type converter covers them in MVC, both with far less machinery. A full custom binder earns its place when binding needs services or multiple sources, like composing an object from a header plus a route value plus a claim. The thing to be careful about is that binders run on untrusted input *outside* your normal validation, so they need to fail cleanly with a useful error rather than throwing, and need tests for malformed input specifically.
 *Follow-up: Your custom binder needs a scoped service. How do you get it, and what's the lifetime risk?*
 
-**Q3. What are the risks of binding collections, and how do you bound them?**
-**A:** An unbounded collection parameter lets a client control how much memory and CPU one request consumes — a query string or body with a hundred thousand elements produces a large allocation and potentially a large downstream query. The defences are a maximum request-body size, a configured limit on model-binding collection size and complexity, and explicit validation of collection length in the contract with a clear error. I would also consider whether the endpoint should accept a collection at all, since a bulk operation usually deserves an explicit batch contract with documented limits and its own throttling rather than an incidental array parameter.
-*Follow-up: A legitimate client needs to submit 50,000 items. How do you design for that?*
+**Q3. How do you keep error responses consistent when a service mixes controllers and minimal APIs?**
+**A:** Make the error contract a pipeline concern rather than an endpoint one: central exception-handling middleware producing the standard body, plus explicit configuration so `[ApiController]`'s automatic 400 and minimal APIs' validation failures produce the same shape. Left alone, the two models emit visibly different bodies for the same class of failure, and clients then special-case per endpoint — which is a contract defect. Encode the shared shape in the platform package and cover it with tests asserting the body for each failure category, because this is exactly the consistency that erodes as endpoints are added.
+*Follow-up: You need to change the error contract for new endpoints only. How?*
 
-**Q4. How do you keep error responses consistent when a service mixes controllers and minimal APIs?**
-**A:** By making the error contract a pipeline concern rather than an endpoint one: central exception-handling middleware producing the standard body, plus explicit configuration so `[ApiController]`'s automatic 400 and minimal APIs' validation failures produce the same shape. Left alone, the two models produce visibly different bodies for the same class of failure, and clients then special-case per endpoint, which is a contract defect. I would encode the shared shape in the platform package and cover it with tests asserting the body for each failure category, since this is exactly the kind of consistency that erodes as endpoints are added.
-*Follow-up: You need to change the error contract for new endpoints only. How do you do that without breaking existing clients?*
-
-**Q5. Where do you put cross-cutting concerns in a minimal-API codebase?**
-**A:** Endpoint filters for per-endpoint concerns such as validation, authorization detail and result shaping; route-group configuration for concerns that apply to a set of endpoints, which is the closest equivalent to a controller-level filter; and middleware for anything that must apply to every request. The trap in minimal APIs is that without controllers as a natural grouping, cross-cutting behaviour drifts into individual handlers and gets applied inconsistently. I would insist on route groups as the organising unit from the start, so there is always a level between "one endpoint" and "the whole app" to attach behaviour to.
+**Q4. Where do cross-cutting concerns live in a minimal-API codebase?**
+**A:** Endpoint filters for per-endpoint concerns like validation and result shaping; route-group configuration for concerns applying to a set of endpoints, which is the nearest equivalent to a controller-level filter; middleware for anything applying to every request. The trap is that without controllers as a natural grouping, cross-cutting behaviour drifts into individual handlers and gets applied inconsistently. I'd insist on route groups as the organising unit from the start, so there's always a level between "one endpoint" and "the whole app" to attach behaviour to.
 *Follow-up: How would you enforce that every endpoint in a group has validation applied?*
 
-**Q6. What are the trade-offs of source-generated JSON serialisation?**
-**A:** It removes runtime reflection, so it is faster, allocates less, starts quicker and is required for NativeAOT and trimming. The costs are that every serialisable type must be declared in a context class, polymorphic and dynamic scenarios need explicit configuration, and there are runtime features it does not support — so an unusual payload shape can require rework. For a service on a modern .NET version with a stable set of contract types, it is a good default; for one relying on dynamic or polymorphic payloads, the reflection-based serialiser is still simpler. I would decide this early, because retrofitting it after a codebase leans on dynamic serialisation is genuinely painful.
+**Q5. What are the trade-offs of source-generated JSON serialisation?**
+**A:** It removes runtime reflection — faster, less allocation, quicker startup, and required for NativeAOT and trimming. The costs: every serialisable type must be declared in a context class, polymorphic and dynamic scenarios need explicit configuration, and some runtime features aren't supported, so an unusual payload shape can force rework. For a service on a modern runtime with a stable set of contract types it's a good default; for one relying on dynamic or polymorphic payloads the reflection-based serialiser is simpler. Decide early, because retrofitting after a codebase leans on dynamic serialisation is genuinely painful.
 *Follow-up: You need polymorphic serialisation of a domain event hierarchy. How does that work with source generation?*
 
-**Q7. How do you test binding and validation behaviour effectively?**
-**A:** Through the HTTP surface with `WebApplicationFactory`, not by calling the handler directly — because binding, inference, validation and the error contract are exactly what a direct call bypasses. I would test the malformed cases specifically: missing required fields, wrong types, extra unexpected fields, null versus absent, boundary sizes, and culture-sensitive values. Those tests are also the regression net for the `[ApiController]`-versus-minimal-API differences, which is where a refactor silently changes behaviour. Testing only the happy path through the handler is the pattern that lets an entire validation layer be removed without a single test failing.
-*Follow-up: How would you catch the case where a new property is added to a request DTO and becomes over-postable?*
+**Q6. How do you test binding and validation effectively?**
+**A:** Through the HTTP surface with `WebApplicationFactory`, not by calling the handler directly — binding, inference, validation and the error contract are exactly what a direct call bypasses. Test the malformed cases specifically: missing required fields, wrong types, extra unexpected fields, null versus absent, boundary sizes, culture-sensitive values. Those tests are also the regression net for the `[ApiController]`-versus-minimal-API differences, which is where a refactor silently changes behaviour. Testing only the happy path through the handler is exactly what lets an entire validation layer be removed with no test failing.
+*Follow-up: How would you catch a new property on a request DTO becoming over-postable?*
 
-**Q8. How do you handle PATCH semantics given the binder can't distinguish absent from null?**
-**A:** Either use JSON Patch, which expresses operations explicitly, or model the payload so absence is representable — an `Optional<T>`-style wrapper or a JSON document you inspect for property presence. Binding a normal DTO to a partial payload gives nulls for everything absent, so a naive implementation wipes fields the caller never mentioned, which is a data-loss bug that looks like a working feature. Whichever approach is chosen, I would make it consistent across the API and documented in the contract, since PATCH semantics vary widely and clients will otherwise guess.
-*Follow-up: JSON Patch is expressive but hard for clients. What would you pick for a public API and why?*
+**Q7. How do you implement PATCH given the binder can't distinguish absent from null?**
+**A:** Either JSON Patch, which expresses operations explicitly, or a payload model where absence is representable — an `Optional<T>`-style wrapper, or inspecting the JSON document for property presence. Binding a normal DTO to a partial payload gives nulls for everything absent, so a naive implementation wipes fields the caller never mentioned: a data-loss bug that looks like a working feature. Whichever you choose, make it consistent across the API and document it, since PATCH semantics vary widely and clients will otherwise guess.
+*Follow-up: JSON Patch is expressive but hard for clients. What would you pick for a public API?*
 
-**Q9. What does binding a domain entity directly cost you, beyond over-posting?**
-**A:** It couples your public contract to your internal model, so every domain refactor becomes a potential breaking change for clients, and every field added to the entity is exposed by default. It also drags persistence concerns into the API — navigation properties serialised into cycles, lazy-loading triggered during serialisation, and identity fields the client should never see. The extra DTO and mapping code is real cost, but it buys the ability to change the internals without coordinating with consumers, which for anything with external clients is the difference between a refactor and a migration project.
+**Q8. Beyond over-posting, what does binding a domain entity cost you?**
+**A:** It couples your public contract to your internal model, so every domain refactor is a potential breaking change for clients and every field added to the entity is exposed by default. It also drags persistence concerns into the API — navigation properties serialised into cycles, lazy loading triggered during serialisation, identity fields the client should never see. The extra DTO and mapping is real cost, but it buys the ability to change internals without coordinating with consumers, which for anything with external clients is the difference between a refactor and a migration project.
 *Follow-up: For an internal API with one consumer team, does that calculus change?*
 
-**Q10. How would you migrate a large controller-based API to minimal APIs, or decide not to?**
-**A:** I would start by asking what problem it solves, because for a large existing surface the answer is often "none that justifies the risk." Minimal APIs win on startup and ceremony, not on throughput in any way most services would notice. If there is a real driver — AOT, cold start, a genuinely simpler service — I would migrate incrementally by route group, keeping both models running side by side, and pay particular attention to the behaviours that do not carry over: automatic validation, `ProblemDetails` shaping, action filters, and convention-based routing. Each of those needs an explicit replacement before the first endpoint moves, or the migration silently removes protections.
+**Q9. How would you migrate a large controller-based API to minimal APIs — or decide not to?**
+**A:** Start by asking what problem it solves, because for a large existing surface the answer is often "none that justifies the risk" — minimal APIs win on startup and ceremony, not on throughput in any way most services notice. If there's a real driver like AOT or cold start, migrate incrementally by route group, keeping both models running, and pay specific attention to what doesn't carry over: automatic validation, `ProblemDetails` shaping, action filters, convention-based routing. Each needs an explicit replacement *before* the first endpoint moves, or the migration silently removes protections.
 *Follow-up: You move one endpoint and its validation disappears. How would you have caught that in CI?*
+
+**Q10. What limits would you set on model binding, and where?**
+**A:** Maximum request body size, maximum JSON nesting depth and element count, maximum collection lengths, maximum string lengths, and a request timeout — all at the platform layer so every endpoint inherits them, with per-endpoint overrides where genuinely needed rather than per-endpoint implementation. Without these, one small request can consume disproportionate memory and CPU, which on a public endpoint is a cheap denial of service needing no authentication. These are security controls, not tuning parameters.
+*Follow-up: An endpoint legitimately accepts a 100 MB upload. How do you handle it differently?*
 
 ---
 
 ## 4. Expert / Architect (10 Q&A)
 
-
-**Q1. How do you set an endpoint-style standard for an organisation with many services?**
-**A:** I would define the decision rather than mandate one style: controllers as the default for services with a substantial public API surface where convention and consistency dominate, minimal APIs for small services, internal utilities and startup-sensitive workloads. What must be standardised regardless of style is the things clients experience — the error contract, validation behaviour, versioning, pagination, authentication and the OpenAPI output — because those are the parts that hurt when they differ. I would ship both as templates with the platform package pre-wired, so the standard is inherited rather than remembered, and I would explicitly discourage mixing styles within one service, since that is where inconsistency actually appears.
+**Q1. How do you set an endpoint-style standard across many services?**
+**A:** Define the decision rather than mandate one style: controllers as the default for services with a substantial public API surface where convention and consistency dominate; minimal APIs for small services, internal utilities and startup-sensitive workloads. What *must* be standardised regardless is what clients experience — error contract, validation behaviour, versioning, pagination, authentication, OpenAPI output — because those are the parts that hurt when they differ. Ship both as templates with the platform package pre-wired so the standard is inherited rather than remembered, and discourage mixing styles within one service, which is where inconsistency actually appears.
 *Follow-up: A team wants to mix both in one service for a specific reason. What would make you agree?*
 
 **Q2. How do you treat the binding layer as a security boundary?**
-**A:** By recognising that it processes untrusted input before any of your code runs, and constraining it accordingly: request size limits, collection and depth limits on model binding and JSON, explicit request DTOs so nothing binds by accident, and no binding to types that carry authorisation-relevant fields. Any field determining tenancy, ownership or privilege must come from the authenticated principal rather than the payload — accepting a `TenantId` from the body is the single most common shape of a cross-tenant vulnerability. I would also make deserialisation configuration explicit and reviewed, since permissive settings such as unrestricted polymorphic type handling have a long history of turning into remote code execution.
+**A:** Recognise it processes untrusted input before any of your code runs, and constrain it accordingly: request size limits, collection and depth limits on binding and JSON, explicit request DTOs so nothing binds by accident, and no binding to types carrying authorisation-relevant fields. Anything determining tenancy, ownership or privilege comes from the authenticated principal, never the payload — accepting a `TenantId` from the body is the single most common shape of a cross-tenant vulnerability. And deserialisation configuration must be explicit and reviewed, since permissive settings like unrestricted polymorphic type handling have a long history of becoming remote code execution.
 *Follow-up: A legitimate admin endpoint needs to act on behalf of another tenant. How do you design that safely?*
 
 **Q3. How do you keep an API's contract stable while the internal model evolves?**
-**A:** By keeping them genuinely separate types with an explicit mapping, and by testing the contract rather than the model — snapshot or schema tests that fail when the serialised shape changes, so a domain rename cannot silently break clients. Versioning strategy then applies to the contract types only, so internal refactors are free and contract changes are deliberate. I would also generate the OpenAPI document in CI and diff it against the previous version, treating a breaking diff as a build failure requiring an explicit version decision. That single control catches most accidental contract breaks, which are far more common than intentional ones.
+**A:** Keep them genuinely separate types with explicit mapping, and test the *contract* rather than the model — snapshot or schema tests that fail when the serialised shape changes, so a domain rename can't silently break clients. Versioning then applies to the contract types only, so internal refactors are free and contract changes are deliberate. I'd also generate the OpenAPI document in CI and diff it against the previous version, treating a breaking diff as a build failure requiring an explicit version decision. That single control catches most accidental contract breaks, which are far more common than intentional ones.
 *Follow-up: How do you classify a diff as breaking versus non-breaking automatically?*
 
-**Q4. What are the performance implications of the binding and serialisation layer at scale, and what would you actually change?**
-**A:** For most services, serialisation is a measurable but minor cost dominated by I/O; it becomes significant with large payloads, high request rates, or deeply nested models. The changes that actually pay are reducing payload size (projection, paging, sparse fieldsets), source-generated serialisation to remove reflection, avoiding double serialisation through intermediate strings, and streaming large responses rather than buffering. What rarely pays is micro-optimising the binder itself. I would also look at whether large payloads should be an API at all — a bulk export is usually better served by a file and a signed URL than by a synchronous JSON response.
-*Follow-up: Responses average 2 MB of JSON. What's your first move?*
+**Q4. What are the performance implications of binding and serialisation at scale, and what would you actually change?**
+**A:** For most services serialisation is measurable but minor against I/O; it becomes significant with large payloads, high request rates, or deeply nested models. The changes that pay: reduce payload size through projection, paging and sparse fieldsets; source-generated serialisation to remove reflection; avoid double serialisation through intermediate strings; stream large responses rather than buffering. What rarely pays is micro-optimising the binder. I'd also ask whether large payloads should be an API at all — a bulk export is usually better served by a file and a signed URL than a synchronous JSON response.
+*Follow-up: Responses average 2 MB of JSON. First move?*
 
-**Q5. How do you handle API surface consistency when dozens of engineers add endpoints over years?**
-**A:** Consistency has to be produced by tooling, not by review, because review attention decays. Concretely: a shared endpoint template and route-group conventions, OpenAPI generated in CI with linting rules for naming, status codes, pagination and error shapes, and contract tests asserting the standard behaviours. I would treat the linter's rules as the actual API standard document, since a rule that runs is worth more than a wiki page that does not. Where a team must deviate, an explicit suppression with a reason makes the exception visible rather than invisible, which is the property that keeps a standard alive over years.
-*Follow-up: The linter has 300 suppressions after two years. What does that tell you and what do you do?*
+**Q5. How do you maintain API surface consistency when dozens of engineers add endpoints over years?**
+**A:** Consistency has to be produced by tooling, not review, because review attention decays. A shared endpoint template and route-group conventions; OpenAPI generated in CI with linting rules for naming, status codes, pagination and error shapes; contract tests asserting the standard behaviours. I'd treat the linter's rules as the *actual* API standard document, since a rule that runs is worth more than a wiki page that doesn't. Where a team must deviate, an explicit suppression with a reason makes the exception visible rather than invisible — which is the property that keeps a standard alive over years.
+*Follow-up: The linter has 300 suppressions after two years. What does that tell you?*
 
-**Q6. How does the choice between controllers and minimal APIs interact with AOT and cold-start-sensitive deployments?**
-**A:** Minimal APIs plus source-generated serialisation are the AOT-friendly path, because MVC's convention discovery and the reflection-based serialiser both rely on capabilities AOT removes. For a scale-to-zero or per-request-billed workload, the startup difference is a genuine cost line rather than a benchmark curiosity. So if AOT or cold start is a strategic requirement, the endpoint-style decision is effectively made for you, and it should be made *before* a large surface exists rather than discovered during a migration. I would state that constraint explicitly in the architecture decision, along with the follow-on constraints it imposes on serialisation, DI registration and reflection use.
-*Follow-up: An existing controller-based service must move to AOT. How do you scope that work?*
+**Q6. How does endpoint style interact with AOT and cold-start-sensitive deployments?**
+**A:** Minimal APIs plus source-generated serialisation are the AOT-friendly path, because MVC's convention discovery and the reflection-based serialiser both rely on capabilities AOT removes. For a scale-to-zero or per-request-billed workload, the startup difference is a real cost line rather than a benchmark curiosity. So if AOT or cold start is a strategic requirement, the endpoint-style decision is effectively made for you — and it should be made *before* a large surface exists rather than discovered during a migration. I'd state that constraint explicitly along with what it implies for serialisation, DI registration and reflection use.
+*Follow-up: An existing controller-based service must move to AOT. How do you scope that?*
 
 **Q7. How do you approach validation architecture across a large API?**
-**A:** Layered and explicit: structural validation at the boundary (types, required fields, ranges, sizes) applied uniformly by the framework or a filter, and business-rule validation in the domain where the rules and the data actually live. The failure mode I would design against is business rules leaking into DTO annotations, where they get duplicated, drift, and are unenforced on any path that does not go through the API. The boundary validation should produce a consistent, machine-readable error body listing all failures rather than the first, because clients need to display them together. I would also treat validation as part of the contract and version it accordingly, since tightening a rule breaks existing callers.
-*Follow-up: A rule must be enforced both at the API and in a message consumer. Where does it live?*
+**A:** Layered and explicit: structural validation at the boundary (types, required fields, ranges, sizes) applied uniformly by the framework or a filter, and business-rule validation in the domain where the rules and the data live. The failure mode to design against is business rules leaking into DTO annotations, where they get duplicated, drift, and are unenforced on any path not going through the API. Boundary validation should return a consistent machine-readable body listing *all* failures rather than the first, because clients need to display them together. And treat validation as part of the contract: tightening a rule breaks existing callers.
+*Follow-up: A rule must be enforced at the API *and* in a message consumer. Where does it live?*
 
 **Q8. What would you require before allowing polymorphic deserialisation of client input?**
-**A:** A closed, explicitly declared set of permitted types — never type resolution driven by a value in the payload against arbitrary types, which is the classic deserialisation RCE pattern that has affected every major platform. `System.Text.Json`'s polymorphism support with declared derived types and discriminators is acceptable because the set is fixed at compile time. I would require a threat-model note on any such endpoint, tests for unexpected discriminators, and a review by someone outside the team. If a design needs open-ended polymorphism from untrusted input, I would treat that as a design problem to solve rather than a capability to enable.
-*Follow-up: A legacy client sends a `$type` field expected by an older serialiser. How do you handle the migration safely?*
+**A:** A closed, explicitly declared set of permitted types — never type resolution driven by a value in the payload against arbitrary types, which is the classic deserialisation RCE pattern that has hit every major platform. `System.Text.Json`'s polymorphism with declared derived types and discriminators is acceptable because the set is fixed at compile time. I'd require a threat-model note on any such endpoint, tests for unexpected discriminators, and review by someone outside the team. If a design needs open-ended polymorphism from untrusted input, that's a design problem to solve rather than a capability to enable.
+*Follow-up: A legacy client sends a `$type` field expected by an older serialiser. How do you migrate safely?*
 
-**Q9. How would you evaluate a proposal to generate endpoints from a schema or specification rather than writing them?**
-**A:** I would look at where the source of truth ends up and what happens when generation is insufficient. Spec-first with generated contracts works well and gives you consistency, client SDKs and documentation for free — the risk is the generated code becoming a layer nobody can modify when a genuine exception is needed, and a toolchain the team must own. Generating whole endpoints including behaviour is a bigger commitment and tends to fail at the first requirement the generator does not anticipate. My position is generally to generate contracts and clients, hand-write behaviour, and treat the specification as the reviewed artefact — which also makes API changes visible in a diff that non-engineers can read.
-*Follow-up: The generator's output differs subtly from what the team hand-wrote before. How do you manage that transition?*
+**Q9. How would you evaluate generating endpoints from a specification rather than writing them?**
+**A:** Look at where the source of truth ends up and what happens when generation is insufficient. Spec-first with generated *contracts* works well and gives you consistency, client SDKs and documentation for free — the risk is generated code becoming a layer nobody can modify when a genuine exception is needed, plus a toolchain the team now owns. Generating whole endpoints including behaviour is a much bigger commitment and tends to fail at the first requirement the generator didn't anticipate. My position: generate contracts and clients, hand-write behaviour, treat the specification as the reviewed artefact — which also makes API changes visible in a diff non-engineers can read.
+*Follow-up: The generator's output differs subtly from what the team hand-wrote. How do you manage that transition?*
 
 **Q10. What signals in an API codebase tell you it will be expensive to maintain?**
-**A:** Domain entities used as request and response types; validation logic duplicated in annotations, handlers and the domain; error shapes that differ by endpoint; no versioning strategy with clients depending on undocumented behaviour; endpoints that return different structures for the same resource depending on the caller; and binding that accepts more than the operation needs. Each of these individually is survivable; together they mean every internal change risks an external break, so the team slows down to protect clients they cannot see. The fix is not a rewrite but a boundary — introduce explicit contract types and contract tests, then refactor freely behind them.
-*Follow-up: You inherit that codebase with 150 endpoints and no contract tests. What's your first quarter's plan?*
+**A:** Domain entities used as request and response types. Validation duplicated across annotations, handlers and the domain. Error shapes differing by endpoint. No versioning strategy, with clients depending on undocumented behaviour. Endpoints returning different structures for the same resource depending on caller. Binding that accepts more than the operation needs. Individually survivable; together they mean every internal change risks an external break, so the team slows down to protect clients they can't see. The fix isn't a rewrite — it's a boundary: introduce explicit contract types and contract tests, then refactor freely behind them.
+*Follow-up: You inherit that codebase with 150 endpoints and no contract tests. What's your first quarter?*
 
 ---
 

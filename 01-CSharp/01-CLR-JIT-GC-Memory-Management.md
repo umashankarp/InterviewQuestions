@@ -48,136 +48,163 @@ Getting it wrong shows up as P99 latency cliffs from stop-the-world gen2 pauses,
 
 ## 2. Beginner (10 Q&A)
 
+**Q1. Where does `Position` actually live in memory here?**
+```csharp
+struct Point { public int X, Y; }
+class Player { public Point Position; }
+var p = new Player();
+```
+**A:** On the heap, inside the `Player` object. "Value types go on the stack" is a rule of thumb about locals, not a rule of the language — a struct lives wherever its storage lives. Same for a struct captured in a closure or held across an `await`: it ends up on the heap. This matters because people reach for `struct` expecting to avoid an allocation and get nothing when it's a field of a class.
+*Follow-up: What if `Point` had a `string` field — does that change how the GC scans `Player`?*
 
-**Q1. Walk me through what happens between `csc` compiling your code and the CPU executing an instruction.**
-**A:** Roslyn compiles C# to IL plus metadata in a PE assembly — that is what NuGet ships, and it is CPU-agnostic. At runtime the CLR loads the assembly, builds a `MethodTable` per type, and points every method slot at a pre-JIT stub. The first call to a method hits that stub, the JIT compiles that method's IL to native code for the actual CPU, and the slot is patched so later calls jump straight to native code. So IL is compiled twice — once ahead of time by the compiler, once per method at runtime — which is why the first call to anything is slower, and why startup performance and steady-state performance are genuinely separate problems.
-*Follow-up: Where does ReadyToRun fit into that pipeline, and why doesn't it eliminate the JIT entirely?*
+**Q2. What's wrong with this?**
+```csharp
+public IActionResult Process(Order o) {
+    var result = _engine.Run(o);
+    GC.Collect();
+    return Ok(result);
+}
+```
+**A:** It forces a full blocking collection on every request. You pause all threads, throw away the collector's tuning heuristics, and make whatever latency problem prompted it measurably worse. `GC.Collect()` has a couple of legitimate uses — a batch job that just dropped a huge graph and is about to go idle, a benchmark baseline — and none of them are in a request path.
+*Follow-up: Someone added it because memory was climbing. What should they have looked at instead?*
 
-**Q2. Someone says "value types go on the stack, reference types go on the heap." Correct them.**
-**A:** That is a rule of thumb about typical locals, not a specification. A value type lives wherever its storage lives: a `struct` field inside a class lives on the heap with its owner, a `struct` captured by a closure or held across an `await` ends up on the heap, and a boxed value type is on the heap by definition. The specification only says a value type's value is copied on assignment; the stack/heap split is a CLR implementation detail that the JIT is free to change. It matters because engineers who believe the myth reach for `struct` expecting zero allocation and get none of the benefit when the struct is a field of a heap object.
-*Follow-up: Given a `struct` containing a reference-type field, where does each part live, and what does that mean for the collector's scanning cost?*
+**Q3. Does setting a variable to null make the object collectable?**
+**A:** Not by itself — it's one less reference, but the object is collectable when nothing reachable from a root points at it. Roots are live stack frames and registers, statics, GC handles, and the finalization queue. In practice, nulling a local is usually pointless because the JIT already knows the local is dead. What actually keeps objects alive is a root you forgot: a static dictionary, an event subscription, a captured `this`.
+*Follow-up: Can an object be collected while a method that declared it is still running?*
 
-**Q3. What actually makes an object eligible for collection?**
-**A:** Unreachability from any root — not going out of scope, not being set to `null`, not being disposed. Roots are the stack slots and registers of live frames, static fields, GC handles (including pinned, weak and dependent handles), and the finalization queue. If the collector cannot reach an object by walking references from those roots, its memory is reclaimable. The practical consequence is that one forgotten root — a static dictionary, an event subscription, a captured `this` — keeps the entire object graph beneath it alive no matter how carefully you null out fields.
-*Follow-up: In a Release build, can an object be collected while a method that declared it is still executing?*
+**Q4. Why is a gen0 collection cheap?**
+**A:** Because the cost is in the survivors, not the garbage. Gen0 is small and contiguous; the collector marks what's live, compacts it, and resets the allocation pointer. Dead objects cost nothing — they're not touched. Typically only a few percent of gen0 survives. The counterintuitive consequence: allocating lots of short-lived objects is cheap, and allocating objects that *survive* is what actually costs you.
+*Follow-up: So what's "premature promotion" and why should I care?*
 
-**Q4. Why is a gen0 collection cheap, and what does that tell you about how to write allocating code?**
-**A:** Gen0 is a small contiguous region, and the collector's cost is proportional to the *survivors*, not the garbage — dead objects cost nothing to reclaim because collection marks and compacts survivors and then resets the allocation pointer. The generational hypothesis is that most objects die young, so a gen0 sweep typically survives a few percent of what was allocated. The implication is the opposite of most people's instinct: allocating many short-lived objects is comparatively cheap, while allocating objects that *survive* — caches, buffers held across an await, anything promoted — is what actually costs. Optimising away allocations that were dying in gen0 anyway is usually wasted engineering.
-*Follow-up: What is "premature promotion," and what does it do to your gen2 collection rate?*
+**Q5. This runs in a loop on a hot path. What's the problem?**
+```csharp
+var buffer = new byte[100_000];
+```
+**A:** 100,000 bytes is over the 85,000-byte threshold, so every one of those goes on the Large Object Heap. The LOH is only collected with gen2, and by default it's swept rather than compacted — so you get gen2 collections far more often than you should, plus fragmentation as differently-sized buffers leave holes. Pool the buffer instead of allocating per iteration.
+*Follow-up: LOH is 3 GB with 400 MB live. Would you turn on LOH compaction?*
 
-**Q5. What is the Large Object Heap and why does it get separate treatment?**
-**A:** Allocations of 85,000 bytes or more go to the LOH, which is collected only as part of a gen2 collection and, by default, is swept rather than compacted because relocating large blocks is expensive. Memory is therefore reclaimed but the free space is left as holes, so a workload repeatedly allocating differently-sized large buffers fragments the LOH and grows the process working set even while live bytes stay flat. You can opt into compaction via `GCSettings.LargeObjectHeapCompactionMode`, but that is a stop-the-world defragmentation, not something to leave enabled. This is precisely why large-buffer workloads want pooled, fixed-size buffers rather than a fresh allocation per request.
-*Follow-up: Your LOH is 3 GB with 400 MB live. Before reaching for compaction, what would you change in the application?*
+**Q6. Review this.**
+```csharp
+class FileCache : IDisposable {
+    private FileStream _fs;
+    public void Dispose() => _fs?.Dispose();
+    ~FileCache() { _fs?.Dispose(); }
+}
+```
+**A:** Two problems. The finalizer shouldn't touch `_fs` at all — by the time it runs, that `FileStream` may already have been finalized, so you're calling into a disposed object. And `Dispose` doesn't call `GC.SuppressFinalize(this)`, so even correctly-disposed instances stay on the finalization queue, survive an extra collection and get promoted. This type owns a *managed* disposable, not an unmanaged handle, so it shouldn't have a finalizer at all.
+*Follow-up: When would a finalizer be justified, and what would you use instead?*
 
-**Q6. Describe what the collector actually does during a collection.**
-**A:** It suspends managed threads at safe points, marks by walking the object graph from roots, then plans the collection: reclaim dead space and, in the compacting generations, relocate survivors and fix up every reference to them. Compaction is what keeps allocation a pointer bump instead of a free-list search — and it is also why references must be rewritten and why pinning hurts. Survivors are promoted to the next generation. Background GC lets most gen2 marking run concurrently with application threads, so the stop-the-world portion is far shorter than a blocking gen2, but it is never zero.
-*Follow-up: What is a safe point, and what happens if a thread sits in a tight loop that contains none?*
+**Q7. Workstation GC or Server GC?**
+**A:** Server GC gives you a heap and a collector thread per core and collects in parallel — much better allocation throughput, and it's the ASP.NET Core default. Workstation is one heap, collects on the allocating thread, uses much less memory. The decision is per workload, not per organisation: Server GC in a 512 MB container with a 1-CPU limit is how you get an OOM with a mostly-empty heap, because it sizes heaps against cores.
+*Follow-up: You're in a 1-CPU, 512 MB pod. What do you actually configure?*
 
-**Q7. `IDisposable` and finalizers both sound like "cleanup." What is each actually for?**
-**A:** `IDisposable` is deterministic release of *non-memory* resources — file handles, sockets, DB connections, native allocations — at a moment you choose, usually via `using`. A finalizer is the collector's non-deterministic safety net for when someone forgot to dispose; it runs on a dedicated finalizer thread at an unpredictable time after collection. Neither frees managed memory: `Dispose` does not deallocate, and the object is still collected normally. The correct pattern is `Dispose` for the deterministic path, a finalizer only when the type directly owns unmanaged resources, and `GC.SuppressFinalize(this)` inside `Dispose` so the object stops paying the finalization tax.
-*Follow-up: Why does adding a finalizer make an object more expensive even when it is always disposed correctly?*
+**Q8. Ops says the process is using 4 GB. Your memory profiler shows a 900 MB managed heap. Who's wrong?**
+**A:** Neither. Managed heap is one component of working set. The rest is native: JIT code heaps, thread stacks at 1 MB reserved each, native buffers from libraries and drivers, memory-mapped assemblies, and heap segments the GC has freed logically but kept committed for reuse. Fragmentation widens it further. First diagnostic step is deciding whether you're chasing managed bytes, native bytes, or committed-but-unused — three different problems, three different fixes.
+*Follow-up: On Linux, what would you look at to split those three apart?*
 
-**Q8. What is a GC root, and why does that definition matter more than "scope"?**
-**A:** A root is any reference the collector treats as unconditionally live: static fields, live stack frames and registers, GC handles, and objects queued for finalization. Everything else is live only transitively. This matters because almost no real .NET "memory leak" is a leak in the C++ sense — nothing is unreclaimable — it is an unintended root holding a graph alive. Framing diagnosis as "find the root path" rather than "find the leak" is what makes dump analysis tractable, because `!gcroot` answers exactly that question and nothing else does.
-*Follow-up: How do weak references change this picture, and where would you legitimately use one?*
+**Q9. How many allocations here?**
+```csharp
+object o = 42;
+int i = (int)o;
+```
+**A:** One — boxing the `int` puts a heap object with the value in it. The unbox is a type check plus a copy, no allocation. It's trivial once; it matters when it's in a loop or a hot path, which is exactly what `List<int>` versus the old `ArrayList` was about: one boxes every element and scatters them across the heap, the other stores them inline in an `int[]`.
+*Follow-up: Where does boxing sneak in without an explicit cast?*
 
-**Q9. Workstation GC vs Server GC — what is the real difference, and what does each optimise for?**
-**A:** Workstation GC uses a single heap and collects on the allocating thread, optimising for low pause and low memory on a machine shared with other applications. Server GC creates a heap and dedicated GC thread per core and collects in parallel — much higher allocation throughput, at the cost of substantially more memory and CPU consumed in bursts. Server GC is the ASP.NET Core default because throughput is the goal, but it interacts badly with small containers: N heaps sized for N cores inside a 512 MB pod is a common route to an OOM with a mostly-empty heap. The choice belongs per workload, not per organisation.
-*Follow-up: You run Server GC in a pod limited to 1 CPU and 512 MB. What specifically goes wrong, and what would you configure instead?*
-
-**Q10. Ops reports the process using 4 GB but your profiler shows a 900 MB managed heap. Explain the gap.**
-**A:** Managed heap size is only one component of working set. The rest is native: JIT code heaps and loader heaps, thread stacks (1 MB reserved each by default, so a thread-pool explosion shows up here), native buffers from libraries and drivers, memory-mapped assemblies, and memory the GC has freed logically but retained as committed segments for reuse. Fragmentation widens the gap further, since committed pages stay committed even when the live set shrinks. The first diagnostic move is therefore to establish whether you are chasing managed bytes, native bytes, or retained-but-unused committed bytes — the three have completely different fixes.
-*Follow-up: Which counters or tools would you use to split those three apart on Linux, and in what order?*
+**Q10. What actually happens during a collection?**
+**A:** Threads are suspended at safe points, the collector marks by walking the object graph from roots, then reclaims dead space — and in the compacting generations, relocates survivors and fixes up every reference to them. Compaction is why allocation is just a pointer bump instead of a free-list search, and it's also why pinning hurts. Survivors get promoted. Background GC does most of the gen2 marking concurrently, so the stop-the-world part is much shorter — but never zero.
+*Follow-up: What's a safe point, and what happens if a thread is in a loop that has none?*
 
 ---
 
 ## 3. Intermediate (10 Q&A)
 
+**Q1. Memory climbs over 48 hours and a nightly restart "fixes" it. Where do you start?**
+**A:** Two heap snapshots a few hours apart under steady load, then diff them. A real retention leak shows a type whose instance count grows monotonically with a consistent root path — `!gcroot` names it. Fragmentation looks different: live bytes flat, committed heap growing, free space scattered, usually in the LOH. An oversized cache looks like a leak but the root path ends in something you deliberately wrote. What I wouldn't do is open the "largest objects" view — that tells you what's big, not what's retained by mistake.
+*Follow-up: The diff shows a million strings rooted in a `ConcurrentDictionary`. Bug or working cache?*
 
-**Q1. A service's memory climbs over 48 hours and is "fixed" by a nightly restart. How do you separate a real retention leak from fragmentation from an oversized cache?**
-**A:** Take two heap snapshots hours apart under steady load and diff them — a retention leak shows a type whose instance count grows monotonically with a consistent root path, which `!gcroot` or a snapshot diff will name outright. Fragmentation shows the opposite signature: live bytes flat, committed heap growing, free space scattered between survivors, usually concentrated in the LOH. An unbounded cache looks like a leak but its root path terminates in something you deliberately wrote, and growth tracks distinct keys rather than request count. The classic mistake is opening the profiler's "largest objects" view, which tells you what is big — not what is retained unintentionally, which is a different question.
-*Follow-up: The diff shows a million strings rooted in a `ConcurrentDictionary`. How do you decide whether that is a bug or a correct cache with the wrong eviction policy?*
+**Q2. Gen2 collections went from once a minute to once every three seconds after a release. No obvious memory growth. What happened?**
+**A:** Premature promotion — objects that used to die in gen0 now survive and accumulate until gen2 pressure forces a full collection. Usual causes: something is held slightly longer, an object graph is now reachable from a longer-lived scope, or allocation sizes crossed the LOH threshold. Changing a DI registration from scoped to singleton does this instantly. I'd compare gen0/gen1/gen2 counts and promoted bytes across the release rather than total memory — the ratio is the signal, the total is noise.
+*Follow-up: How would you catch a scoped-to-singleton change in review?*
 
-**Q2. Gen2 collections have gone from once a minute to once every three seconds after a release. What causes that, and what do you look at?**
-**A:** Almost always premature promotion: objects that used to die in gen0 now survive it, get promoted, and accumulate until gen2 pressure forces full collections. Typical causes are a new cache or buffer held slightly too long, an object graph now reachable from a longer-lived scope — changing a DI registration from scoped to singleton does this instantly — or an increase in allocation *size* pushing objects onto the LOH, which is gen2 by definition. I would compare gen0/gen1/gen2 collection counts and promoted bytes across the release boundary rather than looking at total memory, because the ratio between generations is the signal and the total is noise.
-*Follow-up: How exactly does a scoped-to-singleton change produce this, and how would you catch that class of change in code review?*
+**Q3. Every deploy, P99 is bad for the first minute, then settles. Why, and what do you do about it?**
+**A:** Tiered compilation. Methods start at tier 0 — compiles fast, produces slow code — and only get re-jitted at tier 1 after roughly thirty calls plus a delay. Add cold caches and cold connection pools and the first thousand requests genuinely run different machine code. Options in order: don't take traffic until a warm-up completes, enable ReadyToRun so first-call code is much better, tune the tiering knobs, or go NativeAOT if the profile justifies it. Slowing the rollout hides it rather than fixing it.
+*Follow-up: ReadyToRun helps startup but can be slower at steady state. Why?*
 
-**Q3. Why can storing a reference into a long-lived object cost more than storing one into a freshly-allocated object?**
-**A:** Writing a reference field goes through a write barrier so the runtime can record that an older-generation object now points into a younger one — that is the card table. Without it, every gen0 collection would have to scan all of gen2 looking for cross-generational references; with it, only dirtied cards are scanned. The cost is a small extra store per reference write plus the scanning cost of a graph that constantly re-points from gen2 into gen0. In practice this is why a large mutable long-lived structure whose values are continuously replaced with newly-allocated objects can inflate gen0 pause times even though gen0 itself is small.
-*Follow-up: How does this change your thinking about a large `Dictionary<string, T>` refreshed in place versus rebuilt and swapped atomically?*
+**Q4. Dump shows 40,000 objects on the finalization queue and memory climbing. Diagnosis?**
+**A:** The finalizer thread is blocked or falling behind. There's one of them and it runs finalizers serially, so a single finalizer waiting on a lock or a network call stalls everything queued behind it — and all those objects, plus everything they reference, are rooted by the queue. Look at the finalizer thread's stack in the dump; that names it immediately. Fix is finalizers that do nothing but release unmanaged handles, and actually calling `Dispose` so `SuppressFinalize` keeps things off the queue.
+*Follow-up: Why does a finalizable object survive at least two collections?*
 
-**Q4. After every deploy, P99 latency is bad for 60–90 seconds and then settles. What is happening, and what are the options?**
-**A:** That is JIT warm-up interacting with tiered compilation: methods start at tier 0, which compiles quickly but produces slow code, and are only recompiled at tier 1 after roughly thirty calls plus a background delay, with OSR promoting long-running loops separately. Combine that with cold caches and cold connection pools and the first thousand requests are literally executing different machine code from steady state. The options, in escalating order: keep the instance out of the load balancer until a readiness warm-up completes; enable ReadyToRun so first-call code quality is far better; tune the tiering knobs; or move to NativeAOT if the workload justifies it. The wrong "fix" is slowing the rollout, which hides the symptom rather than removing it.
-*Follow-up: ReadyToRun improves startup but can be slower at steady state than fully-tiered JIT. Why, and does that change your recommendation?*
+**Q5. Where does pinning come from in a typical web service, and how would you know it's your problem?**
+**A:** Mostly invisibly — buffers handed to sockets and file I/O for the duration of an async operation, plus `fixed` blocks and `GCHandle`. A pinned object can't be relocated, so the compacting collector works around it and leaves holes; one long-lived pin in the middle of the ephemeral segment does damage out of all proportion to its size. The signature is heap size growing while live bytes stay flat, with fragmentation in gen0/gen1 rather than the LOH. Pool the I/O buffers so you pin a small fixed set once.
+*Follow-up: From a dump, how do you distinguish pinning from ordinary fragmentation?*
 
-**Q5. Is there ever a legitimate reason to call `GC.Collect()` in production?**
-**A:** Rarely, and every legitimate case is "I know something the collector cannot." A batch process that has just finished a phase, dropped hundreds of megabytes of graph, and is entering a long quiet period is one; a benchmark harness establishing a clean baseline is another; a deliberate one-shot LOH compaction during a maintenance window is a third. What makes them legitimate is that they sit outside the request path and are followed by a period where a pause costs nothing. Inside request handling it is always wrong: it forces a full blocking collection and discards the tuning heuristics the collector built up, typically worsening the exact symptom it was added to fix.
-*Follow-up: If you do call it deliberately, which overload arguments would you pass, and why does `GC.WaitForPendingFinalizers` usually need to follow?*
+**Q6. Pod gets OOMKilled at a 1 GB limit. The dump shows a 300 MB managed heap. Explain.**
+**A:** The limit is on total RSS, not the managed heap, so you're looking at native memory or committed-but-unused pages. Candidates: Server GC committing per-core heaps sized against the host's cores rather than the cgroup limit, thread stacks from an exploded pool, native memory from a compression or crypto or database library, or LOH fragmentation inflating committed pages. I'd compare RSS against GC committed bytes over time and check the runtime is honouring the cgroup limit. "The heap is small so it isn't memory" is the trap here.
+*Follow-up: What would you set for a 1 GB, 2-core pod?*
 
-**Q6. Memory is growing and a dump shows tens of thousands of objects on the finalization queue. What do you conclude?**
-**A:** The finalizer thread is blocked or falling behind. There is one finalizer thread and it runs finalizers serially, so a single finalizer that blocks — on a lock, on a network call, on a `Dispose` that waits — stalls every finalizable object behind it permanently. Those objects are all rooted by the queue, along with everything they reference, so memory grows with no bug in your allocation code at all. Diagnosis is to read the finalizer thread's stack in the dump; the fix is to make finalizers do nothing but release unmanaged handles, and to ensure `Dispose` is actually called so `SuppressFinalize` keeps objects off the queue in the first place.
-*Follow-up: Why does a finalizable object survive at least two collections even when it becomes unreachable immediately?*
+**Q7. A team wants to add object pooling to reduce GC pressure. When is that right and when does it backfire?**
+**A:** Right for large or expensive-to-construct objects where the alternative is repeated LOH allocation — big buffers, parsers, connections. It backfires on small short-lived objects: you take something that was dying free in gen0 and make it survive in gen2, adding write-barrier traffic and card scanning while removing the collector's cheapest case. Pools also bring their own bugs — objects returned while still referenced, state leaking between tenants, unbounded pools that become the leak they were meant to prevent.
+*Follow-up: When would you write your own pool instead of using `ArrayPool<T>.Shared`?*
 
-**Q7. Where does pinning come from in a typical service, and what damage does it do?**
-**A:** From `fixed` blocks, `GCHandle.Alloc(..., Pinned)`, and — most often invisibly — buffers handed to P/Invoke, sockets and file I/O for the duration of an async operation. A pinned object cannot be relocated, so the compacting collector must work around it and leave holes; one long-lived pin in the middle of the ephemeral segment does damage far out of proportion to its size. The signature is heap size growing while live bytes stay stable, with fragmentation concentrated in gen0/gen1. The modern mitigation is the Pinned Object Heap for deliberately-pinned buffers, plus pooling long-lived I/O buffers so you pin a small fixed set once instead of a fresh object per request.
-*Follow-up: How would you confirm pinning is the cause rather than ordinary fragmentation, working only from a dump?*
+**Q8. Why is this potentially more expensive than it looks?**
+```csharp
+// _cache is a long-lived singleton dictionary
+_cache[key] = new Result(...);
+```
+**A:** Storing a reference into an older-generation object goes through a write barrier, which records that gen2 now points into gen0 — the card table. Without it, every gen0 collection would have to scan all of gen2. With it, only dirtied cards get scanned. The cost is a small extra store per write plus the scanning of a graph that constantly re-points from old to new. A big long-lived cache whose values are continuously replaced pushes up gen0 pause times even though gen0 is small.
+*Follow-up: Does rebuilding the dictionary and swapping it atomically change that picture?*
 
-**Q8. Name the two most common real-world causes of unintended retention in a .NET service, and how you'd prove each in a dump.**
-**A:** Static or singleton collections that only ever grow, and event subscriptions where the publisher outlives the subscriber — subscribing to a long-lived singleton's event from a per-request object roots that object and its whole graph forever. Both survive code review because the offending line looks entirely ordinary. In a dump I would run `!dumpheap -stat` to find the type with an implausible instance count, take a few addresses, and run `!gcroot`, which names the static field or the delegate's invocation list directly. The generalisable lesson is that the root path, not the object, identifies the bug.
-*Follow-up: What patterns eliminate the event-handler case structurally, rather than relying on people remembering to unsubscribe?*
+**Q9. Is there ever a good reason to call `GC.Collect()`?**
+**A:** Rarely, and every good reason is "I know something the collector can't". A batch job that's finished a phase, dropped hundreds of megabytes, and is about to sit idle. A benchmark harness establishing a baseline. A deliberate LOH compaction in a maintenance window. What makes those legitimate is that they're off the request path and followed by a period where a pause costs nothing. Inside request handling it's always wrong.
+*Follow-up: If you do call it, what arguments would you pass, and why does `WaitForPendingFinalizers` usually follow?*
 
-**Q9. A pod is `OOMKilled` but the dump shows only a 300 MB managed heap against a 1 GB limit. What is your hypothesis?**
-**A:** The limit applies to the container's total RSS, not the managed heap, so the killer is native memory or committed-but-unused pages. The usual suspects are Server GC committing per-core heaps sized against the host's core count rather than the cgroup limit, thread stacks from an exploded thread pool, native memory from a library (compression, crypto, ML runtimes, database drivers), or LOH fragmentation inflating committed pages. I would compare RSS against GC committed bytes over time, then verify the runtime is honouring the cgroup limit and consider setting `GCHeapHardLimit` explicitly. "The heap is small, so it isn't memory" is the trap this question exists to catch.
-*Follow-up: How does the runtime decide its heap budget inside a container, and what would you set for a 1 GB, 2-core pod?*
-
-**Q10. Someone proposes object pooling to reduce GC pressure. When does it genuinely help, and how does it backfire?**
-**A:** It helps when objects are large or expensive to construct and the alternative is repeated LOH allocation — big buffers, parsers, connections. It backfires for small short-lived objects, because you take something that was dying free in gen0 and make it survive indefinitely in gen2, adding write-barrier traffic and card scanning while removing the collector's cheapest case entirely. Pools also introduce their own bug class: objects returned while still referenced, state leaking between tenants (a real security issue in multi-tenant systems), and unbounded pools that become the leak they were meant to prevent. My rule is to pool only what is measurably expensive, always bound the pool, and always clear state on return.
-*Follow-up: `ArrayPool<T>.Shared` versus a custom pool — what would push you to write your own?*
+**Q10. What's the difference between a first-chance exception and an unhandled one, from a memory point of view?**
+**A:** Different question than most people expect — the memory angle is that exception objects and their stack traces are allocations, so a path throwing and catching thousands of times a second is burning gen0 and CPU invisibly, because none of it reaches unhandled-exception telemetry. Runtime counters for exception rate against request rate expose it. It's a common, entirely silent tax in code that uses exceptions for control flow or sits under a library that does.
+*Follow-up: How would you find which exception type dominates that rate?*
 
 ---
 
 ## 4. Expert / Architect (10 Q&A)
 
+**Q1. You own a pricing service with a hard 5 ms P99 and GC pauses are blowing it. Walk me through how you'd approach it.**
+**A:** Measure the pause distribution and attribute it first — a P99 destroyed by occasional 50 ms blocking gen2s is a completely different problem from one eroded by frequent 1 ms gen0s, and they have opposite fixes. Tuning goes first because it's cheap to try: background GC, heap count, conserve-memory settings can buy an order of magnitude on the tail. Eliminating hot-path allocation is the durable fix but it's expensive engineering, so profiling has to prove the path is allocation-dominated rather than assume it. Architecture — sharding so each process holds a smaller heap, or moving the latency-critical path off the managed heap — comes last, and specifically when the *live set* is the problem, because gen2 pause scales with live objects to trace, not with allocation rate.
+*Follow-up: You decide to shard. How do you size each shard's heap, and what does that do to fleet cost?*
 
-**Q1. You own a pricing service with a hard 5 ms P99 and GC pauses are blowing it. How do you choose between tuning the collector, eliminating allocation, and changing the architecture?**
-**A:** First measure the pause *distribution* and attribute it — a P99 destroyed by occasional 50 ms blocking gen2s is a different problem from one eroded by frequent 1 ms gen0s, and they have opposite fixes. Tuning (background GC, heap count, conserve-memory settings) can buy an order of magnitude on the tail and costs almost nothing to try, so it goes first. Eliminating hot-path allocation is the durable fix but is expensive engineering that only pays if profiling proves the path is allocation-dominated. Architecture — sharding so each process holds a smaller heap, or moving the latency-critical path off the managed heap — comes last, and I would reach for it specifically when the *live set* is the problem, because gen2 pause scales with live objects to trace rather than with allocation rate.
-*Follow-up: You choose to shard. How do you size each shard's heap, and what does that decision do to fleet cost?*
+**Q2. How would you set GC configuration policy across a hundred services?**
+**A:** Publish a default and a rule for deviating rather than a mandate. Default for request-serving services is Server GC with background collection and an explicit heap hard limit derived from the container limit; default for sidecars, jobs and CLI tools is Workstation, because heap-per-core on a tiny container is pure waste. Deviating needs evidence — a measured pause problem or an unusual live-set-to-allocation ratio — recorded in an ADR so the reasoning outlives the engineer. I'd also evaluate DATAS for variable-load services since it adapts heap count instead of committing per-core up front, but roll it per service tier with measurement, not as a fleet-wide flag flip.
+*Follow-up: Who owns that policy — platform or each team — and what stops it rotting?*
 
-**Q2. How would you set GC configuration policy across a fleet of a hundred .NET services?**
-**A:** Not uniformly — I would publish a default plus a documented rule for deviating, rather than a single mandate. The default for request-serving services is Server GC with background collection and an explicit heap hard limit derived from the container limit; the default for sidecars, jobs and CLI tools is Workstation GC, because heap-per-core on a tiny container is pure waste. Deviation requires evidence — a measured pause problem or an unusual live-set-to-allocation ratio — recorded in an ADR so the reasoning survives the engineer. I would also evaluate DATAS for services with variable load, since it adapts heap count dynamically instead of committing per-core heaps up front, but roll it out per service tier with measurement rather than as a fleet-wide flag flip, because it trades some throughput for a better memory profile.
-*Follow-up: Who owns that policy — the platform team or each service team — and what stops it from rotting within a year?*
-
-**Q3. Make the organisational case for or against NativeAOT across your service estate.**
-**A:** NativeAOT removes JIT and tiering entirely: startup drops to milliseconds, footprint falls substantially, and the artefact carries no runtime dependency — genuinely transformative for serverless, CLI tools and anything that scales to zero. The costs are structural rather than incremental: no runtime code generation, so reflection-heavy serialisation, dynamic proxies, EF Core's query pipeline and most interception-based DI and AOP either break or require source-generator replacements; diagnostics change; cross-compilation complicates the build. So my position is per workload — adopt where startup dominates cost, and treat migrating a large reflection-heavy service as a multi-quarter project justified by measured numbers, not by a benchmark chart. The real organisational risk is a half-finished migration that leaves two build models to maintain indefinitely.
-*Follow-up: For a function-style workload where startup dominates, what would you measure to prove NativeAOT actually paid for itself?*
+**Q3. Make the case for or against NativeAOT across your estate.**
+**A:** It removes JIT and tiering entirely: startup in milliseconds, much smaller footprint, no runtime dependency — genuinely transformative for serverless, CLI tools, anything scaling to zero. The costs are structural rather than incremental: no runtime code generation, so reflection-heavy serialisation, dynamic proxies, EF Core's query pipeline and most interception-based DI either break or need source-generator replacements. So: adopt where startup dominates cost, and treat migrating a large reflection-heavy service as a multi-quarter project justified by measured numbers rather than a benchmark chart. The real organisational risk is a half-finished migration leaving two build models to maintain forever.
+*Follow-up: For a function-style workload, what would you measure to prove it paid for itself?*
 
 **Q4. Finance wants a 30% cut in fleet memory. How do you approach it without causing an incident?**
-**A:** Memory limits interact with the collector nonlinearly: the GC expands its budget to fill available space, so a service that "uses 3 GB" may run perfectly at 1.5 GB with a higher collection rate and slightly more CPU. The method is to establish each service's actual live set — not working set — under peak load, set a heap hard limit above it with headroom, and observe the trade as collection frequency and CPU rise while memory falls. I would do this per service tier behind a canary with explicit rollback triggers on pause-time and CPU SLOs, never as a global limit change. The point to communicate upward is that this converts a memory cost into a CPU cost, so the saving is only real where CPU headroom exists.
-*Follow-up: Which services would you exclude from this exercise up front, and on what evidence?*
+**A:** The GC expands its budget to fill available space, so a service "using 3 GB" may run fine at 1.5 GB with a higher collection rate and slightly more CPU. Method: establish each service's actual *live set* under peak load, set a heap hard limit above it with headroom, and watch the trade as collection frequency and CPU rise while memory falls. Per service tier, behind a canary, with explicit rollback triggers on pause-time and CPU SLOs — never a global limit change. The thing to say upward is that this converts a memory cost into a CPU cost, so the saving is only real where CPU headroom exists.
+*Follow-up: Which services would you exclude up front, and on what evidence?*
 
-**Q5. You are migrating a large .NET Framework service to .NET 8. Which runtime-level behaviour changes would you plan for specifically?**
-**A:** GC and JIT behaviour differ enough to invalidate existing tuning: default settings change, segment sizing differs, background GC behaves differently, and configuration moves from `app.config`'s `gcServer` to `runtimeconfig.json` and environment variables — silently losing an old setting is a classic migration surprise. Tiered compilation is on by default, so warm-up profiles change even where steady state improves. The JIT is significantly better at inlining, devirtualisation and struct promotion, which means genuine throughput gains but also that micro-optimisations written against the old JIT may now be pessimisations. I would shadow production traffic in a parallel run and compare GC counters and full latency distributions rather than averages, treating every existing performance hack as a hypothesis to re-verify.
-*Follow-up: The migration improves throughput by 30% but P99 gets worse. What is your first hypothesis?*
+**Q5. You're migrating a large .NET Framework service to .NET 8. What runtime behaviour would you plan for specifically?**
+**A:** GC and JIT behaviour differ enough to invalidate existing tuning — defaults change, segment sizing differs, background GC behaves differently, and configuration moves from `app.config`'s `gcServer` to `runtimeconfig.json` and environment variables, so silently losing an old setting is a classic surprise. Tiered compilation is on by default, so warm-up profiles change even where steady state improves. The JIT is much better at inlining, devirtualisation and struct promotion, which means real gains but also that micro-optimisations written against the old JIT may now be pessimisations. I'd shadow production traffic and compare GC counters and full latency distributions, not averages, and treat every existing perf hack as a hypothesis to re-verify.
+*Follow-up: Throughput improves 30% but P99 gets worse. First hypothesis?*
 
-**Q6. In a multi-tenant service, one tenant's heavy requests cause GC pauses that hurt every tenant. How do you address that architecturally?**
-**A:** This is a blast-radius problem, not a GC problem — the collector is process-wide, so in-process controls (rate limits, quotas, separate schedulers) reduce the rate but cannot stop one allocation burst from triggering a collection that stops every tenant's threads. The durable answers are process- or pod-level isolation: cell-based partitioning where a tenant maps to a cell, or dedicated capacity for the heaviest tenants, so the pause radius equals the isolation boundary. In-process mitigations remain worthwhile as defence in depth — bounding per-request allocation, streaming large payloads rather than buffering, rejecting oversized requests at the edge. I would frame the decision to stakeholders explicitly as choosing a blast radius and paying for it in infrastructure, because that is the actual trade being made.
-*Follow-up: How do you decide which tenants justify dedicated cells, and what stops that list from growing forever?*
+**Q6. Multi-tenant service, one tenant's heavy requests cause GC pauses that hurt everyone. What do you do?**
+**A:** This is a blast-radius problem, not a GC problem — the collector is process-wide, so rate limits and quotas reduce the *rate* but can't stop one allocation burst from triggering a collection that stops every tenant's threads. The durable answers are process- or pod-level isolation: cell-based partitioning with a tenant mapped to a cell, or dedicated capacity for the heaviest tenants, so the pause radius equals the isolation boundary. In-process mitigations still matter as defence in depth — bounding per-request allocation, streaming large payloads rather than buffering, rejecting oversized requests at the edge. I'd frame it to stakeholders as choosing a blast radius and paying for it in infrastructure, because that's the actual trade.
+*Follow-up: How do you decide which tenants justify dedicated cells, and stop that list growing forever?*
 
-**Q7. How do you prevent allocation and memory regressions across many teams, rather than discovering them in production?**
-**A:** Detection must be automated and owned, because no review process catches allocation regressions reliably. Concretely: BenchmarkDotNet with `MemoryDiagnoser` on genuinely hot paths, run in CI against a committed baseline with a failure threshold on allocated-bytes-per-operation; GC counters exported from every service with alerts on rate-of-change rather than absolute values; and load tests that assert on memory trajectory rather than peak. The organisational half matters more than the tooling — the gates belong in the shared pipeline template so teams inherit them by default, and alerts must page the owning team rather than a central performance group, or that group becomes the bottleneck for everyone else's regressions.
-*Follow-up: Microbenchmark gates are notoriously noisy in CI. What keeps them from being disabled within a quarter?*
+**Q7. How do you stop allocation regressions reaching production across many teams?**
+**A:** Automate it, because no review process catches allocation regressions reliably. BenchmarkDotNet with `MemoryDiagnoser` on genuinely hot paths, run in CI against a committed baseline with a failure threshold on allocated-bytes-per-operation. GC counters exported from every service with alerts on rate-of-change rather than absolute values. Load tests asserting on memory trajectory rather than peak. The organisational half matters more than the tooling: the gates belong in the shared pipeline template so teams inherit them, and alerts must page the owning team, or a central performance group becomes the bottleneck for everyone's regressions.
+*Follow-up: Microbenchmark gates are notoriously noisy in CI. What stops them being disabled within a quarter?*
 
-**Q8. What GC telemetry would you standardise across every service, and what would you actually alert on?**
-**A:** Emit gen0/gen1/gen2 collection counts, pause-duration distribution, allocation rate, promoted bytes, committed versus live bytes, LOH size, and time-in-GC percentage — as rates and distributions, since absolute memory is the least informative of them. I would alert on gen2 collection *rate* rising, on P99 pause exceeding the service's share of its latency budget, and on committed-versus-live divergence, which is the fragmentation signature. I would deliberately not alert on working set crossing a threshold, because that fires constantly on healthy services and trains people to ignore the channel. The value of standardising is cross-service comparability during an incident: when latency degrades you want "is this GC?" answered in seconds from a shared dashboard, not by attaching a profiler.
-*Follow-up: A service reports 8% time-in-GC. Is that a problem? What else do you need to know before answering?*
+**Q8. What GC telemetry would you standardise, and what would you alert on?**
+**A:** Emit gen0/1/2 counts, pause-duration distribution, allocation rate, promoted bytes, committed versus live, LOH size, time-in-GC — all as rates and distributions, since absolute memory is the least informative. Alert on gen2 collection *rate* rising, on P99 pause exceeding the service's share of its latency budget, and on committed-versus-live divergence, which is the fragmentation signature. Deliberately don't alert on working set crossing a threshold — it fires on healthy services and trains people to ignore the channel. The point of standardising is that during an incident you want "is this GC?" answered in seconds from a shared dashboard, not by attaching a profiler.
+*Follow-up: A service shows 8% time-in-GC. Problem or not?*
 
-**Q9. When would you conclude that a component should not use the managed heap at all?**
-**A:** When the live set is both large and long-lived, because gen2 pause cost scales with the number of live objects to trace — a 40 GB in-memory index of small objects is pathological for any tracing collector regardless of tuning. The alternatives are off-heap storage in native memory or memory-mapped files behind a thin managed accessor, restructuring the data as large arrays of value types (few objects, many bytes, cheap to trace), or moving it out of process into a purpose-built store. I would try the value-type-array restructuring first because it keeps the code managed and safe while cutting object count by orders of magnitude, and treat true off-heap storage as a last resort since it reintroduces manual lifetime management and the exact bug class the CLR exists to eliminate.
-*Follow-up: You go off-heap anyway. What safety mechanisms would you insist on before that ships?*
+**Q9. When would you conclude a component shouldn't use the managed heap at all?**
+**A:** When the live set is both large and long-lived, because gen2 pause cost scales with live objects to trace — a 40 GB in-memory index of small objects is pathological for a tracing collector no matter how you tune it. Alternatives: off-heap in native memory or memory-mapped files behind a thin managed accessor, restructuring as large arrays of value types (few objects, many bytes, cheap to trace), or moving it out of process. I'd try the value-type-array restructuring first because it keeps the code managed and safe while cutting object count by orders of magnitude, and treat true off-heap as a last resort since it reintroduces manual lifetime management and the entire bug class the CLR exists to eliminate.
+*Follow-up: You go off-heap anyway. What safety mechanisms do you insist on before it ships?*
 
-**Q10. A runtime patch upgrade correlates with a production latency regression. How do you handle it, and how do you de-risk runtime upgrades generally?**
-**A:** Establish attribution before accepting the correlation — "it started after the upgrade" frequently turns out to be a coincident config or traffic change, so I would compare GC counters, tiering behaviour and latency distributions across versions on identical traffic. Runtime upgrades do legitimately change JIT codegen and GC heuristics, so a genuine regression is plausible and worth reducing to a minimal reproduction to take upstream. Structurally I de-risk by pinning runtime versions explicitly in images, staging upgrades through a canary tier with performance gates instead of letting them ride along with OS patching, and keeping a rollback path that does not require a rebuild. The governance point is that the runtime is a production-impacting dependency and deserves the same change-management rigour as any library — in a regulated environment that is an audit requirement, not a preference.
-*Follow-up: Your canary tier shows no regression but production does. What differs, and how would you make the canary representative?*
+**Q10. A runtime patch upgrade correlates with a latency regression. How do you handle it, and how do you de-risk runtime upgrades generally?**
+**A:** Establish attribution before accepting the correlation — "it started after the upgrade" is frequently a coincident config or traffic change, so compare GC counters, tiering behaviour and latency distributions on identical traffic. Runtime upgrades do legitimately change JIT codegen and GC heuristics, so a genuine regression is plausible and worth reducing to a minimal reproduction to take upstream. Structurally: pin runtime versions explicitly in images, stage upgrades through a canary tier with performance gates rather than letting them ride along with OS patching, and keep a rollback that doesn't require a rebuild. The governance point is that the runtime is a production-impacting dependency and deserves the same change management as any library — in a regulated environment that's an audit requirement, not a preference.
+*Follow-up: Canary shows no regression, production does. What differs, and how do you make the canary representative?*
 
 ---
 

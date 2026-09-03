@@ -1,6 +1,6 @@
 # Module 148 — Distributed Systems: Storage Engine Internals — LSM-Trees vs. B-Trees & Bloom Filters
 
-> Domain: Distributed Systems | Level: Beginner → Expert | Prerequisite: [[../04-SQL-Server/01-Indexing-Query-Optimization]] (B-tree indexes as SQL Server's on-disk structure — this module makes that structure's trade-offs explicit and compares it against the alternative), [[../14-System-Design/10-Designing-Market-Data-Distribution-Platform]] (the high-volume tick-ingestion workload this module's incident extends), [[03-PACELC-Consistency-Models-SplitBrain]] (the consistency-model vocabulary this module's read-path discussion assumes)
+> Domain: Distributed Systems | Level: Beginner → Expert | Prerequisite: [[../04-SQL-Server/01-Indexing-Query-Execution-Plans]] (B-tree indexes as SQL Server's on-disk structure — this module makes that structure's trade-offs explicit and compares it against the alternative), [[../14-System-Design/10-Designing-Market-Data-Distribution-Platform]] (the high-volume tick-ingestion workload this module's incident extends), [[03-PACELC-Consistency-Models-SplitBrain]] (the consistency-model vocabulary this module's read-path discussion assumes)
 
 >
 > **Scope note:** Third of four modules extending `16-Distributed-Systems` toward a 6-module scope. Full 16-section template; Elite FinTech Interview Panel lens.

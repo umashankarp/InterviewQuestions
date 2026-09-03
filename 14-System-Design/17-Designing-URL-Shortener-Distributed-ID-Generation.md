@@ -1,6 +1,6 @@
 # Module 177 — System Design: Designing a URL Shortener & Distributed Unique ID Generation
 
-> Domain: System Design | Level: Beginner → Expert | Prerequisite: [[01-System-Design-Fundamentals]] (capacity estimation, caching strategies, CAP), [[16-Interview-Execution-Playbook-Estimation-Rubric]] (the 45-minute shape this module is the canonical rehearsal for), [[../08-DynamoDB/01-Core-Concepts-Partition-Keys-Indexes]] (partition-key design and conditional writes, used directly), [[../07-Redis/01-Data-Structures-Caching-Patterns]] (cache-aside, hot-key handling)
+> Domain: System Design | Level: Beginner → Expert | Prerequisite: [[01-System-Design-Fundamentals]] (capacity estimation, caching strategies, CAP), [[16-Interview-Execution-Playbook-Estimation-Rubric]] (the 45-minute shape this module is the canonical rehearsal for), [[../08-DynamoDB/01-Data-Modeling-Partition-Key-Design]] (partition-key design and conditional writes, used directly), [[../07-Redis/01-Data-Structures-Caching-Patterns]] (cache-aside, hot-key handling)
 
 ---
 

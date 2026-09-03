@@ -48,136 +48,161 @@ The signature failure is **thread-pool starvation**: latency climbs across *ever
 
 ## 2. Beginner (10 Q&A)
 
+**Q1. Does `await` block the calling thread?**
+**A:** No. If the operation hasn't already completed, the method returns to its caller and the thread goes back to the pool; the rest of the method is registered as a continuation and resumes later, possibly on a different thread. If the operation *has* already completed, there's no suspension at all — it just carries on synchronously. The distinction that matters is "the method is suspended" versus "the thread is blocked". Only the first one is true.
+*Follow-up: Which thread runs the code after the `await`?*
 
-**Q1. Does `await` block the calling thread? Be precise.**
-**A:** No. If the awaited operation has not already completed, the method returns to its caller, the thread goes back to the pool to do other work, and the rest of the method is registered as a continuation that resumes later — possibly on a different thread. If the operation *has* already completed, there is no suspension at all: execution continues synchronously down the fast path. The distinction that matters is between "the method is suspended" and "the thread is blocked" — the entire value of async rests on the second one being false.
-*Follow-up: Which thread runs the code after the `await`, and what determines that?*
+**Q2. What does the compiler generate for this?**
+```csharp
+async Task<int> GetAsync() {
+    var a = await _http.GetStringAsync(url);
+    return a.Length;
+}
+```
+**A:** A state machine struct implementing `IAsyncStateMachine`, with `a` and the awaiter lifted to fields, and the code split into cases of a `MoveNext` switch. An `AsyncTaskMethodBuilder` owns the returned `Task`. In Release the state machine is a struct, so if the call completes synchronously nothing is allocated — it's boxed onto the heap only the first time it actually suspends and needs to outlive the stack frame.
+*Follow-up: So what specifically triggers the boxing?*
 
-**Q2. What does the compiler actually generate for an `async` method?**
-**A:** It rewrites the method body into a state machine type implementing `IAsyncStateMachine`, with the locals lifted to fields and the code between awaits split into cases of a `MoveNext` switch. A builder (`AsyncTaskMethodBuilder`, `AsyncValueTaskMethodBuilder`, or `AsyncVoidMethodBuilder`) owns the returned task and drives the transitions. In Release builds the state machine is a `struct`, so a method that completes synchronously allocates nothing; it is boxed onto the heap only the first time it genuinely suspends and needs to outlive the stack frame. Understanding that shape is what lets you reason about async allocation cost rather than guessing.
-*Follow-up: What exactly triggers the boxing, and how would you find a hot async method that suspends more often than you expected?*
+**Q3. What's wrong with this?**
+```csharp
+public async Task<Order> GetOrder(int id) {
+    return await Task.Run(() => _db.Orders.FindAsync(id));
+}
+```
+**A:** `Task.Run` around something that's already async buys a thread hop and an allocation and nothing else. I/O-bound async consumes no thread while waiting — the operation completes via an OS completion callback. You're already on a pool thread in a web app, so you've moved work to another thread from the same finite pool. `Task.Run` is for CPU-bound work you want off the current thread; it's not how you "make things async".
+*Follow-up: If no thread is waiting on that I/O, who completes the task?*
 
-**Q3. What is the difference between `Task.Run` and awaiting an async method?**
-**A:** `Task.Run` moves work *onto* a thread-pool thread — the right tool for CPU-bound work you want off the current thread. Awaiting a genuinely I/O-bound async method consumes no thread at all while waiting; the operation completes via an OS completion callback and only then is a continuation queued. Confusing the two produces `Task.Run(() => SomeIoAsync())`, which buys a thread hop and an allocation and nothing else. In ASP.NET Core it is worse than neutral, because you are already on a pool thread and have just moved work to a different thread from the same finite pool.
-*Follow-up: If no thread is waiting on an I/O-bound task, who completes it?*
+**Q4. Why is `async void` dangerous?**
+**A:** There's nothing to await, so the caller can't observe completion and can't catch the exception — it's raised on the ambient `SynchronizationContext` and typically takes the process down. `async Task` stores the exception on the task and surfaces it at `await`. The one legitimate use is a framework event handler whose signature you don't control, and even then the body should be a try/catch wrapping a call to a real `async Task` method. Fire-and-forget background work is *not* a legitimate use.
+*Follow-up: Why doesn't a try/catch at the call site catch it?*
 
-**Q4. Why is `async void` dangerous, and what is its one legitimate use?**
-**A:** `async void` returns nothing to await, so completion cannot be observed and exceptions cannot be caught by the caller — they are raised on the ambient `SynchronizationContext` and typically take down the process. `async Task` instead stores the exception on the returned task and surfaces it at `await`. The single legitimate use is a framework event handler whose delegate signature you do not control, and even then the body should be a `try`/`catch` wrapping a call to a proper `async Task` method. Fire-and-forget background work is *not* a legitimate use — that needs a hosted service or a channel-backed worker with its own error handling.
-*Follow-up: A `try`/`catch` around the call site of an `async void` method doesn't catch its exception. Why not?*
+**Q5. What does `ConfigureAwait(false)` do — and what does it not do?**
+**A:** It opts out of capturing the current `SynchronizationContext`, so the continuation resumes on a pool thread rather than being posted back. That avoids the marshalling cost and the classic sync-over-async deadlock in hosts that have a context, which is why libraries should use it — a library can't know its host. What it does *not* do is stop `ExecutionContext` flow: `AsyncLocal` values, culture and the current `Activity` still propagate. In ASP.NET Core, which installs no context, it's effectively a no-op.
+*Follow-up: Where would adding it change behaviour rather than just performance?*
 
-**Q5. What does `ConfigureAwait(false)` do, and — just as importantly — what does it not do?**
-**A:** It opts out of capturing the current `SynchronizationContext`, so the continuation resumes on a pool thread instead of being posted back to the original context. That avoids both the marshalling cost and the classic sync-over-async deadlock in hosts that install a context, which is why libraries should use it unconditionally — a library cannot know its host. What it does *not* do is stop `ExecutionContext` flow, so `AsyncLocal` values, culture and the ambient activity still propagate. In ASP.NET Core, which installs no `SynchronizationContext`, it is effectively a no-op for performance.
-*Follow-up: Where would adding `ConfigureAwait(false)` change behaviour rather than just performance?*
+**Q6. What's the bug?**
+```csharp
+var results = new List<Order>();
+foreach (var id in ids)
+    results.Add(await _repo.GetAsync(id));
+```
+**A:** It's sequential — you're paying the sum of the latencies when these are independent calls. Start them all and `await Task.WhenAll`, which turns the sum into the max. The care needed: that's now N concurrent calls per request multiplied by every concurrent request, so check the downstream's rate limits and `HttpClient`'s per-server connection limit before shipping it.
+*Follow-up: One of those calls is optional and slow. How do you stop it dragging the response?*
 
-**Q6. `Task.WhenAll` versus `Task.WhenAny` — semantics and the trap in each.**
-**A:** `WhenAll` completes when every task has completed and collects all exceptions on the returned task, but `await` surfaces only the first one — so "we awaited `WhenAll` so we'd see every failure" is wrong. `WhenAny` completes as soon as the first task settles, and the others keep running; unless you cancel or observe them you have leaked work and possibly an unobserved exception. Both traps are about what happens to the tasks you stopped paying attention to, which is the actual bug these APIs produce in production.
-*Follow-up: What's the modern way to apply a timeout to a single call, and why is it better than `WhenAny` with a delay task?*
+**Q7. `Task.WhenAll` versus `Task.WhenAny` — what's the trap in each?**
+**A:** `WhenAll` collects every exception on the returned task, but `await` surfaces only the first — so "we awaited WhenAll so we'd see all the failures" is wrong. `WhenAny` completes as soon as the first task settles and the others keep running; unless you cancel or observe them you've leaked work and possibly an unobserved exception. Both traps are about the tasks you stopped paying attention to.
+*Follow-up: What's the modern way to time out a single call?*
 
-**Q7. Can you await the same task twice? Does the answer differ for `ValueTask`?**
-**A:** `Task`/`Task<T>` is effectively an immutable completed-result holder once finished, so it supports any number of awaits and consumers — each returns the cached result or rethrows the stored exception. `ValueTask<T>` does not: it may wrap a pooled `IValueTaskSource` that is recycled after a single await, so awaiting twice, or awaiting after calling `.AsTask()`, is undefined behaviour that can return another caller's result. If you need to consume a `ValueTask` more than once, call `.AsTask()` exactly once and await the resulting `Task`.
-*Follow-up: Given those restrictions, when is `ValueTask` worth using at all?*
+**Q8. Can you await the same task twice? Does `ValueTask` behave the same?**
+**A:** `Task` yes — once completed it's effectively an immutable result holder, so any number of awaits return the cached result or rethrow the stored exception. `ValueTask` no: it may wrap a pooled `IValueTaskSource` that's recycled after one await, so awaiting twice is undefined and can hand you another caller's result. If you need it more than once, call `.AsTask()` exactly once and await that.
+*Follow-up: Given those restrictions, when is `ValueTask` worth it at all?*
 
-**Q8. Is async the same as multithreading?**
-**A:** No. Async is about not occupying a thread while waiting; running work in parallel across threads is a separate concern served by `Task.Run`, `Parallel`, or simply starting several async operations before awaiting them. A single-threaded application can have thousands of async operations in flight. Async raises how many concurrent operations a fixed number of threads can serve — it does not, by itself, make anything run faster or in parallel. A single request usually gets marginally *slower* under async; the win is systemic throughput.
-*Follow-up: How do you actually run two independent I/O calls concurrently, and what's the common mistake people make when they try?*
+**Q9. Is async the same as multithreading?**
+**A:** No. Async is about not occupying a thread while waiting. Running things in parallel is a separate concern — `Task.Run`, `Parallel`, or just starting several async operations before awaiting them. A single-threaded app can have thousands of async operations in flight. Async raises how many concurrent operations a fixed number of threads can serve; it doesn't by itself make anything faster. A single request usually gets marginally *slower*; the win is systemic throughput.
+*Follow-up: So how would you demonstrate the benefit in a test?*
 
-**Q9. What happens to an exception thrown inside an `async Task` method?**
-**A:** It is captured and stored on the returned task rather than propagating immediately, and rethrown when the task is awaited, with the original type and stack trace preserved via `ExceptionDispatchInfo`. If you block on `.Result` or `.Wait()` instead, it surfaces wrapped in an `AggregateException` — which is why replacing `await` with `.Result` silently breaks existing `catch (SqlException)` clauses. If nobody ever awaits the task, the exception is simply never observed.
-*Follow-up: How would you detect un-awaited tasks across a large codebase before they hide a failure?*
-
-**Q10. What is a `CancellationToken` actually for, and what does it not do?**
-**A:** It is a cooperative signal that lets in-flight work stop early — client disconnect, timeout, shutdown. Cooperative is the operative word: nothing is forcibly aborted, so the code must either check the token or hand it to APIs that do. Its highest-value production use is propagating a client disconnect all the way to the database call, so an abandoned request stops holding a connection. What it does not do is undo side effects that have already been committed — cancellation is not a rollback.
-*Follow-up: How would you compose a request-abort token with a per-call timeout?*
+**Q10. What happens to an exception thrown inside an `async Task` method?**
+**A:** It's captured and stored on the returned task rather than propagating immediately, and rethrown when the task is awaited — original type and stack trace preserved via `ExceptionDispatchInfo`. If you block on `.Result` or `.Wait()` instead, it comes back wrapped in an `AggregateException`. That's why swapping `await` for `.Result` silently breaks an existing `catch (SqlException)`. If nobody awaits the task, the exception is simply never observed.
+*Follow-up: How would you find un-awaited tasks across a large codebase?*
 
 ---
 
 ## 3. Intermediate (10 Q&A)
 
+**Q1. Why does this deadlock in classic ASP.NET but usually not in ASP.NET Core?**
+```csharp
+public ActionResult Get() {
+    var data = _service.GetDataAsync().Result;
+    return View(data);
+}
+```
+**A:** Classic ASP.NET installs a `SynchronizationContext` that requires continuations to run on the request thread. `.Result` blocks that thread, so the continuation can never be scheduled — and that continuation is what would complete the task you're blocking on. Self-deadlock. ASP.NET Core installs no context, so continuations run on arbitrary pool threads and the cycle doesn't form. Don't conclude `.Result` is safe there: you've traded a deterministic deadlock for thread-pool starvation under load, which is much harder to diagnose.
+*Follow-up: You have to implement a synchronous interface over genuinely async work. What do you do?*
 
-**Q1. Explain precisely why `.Result` deadlocks in classic ASP.NET or WPF but usually does not in ASP.NET Core.**
-**A:** Classic ASP.NET and WPF install a `SynchronizationContext` that requires continuations to run on a specific thread — the request thread or the UI thread. Blocking that thread with `.Result` means the continuation can never be scheduled onto it, and the continuation is what would complete the task you are blocking on: a textbook self-deadlock. ASP.NET Core installs no `SynchronizationContext`, so continuations run on arbitrary pool threads and the cycle does not form. It is important not to conclude that `.Result` is therefore safe there — you have traded a deterministic deadlock for thread-pool starvation under load, which is much harder to diagnose.
-*Follow-up: Given that, how do you handle a legacy synchronous interface you must implement but whose work is genuinely async?*
+**Q2. Latency is climbing on every endpoint, CPU is at 30%, and the DBA says their queries are fast. What's happening?**
+**A:** Thread-pool starvation. Flat CPU with all-endpoint degradation and healthy dependencies is the signature, and the detail that confirms it is the database looking slow from the app and fast from the server — the time is spent queued before the call is even made. Blocking calls occupy pool threads, and the pool injects new ones at only one or two a second, so queued work backs up faster than threads arrive. Confirm from pool queue length and thread count, or a dump showing threads parked in `Monitor.Wait` or `Task.Result`. The fix is removing the blocking call; raising `SetMinThreads` only buys time.
+*Follow-up: The blocking call is inside a NuGet package you can't change. Options?*
 
-**Q2. Walk me through diagnosing thread-pool starvation. What are the symptoms and what misleads people?**
-**A:** The symptoms are latency climbing across *all* endpoints simultaneously, CPU that is low rather than high, and timeouts appearing at whatever dependency happens to be called most — which is what misleads people into blaming the database. The mechanism is blocking calls occupying pool threads, so the pool's hill-climbing algorithm injects new threads slowly (roughly one or two per second), and queued work backs up faster than threads arrive. Confirmation is direct: compare `ThreadPool.ThreadCount` and queue length against completed work items, or take a dump and count threads parked in `Monitor.Wait`, `Task.Result`, or synchronous socket reads. The fix is removing the blocking call, not raising `SetMinThreads`, which only buys time.
-*Follow-up: `SetMinThreads` is sometimes a legitimate mitigation. When, and what do you do immediately afterwards?*
+**Q3. When would you use `ValueTask<T>`, and when would you refuse?**
+**A:** Use it on a hot path where the operation usually completes synchronously — a cache lookup that mostly hits, a buffered read — because that avoids a `Task<T>` allocation per call somewhere it's actually measurable. Refuse on public APIs where consumers might store or await the result more than once, on anything low-frequency where the allocation is noise, and anywhere the extra constraints outweigh a saving you haven't measured. It's a targeted optimisation with sharp edges, not a better default.
+*Follow-up: Pooling via `IValueTaskSource` removes the async-path allocation too. What does that cost you?*
 
-**Q3. When would you choose `ValueTask<T>` over `Task<T>`, and what would make you refuse?**
-**A:** Choose it on a hot path where the operation usually completes synchronously — a cache lookup that hits most of the time, a buffered stream read, a pipeline that is normally already satisfied — because that avoids a `Task<T>` allocation per call in a place where per-call allocation is measurable. Refuse it on public APIs where consumers might store, share, or await the result more than once, on anything low-frequency where the allocation is noise, and anywhere the added usage constraints outweigh a saving you have not measured. The honest position is that `ValueTask` is a targeted optimisation with sharp edges, not a better default.
-*Follow-up: `ValueTask` pooling via `IValueTaskSource` removes even the async-path allocation. What does that add in complexity and risk?*
+**Q4. `ExecutionContext` versus `SynchronizationContext` — what's the practical difference?**
+**A:** `ExecutionContext` carries ambient state — `AsyncLocal`, culture, the current `Activity` — across async boundaries regardless of which thread resumes. `SynchronizationContext` decides *where* the continuation resumes. They're captured and restored independently, which is exactly why `ConfigureAwait(false)` opts out of the second and never the first. That's how distributed tracing and correlation IDs survive an `await` onto a completely different thread — and why "ConfigureAwait breaks correlation IDs" is a myth worth correcting in review.
+*Follow-up: `AsyncLocal` flows down but changes don't flow back up. Why, and where does that bite?*
 
-**Q4. `ExecutionContext` versus `SynchronizationContext` — what does each do, and why does the distinction matter operationally?**
-**A:** `ExecutionContext` carries ambient state — `AsyncLocal` values, culture, the current `Activity` — across async boundaries regardless of which thread resumes. `SynchronizationContext` determines *where* a continuation resumes. They are captured and restored independently, which is why `ConfigureAwait(false)` opts out of the second but never the first. Operationally this is exactly how distributed tracing and correlation IDs survive an `await` while resuming on a completely different thread — and why the belief that `ConfigureAwait(false)` breaks correlation IDs is a myth worth correcting in review.
-*Follow-up: `AsyncLocal` flows down but changes don't flow back up to the caller. Why, and where does that surprise people?*
+**Q5. A controller action wraps CPU work in `Task.Run` "to free up the request thread". What do you say?**
+**A:** It accomplishes nothing. The action is already on a pool thread; `Task.Run` moves the same work to another thread from the same finite pool, adding a hop and an allocation. Total capacity is unchanged, so under load the queue is identical. The real questions are whether that CPU work belongs in the request path at all — often it should be a background job — and whether the box has the cores to do it concurrently. `Task.Run` makes sense in a desktop app to get work off the UI thread; in a server it's a misunderstanding of what the pool is.
+*Follow-up: The work is 200 ms of CPU and genuinely has to be in the request. Now what?*
 
-**Q5. You inherit a method that makes six independent HTTP calls with sequential awaits. What do you change, and what do you have to be careful about?**
-**A:** Start all six, then `await Task.WhenAll`, turning a sum of latencies into a max — usually the single largest win available in this kind of code. The care is in what concurrency exposes: the downstream service may not tolerate a six-fold burst multiplied by every concurrent request, so I would check `HttpClient`'s per-server connection limits and whether the dependency has a rate limit or its own thread-pool constraint. I would also make failure semantics explicit, since `WhenAll` surfaces only the first exception and abandons nothing — if partial success is acceptable, that has to be handled deliberately rather than inherited from the API's default behaviour.
-*Follow-up: One of the six is optional and slow. How would you structure that so it can't drag the whole response?*
+**Q6. What's wrong with this?**
+```csharp
+public async Task<IActionResult> Get(CancellationToken ct) {
+    var data = await _repo.GetAllAsync();
+    return Ok(data);
+}
+```
+**A:** The token is accepted and never used. That's worse than not accepting it, because it looks like cancellation is supported so nobody investigates. The abandoned request keeps its database connection, keeps running the query, and keeps a pool thread busy producing a result that will be discarded — which under a retry storm is how a slow dependency becomes an outage. Thread it through every async call, especially the database and HTTP ones, and link it with a timeout where appropriate.
+*Follow-up: Where should you check the token inside a long CPU-bound loop?*
 
-**Q6. Someone adds `Task.Run` around a CPU-bound method inside an ASP.NET Core controller action to "free up the request thread." What do you tell them?**
-**A:** That it accomplishes nothing, because the action is already running on a thread-pool thread and `Task.Run` moves the same work to another thread from the same finite pool, adding a hop and an allocation. Total pool capacity is unchanged, so under load the queue is identical. The genuine questions are whether the CPU work belongs in the request path at all — often it should be a background job or a separate service — and whether the box has the cores to do it concurrently. `Task.Run` is legitimate in a *desktop* app to get work off the UI thread; in a server it is almost always a misunderstanding of what the pool is.
-*Follow-up: What if the CPU-bound work is 200 ms and must be in the request? What do you do instead?*
+**Q7. What's `TaskCompletionSource` for, and what's the classic bug?**
+**A:** It bridges a non-task async source — an event, a callback, a legacy Begin/End API, a message arriving on a socket — into the `Task` world by handing out a task you complete manually. The classic bug: without `TaskCreationOptions.RunContinuationsAsynchronously`, calling `SetResult` runs the awaiting continuations *synchronously on the completing thread*. When that's a message-pump, socket-reader or timer thread, arbitrary user code is now running on your infrastructure thread — stalls, reentrancy and occasional deadlocks that are extremely hard to attribute.
+*Follow-up: What's the second most common bug with it?*
 
-**Q7. A `CancellationToken` is accepted by the controller and passed nowhere else. Why is that worse than not accepting it at all?**
-**A:** Because it creates the appearance of cancellation support without the behaviour, so nobody investigates further. The abandoned request keeps its database connection, keeps executing its query, and keeps consuming a pool thread until it completes work whose result will be discarded — which under a retry storm is exactly how a slow dependency becomes an outage. Real support means threading the token to every async call in the chain, especially the database and HTTP calls, and often linking it with a timeout via `CreateLinkedTokenSource`. It is worth enforcing with an analyzer, since this is a discipline failure rather than a knowledge failure.
-*Follow-up: Where should cancellation be checked in a long CPU-bound loop, and what's the cost of checking too often?*
+**Q8. When is `IAsyncEnumerable<T>` the right tool?**
+**A:** When results arrive incrementally and you want the consumer working before the producer finishes — streaming query results, paging an API, consuming a channel. It avoids buffering the whole set and improves time-to-first-byte. It costs a `MoveNextAsync` state-machine transition per item, so it's the wrong choice for millions of tiny items where a batched `Task<List<T>>` is far cheaper. You also need `[EnumeratorCancellation]` for `WithCancellation` to work, and the underlying resource — usually a database reader — stays open for the whole enumeration, which changes your connection-pool maths.
+*Follow-up: What breaks if the caller enumerates it after the DI scope is disposed?*
 
-**Q8. What is `TaskCompletionSource` for, and what is the classic production bug with it?**
-**A:** It is the bridge from a non-task-based async source — an event, a callback, a legacy `Begin`/`End` API, a message arriving on a socket — into the `Task` world, by handing out a task you complete manually. The classic bug is that, without `TaskCreationOptions.RunContinuationsAsynchronously`, calling `SetResult` runs the awaiting continuations *synchronously on the completing thread*. When that thread is a message-pump, socket-reader or timer thread, arbitrary user code now runs on your infrastructure thread — producing stalls, reentrancy and occasional deadlocks that are extremely hard to attribute. Always pass that flag unless you have a specific reason not to.
-*Follow-up: What's the second most common bug — around setting a result more than once?*
+**Q9. Does making a method async make it faster?**
+**A:** For a single request, usually marginally slower — you've added state-machine transitions, possible heap allocation and continuation scheduling to a path that ran straight through. The benefit is systemic: the same number of threads serves far more concurrent requests, so throughput and behaviour under load improve dramatically even though per-request latency doesn't. That's why async shows nothing on a single-user benchmark and everything on a load test.
+*Follow-up: How would you design the load test to actually show it?*
 
-**Q9. When is `IAsyncEnumerable<T>` the right tool, and what does it cost?**
-**A:** It is right when results arrive incrementally and you want the consumer to start work before the producer finishes — streaming query results, paging an API, consuming a channel — because it avoids buffering an entire result set in memory and improves time-to-first-byte. The cost is a `MoveNextAsync` state-machine transition per item, so it is the wrong choice for millions of tiny items where a batched `Task<List<T>>` is dramatically cheaper. You also need `[EnumeratorCancellation]` on the token parameter for `WithCancellation` to work, and to remember that the underlying resource — often a database reader — stays open for the whole enumeration, which changes your connection-pool math.
-*Follow-up: What breaks when an `IAsyncEnumerable` returned from a repository is enumerated after the `DbContext` has been disposed?*
-
-**Q10. Does making a method async make it faster?**
-**A:** For a single request, usually marginally slower — you have added state-machine transitions, possible heap allocation, and continuation scheduling to a path that previously ran straight through. The benefit is systemic: the same number of threads can serve far more concurrent requests, so throughput and behaviour under load improve dramatically even though per-request latency does not. This is why async shows nothing on a single-user benchmark and everything on a load test, and why "we made it async and it didn't get faster" is usually a measurement problem rather than a design problem.
-*Follow-up: How would you design a load test that demonstrates the actual benefit?*
+**Q10. Your API calls a downstream service that's become slow. What does async change about how that failure spreads?**
+**A:** It stops you exhausting threads during the wait, so the process stays responsive far longer than a blocking equivalent — but it bounds nothing. In-flight requests still accumulate, each holding a state machine, buffers and often a connection, so you've traded thread starvation for memory pressure and connection-pool exhaustion. Async without timeouts, concurrency limits and circuit breakers just fails more slowly and less visibly.
+*Follow-up: Where would you put the concurrency limit — per dependency, per endpoint, or globally?*
 
 ---
 
 ## 4. Expert / Architect (10 Q&A)
 
-
-**Q1. Latency degrades across every endpoint, CPU sits at 30%, and the database team says their queries are fast. Walk me through the incident.**
-**A:** Flat-CPU, all-endpoints degradation with healthy dependencies is the signature of thread-pool starvation, and the fact that the database *looks* slow from the application while looking fast from the server is the confirming detail — the time is spent queued before the call is even made. I would confirm from the pool's own counters and a dump showing threads parked in blocking waits, then find the sync-over-async call that entered the hot path, which is very often in a library, a health check, or a logging sink rather than the code recently changed. Immediate mitigation is raising minimum threads to restore service while the real fix is deployed. Prevention is structural: an analyzer banning `.Result`/`.Wait()`, dashboards on pool queue depth as a first-class signal, and a runbook entry so the next responder does not spend an hour on the database.
-*Follow-up: The blocking call is inside a third-party NuGet package you can't change. What are your options?*
-
-**Q2. How would you drive async correctness across dozens of teams and a large legacy codebase?**
-**A:** Treat it as a supply-chain problem rather than an education problem: guidance does not scale, gates do. I would ban `.Result`, `.Wait()`, `GetAwaiter().GetResult()` and `async void` with analyzers wired into the shared build template so teams inherit them, and enable CS4014 as an error. Legacy code gets a suppression baseline so the rules can go in today and the debt is visible and burned down deliberately rather than blocking adoption. Alongside that, the platform team owns the observability — pool queue depth and thread count on the standard dashboard — so the failure mode is recognisable to a responder who has never read the guidance. The cultural piece is making the *reason* concrete with a real incident, because "async all the way" as a slogan does not survive a deadline.
+**Q1. How would you drive async correctness across dozens of teams and a large legacy codebase?**
+**A:** Treat it as a supply-chain problem, not an education problem — guidance doesn't scale, gates do. Ban `.Result`, `.Wait()`, `GetAwaiter().GetResult()` and `async void` with analyzers wired into the shared build template so teams inherit them, and make CS4014 an error. Legacy code gets a suppression baseline so the rules go in today and the debt is visible and burned down deliberately rather than blocking adoption. Alongside that, the platform team owns the observability — pool queue depth and thread count on the standard dashboard — so the failure mode is recognisable to a responder who's never read the guidance. The cultural piece is making the reason concrete with a real incident, because "async all the way" as a slogan doesn't survive a deadline.
 *Follow-up: A team says the analyzer blocks a legitimate case in their startup path. How do you handle the exception request?*
 
-**Q3. You are converting a large synchronous codebase to async. How do you sequence it, and what makes it dangerous?**
-**A:** Async is viral, so it must be converted from the I/O leaves upward — converting the middle produces exactly the sync-over-async bridges that cause the incidents. I would identify the highest-value I/O paths, convert each end to end behind a feature flag, and ship in slices rather than attempting a big-bang. The danger is the intermediate state: partially converted paths where a blocking bridge remains, and the fact that async changes concurrency characteristics, so code that was implicitly serialised by blocking may now run concurrently and expose latent thread-safety bugs in shared state. I would also expect throughput to rise enough to shift the bottleneck downstream, so connection-pool sizes and dependency rate limits need re-checking as part of the same work.
+**Q2. You're converting a large synchronous codebase to async. How do you sequence it and what makes it dangerous?**
+**A:** Async is viral, so convert from the I/O leaves upward — converting the middle produces exactly the sync-over-async bridges that cause the incidents. Identify the highest-value I/O paths, convert each end to end behind a feature flag, ship in slices. The danger is the intermediate state: partially converted paths with a blocking bridge still in place, and the fact that async changes concurrency characteristics — code that was implicitly serialised by blocking may now run concurrently and expose latent thread-safety bugs in shared state. Expect throughput to rise enough to shift the bottleneck downstream, so connection-pool sizes and dependency rate limits need re-checking as part of the same work.
 *Follow-up: Halfway through, throughput doubles and the database starts timing out. Is that a failure of the migration?*
 
-**Q4. Design a bounded async work pipeline for a service that ingests bursty messages faster than it can process them.**
-**A:** I would use `System.Threading.Channels` with a bounded channel and an explicit full-mode policy, a small set of consumer tasks, and backpressure propagated to the ingestion point rather than absorbed silently. Bounded is the essential decision: an unbounded channel converts a throughput problem into an out-of-memory crash, which is strictly worse because it destroys in-flight work. The full-mode choice is a product decision — `Wait` applies backpressure to the producer, `DropOldest` accepts loss to protect freshness — and should be made explicitly with the business, not defaulted. I would expose queue depth and consumer lag as first-class metrics, because the queue is where this system's health becomes visible before latency moves.
-*Follow-up: The producer is a Kafka consumer that can't be slowed without triggering rebalances. How does that change the design?*
+**Q3. Design a bounded async work pipeline for a service ingesting bursty messages faster than it can process them.**
+**A:** `System.Threading.Channels` with a bounded channel and an explicit full-mode policy, a small set of consumer tasks, and backpressure propagated to the ingestion point rather than absorbed silently. Bounded is the essential decision — an unbounded channel converts a throughput problem into an out-of-memory crash, which is strictly worse because it destroys in-flight work. The full-mode choice is a product decision, not a default: `Wait` applies backpressure to the producer, `DropOldest` accepts loss to protect freshness. Expose queue depth and consumer lag as first-class metrics, because the queue is where this system's health becomes visible before latency moves.
+*Follow-up: The producer is a Kafka consumer that can't be slowed without triggering rebalances. How does that change it?*
 
-**Q5. How much of your latency budget does async machinery legitimately consume, and how would you decide it is worth optimising?**
-**A:** In a typical service, a handful of microseconds per await against milliseconds of real I/O — genuinely irrelevant, and optimising it is misallocated effort. It becomes worth attention only in high-frequency paths where the operation itself is sub-microsecond and completes synchronously most of the time, which is where `ValueTask`, pooled value-task sources, and sometimes avoiding async altogether pay off. The decision rule I use is that the async overhead must be a measured, material fraction of the total in a profile — not inferred from a benchmark of `await` in isolation, which is the classic way teams spend a quarter on a 0.3% improvement.
+**Q4. How much of your latency budget does async machinery legitimately consume, and when is it worth optimising?**
+**A:** In a typical service, a handful of microseconds per await against milliseconds of real I/O — genuinely irrelevant, and optimising it is misallocated effort. It becomes worth attention only on high-frequency paths where the operation itself is sub-microsecond and usually completes synchronously, which is where `ValueTask`, pooled value-task sources, and sometimes avoiding async altogether pay off. The rule I'd apply is that async overhead must be a measured, material fraction of the total in a real profile — not inferred from a microbenchmark of `await` in isolation, which is the classic way teams spend a quarter on a 0.3% improvement.
 *Follow-up: Where in a modern .NET service does async overhead genuinely show up in a profile?*
 
-**Q6. A background job started with fire-and-forget occasionally vanishes with no trace. What went wrong and how do you fix it structurally?**
-**A:** Almost certainly `async void` or an un-awaited `Task`: with `async void` the exception is raised on the ambient context and may crash or be swallowed depending on the host, and with an un-awaited `Task` the exception is stored on an object nobody looks at, so the work simply stops silently. The additional hazard in a hosted environment is that shutdown does not wait for orphaned work, so a rolling deploy can terminate the job mid-flight with no record. The structural fix is to have no fire-and-forget at all: background work belongs in an `IHostedService`/`BackgroundService` with explicit lifetime, structured logging, its own error handling, and participation in graceful shutdown. If the work must survive a restart, it belongs in a queue rather than in memory.
-*Follow-up: How do you make a `BackgroundService` shut down cleanly without losing in-flight work during a rolling deploy?*
+**Q5. A background job started with fire-and-forget occasionally vanishes with no trace. What went wrong and how do you fix it structurally?**
+**A:** Almost certainly `async void` or an un-awaited `Task` — with `async void` the exception goes to the ambient context and may crash or be swallowed depending on the host; with an un-awaited task it's stored on an object nobody looks at, so the work just stops silently. There's an additional hazard in a hosted environment: shutdown doesn't wait for orphaned work, so a rolling deploy kills it mid-flight with no record. The structural fix is to have no fire-and-forget at all — background work belongs in an `IHostedService` with explicit lifetime, structured logging, its own error handling and participation in graceful shutdown. If it must survive a restart, it belongs in a queue, not in memory.
+*Follow-up: How do you shut a `BackgroundService` down cleanly without losing in-flight work during a rolling deploy?*
 
-**Q7. Your API calls a downstream service that has become slow. Explain how async changes — and does not change — how that failure propagates.**
-**A:** Async prevents thread exhaustion during the wait, so the process stays responsive far longer than a blocking equivalent, but it does not bound anything: in-flight requests still accumulate, each holding its state machine, its buffers, and often a connection, so you trade thread starvation for memory pressure and connection-pool exhaustion. Async without timeouts, concurrency limits and circuit breakers just fails more slowly and less obviously. The correct architecture pairs async with a bounded concurrency limiter per dependency, aggressive timeouts, a circuit breaker to stop sending doomed requests, and load shedding at the edge so the system degrades deliberately rather than by exhaustion.
-*Follow-up: Where do you place the concurrency limit — per dependency, per endpoint, or globally — and why?*
+**Q6. A team proposes `AsyncLocal` to carry tenant context through the request pipeline. Your view?**
+**A:** The mechanism is sound — it's how `Activity`, correlation IDs and most ambient diagnostics already flow. My concerns are architectural rather than technical: ambient state is invisible in method signatures, so it becomes untestable and hard to reason about, and it silently fails wherever `ExecutionContext` doesn't cross — thread-pool work queued without flow, long-lived singletons, custom threads, anything resumed from a different logical request. In a multi-tenant system that failure mode is a data-leak class bug, not a correctness inconvenience. So: acceptable for cross-cutting diagnostics where a missing value is harmless, and explicit parameter passing for anything that authorises or scopes data access.
+*Follow-up: How would you detect a case where the tenant context is missing — or worse, belongs to a different tenant?*
 
-**Q8. `AsyncLocal` is proposed to carry tenant context through the request pipeline. What is your view?**
-**A:** It works and it is how `Activity`, correlation IDs and most ambient diagnostics already flow, so the mechanism is sound. My concerns are architectural rather than technical: ambient state is invisible in method signatures, so it becomes untestable and hard to reason about, and it silently fails at boundaries the `ExecutionContext` does not cross — thread-pool work queued without flow, long-lived singletons, custom threads, and anything resumed from a different logical request. In a multi-tenant system that failure mode is a data-leak class bug, not a correctness inconvenience. I would accept it for cross-cutting diagnostics where a missing value is harmless, and insist on explicit parameter passing for anything that authorises or scopes data access.
-*Follow-up: How would you detect a case where the tenant context is missing or, worse, belongs to a different tenant?*
-
-**Q9. How do you test async code so that concurrency bugs surface before production?**
-**A:** Deterministic unit tests catch almost none of them, because a test that awaits a completed task never exercises the suspension path at all. What actually works is a layered approach: tests that force the asynchronous path with real delays or controlled `TaskCompletionSource` sources; cancellation tests that assert the operation actually stops rather than merely returning; concurrency tests that run the operation N times in parallel and assert on shared state; and load tests that hold sustained concurrency long enough for pool behaviour to emerge. I would also inject latency and faults at dependency boundaries in a staging environment, since most async production failures are really timeout, cancellation and backpressure failures rather than logic errors.
+**Q7. How do you test async code so concurrency bugs surface before production?**
+**A:** Deterministic unit tests catch almost none of them, because a test that awaits an already-completed task never exercises the suspension path at all. What works is layered: tests that force the asynchronous path with real delays or controlled `TaskCompletionSource` sources; cancellation tests asserting the operation actually stops rather than merely returning; concurrency tests running the operation N times in parallel and asserting on shared state; and load tests holding sustained concurrency long enough for pool behaviour to emerge. I'd also inject latency and faults at dependency boundaries in staging, since most async production failures are really timeout, cancellation and backpressure failures rather than logic errors.
 *Follow-up: How would you write a regression test for a sync-over-async deadlock without depending on timing?*
 
-**Q10. Would you argue for a different concurrency model than task-based async for a new high-throughput service, and how would you make that case?**
-**A:** I would start from the workload rather than the model. Task-based async is the right default in .NET because the ecosystem, tooling and hiring pool all assume it. Reactive/dataflow models are worth arguing for when the domain is genuinely stream-shaped with complex composition, windowing and backpressure; an actor model is worth arguing for when the domain is naturally partitioned per-entity and you would otherwise be hand-rolling locks. The case has to be made on ownership cost, not elegance: a model the team cannot debug at 3 a.m., or which every new hire must be trained into, is a long-term liability that usually outweighs the design win. My default recommendation is async plus `Channel<T>` for pipelines, escalating only when a specific, demonstrated shortcoming justifies it.
-*Follow-up: You inherit a service built on a reactive framework nobody remaining understands. Do you migrate it, and how do you decide?*
+**Q8. Would you argue for a different concurrency model than task-based async for a new high-throughput service?**
+**A:** I'd start from the workload rather than the model. Task-based async is the right default in .NET because the ecosystem, the tooling and the hiring pool all assume it. Reactive or dataflow models are worth arguing for when the domain is genuinely stream-shaped with complex composition, windowing and backpressure; an actor model when the domain is naturally partitioned per-entity and you'd otherwise hand-roll locks. But the case has to be made on ownership cost, not elegance — a model the team can't debug at 3 a.m., or that every new hire must be trained into, is a long-term liability that usually outweighs the design win. My default recommendation is async plus `Channel<T>` for pipelines, escalating only when a specific demonstrated shortcoming justifies it.
+*Follow-up: You inherit a service built on a reactive framework nobody remaining understands. Do you migrate it?*
+
+**Q9. Async, timeouts and retries interact badly if you get the layering wrong. How do you set it?**
+**A:** Timeouts bound everything and should be derived from a request budget rather than picked per call. Retry sits closest to the dependency and only handles genuinely transient failures — and only on idempotent operations, or you duplicate work on the ambiguous timeout. Circuit breakers sit above retry so a consistently failing dependency stops receiving traffic rather than absorbing the full retry load. Concurrency limits bound in-flight work per dependency so a slow one can't consume the whole pool. The failure I've seen most is retries configured independently at three layers, so one logical call becomes dozens downstream — which is why the policy belongs in a shared client package configured per dependency, not reinvented per team.
+*Follow-up: How would you detect that retry multiplication in production before it causes an outage?*
+
+**Q10. What separates an excellent answer from an adequate one when someone diagnoses an async performance problem?**
+**A:** An adequate answer knows what thread-pool starvation is. An excellent one recognises the *shape* — flat CPU, all endpoints degrading together, the dependency looking slow from the app and fine from the server — and reasons from that to the cause rather than starting at the dependency everyone is blaming. It knows async bounds nothing on its own, so it asks about timeouts and concurrency limits before optimising anything. It distinguishes what's genuinely I/O-bound from what's CPU-bound wearing an async signature. And it treats the fix as structural — an analyzer, a shared policy, a dashboard the next responder will see — rather than as a one-off code change. The distinguishing quality is diagnosing from the system's signature instead of from the first plausible suspect.
+*Follow-up: Given that, what's the first thing you'd put on a dashboard for a service you've just inherited?*
 
 ---
 

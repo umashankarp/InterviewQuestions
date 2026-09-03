@@ -48,136 +48,162 @@ Two pathologies dominate production. **Silent client-side evaluation**: the chai
 
 ## 2. Beginner (10 Q&A)
 
-
-**Q1. What does the compiler generate for a method containing `yield return`?**
-**A:** A state machine class implementing `IEnumerable<T>` and `IEnumerator<T>`, with the method's locals lifted to fields and the body split into cases of a `MoveNext` switch keyed on a state field. Calling the method executes none of the body — it just constructs the state machine — and each `MoveNext` runs until the next `yield return`, storing the value in `Current` and recording where to resume. This is why an exception inside an iterator method surfaces at the first `MoveNext`, not at the call, which routinely confuses people validating arguments in iterator methods.
-*Follow-up: How would you make argument validation throw eagerly in an iterator method?*
-
-**Q2. Explain deferred execution and give an example where it produces a wrong result.**
-**A:** Most LINQ operators build a pipeline object and execute nothing until enumerated, so the query runs at the `foreach`, `ToList`, or aggregation — not where it was written. The classic wrong result comes from a captured variable that changes in between: define `var q = items.Where(x => x.Id == id)`, reassign `id`, then enumerate, and you filter on the new value because capture is by reference. The same shape causes trouble with a query defined inside a `using` and enumerated after the resource is disposed. The mental model to hold is that a LINQ query is a *recipe*, not a result.
+**Q1. What does this print, and why?**
+```csharp
+var id = 1;
+var q = orders.Where(o => o.Id == id);
+id = 2;
+Console.WriteLine(q.Count());
+```
+**A:** The count of orders with `Id == 2`. The query is deferred — nothing ran at the `Where`; it built a pipeline. The lambda captured the *variable* `id`, not its value, so by the time `Count()` enumerates, `id` is 2. A LINQ query is a recipe, not a result, and that's the single most useful mental model for the whole topic.
 *Follow-up: Which common operators execute immediately rather than lazily?*
 
-**Q3. What is the difference between `IEnumerable<T>` and `IQueryable<T>`?**
-**A:** `IEnumerable<T>` operators take delegates and execute in-process, pulling items one at a time. `IQueryable<T>` operators take *expression trees* — the lambda as a data structure describing the code rather than compiled code — which a provider inspects and translates into something else, typically SQL. That difference is why a predicate on an `IQueryable` can become a `WHERE` clause executed by the database, while the same predicate on an `IEnumerable` requires every row to be fetched first. Knowing which one you are holding is the single most consequential thing about a LINQ query in a data-access path.
-*Follow-up: What happens at the moment an `IQueryable<T>` is assigned to an `IEnumerable<T>` variable?*
+**Q2. How many times does the database get hit here?**
+```csharp
+var q = _db.Orders.Where(o => o.Total > 100);
+if (q.Any())
+    foreach (var o in q) { ... }
+```
+**A:** Twice. `Any()` executes the query, then the `foreach` executes it again from scratch. Add a `Count()` and it's three times. Worse, the data can change between them, so you can get inconsistent results under concurrency. If you need the results more than once, materialise once into a list — deliberately, not reflexively.
+*Follow-up: How do you decide between materialising and restructuring so you enumerate once?*
 
-**Q4. Which operators stream and which buffer, and why does that distinction matter?**
-**A:** `Where`, `Select`, `Take`, `SkipWhile` and friends stream — they process one element at a time and hold nothing. `OrderBy`, `GroupBy`, `Reverse`, `ToList`, `ToDictionary` and `Distinct` (partially) must buffer, because they cannot produce their first result until they have seen enough of the input. It matters because a streaming pipeline over a million rows uses constant memory, while inserting a single `OrderBy` in the middle materialises the whole sequence. It also matters for latency: a buffering operator destroys time-to-first-result, which is the whole point of streaming from a database or a network.
-*Follow-up: `OrderBy(...).First()` — does that sort everything, and does the answer differ for `IQueryable`?*
+**Q3. What's the difference between `IEnumerable<T>` and `IQueryable<T>`?**
+**A:** `IEnumerable<T>` operators take compiled delegates and run in your process, pulling items one at a time. `IQueryable<T>` operators take *expression trees* — the lambda as a data structure describing the code — which a provider inspects and translates, typically into SQL. That's why a predicate on an `IQueryable` can become a `WHERE` clause, while the same predicate on an `IEnumerable` requires fetching every row first. Knowing which one you're holding is the most consequential thing about any query in a data-access path.
+*Follow-up: What happens the moment you assign an `IQueryable<T>` to an `IEnumerable<T>` variable?*
 
-**Q5. What is multiple enumeration, and why is it dangerous?**
-**A:** Enumerating the same deferred query more than once re-executes the entire pipeline each time — including, for an `IQueryable`, re-issuing the database query. The dangerous version is subtle: `if (q.Any()) { foreach (var x in q) ... }` runs the query twice, and `q.Count()` followed by iteration runs it twice more. Beyond cost, it can give inconsistent results if the underlying data changed between enumerations, which produces bugs that only appear under concurrency. The fix is to materialise once into a `List<T>` when you know you need the results more than once — deliberately, not reflexively.
-*Follow-up: How do you decide between materialising and restructuring the code to enumerate once?*
+**Q4. This was fast in dev and takes 40 seconds in production. The DBA says there's no `WHERE` clause on the query. What happened?**
+```csharp
+IEnumerable<Order> orders = _db.Orders;
+var recent = orders.Where(o => o.Date > cutoff).ToList();
+```
+**A:** The variable is typed `IEnumerable<Order>`, so `Where` binds to `Enumerable.Where`, not `Queryable.Where`. The provider fetches the entire table and the predicate runs in memory. In dev the table had a thousand rows and nobody noticed. That's client-side evaluation, and the one-character fix is to keep it as `IQueryable<Order>` — which is exactly why the static type matters so much here.
+*Follow-up: The filter is a business rule the provider genuinely can't translate. Now what?*
 
-**Q6. `First`, `FirstOrDefault`, `Single`, `SingleOrDefault` — how do you choose?**
-**A:** Choose by the invariant you are asserting, not by convenience. `Single` says "exactly one must match, and it is a bug otherwise" and will throw if there are two — which is exactly what you want when the value is a primary key and a duplicate indicates data corruption. `First` says "there may be several, give me one," which only makes sense with a deterministic ordering. The `OrDefault` variants say absence is expected and handled. The cost difference matters too: `Single` must read a second element to prove uniqueness, so on a large sequence or a database query it is strictly more work than `First`.
-*Follow-up: A developer uses `First()` on an unordered query and it's non-deterministic in production but stable in dev. Why?*
+**Q5. Which operators stream and which buffer?**
+**A:** `Where`, `Select`, `Take`, `SkipWhile` stream — one element at a time, holding nothing. `OrderBy`, `GroupBy`, `Reverse`, `ToList`, `ToDictionary` must buffer, because they can't produce a first result until they've seen enough input. It matters twice over: a streaming pipeline over a million rows uses constant memory, and inserting one `OrderBy` materialises the whole sequence. It also destroys time-to-first-result, which is the entire point of streaming from a database.
+*Follow-up: Does `OrderBy(...).First()` sort everything? Does the answer differ for `IQueryable`?*
 
-**Q7. Why is `Any()` usually preferable to `Count() > 0`?**
-**A:** `Any()` stops at the first element; `Count()` enumerates the entire sequence, and on an `IQueryable` it becomes a `COUNT(*)` over the full result set. On a large collection or a large table that is the difference between an index seek and a scan. The exception worth knowing is that when the source is an `ICollection<T>`, `Count()` short-circuits to the `Count` property and is O(1) — but relying on that requires knowing the concrete type, which the interface deliberately hides, so `Any()` remains the safer habit.
-*Follow-up: What about `Count() == 0` versus `!Any()` on an `IQueryable` — is there a difference in generated SQL?*
+**Q6. Why is `Any()` usually better than `Count() > 0`?**
+**A:** `Any()` stops at the first element. `Count()` enumerates everything, and on an `IQueryable` becomes a `COUNT(*)` over the full result set — on a large table that's the difference between a seek and a scan. The exception worth knowing: when the source is an `ICollection<T>`, `Count()` short-circuits to the `Count` property and is O(1). But relying on that means knowing the concrete type, which the interface deliberately hides, so `Any()` stays the safer habit.
+*Follow-up: What about `Count() == 0` versus `!Any()` on an `IQueryable` — different SQL?*
 
-**Q8. What does a simple `Where(...).Select(...)` chain allocate?**
-**A:** One iterator object per operator, one delegate per lambda, and a display class per capturing lambda — so a two-operator chain over a collection typically allocates a handful of small objects once, then nothing per element. That is cheap and dies in gen0, which is why LINQ is fine almost everywhere. It becomes material only when the chain is constructed inside a hot loop, so the per-chain allocations happen millions of times, or when the sequence is short enough that the fixed setup cost dominates the work. Recognising that the cost is per-query rather than per-element is the point.
-*Follow-up: Why can a `foreach` over a `List<T>` avoid an enumerator allocation where the same loop over `IEnumerable<T>` cannot?*
+**Q7. What does this actually return if `Categories` contains a NULL?**
+```csharp
+var q = products.Where(p => !categories.Contains(p.CategoryId));
+```
+**A:** Translated to SQL as `NOT IN` with a NULL in the list, it returns *nothing* — three-valued logic means the comparison is never definitively true. Silent, no error, and one of the most confusing SQL bugs there is. `NOT EXISTS` has no such problem, which is why it's the safer construction. Worth knowing this is a SQL semantics trap that LINQ faithfully passes through.
+*Follow-up: Why exactly does the NULL make it return nothing?*
 
-**Q9. What is an expression tree, and how is it different from a lambda?**
-**A:** `Func<T, bool>` is compiled code — a delegate you can only invoke. `Expression<Func<T, bool>>` is the same lambda captured as a *tree of nodes* describing the operation, which you can inspect, rewrite, translate to another language, or compile to a delegate at runtime. The compiler chooses which to build based on the target type, which is why the identical lambda text means something completely different depending on whether it is passed to `Enumerable.Where` or `Queryable.Where`. Everything a query provider does rests on this.
-*Follow-up: What kinds of C# constructs cannot be represented in an expression tree?*
+**Q8. `First`, `FirstOrDefault`, `Single`, `SingleOrDefault` — how do you choose?**
+**A:** By the invariant you're asserting, not by convenience. `Single` says "exactly one must match and it's a bug otherwise" — right when the value is a primary key and a duplicate means corruption. `First` says "there may be several, give me one", which only makes sense with a deterministic ordering. The `OrDefault` variants say absence is expected and handled. Cost matters too: `Single` has to read a second element to prove uniqueness, so it's strictly more work than `First`.
+*Follow-up: A developer uses `First()` on an unordered query — stable in dev, non-deterministic in production. Why?*
 
-**Q10. What does `AsEnumerable()` do, and when would you use it deliberately?**
-**A:** It changes the static type from `IQueryable<T>` to `IEnumerable<T>`, so every subsequent operator binds to `Enumerable` rather than `Queryable` — meaning everything after that point executes in memory on the results fetched so far. You use it deliberately when the remaining logic cannot be translated by the provider and you have already reduced the result set to a size you are happy to pull into memory. Using it accidentally, or early in a chain, is one of the most expensive mistakes available in a data-access layer.
-*Follow-up: How would you make an accidental `AsEnumerable` visible in code review or in CI?*
+**Q9. What does `yield return` compile to?**
+**A:** A state machine class implementing `IEnumerable<T>` and `IEnumerator<T>`, with locals lifted to fields and the body split into cases of a `MoveNext` switch. Calling the method executes none of the body — it just constructs the state machine. That's why an argument-validation exception in an iterator method surfaces at the first `MoveNext`, not at the call, which routinely confuses people who put guard clauses in iterators.
+*Follow-up: How would you make argument validation throw eagerly in an iterator method?*
+
+**Q10. Is a CTE-style intermediate query materialised?**
+```csharp
+var expensive = orders.Where(o => SlowCheck(o));
+var a = expensive.Count();
+var b = expensive.Sum(o => o.Total);
+```
+**A:** No — `expensive` is a recipe, so `SlowCheck` runs once per element for `Count()` and again for `Sum()`. Nothing is cached. People often assume assigning to a variable materialises it. If you need one evaluation, call `ToList()` explicitly and work from that.
+*Follow-up: How would you compute both aggregates in a single pass?*
 
 ---
 
 ## 3. Intermediate (10 Q&A)
 
+**Q1. How would you find and fix multiple enumeration across an existing codebase?**
+**A:** Static analysis first — the "possible multiple enumeration" inspection catches most of it and is worth enabling as a warning despite false positives. Then the higher-leverage structural change: stop returning `IEnumerable<T>` from methods that have already materialised their data, and return `IReadOnlyList<T>` instead, which makes multiple enumeration harmless and free. For repositories, returning `IQueryable<T>` beyond the data layer is what lets callers accidentally enumerate a live query several times, so I'd treat that boundary as the real defect rather than fixing call sites one at a time.
+*Follow-up: Some argue repositories should return `IQueryable<T>` for composability. Your position?*
 
-**Q1. A query that was fast in dev takes 40 seconds in production and the database shows a full table scan with no `WHERE` clause. What happened?**
-**A:** Almost certainly client-side evaluation: the chain became `IEnumerable<T>` before the filter — through an `AsEnumerable`, a `ToList`, a method the provider cannot translate, or assignment to an `IEnumerable<T>` variable — so the provider fetched every row and the predicate ran in memory. In dev the table had a thousand rows and nobody noticed. I would confirm by capturing the generated SQL, then find the exact point in the chain where translation stopped. The durable fix is not just moving the filter but making this class of bug loud: newer EF Core versions throw rather than silently evaluating client-side, and query logging with a row-count threshold catches the rest.
-*Follow-up: The untranslatable part is a genuine business rule that can't be expressed in SQL. How do you restructure the query?*
-
-**Q2. How would you find and fix multiple enumeration in an existing codebase?**
-**A:** Static analysis first — the "possible multiple enumeration" inspection catches most of it, and it is worth enabling as a warning even though it has false positives. Then the higher-leverage structural change: stop returning `IEnumerable<T>` from methods that have already materialised their data, and return `IReadOnlyList<T>` instead, which makes multiple enumeration harmless and free. For repositories, returning `IQueryable<T>` beyond the data layer is what allows callers to accidentally enumerate a live query several times, so I would treat that boundary as the real defect rather than fixing call sites one at a time.
-*Follow-up: Some argue repositories should return `IQueryable<T>` for composability. What's your position?*
-
-**Q3. When is `.ToList()` the right call, and when is it a mistake?**
-**A:** It is right when you will genuinely enumerate more than once, when you need to release a connection or a `DbContext` before consuming, or when you need a stable snapshot because the source may change. It is a mistake when it is reflexive — inserted "to be safe" mid-chain — because it materialises everything at that point, defeats streaming, discards any remaining server-side filtering, and can pull an unbounded result set into memory. The tell in review is `.ToList()` followed immediately by more LINQ operators: that is almost always a fence in the wrong place.
+**Q2. When is `.ToList()` right, and when is it a mistake?**
+**A:** Right when you'll genuinely enumerate more than once, when you need to release a connection or `DbContext` before consuming, or when you need a stable snapshot because the source may change. A mistake when it's reflexive — inserted "to be safe" mid-chain — because it materialises everything at that point, defeats streaming, and discards any remaining server-side filtering. The tell in review is `.ToList()` followed immediately by more LINQ operators: that's almost always a fence in the wrong place.
 *Follow-up: A junior adds `.ToList()` to fix a "connection already open" error. What's the actual bug?*
 
-**Q4. Explain the performance implication of operator order in a LINQ chain.**
-**A:** For streaming operators, put the most selective filter first so later operators process fewer elements — `Where` before `Select` before `OrderBy` is the general shape, and sorting before filtering is a common and expensive inversion. For `IQueryable` the provider usually reorders for you since it produces a single SQL statement, so ordering matters far less; for `IEnumerable` the pipeline executes literally as written, so it matters a great deal. The important judgement is knowing which of those two worlds you are in, because advice that is correct for one is irrelevant in the other.
+**Q3. Does operator order matter?**
+**A:** For `IEnumerable`, yes and literally — the pipeline executes as written, so putting the most selective filter first means later operators process fewer elements, and sorting before filtering is an expensive inversion. For `IQueryable`, much less: the provider usually reorders because it produces a single SQL statement. So the important judgement is knowing which world you're in, because advice that's correct for one is irrelevant in the other.
 *Follow-up: Is there a case where putting `Where` first is actually worse?*
 
-**Q5. What is the cost of `GroupBy` and how does it differ between LINQ to Objects and a database provider?**
-**A:** In LINQ to Objects, `GroupBy` buffers the entire source to build the groups, so it is O(n) memory and produces no results until the input is exhausted — a real problem in a streaming pipeline over a large sequence. Translated to SQL it becomes a `GROUP BY` executed by the database with its own indexes and memory, which is usually far better, but only if the projection is translatable — grouping and then selecting a complex object often falls back to fetching all rows and grouping client-side. So the same expression can be an index-assisted aggregate or a full table load depending on details that are invisible in the C#.
-*Follow-up: How do you verify which of those two you got, without guessing?*
+**Q4. What does `GroupBy` cost, and does that differ between LINQ to Objects and a database provider?**
+**A:** In LINQ to Objects it buffers the entire source to build the groups — O(n) memory, and no results until the input is exhausted, which is a real problem in a streaming pipeline. Translated to SQL it becomes a `GROUP BY` executed by the database with its own indexes, usually far better — but only if the projection is translatable. Grouping and then selecting a complex object often falls back to fetching all rows and grouping client-side. So the same expression is either an index-assisted aggregate or a full table load, depending on details invisible in the C#.
+*Follow-up: How do you verify which one you actually got?*
 
-**Q6. When would you write a custom LINQ operator, and how would you implement it?**
-**A:** When a non-trivial sequence transformation appears repeatedly and expressing it inline hurts readability — batching, chunking before `Chunk` existed, sliding windows, distinct-by-key before `DistinctBy` existed. Implement it as an extension method on `IEnumerable<T>` using `yield return` so it composes and streams like the built-ins, and split argument validation into a non-iterator wrapper so it throws eagerly. I would check the BCL first, since several classic custom operators have been added to `System.Linq` in recent versions, and a custom one that shadows a built-in causes confusion later.
-*Follow-up: How would you write that operator so it also works efficiently when the source is an `IList<T>`?*
+**Q5. When would you write a custom LINQ operator, and how?**
+**A:** When a non-trivial sequence transformation appears repeatedly and inline expression hurts readability — batching, sliding windows, distinct-by-key. Implement as an extension method on `IEnumerable<T>` using `yield return` so it composes and streams like the built-ins, and split argument validation into a non-iterator wrapper so it throws eagerly. Check the BCL first, since several classic custom operators have been added to `System.Linq` recently and a custom one shadowing a built-in causes confusion later.
+*Follow-up: How would you make that operator efficient when the source is an `IList<T>`?*
 
-**Q7. How do closures interact with LINQ in a way that causes bugs?**
-**A:** A predicate captures variables by reference and the query runs later, so anything that mutates the captured variable between definition and enumeration changes the result — including a loop variable, which for a `for` loop is shared across iterations. The subtler production version is capturing something expensive or long-lived: a lambda capturing `this` inside a query stored in a field roots the whole containing object, and a lambda capturing a `DbContext` in a deferred query means the query is only valid while that context lives. I would look for deferred queries that escape the scope of what they captured — that is the shape of the bug.
-*Follow-up: How does storing an `IQueryable` in a field or cache go wrong?*
+**Q6. What breaks here?**
+```csharp
+public IQueryable<Order> GetOrders() {
+    using var db = new AppDbContext();
+    return db.Orders.Where(o => o.Active);
+}
+```
+**A:** The context is disposed when the method returns, but the query hasn't executed — the caller enumerates a live query against a disposed context and gets `ObjectDisposedException`. It's the deferred-execution trap combined with a lifetime mistake. Either materialise inside the method, or let the caller own the context lifetime, which is what DI scoping normally handles.
+*Follow-up: How does storing an `IQueryable` in a field or a cache go wrong in the same way?*
 
-**Q8. When is LINQ genuinely too slow, and what replaces it?**
-**A:** In tight numeric loops over large arrays or spans, where the per-element delegate invocation and enumerator indirection prevent the JIT from vectorising or inlining, a hand-written `for` loop over a `Span<T>` can be several times faster. It also matters where a chain is rebuilt inside a hot loop so the per-query allocation happens millions of times. Everywhere else — request handling, business logic, anything dominated by I/O — LINQ's cost is noise and replacing it trades readability for nothing. The decision must come from a profile showing the LINQ pipeline as a leading cost, not from a general belief that LINQ is slow.
-*Follow-up: You replace a LINQ chain with a manual loop and gain 30% on the benchmark. What do you check before merging?*
+**Q7. When is LINQ genuinely too slow?**
+**A:** In tight numeric loops over large arrays or spans, where per-element delegate invocation and enumerator indirection stop the JIT vectorising or inlining — a hand-written `for` over a `Span<T>` can be several times faster. Also where a chain is rebuilt inside a hot loop so the per-query allocation happens millions of times. Everywhere else — request handling, business logic, anything I/O-dominated — LINQ's cost is noise and replacing it trades readability for nothing. The decision has to come from a profile showing the pipeline as a leading cost, not from a general belief that LINQ is slow.
+*Follow-up: You replace a chain with a manual loop and gain 30% on the benchmark. What do you check before merging?*
 
-**Q9. How do you unit-test code that returns `IQueryable<T>`, and what does that testing miss?**
-**A:** You can back it with an in-memory list and the tests will pass — which is exactly the trap, because the in-memory provider is `Enumerable`, so it happily evaluates expressions the real provider cannot translate, and it applies .NET semantics for null handling, string comparison and culture that differ from the database's. Tests therefore prove the logic and hide the translation failures, which are the bugs that actually reach production. The reliable answer is integration tests against the real database engine, ideally containerised, for anything whose correctness depends on translation — with in-memory tests reserved for pure logic.
+**Q8. How do you test code returning `IQueryable<T>`, and what does that testing miss?**
+**A:** You can back it with an in-memory list and the tests pass — which is exactly the trap, because the in-memory provider is `Enumerable`, so it happily evaluates expressions the real provider can't translate, and applies .NET semantics for nulls, string comparison and culture that differ from the database's. So the tests prove the logic and hide the translation failures, which are the bugs that reach production. For anything whose correctness depends on translation, integration tests against the real engine, ideally containerised, are the honest answer.
 *Follow-up: Containerised database tests are slow. How do you keep the feedback loop tolerable?*
 
-**Q10. What is your view on returning `IEnumerable<T>` from a repository method?**
-**A:** It is usually the wrong choice, because it hides whether the result is already materialised or a live query. Callers cannot tell whether enumerating twice is free or catastrophic, whether the underlying connection is still open, or whether the sequence is bounded. Returning `IReadOnlyList<T>` states "this is materialised and safe," while returning `IAsyncEnumerable<T>` states "this streams and you must consume it within the resource's lifetime" — both are honest, and `IEnumerable<T>` is not. The general principle is that a return type should communicate the consumption contract, and this is one of the clearest places where C#'s default choice communicates nothing.
-*Follow-up: What breaks when an `IAsyncEnumerable` from a repository is enumerated after the scope is disposed, and how do you prevent it?*
+**Q9. What's your view on returning `IEnumerable<T>` from a repository?**
+**A:** Usually wrong, because it hides whether the result is materialised or a live query. The caller can't tell whether enumerating twice is free or catastrophic, whether the connection is still open, or whether the sequence is bounded. `IReadOnlyList<T>` says "materialised and safe"; `IAsyncEnumerable<T>` says "streams, consume within the resource's lifetime". Both are honest and `IEnumerable<T>` isn't. A return type should communicate the consumption contract, and this is one of the clearest places where the default choice communicates nothing.
+*Follow-up: What breaks when an `IAsyncEnumerable` from a repository is enumerated after the scope is disposed?*
+
+**Q10. How do closures cause LINQ bugs beyond the loop-variable case?**
+**A:** The dangerous version is capturing something expensive or long-lived. A lambda capturing `this` inside a query stored in a field roots the whole containing object. A predicate capturing a `DbContext` in a deferred query means the query is only valid while that context lives — which is the disposed-context bug from earlier. So the shape to look for is a *deferred query escaping the scope of what it captured*. Once you're looking for that shape rather than for "closures", these are easy to spot.
+*Follow-up: How would you catch that in review rather than at runtime?*
 
 ---
 
 ## 4. Expert / Architect (10 Q&A)
 
-
-**Q1. Would you allow `IQueryable<T>` to cross the boundary out of the data-access layer? Argue both sides.**
-**A:** For it: composability — callers add filters and paging, the provider produces one efficient query, and you avoid an explosion of near-identical repository methods. Against it: the abstraction leaks completely. Callers can compose expressions the provider cannot translate, cause client-side evaluation, hold a live query past the context's lifetime, and defeat any attempt to reason about or govern the queries a service issues. My position for a large estate is that `IQueryable` stops at the data layer, with an explicit specification or query-object pattern for the composability people actually want, because the failure modes of a leaked `IQueryable` are severe, load-dependent, and diagnosed far from where they were introduced.
+**Q1. Would you let `IQueryable<T>` cross out of the data-access layer? Argue both sides.**
+**A:** For: composability — callers add filters and paging, the provider produces one efficient query, and you avoid an explosion of near-identical repository methods. Against: the abstraction leaks completely. Callers can compose expressions the provider can't translate, cause client-side evaluation, hold a live query past the context's lifetime, and defeat any attempt to govern the queries a service issues. My position for a large estate is that `IQueryable` stops at the data layer, with a specification or query-object pattern giving the composability people actually want — because the failure modes of a leaked `IQueryable` are severe, load-dependent, and diagnosed far from where they were introduced.
 *Follow-up: How would you implement that specification pattern without recreating a worse `IQueryable`?*
 
-**Q2. How would you make LINQ-related performance problems detectable at the organisation level rather than per incident?**
-**A:** Make the database the source of truth for what actually happened. Log generated SQL with the associated query tag in non-production and sampled in production, alert on queries returning above a row threshold, and surface per-request query counts so N+1 patterns show as a number rather than a suspicion. Configure the provider to throw on client-side evaluation rather than warn, so it fails in CI instead of degrading in production. Then add integration tests that assert query counts for critical paths, which is the only reliable regression gate for this class of bug. The organisational piece is that this instrumentation belongs in the shared data-access package so every service inherits it rather than each team rediscovering the need.
-*Follow-up: A team's query-count test fails after an unrelated refactor. How do you keep that from being marked flaky and deleted?*
+**Q2. How do you make LINQ-related performance problems detectable organisationally rather than incident by incident?**
+**A:** Make the database the source of truth for what actually happened. Log generated SQL with a query tag in non-production and sampled in production, alert on queries returning above a row threshold, and surface per-request query counts so N+1 shows as a number rather than a suspicion. Configure the provider to *throw* on client-side evaluation rather than warn, so it fails in CI instead of degrading in production. Then integration tests asserting query counts for critical paths — the only reliable regression gate for this class of bug. And put that instrumentation in the shared data-access package so every service inherits it rather than each team rediscovering the need.
+*Follow-up: A team's query-count test fails after an unrelated refactor. How do you stop it being marked flaky and deleted?*
 
-**Q3. A team wants to build a dynamic query API where clients send filter expressions that are turned into `IQueryable` predicates. What are your concerns?**
-**A:** Primarily security and cost. Building expression trees from client input is an injection surface of a different shape than SQL injection — the risk is not string concatenation but allowing filters on unindexed columns, unbounded result sets, or navigation paths that expose data the caller should not see. There is also a denial-of-service dimension: an arbitrary filter can force a full scan or a cartesian join, and an arbitrary sort can exhaust the database's memory. I would require an explicit allow-list of filterable fields and operators, mandatory paging with a hard cap, per-caller cost limits, and authorisation applied as a non-negotiable predicate composed into every query rather than something the client can influence.
-*Follow-up: How do you enforce that the tenant filter can never be omitted, structurally rather than by convention?*
+**Q3. A team wants a dynamic query API where clients send filter expressions turned into `IQueryable` predicates. Concerns?**
+**A:** Security and cost, primarily. Building expression trees from client input is an injection surface of a different shape — the risk isn't string concatenation, it's allowing filters on unindexed columns, unbounded result sets, or navigation paths exposing data the caller shouldn't see. There's a denial-of-service dimension too: an arbitrary filter can force a full scan, and an arbitrary sort can exhaust the database's memory. I'd require an explicit allow-list of filterable fields and operators, mandatory paging with a hard cap, per-caller cost limits, and the authorisation predicate composed into every query as something the client cannot influence.
+*Follow-up: How do you enforce that the tenant filter can never be omitted — structurally, not by convention?*
 
-**Q4. How would you approach migrating a large codebase off a query pattern that has become a systemic performance problem?**
-**A:** Measure first to size it: instrument to find which call sites actually produce the bad queries, because in my experience a small number of paths generate most of the cost and a mass refactor would be mostly wasted. Then fix in order of production impact rather than alphabetically, behind tests that assert query counts and SQL shape so the fix cannot regress. To stop the bleeding while migrating, add the analyzer or provider setting that makes the pattern a build error for *new* code with a suppression baseline for existing code — that converts an unbounded refactor into a burn-down with a visible number. I would resist the instinct to ban the pattern outright before the alternative is documented and easy, since teams under deadline will otherwise route around it in worse ways.
-*Follow-up: The burn-down stalls at 80% because the remaining sites are hard. What do you do?*
+**Q4. What are the architectural implications of expression trees, beyond LINQ?**
+**A:** The same mechanism underpins provider-based ORMs, mapping libraries, validation rule engines, mocking frameworks and dynamic filtering. Two architectural costs follow. Translation is partial and version-dependent, so what compiles isn't what's supported — the contract lives in a provider's implementation rather than in the type system, and a provider upgrade can change which of your queries are translatable. And compiling expression trees is runtime code generation, which is unavailable under NativeAOT — so a codebase leaning heavily on this pattern has quietly foreclosed an AOT option. I'd want those dependencies known and deliberate rather than accumulated.
+*Follow-up: How would you assess whether your service could move to AOT given a heavy expression-tree dependency?*
 
-**Q5. What are the architectural implications of expression trees being used for translation — where else does this pattern show up, and what does it cost you?**
-**A:** The same mechanism underpins provider-based ORMs, mapping libraries, validation rule engines, mocking frameworks and dynamic filtering. The architectural cost is that translation is partial and version-dependent: what compiles is not what is supported, so the contract lives in a provider's implementation rather than in the type system, and a provider upgrade can change which of your queries are translatable. The second cost is runtime code generation — compiling expression trees is expensive and, critically, unavailable under NativeAOT, so a codebase leaning heavily on this pattern has quietly foreclosed an AOT option. I would want those dependencies known and deliberate rather than accumulated.
-*Follow-up: How would you evaluate whether your service could move to NativeAOT given a heavy expression-tree dependency?*
+**Q5. How do you weigh readability against performance when setting LINQ guidance for many teams?**
+**A:** Default firmly to readability, because the vast majority of code isn't hot and LINQ's clarity compounds in a codebase many people maintain. The guidance I'd write is narrow and specific rather than general: no `IQueryable` beyond the data layer, no reflexive `.ToList()`, prefer `Any()` over `Count()`, return types that state their consumption contract, hand-optimised loops only in benchmarked hot paths with a comment explaining why. Blanket advice like "avoid LINQ for performance" is actively harmful — it produces slower, buggier code written by people optimising the wrong thing. Guidance is credible only when it names the specific failure it prevents.
+*Follow-up: A senior engineer on another team is banning LINQ in their service. How do you handle that?*
 
-**Q6. How do you weigh readability against performance when setting LINQ guidance for many teams?**
-**A:** I would set the default firmly on readability, because the vast majority of code is not hot and LINQ's clarity has real, compounding value in a codebase many people maintain. The guidance I would write is narrow and specific rather than general: no `IQueryable` beyond the data layer, no reflexive `.ToList()`, prefer `Any()` over `Count()`, return types that state their consumption contract, and hand-optimised loops only in benchmarked hot paths with a comment explaining why. Blanket advice like "avoid LINQ for performance" is actively harmful — it produces slower, buggier code written by people optimising the wrong thing. The credibility of guidance depends on it naming the specific failure it prevents.
-*Follow-up: A senior engineer on another team disagrees and is banning LINQ in their service. How do you handle that?*
-
-**Q7. In a service with a strict latency budget, how do you decide where LINQ is acceptable?**
-**A:** By allocating the budget explicitly: measure where time actually goes, and accept LINQ anywhere its contribution is below the noise floor of that path — which is nearly everywhere, since a few enumerator allocations are nanoseconds against milliseconds of I/O. The places to scrutinise are per-element work in high-frequency loops, chains rebuilt inside loops, and any buffering operator on a sequence whose size is caller-controlled, because that is a memory and latency risk rather than a constant cost. I would encode the outcome as benchmarks on the specific hot paths rather than as a style rule, so the constraint is enforced by measurement and stays true as the code changes.
-*Follow-up: Where in a typical request pipeline would you expect LINQ to actually show up in a profile?*
-
-**Q8. How does the LINQ-to-provider model complicate multi-tenant data isolation?**
-**A:** The tenant predicate has to be present on every query, and LINQ makes it very easy to write one that omits it — a single missed `Where` is a cross-tenant data leak that no test will catch unless it was written to look for it. Relying on developers to remember is not a control. The structural answers are provider-level global query filters applied automatically, plus database-level enforcement such as row-level security so the isolation does not depend on the application at all, plus tests that run as one tenant and assert that another tenant's rows are unreachable through every repository method. I would treat any code path that bypasses the filter as requiring explicit review and an audit record, because in a regulated environment that is a control, not a convention.
+**Q6. How does the LINQ-to-provider model complicate multi-tenant isolation?**
+**A:** The tenant predicate has to be on every query, and LINQ makes it very easy to write one that omits it — a single missed `Where` is a cross-tenant leak that no test catches unless it was written to look for it. Relying on developers to remember isn't a control. The structural answers are provider-level global query filters applied automatically, database-level row-level security so isolation doesn't depend on the application at all, and tests that authenticate as one tenant and assert another's rows are unreachable through every repository method. Any path bypassing the filter should require explicit review and an audit record.
 *Follow-up: A reporting feature legitimately needs cross-tenant access. How do you allow it without weakening the default?*
 
-**Q9. What is your position on hand-written SQL versus LINQ for a data-intensive service?**
-**A:** Mixed by intent rather than by ideology. LINQ for the large volume of ordinary CRUD and simple queries, where its type safety, refactorability and compile-time checking against the model are real advantages over strings. Hand-written SQL for the small number of queries where performance is critical, the shape is complex, or you need engine-specific features the provider cannot express — because fighting the translator to produce a specific plan is more fragile than writing the query you want. The important part is making the boundary deliberate and reviewed: hand-written SQL needs its own tests, parameterisation discipline, and an owner, and should be kept where it is discoverable rather than scattered inline.
-*Follow-up: How do you keep hand-written SQL from drifting out of sync with the model over time?*
+**Q7. Hand-written SQL or LINQ for a data-intensive service?**
+**A:** Mixed by intent rather than ideology. LINQ for the large volume of ordinary queries, where type safety, refactorability and compile-time checking against the model beat strings. Hand-written SQL for the small number where performance is critical, the shape is complex, or you need engine-specific features the provider can't express — because fighting the translator to produce a specific plan is more fragile than writing the query you want. What matters is making the boundary deliberate and reviewed: hand-written SQL needs its own tests, parameterisation discipline and an owner, and should live somewhere discoverable rather than scattered inline.
+*Follow-up: How do you stop hand-written SQL drifting out of sync with the model over time?*
 
-**Q10. A performance review finds LINQ named as the top allocation source in a service. How do you interpret that, and what would you do?**
-**A:** With scepticism, because "top allocation source" and "top cost" are different claims, and LINQ appearing at the top of an allocation profile is normal in an application that is behaving fine — those allocations mostly die in gen0 at negligible cost. I would look at whether they are actually causing collection pressure, promotion or pause time before acting, and I would look for the specific pathologies that genuinely hurt: buffering operators on unbounded inputs, chains constructed per-element, and materialisation of large result sets. If the honest answer is that LINQ allocates a lot and it costs nothing, that is the finding, and I would say so rather than authorising a rewrite. Redirecting a team away from a plausible-looking but worthless optimisation is one of the more valuable things a principal engineer does.
-*Follow-up: The team has already spent two weeks on the rewrite and it shows a 2% improvement. How do you close that out?*
+**Q8. A performance review names LINQ as the top allocation source. How do you interpret that?**
+**A:** Sceptically, because "top allocation source" and "top cost" are different claims — LINQ appearing at the top of an allocation profile is normal in an application behaving perfectly well, since those allocations mostly die in gen0 at negligible cost. I'd check whether they're actually causing collection pressure, promotion or pause time before acting, and look for the specific pathologies that genuinely hurt: buffering operators on unbounded inputs, chains constructed per-element, materialisation of large result sets. If the honest answer is that LINQ allocates a lot and it costs nothing, that's the finding — and redirecting a team away from a plausible-looking but worthless optimisation is one of the more valuable things a principal engineer does.
+*Follow-up: The team has already spent two weeks and the rewrite shows 2%. How do you close that out?*
+
+**Q9. How would you migrate a codebase off a query pattern that's become a systemic performance problem?**
+**A:** Measure first to size it — instrument to find which call sites actually produce the bad queries, because typically a small number of paths generate most of the cost and a mass refactor would be mostly wasted. Fix in order of production impact, behind tests asserting query counts and SQL shape so the fix can't regress. To stop the bleeding while migrating, make the pattern a build error for *new* code with a suppression baseline for existing code — that turns an unbounded refactor into a burn-down with a visible number. I'd resist banning the pattern outright before the alternative is documented and easy, because teams under deadline will route around it in worse ways.
+*Follow-up: The burn-down stalls at 80% because the remaining sites are hard. What do you do?*
+
+**Q10. What separates an excellent answer from an adequate one on a LINQ performance question?**
+**A:** An adequate answer knows deferred execution and that N+1 is bad. An excellent one immediately establishes *which execution model* is in play, because everything else follows from `IEnumerable` versus `IQueryable`; reasons about where the server/client fence sits and what crosses it; distinguishes per-query cost from per-element cost when judging allocation; treats the return type as a contract about consumption; and knows the difference between a query that's slow and a query that shouldn't be running. It also knows when to stop — that most LINQ in most services costs nothing measurable. The distinguishing quality is thinking about the *boundary* rather than the syntax.
+*Follow-up: Given that, what's the first question you'd ask about any LINQ query in a code review?*
 
 ---
 

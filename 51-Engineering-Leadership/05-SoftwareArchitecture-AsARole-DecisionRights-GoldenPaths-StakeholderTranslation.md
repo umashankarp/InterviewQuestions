@@ -1,4 +1,4 @@
-# Module 173 — Software Architecture as a Role: Decision Rights, Golden Paths & Stakeholder Translation
+# Module 187 — Software Architecture as a Role: Decision Rights, Golden Paths & Stakeholder Translation
 
 > Domain: Engineering Leadership (merged 51-55) | Level: Beginner → Expert | Prerequisite: [[04-PrincipalEngineering-OrgWideStrategy-GovernanceAtScale-BuildVsBuy-RiskOwnership]] (the decision-system components, which the architect role operates within or owns), [[03-StaffPlusEngineering-Archetypes-ScopeSelection-GlueWork-TechnicalStrategy]] (the Architect *archetype* — this module is about the formal *role*, which overlaps but is not identical), [[../30-Architecture-Patterns/02-EvolutionaryArchitecture-FitnessFunctions-ADRs-Governance]] (the fitness functions and ADRs — the instruments this role uses)
 
@@ -1440,4 +1440,4 @@ Architects join the platform/developer-experience organization; the function's o
 
 ---
 
-**Next:** [[06-EngineeringManagement-PeopleSystems-Performance-Hiring-OrgDesign]] — Module 174 takes the fifth thread: Engineering Management as a parallel track with a fundamentally different scaling mechanism, and the EM/Staff+ partnership that makes both work.
+**Next:** [[06-EngineeringManagement-PeopleSystems-Performance-Hiring-OrgDesign]] — Module 188 takes the fifth thread: Engineering Management as a parallel track with a fundamentally different scaling mechanism, and the EM/Staff+ partnership that makes both work.

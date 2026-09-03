@@ -49,136 +49,158 @@ Ordering defects are silent and severe. Authentication registered after authoriz
 
 ## 2. Beginner (10 Q&A)
 
+**Q1. What's wrong with this pipeline?**
+```csharp
+app.UseRouting();
+app.UseAuthorization();
+app.UseAuthentication();
+app.MapControllers();
+```
+**A:** Authentication runs after authorization, so when authorization evaluates the policy `HttpContext.User` hasn't been populated yet — every request is anonymous. Depending on your policies that either denies everything or, worse, lets anonymous-allowed endpoints through while the authenticated ones fail. Order must be `UseAuthentication` then `UseAuthorization`, and authorization has to sit between `UseRouting` and the endpoints.
+*Follow-up: Why specifically between routing and endpoints?*
 
-**Q1. Describe the shape of the middleware pipeline and what "onion" means in practice.**
-**A:** Each middleware receives the next one as a delegate and chooses whether to call it, so the chain nests: code before `await next()` runs on the way in, in registration order, and code after it runs on the way out, in reverse order. That means a middleware registered first sees the request earliest and the response latest — which is exactly why exception handling and logging go near the top. A middleware that does not call `next` short-circuits, and everything after it never runs. Holding that in-and-out picture is what makes ordering bugs obvious rather than mysterious.
-*Follow-up: What happens to the response if a middleware calls `next()` twice?*
+**Q2. Explain the "onion" and what happens on the way out.**
+**A:** Each middleware gets the next one as a delegate. Code before `await next()` runs on the way in, in registration order; code after it runs on the way out, in reverse. So the first-registered middleware sees the request earliest and the response latest — which is exactly why exception handling and logging go at the top. A middleware that doesn't call `next` short-circuits and everything after it never runs.
+*Follow-up: What happens if a middleware calls `next()` twice?*
 
-**Q2. Why does middleware ordering matter so much? Give the two orderings people most often get wrong.**
-**A:** Authentication before authorization, because authorization evaluates an identity that authentication must have already established — reversed, every request is anonymous and either everything is denied or, worse, an anonymous-allowed policy lets requests through. And exception handling first, because it can only catch what runs *inside* it, so registering it after several middlewares leaves their failures unhandled. The general rule is that anything which must observe or wrap the whole request goes early, and anything that terminates goes late.
-*Follow-up: Where do CORS and static files belong relative to authentication, and why?*
+**Q3. Why does this break model binding?**
+```csharp
+app.Use(async (ctx, next) => {
+    using var reader = new StreamReader(ctx.Request.Body);
+    var body = await reader.ReadToEndAsync();
+    _logger.LogInformation("Body: {Body}", body);
+    await next();
+});
+```
+**A:** The request body is a forward-only stream that can only be read once. This consumes it, so the model binder downstream finds nothing and the action receives a null model — with no error anywhere. `Request.EnableBuffering()` switches to a rewindable stream so you can read then reset the position. But don't do it globally: it buffers every body to memory or disk, which on an upload endpoint is a per-request amplification.
+*Follow-up: What limits does `EnableBuffering` have, and how do you protect against a large-body DoS?*
 
-**Q3. What is the difference between `Use`, `Run` and `Map`?**
-**A:** `Use` adds a middleware that can call the next one, so it participates in both directions. `Run` adds a terminal middleware that never calls next — the end of a branch. `Map` branches the pipeline on a path prefix, creating a separate chain for matching requests, and `UseWhen` branches on an arbitrary predicate while rejoining the main pipeline afterwards. The distinction between `Map` and `UseWhen` matters: `Map` is a hard fork with its own terminal, `UseWhen` is a conditional insertion.
-*Follow-up: When would you use `MapWhen` rather than routing to separate endpoints?*
+**Q4. Why can't you inject a scoped service here?**
+```csharp
+public class TenantMiddleware {
+    public TenantMiddleware(RequestDelegate next, AppDbContext db) { ... }
+}
+```
+**A:** Convention-based middleware is constructed once at startup and reused for every request, so it's effectively a singleton. Injecting a scoped `DbContext` into the constructor captures one request's instance forever — shared across every concurrent request, accumulating tracked entities, and eventually disposed underneath you. Scoped services go as extra parameters on `InvokeAsync`, which is resolved per request.
+*Follow-up: How does `IMiddleware` differ in this respect?*
 
-**Q4. What is `HttpContext.Features` for?**
-**A:** It is the extensibility layer between the server and the framework: a collection of interfaces the server implements (request/response bodies, connection info, TLS details, WebSocket upgrade, response completion) which higher layers query rather than depending on Kestrel directly. That indirection is why the same application runs on Kestrel, HTTP.sys or IIS in-process, and why middleware can *replace* a feature — response caching and compression work by swapping the response body feature. Encountering `Features` in code usually signals someone reaching below the normal abstraction, which is worth asking about in review.
-*Follow-up: How does response-buffering middleware use the feature collection, and what's the risk?*
-
-**Q5. Why does endpoint routing split into a selection stage and an execution stage?**
-**A:** Because middleware between the two stages needs to know *which* endpoint was selected without having executed it. `UseRouting` matches the request to an endpoint and puts its metadata on the context; `UseAuthorization` then reads that endpoint's authorization metadata to enforce policy; the endpoint middleware finally executes the handler. That gap is precisely why `UseAuthorization` must sit between them — placed before `UseRouting` it has no endpoint to inspect, and placed after the endpoint executes it is too late.
+**Q5. Why does `UseRouting` exist separately from endpoint execution?**
+**A:** So middleware *between* the two can know which endpoint was selected without having executed it. `UseRouting` matches the request and attaches the endpoint's metadata to the context; `UseAuthorization` then reads that endpoint's authorization metadata to enforce policy; endpoint middleware finally runs the handler. That gap is the whole reason metadata-driven authorization works — before `UseRouting` there's no endpoint to inspect, and after execution it's too late.
 *Follow-up: What happens if you call `UseAuthorization` before `UseRouting`?*
 
-**Q6. What does "the response has started" mean and why does it constrain you?**
-**A:** Once the first byte of the response body is written, headers and status code have already gone out on the wire, so they cannot be changed — attempting to set them throws. This constrains any middleware that wants to modify the response on the way out: by the time an inner component has written, the outer middleware's chance to set a header or change the status has passed. That is why exception-handling middleware checks `Response.HasStarted` and, if it has, can only abort the connection rather than return a clean error page.
-*Follow-up: How would you write middleware that must modify a response body that inner components produce?*
+**Q6. What does "the response has started" mean and what does it stop you doing?**
+**A:** Once the first byte of the body goes out, the status and headers are already on the wire and can't be changed — attempting to set them throws. That constrains any middleware wanting to modify the response on the way out: by the time an inner component has written, your chance is gone. It's why exception-handling middleware checks `Response.HasStarted` and, if it has, can only abort the connection rather than return a clean error.
+*Follow-up: How would you write middleware that must modify a response body produced downstream?*
 
-**Q7. Why is middleware effectively a singleton, and what does that forbid?**
-**A:** Convention-based middleware is constructed once at startup and reused for every request, so constructor-injected dependencies live for the application's lifetime. That forbids injecting scoped services into the constructor — doing so captures one request's instance forever, which for something like a `DbContext` means a disposed or shared context across requests. Scoped services must be resolved per request, which is why the `InvokeAsync` method accepts additional injected parameters resolved from the request scope. It also forbids instance fields holding per-request state, since concurrent requests share the instance.
-*Follow-up: How does `IMiddleware` differ from convention-based middleware in this respect?*
+**Q7. `Map`, `MapWhen`, `UseWhen`, `Use`, `Run` — what's the difference?**
+**A:** `Use` adds a middleware that can call the next, participating in both directions. `Run` is terminal — never calls next. `Map` branches on a path prefix into a *separate* chain with its own terminal. `UseWhen` conditionally inserts middleware into the main pipeline and rejoins it. The distinction that bites is `Map` versus `UseWhen`: `Map` is a hard fork, so anything registered after it never runs for matched requests.
+*Follow-up: How would you audit an app for endpoints that bypass parts of the pipeline?*
 
-**Q8. How do you read the request body in middleware without breaking model binding?**
-**A:** The request body is a forward-only stream that can be read once, so a middleware that reads it leaves nothing for the model binder — the classic symptom is a null model after adding request logging. `Request.EnableBuffering()` switches to a rewindable stream so you can read and then reset the position, at the cost of buffering the body in memory or to disk. That cost is the reason not to do it globally: on an endpoint accepting large uploads it is a memory or disk amplification per request, so buffering should be scoped to the routes that actually need it.
-*Follow-up: What are the limits on `EnableBuffering`, and how would you protect against a large-body denial of service?*
+**Q8. What is `HttpContext.Features` for?**
+**A:** It's the extensibility layer between the server and the framework — a collection of interfaces the server implements (request/response bodies, connection info, TLS details, WebSocket upgrade) that higher layers query rather than depending on Kestrel directly. That indirection is why the same app runs on Kestrel, HTTP.sys or IIS in-process, and why middleware can *replace* a feature: response caching and compression both work by swapping the response body feature.
+*Follow-up: Seeing `Features` in application code usually signals what?*
 
-**Q9. Middleware versus filters versus endpoint filters — how do you choose?**
-**A:** Middleware is the right level for concerns that apply to *every* request regardless of routing and that may need to run before routing exists — logging, exception handling, correlation, compression, security headers. Filters run inside the MVC/endpoint execution and have access to the action, its arguments and its result, which makes them right for model-level concerns such as validation or result shaping. Endpoint filters are the minimal-API equivalent, lighter weight and composable per endpoint. The tell is whether you need routing and argument context: if you do, it is not middleware.
-*Follow-up: You need a concern applied to all endpoints in one controller only. Which do you use and why?*
+**Q9. Middleware, action filter, or endpoint filter?**
+**A:** Middleware for concerns applying to every request regardless of routing, and that may need to run before routing exists — logging, exception handling, correlation, security headers, compression. Filters run inside MVC execution with access to the action, its arguments and its result, so they're right for model-level concerns like validation or result shaping. Endpoint filters are the minimal-API equivalent, lighter and composable per endpoint or route group. The tell: if you need routing or argument context, it isn't middleware.
+*Follow-up: A concern applies to one controller only. Which, and why?*
 
-**Q10. What is `IHttpContextAccessor` and why is it treated with suspicion?**
-**A:** It exposes the current `HttpContext` via an `AsyncLocal`, letting code deep in the stack reach the request without it being passed down. The suspicion is well-earned: it creates an invisible dependency on a web context, so the code cannot be used from a background job or a console host without failing at runtime; it costs a little on every request because the context must be tracked; and it silently returns null in exactly the contexts where you did not expect to be. It is acceptable in infrastructure such as a logging enricher and a poor choice in domain or application logic, where the needed value should be an explicit parameter.
-*Follow-up: A service needs the current user's tenant ID. What's the better design than injecting the accessor?*
+**Q10. Why is `IHttpContextAccessor` treated with suspicion?**
+**A:** It exposes the current context via an `AsyncLocal`, letting code deep in the stack reach the request without it being passed down. That creates an invisible dependency on a web context, so the code can't run from a background job or a message consumer without failing at runtime; it costs a little on every request; and it silently returns null exactly where you didn't expect to be. Fine in a logging enricher; a poor choice in domain or application logic, where the value should be an explicit parameter.
+*Follow-up: A service needs the current user's tenant ID. What's the better design?*
 
 ---
 
 ## 3. Intermediate (10 Q&A)
 
-
-**Q1. A new middleware is added and authentication silently stops working on some endpoints. How do you diagnose it?**
-**A:** I would first dump the actual pipeline order, because `Program.cs` in a real service is usually assembled across extension methods and the effective order is not what anyone believes. Then check whether the new middleware short-circuits — returning without calling `next` for some paths — or writes to the response early, so downstream components see a started response. I would also check whether it branched with `Map`, since a mapped branch does not inherit middleware registered afterwards, which is a very common cause of "auth works on most endpoints." The general lesson is that pipeline problems are diagnosed by establishing the real order first, not by reading the middleware's own code.
+**Q1. Someone adds middleware and authentication silently stops working on some endpoints. How do you diagnose it?**
+**A:** First dump the *actual* pipeline order, because `Program.cs` in a real service is assembled across extension methods and the effective order is rarely what anyone believes. Then check whether the new middleware short-circuits for some paths, or writes to the response early so downstream sees a started response. Also check whether it branched with `Map` — a mapped branch doesn't inherit middleware registered afterwards, which is a very common cause of "auth works on most endpoints". The lesson: diagnose pipeline problems by establishing real order first, not by reading the middleware's code.
 *Follow-up: How would you write a test that fails when someone reorders the pipeline incorrectly?*
 
-**Q2. How would you implement request/response logging without wrecking performance or leaking data?**
-**A:** Log metadata by default — method, path, status, duration, correlation ID, user and tenant identifiers — and treat bodies as opt-in per route, because buffering every body costs memory and captures payloads you almost certainly should not retain. Where bodies are needed, cap the captured size, redact known-sensitive fields by an allow-list rather than a deny-list, and sample rather than capturing everything. I would also make sure the logging middleware is exception-safe and never changes response semantics, since a logging component that alters behaviour is the worst kind of bug to chase. In a regulated environment, retention and access controls on those logs are part of the design, not an afterthought.
-*Follow-up: A sensitive field appears in logs despite redaction. What went wrong, and how do you prevent recurrence?*
+**Q2. How do you implement request/response logging without wrecking performance or leaking data?**
+**A:** Log metadata by default — method, path, status, duration, correlation ID, user and tenant — and make bodies opt-in per route, because buffering every body costs memory and captures payloads you almost certainly shouldn't retain. Where bodies are needed, cap the captured size, redact by an *allow-list* rather than a deny-list, and sample. Make the middleware exception-safe and certain never to change response semantics, since a logging component that alters behaviour is the worst kind of bug to chase. In a regulated environment, retention and access controls on those logs are part of the design.
+*Follow-up: A sensitive field appears in logs despite redaction. What went wrong?*
 
-**Q3. Explain what a scope is in a request, and what commonly goes wrong with it.**
-**A:** The framework creates a DI scope per request and disposes it when the request completes; scoped services live for that scope, which is what makes a per-request `DbContext` work. What goes wrong is work that outlives the request: fire-and-forget continuations that use a scoped service after the scope is disposed, background work started from a request, and singletons that captured a scoped dependency. The symptom is an `ObjectDisposedException` that appears only under load or only sometimes, because it depends on the race between the work and the disposal. The fix is to create an explicit scope for background work rather than borrowing the request's.
-*Follow-up: How would you correctly start a background operation from a request handler?*
+**Q3. What's the bug, and why is it intermittent?**
+```csharp
+public async Task<IActionResult> Post(Order o) {
+    _ = ProcessInBackground(o);   // uses injected scoped DbContext
+    return Accepted();
+}
+```
+**A:** The background work continues after the response, but the DI scope is disposed when the request completes — so the `DbContext` is disposed underneath it. It's intermittent because it depends on the race between the work and the disposal, so it passes locally and fails under load. Fix is an explicit scope for work that outlives the request, resolved from `IServiceScopeFactory` — or better, hand it to a hosted service or a queue so it isn't tied to a request at all.
+*Follow-up: The background work needs data from the request scope. How do you pass it safely?*
 
-**Q4. How do you correctly handle exceptions in the pipeline, and what does the built-in handler not cover?**
-**A:** Exception-handling middleware registered first catches everything downstream and maps it to a consistent response with a correlation ID. What it does not cover is anything thrown *before* it (including in the host's own startup path), anything after the response has started — where the only honest option is to abort the connection — and failures in the response-writing itself. It also does not cover exceptions on background threads, which are outside the request entirely. So the complete picture needs the middleware plus a top-level unhandled-exception hook plus explicit error handling for hosted services.
-*Follow-up: The response has already started when the exception is thrown. What should the client actually experience?*
+**Q4. What does the built-in exception handler *not* cover?**
+**A:** Anything thrown before it in the pipeline, including in the host's own startup path. Anything after the response has started, where the only honest option is aborting the connection. Failures in the response writing itself. And anything on a background thread, which is outside the request entirely. So the complete picture needs the middleware, plus a top-level unhandled-exception hook, plus explicit error handling inside hosted services.
+*Follow-up: The response has already started when the exception is thrown. What should the client experience?*
 
-**Q5. Where should a rate limiter live — middleware, gateway, or both?**
-**A:** Both, for different reasons. The gateway or edge is where you shed load cheaply and protect the whole service, because rejecting there costs no application resources and can defend against volumetric abuse. In-process middleware is where you enforce per-tenant or per-endpoint fairness that the edge cannot see, since it needs application knowledge of the caller's plan or the endpoint's cost. The trade-off is state: in-process limiting is per-instance unless backed by a shared store, so an N-instance deployment permits N times the configured rate, which is a detail people routinely miss when the limit is a contractual one.
-*Follow-up: How do you implement a distributed rate limit without making the store a single point of failure?*
+**Q5. Where should a rate limiter live — gateway, middleware, or both?**
+**A:** Both, for different reasons. The edge is where you shed load cheaply and protect the whole service, because rejecting there costs no application resources and defends against volumetric abuse. In-process middleware is where you enforce per-tenant or per-endpoint fairness the edge can't see, since it needs application knowledge of the caller's plan. The trade-off is state: in-process limiting is per-instance unless backed by a shared store, so an N-instance deployment permits N times the configured rate — a detail people routinely miss when the limit is contractual.
+*Follow-up: How do you implement a distributed limit without making the store a single point of failure?*
 
-**Q6. What are the performance characteristics of the pipeline itself, and when does middleware count become a problem?**
-**A:** Each middleware is a delegate call plus whatever it does, so the framework overhead per middleware is negligible — the cost is entirely in what they do. Problems come from middleware doing per-request work that should be cached (parsing configuration, building a policy, resolving expensive services), from buffering bodies globally, and from synchronous or blocking calls inside middleware, which occupy a thread for the whole request. I would profile rather than count: a pipeline of twenty cheap middlewares is fine, and a pipeline of three where one does a synchronous lookup per request is not.
-*Follow-up: How would you attribute latency to a specific middleware in production?*
-
-**Q7. How does graceful shutdown work, and where do requests get lost?**
-**A:** On shutdown the host stops accepting new connections, signals `ApplicationStopping`, and waits up to a configured timeout for in-flight requests to complete before disposing services. Requests get lost when the timeout is shorter than the longest legitimate request, when the load balancer keeps routing traffic because readiness was not flipped first, and when background work started from a request is not tracked and is simply killed. In Kubernetes, the classic gap is the pod receiving SIGTERM before the endpoints controller has removed it from the service, which is why a pre-stop delay matters. Getting this right is what makes rolling deploys invisible to users.
+**Q6. How does graceful shutdown work, and where do requests get lost?**
+**A:** The host stops accepting new connections, signals `ApplicationStopping`, and waits up to a configured timeout for in-flight requests before disposing services. Requests get lost when that timeout is shorter than the longest legitimate request; when the load balancer keeps routing because readiness wasn't flipped first; and when background work started from a request isn't tracked and is simply killed. In Kubernetes the classic gap is the pod getting SIGTERM before the endpoints controller has removed it from the service, which is why a pre-stop delay matters.
 *Follow-up: What sequence would you configure so a rolling deploy drops zero requests?*
 
-**Q8. How would you implement per-tenant behaviour in the pipeline?**
-**A:** Resolve tenant identity early — from host name, path, header or token claim — into a strongly-typed context object registered as a scoped service, so downstream code depends on an explicit abstraction rather than reparsing the request. Then use that context for configuration, connection selection and data filtering. The critical design decision is failure behaviour: an unresolvable tenant must fail closed with a clear error, never fall through to a default, because a default tenant is a cross-tenant data exposure waiting to happen. I would also keep tenant resolution out of `IHttpContextAccessor` reach in the domain layer, so a background job cannot accidentally run with no tenant at all.
+**Q7. How would you implement per-tenant behaviour in the pipeline?**
+**A:** Resolve tenant identity early — from host, path, header or a token claim — into a strongly-typed context registered as a scoped service, so downstream code depends on an explicit abstraction rather than reparsing the request. Then use it for configuration, connection selection and data filtering. The critical decision is failure behaviour: an unresolvable tenant must fail closed with a clear error, never fall through to a default, because a default tenant is a cross-tenant exposure waiting to happen. And keep it out of `IHttpContextAccessor` reach in the domain, so a background job can't run with no tenant at all.
 *Follow-up: How do you ensure a background job processes with the correct tenant context?*
 
-**Q9. What is the difference between `UseWhen` and `MapWhen`, and when has that distinction bitten you?**
-**A:** `UseWhen` conditionally inserts middleware into the main pipeline and rejoins it, so everything registered afterwards still runs. `MapWhen` creates a separate branch that terminates on its own, so middleware registered after the branch never runs for matched requests. The bite is exactly there: someone adds a `Map` for a health or metrics path early in `Program.cs`, and later additions — authentication, correlation, exception handling — silently do not apply to that branch. It is usually benign until it is not, such as when the branch handles something that should have been authenticated.
-*Follow-up: How would you audit an existing application for endpoints that bypass parts of the pipeline?*
+**Q8. How do you attribute latency to a specific middleware in production?**
+**A:** Wrap each registration with timing instrumentation in a non-production environment, or sample it in production, emitting per-middleware duration — because "the pipeline is slow" is nearly always one middleware doing something synchronous or uncached. The specific patterns to look for are per-request configuration parsing, policy construction, resolving an expensive service graph, body buffering, and any synchronous I/O. I'd profile rather than count middlewares: twenty cheap ones are fine, three where one does a blocking lookup is not.
+*Follow-up: The per-middleware instrumentation costs more than some of the middleware. How do you handle that?*
 
-**Q10. How do you test middleware properly?**
-**A:** Unit tests with a `DefaultHttpContext` and a stub `next` delegate verify the middleware's own logic, including that it calls or does not call next, and that it does not alter the response unexpectedly. But the important tests are integration tests via `WebApplicationFactory`, because the bugs that actually happen are ordering and interaction bugs that a unit test cannot see. I would specifically assert on pipeline-level invariants: that an unauthenticated request to a protected endpoint gets 401, that an exception produces the standard error contract, and that security headers are present on every response — those assertions are what catch a reorder six months later.
+**Q9. How do you test middleware properly?**
+**A:** Unit tests with a `DefaultHttpContext` and a stub `next` verify the middleware's own logic — that it calls or doesn't call next, that it doesn't alter the response unexpectedly. But the bugs that actually happen are *ordering and interaction* bugs a unit test can't see, so the important tests are integration tests via `WebApplicationFactory` asserting pipeline-level invariants: unauthenticated request to a protected endpoint returns 401, an exception produces the standard error contract, security headers appear on every response. Those are what catch a reorder six months later.
 *Follow-up: How would you assert the whole pipeline's ordering rather than testing behaviours one at a time?*
+
+**Q10. What's the difference between `UseWhen` and `MapWhen`, and when has it bitten you?**
+**A:** `UseWhen` conditionally inserts middleware into the main pipeline and rejoins it, so everything registered afterwards still runs. `MapWhen` creates a separate branch that terminates on its own, so later-registered middleware never runs for matched requests. The bite is exactly there: someone adds a `Map` for a health or metrics path early in `Program.cs`, and later additions — authentication, correlation, exception handling — silently don't apply to that branch. Usually benign until the branch handles something that should have been authenticated.
+*Follow-up: How would you enumerate every endpoint and its effective middleware at startup?*
 
 ---
 
 ## 4. Expert / Architect (10 Q&A)
 
-
 **Q1. How do you decide what belongs in application middleware versus a gateway or service mesh?**
-**A:** By asking whether the concern needs application knowledge and whether it must be consistent across everything. Volumetric protection, TLS termination, coarse routing, IP filtering and basic authentication belong at the edge, where they are cheaper and where a compromised or misconfigured service cannot bypass them. Concerns needing domain context — per-tenant fairness, business-level authorization, request enrichment — must be in-process. The important architectural point is that edge controls are not optional defence in depth: anything the edge enforces should also be assumed enforceable in-process, because service-to-service traffic often does not traverse the edge at all. I would map each cross-cutting concern to a layer explicitly, since the ones that end up in both by accident are where inconsistency and double-counting live.
-*Follow-up: A concern is implemented both at the gateway and in middleware with different configurations. How do you resolve that?*
+**A:** Ask whether the concern needs application knowledge and whether it must be consistent across everything. Volumetric protection, TLS termination, coarse routing, IP filtering and basic authentication belong at the edge, where they're cheaper and where a misconfigured service can't bypass them. Concerns needing domain context — per-tenant fairness, business-level authorization, request enrichment — must be in-process. The important architectural point is that edge controls are *not* defence in depth on their own: anything the edge enforces should also be enforceable in-process, because service-to-service traffic often never traverses the edge. I'd map each cross-cutting concern to a layer explicitly, since the ones landing in both by accident are where inconsistency lives.
+*Follow-up: A concern is implemented at both the gateway and in middleware with different configurations. How do you resolve it?*
 
 **Q2. How would you standardise the pipeline across dozens of services without blocking teams?**
-**A:** A shared package exposing a single opinionated composition — correlation, structured logging, exception handling and the error contract, security headers, health endpoints, telemetry — so a service gets the platform's behaviour by calling one method, and deviations are visible because they require explicit code. That is far more effective than documentation, because the default path is also the correct one. To avoid blocking, the package must be composable rather than all-or-nothing, versioned so teams can adopt on their own schedule, and it must not embed business decisions. The risk to manage is the shared package becoming a bottleneck or a dumping ground; I would keep its scope explicitly limited to cross-cutting platform concerns with a named owner.
+**A:** A shared package exposing one opinionated composition — correlation, structured logging, exception handling and the error contract, security headers, health endpoints, telemetry — so a service gets the platform's behaviour by calling one method, and deviations require explicit code and are therefore visible. That's far more effective than documentation, because the default path is also the correct one. To avoid blocking, it must be composable rather than all-or-nothing, versioned so teams adopt on their own schedule, and free of business decisions. The risk to manage is it becoming a bottleneck or a dumping ground, so I'd scope it explicitly to cross-cutting platform concerns with a named owner.
 *Follow-up: A team needs to disable one part of the standard pipeline. How do you handle that without eroding the standard?*
 
-**Q3. What is your position on `IHttpContextAccessor` in a layered architecture?**
-**A:** It belongs in the web layer and in infrastructure adapters, never in application or domain code. Once domain services depend on it, they cannot be exercised from a background worker, a message consumer or a test without a fake HTTP context, and the dependency is invisible in constructors, so nobody discovers it until the code is reused. The alternative is to capture what you need at the boundary — user, tenant, correlation — into an explicit context object injected as a scoped dependency, which works identically in a request, a job and a test. I would treat accessor usage outside the web layer as an architecture-test failure rather than a code-review preference, because this is a rule that erodes silently.
-*Follow-up: How would you enforce that with an automated architecture test?*
+**Q3. What's your position on `IHttpContextAccessor` in a layered architecture?**
+**A:** Web layer and infrastructure adapters only — never application or domain code. Once domain services depend on it they can't be exercised from a background worker, a message consumer or a test without faking an HTTP context, and the dependency is invisible in constructors so nobody discovers it until the code is reused. The alternative is capturing what you need at the boundary — user, tenant, correlation — into an explicit context object injected as a scoped dependency, which works identically in a request, a job and a test. I'd enforce that with an architecture test rather than review, because it's a rule that erodes silently.
+*Follow-up: How would you write that architecture test?*
 
 **Q4. Design the request lifecycle for a service handling both interactive traffic and long-running operations.**
-**A:** Separate them at the protocol level: interactive requests complete within a short bounded time, while long operations return `202 Accepted` with a status resource, doing the actual work in a durable background process. Holding a connection open for minutes wastes a connection and a request slot, breaks under load-balancer idle timeouts, and gives the client no recovery path if the connection drops. The queue-plus-status-endpoint pattern also gives you retry, backpressure and observability that a long request cannot. I would enforce it with a hard request timeout so a long path cannot quietly appear, and I would make the status contract consistent across services so clients learn it once.
-*Follow-up: The client team says polling is unacceptable. What are your options and their costs?*
+**A:** Separate them at the protocol level: interactive requests complete within a short bounded time, long operations return `202 Accepted` with a status resource and do the work in a durable background process. Holding a connection for minutes wastes a request slot, breaks under load-balancer idle timeouts, and leaves the client no recovery path if the connection drops. The queue-plus-status pattern also gives you retry, backpressure and observability a long request can't. I'd enforce it with a hard request timeout so a long path can't quietly appear, and keep the status contract consistent across services so clients learn it once.
+*Follow-up: The client team says polling is unacceptable. What are the options and their costs?*
 
-**Q5. A pipeline concern needs to be applied consistently but one service keeps bypassing it. How do you handle it structurally?**
-**A:** Assume bypass will happen and design so it fails safe rather than fails open. That means enforcing the invariant at more than one layer — for example, authorization enforced by endpoint metadata with a global fallback policy that denies by default, so a missing attribute produces a 401 rather than open access. Then make the deviation detectable: an automated test asserting every endpoint has an authorization policy, run in CI, is far more reliable than review. Structurally, defaults should be secure and opting out should require an explicit, greppable, reviewable declaration. Relying on every team remembering to add something is a control that will fail, and in a regulated environment it will fail an audit as well.
+**Q5. A pipeline concern must be applied consistently and one service keeps bypassing it. How do you handle that structurally?**
+**A:** Assume bypass will happen and design so it fails *safe*. That means enforcing the invariant at more than one layer — authorization by endpoint metadata plus a global fallback policy that denies by default, so a missing attribute yields 401 rather than open access. Then make deviation detectable: an automated test enumerating endpoints and asserting every one has an authorization policy is far more reliable than review. Defaults should be secure and opting out should require an explicit, greppable, reviewable declaration. Relying on every team remembering is a control that will fail, and in a regulated environment it'll fail an audit too.
 *Follow-up: How would you enumerate every endpoint and its metadata at startup to assert on it?*
 
-**Q6. What are the failure modes of the pipeline under overload, and how do you make degradation deliberate?**
-**A:** Under overload the default behaviour is to accept everything and get slower, so queues build, timeouts cascade, and clients retry — which is how a capacity problem becomes an outage. Deliberate degradation means bounding concurrency so excess requests are rejected quickly with a retryable status rather than queued indefinitely, shedding low-priority traffic first, and returning fast failures that clients can back off from. The pipeline is the natural place for admission control because it sees every request before any expensive work. The key design point is that fast rejection is a *feature*: a 503 in 2 ms is far better for the whole system than a 200 in 40 seconds, and that needs explaining to stakeholders before the incident, not during it.
+**Q6. What are the pipeline's failure modes under overload, and how do you make degradation deliberate?**
+**A:** By default it accepts everything and gets slower — queues build, timeouts cascade, clients retry, and a capacity problem becomes an outage. Deliberate degradation means bounding concurrency so excess requests are rejected quickly with a retryable status rather than queued indefinitely, shedding low-priority traffic first, and returning fast failures clients can back off from. The pipeline is the natural place for admission control because it sees every request before any expensive work. The key point to land with stakeholders *before* the incident is that fast rejection is a feature: a 503 in 2 ms is far better for the whole system than a 200 in 40 seconds.
 *Follow-up: How do you decide which traffic to shed first, and how do you know your priorities are right?*
 
-**Q7. How does the pipeline design change for a service that must produce an auditable record of every request?**
-**A:** Audit becomes a first-class concern with different requirements from logging: it must be durable, tamper-evident, complete, and retained per policy — so it cannot be a log line that may be sampled or dropped under load. I would capture audit records in middleware that has access to identity and outcome, write them through a path with delivery guarantees (an outbox or an append-only store) rather than fire-and-forget, and make failure to record an audit event a failure of the request where the regulation demands it. That last decision is a real trade-off between availability and compliance that belongs to the business, not to engineering. I would also keep audit and diagnostic logging separate, because their retention, access control and completeness requirements genuinely differ.
+**Q7. How does the pipeline change for a service that must produce an auditable record of every request?**
+**A:** Audit becomes a first-class concern with different requirements from logging: durable, tamper-evident, complete, retained per policy — so it can't be a log line that may be sampled or dropped under load. I'd capture audit records in middleware that has identity and outcome, write them through a path with delivery guarantees (an outbox or append-only store) rather than fire-and-forget, and make failure to record a failure of the request where the regulation demands it. That last decision is a real availability-versus-compliance trade that belongs to the business. And keep audit separate from diagnostic logging, because their retention, access control and completeness requirements genuinely differ.
 *Follow-up: Writing the audit record synchronously adds 15 ms per request. How do you evaluate that?*
 
-**Q8. How do you evolve the pipeline safely in a system where many services depend on shared middleware?**
-**A:** Treat the shared middleware as a product with versioning, a compatibility policy and a deprecation process. Changes that alter observable behaviour — a new default, a stricter validation, a changed error shape — need to be opt-in for at least one version, announced with a migration path, and ideally accompanied by telemetry showing who is affected. I would roll such changes out through a canary service before broad release, since a defect in shared middleware is an estate-wide incident rather than a single-service one. The organisational discipline that matters most is resisting behavioural changes in patch versions, because teams reasonably assume patches are safe and will pick them up automatically.
-*Follow-up: You need to fix a security issue in shared middleware that changes behaviour. How do you sequence that?*
+**Q8. How do you evolve shared middleware safely across many dependent services?**
+**A:** Treat it as a product: versioning, a compatibility policy, a deprecation process. Changes that alter observable behaviour — a new default, stricter validation, a changed error shape — must be opt-in for at least one version, announced with a migration path, and ideally accompanied by telemetry showing who's affected. Roll such changes through a canary service before broad release, because a defect in shared middleware is an estate-wide incident rather than a single-service one. The discipline that matters most is resisting behavioural changes in patch versions, since teams reasonably assume patches are safe and pick them up automatically.
+*Follow-up: You need to fix a security issue in shared middleware that changes behaviour. How do you sequence it?*
 
-**Q9. How do you approach performance work on the pipeline when latency is dominated by cross-cutting concerns?**
-**A:** First attribute properly, because "middleware is slow" is usually one middleware doing a synchronous or uncached operation rather than a distributed cost. Instrument per-middleware duration in a non-production environment or via sampling, and look for the specific patterns: per-request configuration parsing, policy construction, service resolution of expensive graphs, body buffering, and synchronous I/O. Then fix by caching what is invariant, scoping expensive middleware to the routes that need it, and moving anything that does not need to be in the request path out of it. If after that the cross-cutting cost is still material, the honest architectural conversation is which of those concerns can move to the edge — but I would want the measurement first, because this is an area where intuition is usually wrong.
-*Follow-up: Per-middleware instrumentation itself costs more than some of the middleware. How do you handle that?*
+**Q9. Latency is dominated by cross-cutting concerns. How do you approach it?**
+**A:** Attribute properly first, because "middleware is slow" is usually one middleware doing something synchronous or uncached rather than a distributed cost. Instrument per-middleware duration in non-production or via sampling, and look for the specific patterns: per-request configuration parsing, policy construction, expensive service resolution, body buffering, synchronous I/O. Then cache what's invariant, scope expensive middleware to the routes needing it, and move anything that doesn't need to be in the request path out of it. If cross-cutting cost is still material after that, the honest conversation is which concerns can move to the edge — but I'd want the measurement first, because intuition here is usually wrong.
+*Follow-up: Which middleware would you expect to be genuinely expensive in a typical service?*
 
-**Q10. What would you look for when reviewing a `Program.cs` you have never seen, to judge the health of the service?**
-**A:** The order of the security-relevant middleware first — exception handling early, authentication before authorization, authorization between routing and endpoints, HTTPS and security headers present. Then the presence of the operational essentials: correlation, structured logging, health endpoints separated into liveness and readiness, telemetry, and graceful-shutdown configuration. Then the warning signs: `Map` branches that bypass later middleware, global body buffering, `catch`-everything middleware, scoped services resolved at composition time, and business logic embedded in the pipeline. `Program.cs` is the most information-dense file in an ASP.NET Core service — you can generally tell within a few minutes whether the team has operated this service in production.
-*Follow-up: You find no readiness/liveness distinction and a single `/health` endpoint. What specifically goes wrong in production?*
+**Q10. You're handed a `Program.cs` you've never seen. What tells you whether the team has operated this service in production?**
+**A:** The security-relevant ordering first — exception handling early, authentication before authorization, authorization between routing and endpoints, HTTPS and security headers present. Then the operational essentials: correlation, structured logging, health endpoints split into liveness and readiness, telemetry, graceful-shutdown configuration. Then the warning signs: `Map` branches bypassing later middleware, global body buffering, catch-everything middleware, scoped services resolved at composition time, business logic in the pipeline. `Program.cs` is the most information-dense file in an ASP.NET Core service — you can usually tell within a few minutes.
+*Follow-up: You find a single `/health` endpoint with no liveness/readiness split. What specifically goes wrong in production?*
 
 ---
 

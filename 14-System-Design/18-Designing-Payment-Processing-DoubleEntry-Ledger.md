@@ -1,6 +1,6 @@
 # Module 178 — System Design: Designing a Payment Processing System & Double-Entry Ledger
 
-> Domain: System Design | Level: Beginner → Expert | Prerequisite: [[01-System-Design-Fundamentals]], [[07-Designing-Amazon-Ecommerce]] (checkout and the Saga motivation, extended here into the money-movement core it gestured at), [[11-Designing-Order-Management-Trade-Lifecycle]] (externally-held authoritative truth, idempotency under retransmission — the same problems in the securities domain), [[16-Interview-Execution-Playbook-Estimation-Rubric]] (the clock discipline this module's depth demands), [[../36-Saga/01-Saga-Fundamentals]], [[../37-Outbox/01-Outbox-Pattern]]
+> Domain: System Design | Level: Beginner → Expert | Prerequisite: [[01-System-Design-Fundamentals]], [[07-Designing-Amazon-Ecommerce]] (checkout and the Saga motivation, extended here into the money-movement core it gestured at), [[11-Designing-Order-Management-Trade-Lifecycle]] (externally-held authoritative truth, idempotency under retransmission — the same problems in the securities domain), [[16-Interview-Execution-Playbook-Estimation-Rubric]] (the clock discipline this module's depth demands), [[../36-Saga/01-SagaFundamentals-OrchestrationVsChoreography-CompensatingTransactions]], [[../37-Outbox/01-OutboxFundamentals-TableDesign-RelayMechanisms-DeliveryGuarantees]]
 
 ---
 

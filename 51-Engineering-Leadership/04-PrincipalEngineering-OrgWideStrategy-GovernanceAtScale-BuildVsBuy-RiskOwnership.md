@@ -1440,4 +1440,4 @@ Each division sets its own standards; a central forum coordinates only on cross-
 
 ---
 
-**Next:** [[05-SoftwareArchitecture-AsARole-DecisionRights-GoldenPaths-StakeholderTranslation]] — Module 173 takes the fourth thread: the Software/Enterprise Architect role, and how it differs from both Staff+ and Principal in a firm that has all three titles.
+**Next:** [[05-SoftwareArchitecture-AsARole-DecisionRights-GoldenPaths-StakeholderTranslation]] — Module 187 takes the fourth thread: the Software/Enterprise Architect role, and how it differs from both Staff+ and Principal in a firm that has all three titles.
