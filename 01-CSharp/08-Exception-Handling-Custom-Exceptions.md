@@ -4,20 +4,203 @@
 
 ---
 
-## 1. Fundamentals
+## 1. Topic Description
 
-### What is exception handling?
+### Definition
+
+.NET exceptions use a **two-pass, table-driven** model. The first pass walks the stack looking for a handler whose type matches and whose `when` filter returns true; only once one is found does the second pass unwind, running `finally` blocks along the way. That ordering is why a filter observes the stack *at the throw point*, and why table-driven dispatch makes `try` blocks free on the non-throwing path while making a throw expensive — roughly microseconds, dominated by stack-trace capture and the two-pass walk. **Exception design** is the separate, architectural half: which failures are genuinely exceptional, what a custom exception hierarchy should look like, and where exceptions are translated into API responses or messages.
+
+### Core sub-concepts
+
+- **The two-pass model** — filter evaluation before unwinding; `when` filters for conditional handling and for logging with an intact stack.
+- **`throw` vs `throw ex` vs `ExceptionDispatchInfo`** — stack-trace preservation and rethrowing across contexts.
+- **`finally` guarantees and their limits** — `StackOverflowException`, `FailFast`, process kill; why `finally` is not a durability mechanism.
+- **Cost model** — free to declare, expensive to throw; first-chance versus unhandled exception rates.
+- **Exceptions you should not catch** — `OutOfMemoryException`, `StackOverflowException`, corrupted-state exceptions, and `OperationCanceledException` treated as an error.
+- **`AggregateException`** — `Flatten()`, and the `await`-versus-`.Result` difference in exception *shape*.
+- **`InnerException` chains and wrapping** — adding context across an architectural boundary versus renaming for no benefit.
+- **Custom exception design** — shallow, intention-revealing hierarchies; structured data on the exception rather than formatted message strings.
+- **Exceptions vs result types** — frequency and locality as the deciding tests; where each model belongs in a layered system.
+- **Boundary translation** — centralised middleware, status-code mapping, `ProblemDetails`, correlation IDs, and what must never reach a client.
+- **Retry classification** — transient versus permanent, and the inseparable pairing with idempotency.
+- **Observability of failures** — structured logging at the handling boundary, avoiding double-logging, error-rate classification.
+
+### Where it fits
+
+Exception handling is the failure-path counterpart to every other topic in this folder: async determines *where* an exception surfaces (`await` versus `.Result`), delegates and events determine whether a handler's exception silences the rest of the invocation list, and disposal semantics determine whether cleanup runs. Upward it defines a service's error contract, its error-budget SLI, and how a distributed caller distinguishes "retry me" from "stop".
+
+### Why it matters at scale
+
+Exception design failures degrade a system in two directions. Diagnostically: `throw ex` resets the stack trace so logs point at the catch block instead of the bug; `catch (Exception) { log; }` converts a failure into a silent wrong answer whose symptom appears far from its cause; double-logging at every layer makes the error rate meaningless so real incidents hide in noise. Operationally: exceptions used for expected outcomes cost microseconds each, so a routinely-throwing path burns CPU entirely invisibly because those exceptions are caught and never reach error metrics — a first-chance rate well above the request rate is a common, unnoticed tax. And retry logic that does not classify errors will faithfully retry a payment that already succeeded.
+
+### Common pitfalls / anti-patterns
+
+- **`throw ex;` instead of `throw;`** — resets the stack trace to the catch site, destroying the record of where the failure actually originated, and only discovered during an incident when the information is gone.
+- **`catch (Exception ex) { log; }` followed by continuing** — the operation failed but the caller is told it succeeded, so partial or corrupt state propagates and the eventual symptom is far from the cause.
+- **Using exceptions for expected outcomes** (validation failures, cache misses, `Parse` instead of `TryParse`) — thousands of throws per second consume CPU and allocations while remaining invisible to unhandled-exception telemetry.
+- **Catching `OperationCanceledException` as a failure** — client disconnects and timeouts inflate the error rate, hiding genuine problems and corrupting the error-budget SLI.
+- **Retrying without classifying, or without idempotency** — a timed-out non-idempotent write is retried and double-applies; a validation failure is retried until the budget is exhausted.
+- **A deep or purely taxonomic custom hierarchy** — nobody knows what to catch, so everyone catches the base type and the hierarchy provides no value; equally, a library wrapping everything in one custom type forces consumers to inspect `InnerException`.
+- **Leaking internals in the error response** — stack traces, SQL and type names are an information-disclosure finding, and clients start depending on them.
+- **Relying on `finally` for cross-process invariants** — a distributed lock released only in `finally` is held forever when the process dies; that needs a lease with a timeout.
+
+> Scope note: how exceptions are stored on tasks and the `await`-versus-`.Result` shape difference belongs to `02-Async-Await-Internals`; GC and finalizer interactions to `01-CLR-JIT-GC-Memory-Management`.
+
+---
+
+## 2. Beginner (10 Q&A)
+
+
+**Q1. Explain the two-pass exception model and one thing it lets you do that a one-pass model would not.**
+**A:** The first pass walks the stack looking for a handler whose type matches and whose `when` filter returns true; only once a handler is found does the second pass unwind, running `finally` blocks along the way. The consequence that matters is that a filter runs *before* unwinding, so the stack at the point of the throw is still intact — which is why logging from inside a `when` filter captures a far more useful state than logging from a `catch` block. It is also why a filter must not have side effects that assume unwinding has happened.
+*Follow-up: How would you use a `when` filter to log without actually handling the exception?*
+
+**Q2. What is the difference between `throw;` and `throw ex;`?**
+**A:** `throw;` rethrows the current exception preserving its original stack trace and throw point. `throw ex;` throws the same object but resets the stack trace to the current line, destroying the record of where the failure actually originated — so your logs point at the catch block rather than the bug. It is one of the highest-cost-per-character mistakes in C#, because the damage only shows up during an incident when the information is already gone. If you need to rethrow from a different context, `ExceptionDispatchInfo.Capture(ex).Throw()` preserves the original trace.
+*Follow-up: When would you actually need `ExceptionDispatchInfo` rather than a plain rethrow?*
+
+**Q3. When does a `finally` block not run?**
+**A:** When the process does not survive to run it: a `StackOverflowException`, `Environment.FailFast`, a process kill, or a power loss. Historically a corrupted-state exception could also bypass it. The important design implication is that `finally` is a guarantee within a functioning process, not a durability mechanism — so cleanup that must happen even if the process dies (releasing a distributed lock, marking a job as abandoned) needs an external mechanism such as a lease with a timeout, not a `finally` block. Engineers who rely on `finally` for cross-process invariants are surprised exactly once.
+*Follow-up: How would you make a distributed lock safe against the process dying while holding it?*
+
+**Q4. What does it actually cost to throw an exception?**
+**A:** Declaring and having `try` blocks is essentially free — modern runtimes use table-driven exception handling with no cost on the non-throwing path. Throwing is expensive: capturing the stack trace, the two-pass walk, and the allocation together cost on the order of microseconds, which is thousands of times more than a normal return. That is irrelevant when exceptions are actually exceptional and completely dominant when they are used for expected outcomes — a validation path throwing per request at high volume is a measurable, and entirely self-inflicted, cost.
+*Follow-up: Where does that cost show up first in a profile — CPU, allocation, or something else?*
+
+**Q5. Which exception types should you generally not catch, and why?**
+**A:** `OutOfMemoryException` and `StackOverflowException` indicate the process is no longer in a state you can reason about — and the latter cannot be caught at all. `AccessViolationException` and similar corrupted-state exceptions mean memory integrity is already compromised. `OperationCanceledException` should not be caught *as an error*, because cancellation is a normal outcome and logging it as a failure pollutes your error rate with client disconnects. The general rule is to catch what you can meaningfully act on; catching what you cannot handle turns a clean crash into an unpredictable zombie process, which is strictly worse to operate.
+*Follow-up: Your error dashboard is 40% `OperationCanceledException`. What do you change?*
+
+**Q6. When should you define a custom exception type?**
+**A:** When callers need to catch *that specific failure* and act differently — a domain rule violation they can translate into a 422, a transient dependency failure they should retry, a concurrency conflict they should resolve. If no caller will ever catch it selectively, a framework exception with a good message serves better, because every custom type is API surface someone must learn. Custom exceptions should also carry structured data (the entity id, the rule violated) rather than encoding it in the message string, so handlers and logs can use it without parsing English.
+*Follow-up: How many custom exception types would you expect in a typical service, and what does a hundred tell you?*
+
+**Q7. What is `AggregateException` and where do you encounter it?**
+**A:** It is a container holding multiple exceptions, produced when several operations fail together — parallel work, `Task.WhenAll`, or blocking on a faulted task. The two things to know are that `Flatten()` collapses nested aggregates into a single level, which you almost always want before inspecting, and that `await` unwraps it to the first inner exception while `.Result`/`.Wait()` surfaces the aggregate itself. That asymmetry is why switching from `await` to `.Result` silently breaks existing `catch` clauses that named a specific exception type.
+*Follow-up: How do you make sure every failure from a `Task.WhenAll` is logged, not just the first?*
+
+**Q8. What is an exception filter (`when`) good for beyond conditional catching?**
+**A:** Two things. First, genuinely conditional handling — catching an `HttpRequestException` only when the status code is retryable, without catching-and-rethrowing, which would otherwise disturb the stack and the flow. Second, diagnostics: a filter that logs and returns `false` runs before unwinding, so it captures the full stack state at the throw point while leaving the exception to propagate untouched. Both are cleaner than the catch-inspect-rethrow pattern, which is easy to get wrong with `throw ex`.
+*Follow-up: What's the risk of putting expensive or throwing code inside a filter?*
+
+**Q9. What belongs in an exception message, and what does not?**
+**A:** What belongs: what operation failed, on what, and enough context to identify the instance — ideally as structured properties on the exception with the message summarising them. What does not belong: secrets, connection strings, personal data, or internal implementation detail that will end up in a client response or an unprotected log. The message is read by an engineer during an incident, so it should answer "what was the system trying to do" rather than restate the exception type. Anything a caller needs to branch on should be a property or a type, never a substring of the message.
+*Follow-up: Where do you draw the line between the exception message and structured logging fields?*
+
+**Q10. What is the difference between a first-chance exception and an unhandled one?**
+**A:** A first-chance notification fires when the exception is thrown, before any handler has run; unhandled means it reached the top of the stack with no handler at all. The gap between them is important operationally: a service can be throwing and catching thousands of exceptions per second — a healthy-looking service that is quietly burning CPU — with none of it visible in unhandled-exception telemetry. Watching first-chance rates, usually via runtime counters, is how you discover exceptions being used as control flow inside a dependency.
+*Follow-up: How would you find which exception type dominates a high first-chance rate in production?*
+
+---
+
+## 3. Intermediate (10 Q&A)
+
+
+**Q1. How would you design an exception hierarchy for a service, and what would you avoid?**
+**A:** Shallow and intention-revealing: a small number of base types that correspond to how callers actually respond — a domain/validation failure, a not-found, a conflict, a transient dependency failure — with specific types beneath only where a caller genuinely branches on them. What I avoid is depth for taxonomy's sake, since a five-level hierarchy means nobody knows what to catch and everyone catches the base; and a flat set of fifty unrelated types, which means callers cannot catch a category at all. Each type should carry structured data rather than formatted strings, and the hierarchy should be documented by *what a handler should do*, which is the only question a catch site is really asking.
+*Follow-up: How does that hierarchy map to HTTP status codes without leaking domain detail to clients?*
+
+**Q2. Exceptions versus result types for expected failures — where do you draw the line?**
+**A:** Exceptions for genuinely exceptional conditions and for things no local caller can handle; result types for outcomes that are part of the operation's normal contract — validation failures, not-found lookups, business-rule rejections. The tests I apply are frequency and locality: if the failure happens routinely, or the immediate caller always handles it, an exception is both slower and less honest than a return value, because it hides a normal outcome in the control flow. What I would not do is adopt result types everywhere, since they infect every signature, compose awkwardly with async and LINQ, and fight a framework built around exceptions. Mixed and deliberate beats pure and dogmatic here.
+*Follow-up: A method has five distinct failure reasons. How do you express that cleanly without five exception types?*
+
+**Q3. Someone writes `catch (Exception ex) { _logger.LogError(ex, "..."); }` and continues. What's wrong?**
+**A:** It converts a failure into a silent wrong answer. The operation did not succeed, but the caller is told it did, so corrupt or partial state propagates and the eventual symptom appears far from the cause. It also catches things that should never be caught here — cancellation, out-of-memory, programming errors — flattening every failure into one log line with no differentiation. The legitimate version of this pattern is narrow: a genuinely optional side effect such as emitting a metric, where a documented comment explains why continuing is correct. Everywhere else the exception should either be handled meaningfully or allowed to propagate.
+*Follow-up: Where is a top-level `catch (Exception)` legitimate, and what must it do?*
+
+**Q4. How should exceptions be handled at an API boundary?**
+**A:** Centrally, in one middleware or filter, mapping exception types to status codes and a consistent problem-detail body — never with try/catch scattered through controllers, which produces inconsistent responses and duplicated code. The mapping is a policy decision: domain violations to 400/422, not-found to 404, concurrency to 409, unmapped exceptions to 500 with a generic message. Crucially, the response must not carry internal details — stack traces, SQL, type names — because that is both an information-disclosure risk and useless to the client. What does go out is a correlation ID that appears in the logs, so support can connect a user's complaint to the actual error.
+*Follow-up: How do you keep the mapping from becoming a giant switch that every feature has to edit?*
+
+**Q5. What are the observability requirements around exceptions, and what do teams typically get wrong?**
+**A:** You need the exception type, the message, the full stack including inner exceptions, the correlation or trace ID, and the operation context — logged as structured fields, not interpolated into a string, so they can be aggregated. What teams get wrong is double-logging (logged at every level as it propagates, so one failure appears five times and the error rate is meaningless), logging without correlation so traces cannot be reconstructed, and logging the message but not the exception object, which discards the stack. The rule I enforce is: log at the boundary where it is handled, enrich with context on the way up, and never log-and-rethrow.
+*Follow-up: You need context from three layers down. How do you attach it without logging at each layer?*
+
+**Q6. How do you handle exceptions in a retry policy, and what is the classic mistake?**
+**A:** Retry only what is genuinely transient — timeouts, connection failures, throttling responses, deadlock victims — and never retry a validation failure, an authorisation failure, or a business-rule rejection, which will fail identically every time while consuming capacity. The classic mistake is retrying non-idempotent operations, so a timeout on a payment that actually succeeded results in a double charge; the second mistake is retrying without jitter and backoff, which synchronises clients into a thundering herd exactly when the dependency is weakest. Retry classification therefore belongs with an idempotency mechanism, not on its own.
+*Follow-up: A write times out and you don't know whether it committed. What's the correct pattern?*
+
+**Q7. How does exception handling interact with cancellation?**
+**A:** Cancellation surfaces as `OperationCanceledException`, which is a normal outcome rather than a failure, so it must be distinguished from real errors — otherwise every client disconnect inflates your error rate and hides genuine problems. The subtlety is disambiguation: an exception may be cancellation from *your* token or a timeout from a dependency's, and these mean different things, which is why comparing the exception's `CancellationToken` against your own matters. Cancellation should also not be swallowed silently, since a caught-and-ignored cancellation means the operation continues doing work nobody wants.
+*Follow-up: A downstream timeout throws `TaskCanceledException`. How do you tell it apart from a real client cancellation?*
+
+**Q8. What is the correct pattern for wrapping a lower-level exception in your own?**
+**A:** Wrap when you are adding genuinely useful context or translating across an architectural boundary — a data-access failure becoming a repository-level exception the domain can reason about — and always pass the original as `InnerException` so the root cause survives. Do not wrap merely to rename, which adds a stack layer and a type nobody catches while obscuring the actual problem. The other thing to preserve is any structured data the original carried, since a wrapped exception whose inner detail is only in a string is a diagnostic downgrade. When in doubt, letting the original propagate is better than an uninformative wrapper.
+*Follow-up: How deep does an `InnerException` chain get before it's a problem, and what causes that?*
+
+**Q9. How do you test exception behaviour meaningfully?**
+**A:** Assert on the specific type and on the structured data, not on message text, since messages change and message-based assertions are brittle and get deleted. Test that `finally`/`using` cleanup actually ran, that cancellation propagates as cancellation rather than as an error, and that the API boundary maps each exception type to the right status and body — that mapping is where regressions actually hurt. The tests people skip are the ones that matter most operationally: that a partial failure leaves no half-committed state, and that the failure path logs enough to diagnose it, which you can assert against a test logger.
+*Follow-up: How would you test that a failure mid-transaction leaves the system in a consistent state?*
+
+**Q10. What's the cost profile of exception-heavy code, and how would you detect it in an existing service?**
+**A:** Exceptions cost microseconds each, so a path that throws routinely — parsing with `Parse` instead of `TryParse`, control flow via exceptions, a dependency throwing internally on every cache miss — burns CPU and allocations invisibly, because the exceptions are caught and never reach your error metrics. I would detect it with the runtime's exception-count counter and first-chance monitoring, comparing throw rate against request rate; a ratio well above one is a strong signal. A CPU profile will show the throw machinery directly. The fix is usually a `Try*` variant or a redesign of the failure path, and the win can be surprisingly large because nobody was aware of the cost.
+*Follow-up: The throws are inside a third-party library on every call. What are your options?*
+
+---
+
+## 4. Expert / Architect (10 Q&A)
+
+
+**Q1. What error-handling philosophy would you set for a large service estate, and how do you make it stick?**
+**A:** A small number of principles that resolve real arguments: exceptions for exceptional conditions and results for expected outcomes; failures handled where they can be acted on, not where they occur; no swallowing without a documented reason; a shared exception base set with a defined mapping to API responses. Making it stick means encoding it rather than publishing it — analyzers banning empty catches and `throw ex`, a shared middleware package that does the mapping so teams inherit it, and a shared logging enricher so correlation is automatic. Guidance nobody can violate accidentally is worth more than guidance everyone agrees with, and I would expect the shared package to be the actual mechanism of standardisation.
+*Follow-up: A team needs to deviate from the standard mapping for a legacy client. How do you handle the exception request?*
+
+**Q2. How should exceptions be treated at service boundaries in a distributed system?**
+**A:** They stop at the boundary. Exceptions are an in-process control-flow mechanism; across a network you have status codes, error payloads and message outcomes, and serialising an exception type across services couples their internals and leaks implementation detail. The right shape is a stable error contract — a machine-readable code, a human-readable message, a correlation ID, and a retryability indicator — with each service translating its internal exceptions into that contract. The retryability signal is the part teams most often omit and most need, because without it every caller invents its own classification and gets it wrong for at least one case.
+*Follow-up: How do you propagate enough context for end-to-end diagnosis without leaking internals?*
+
+**Q3. How do you design failure handling so that partial failures don't corrupt state?**
+**A:** By making the unit of work explicit and ensuring every operation is either atomic within one resource or explicitly compensable across several. In practice that means a local transaction where possible; an outbox where a state change and a message must both happen; idempotency keys so a retry after an ambiguous failure cannot double-apply; and sagas with compensating actions where a distributed sequence genuinely cannot be atomic. The exception-handling code is the smallest part of this — the important design work is deciding, per operation, what "failed" means and what state the system is allowed to be left in. Teams that treat this as a try/catch question end up with half-applied writes they discover during reconciliation.
+*Follow-up: A compensating action itself fails. What's your design for that case?*
+
+**Q4. How do you decide what a client is told when something fails, especially in a regulated environment?**
+**A:** Clients get a stable error code, a safe message, and a correlation ID — never stack traces, internal type names, SQL, or anything that reveals system structure, because that is both an information-disclosure finding and useless to them. Internally, the full detail goes to logs behind access control, with personal data handled according to the data-classification policy, since exception messages are a notorious channel for PII to leak into logs that have a longer retention than the policy allows. In a regulated setting I would also expect failures of security-relevant operations to produce audit records distinct from error logs, because "the payment failed" is an operational event and "authorisation was denied" is an auditable one.
+*Follow-up: A developer adds the request payload to an exception message for debugging. What's your review response?*
+
+**Q5. How do you evaluate a proposal to adopt result types (`Result<T>`/`Either`) across a codebase?**
+**A:** I would ask which specific problem it solves and where. Result types genuinely improve domain and application layers where failure is an expected, enumerable outcome and the compiler forcing you to handle it has real value. They are a poor fit at the edges, where the framework, the ORM and every library throw anyway, so you end up with a translation layer in both directions and two error models to keep in sync. My position is to adopt them in the core where failures are domain outcomes, keep exceptions at the boundaries and for genuinely unexpected conditions, and be explicit about where the conversion happens. A blanket adoption usually costs more in signature noise and library friction than it returns.
+*Follow-up: The team wants to eliminate exceptions entirely for "explicit error handling." What's your response?*
+
+**Q6. How do you drive down error-rate noise in a large system so the signal is usable?**
+**A:** By classifying rather than suppressing. Client-caused failures (validation, 404s, cancellation) belong in a different bucket from server-caused ones, so the error-rate SLI reflects things the team can fix; expected transient failures that succeeded on retry are worth counting separately, because their rate is a leading indicator even though they are not incidents. Then attack the top contributors specifically: the single endpoint producing 60% of the errors, the dependency throwing on every cache miss. The organisational point is that a noisy error dashboard is not a monitoring problem but an ownership problem — if nobody is accountable for the rate, it only ever grows, and alerts on it get ignored, which is how a real incident gets missed.
+*Follow-up: How do you set an error-budget SLO when a large share of errors are client-caused?*
+
+**Q7. What is your approach to exception handling in a plugin or extension architecture?**
+**A:** Assume every extension will throw, hang, and leak, because eventually one will. In-process, that means invoking each extension inside its own try/catch, applying a timeout, attributing the failure to the specific plugin in telemetry, and having a policy for repeat offenders — disabling a plugin after repeated failures is far better than letting it degrade the host. What in-process isolation cannot protect against is memory exhaustion, stack overflow or a runaway loop, so if extensions are genuinely untrusted the boundary must be a process or a sandbox rather than a catch block. I would make that call explicitly based on trust level, and be clear with stakeholders about which guarantees the cheaper option does not provide.
+*Follow-up: Which failure modes survive process isolation, and what do you do about those?*
+
+**Q8. How would you migrate a legacy codebase with pervasive `catch (Exception) { }` to something diagnosable?**
+**A:** Not by deleting them, because some of those catches are load-bearing in ways nobody remembers and removing them turns silent degradation into an outage. I would first make them visible: add logging inside every empty catch so the actual rate and types are known, which alone usually reveals a handful of paths generating almost all of it. Then remove or narrow them in priority order, with the analyzer enabled for new code and a suppression baseline for existing sites, so the debt is bounded and burning down. Along the way, each removal needs a decision about what should happen instead — which is a design conversation, not a mechanical edit, and is why this work is slower than it looks.
+*Follow-up: Logging inside the empty catches reveals 50,000 exceptions per hour. How do you prioritise?*
+
+**Q9. How does exception design differ between a shared library and an application?**
+**A:** A library's exceptions are public API: the types, the hierarchy and the conditions under which they are thrown are a contract, and changing them breaks consumers in ways the compiler will not catch. So a library should throw a small, documented, stable set of types; use the framework's standard types where they fit rather than inventing parallel ones; never catch and swallow on the consumer's behalf; and be explicit about which failures are transient. An application has far more freedom because it owns all its call sites. The mistake I see most is a library that wraps everything in one custom exception type, which forces every consumer to inspect the inner exception and defeats the point of typed handling.
+*Follow-up: You need to add a new exception type to a widely-used library. How do you do it without breaking consumers?*
+
+**Q10. What is the relationship between exception handling and resilience patterns, and where do teams get the layering wrong?**
+**A:** Exceptions are the *signal*; resilience patterns are the *policy* that acts on them, and the layering matters. Retry sits closest to the call and handles transient failures; circuit breakers sit above retry and stop sending traffic to a dependency that is failing consistently; timeouts bound everything; fallbacks decide what the caller sees when all of that fails. Teams get it wrong by retrying inside a circuit breaker in a way that multiplies load, by retrying at several layers so one logical call becomes dozens, and by applying retries to non-idempotent operations. I would set the policy centrally in a shared client package with a per-dependency configuration, so that classification and layering are decided once rather than reinvented — and reviewed as an architectural concern, since this is exactly where a slow dependency turns into a self-inflicted outage.
+*Follow-up: Retries at three layers turn one request into 27 downstream calls. How do you detect and prevent that pattern?*
+
+---
+
+## 5. Reference Material
+
+> Retained from the original module: deep-dive internals, diagrams, production examples, exercises, system/low-level design, debugging walkthroughs and the Principal Engineer perspective.
+
+### 1. Fundamentals
+
+#### What is exception handling?
 Exception handling is the mechanism by which.NET represents and propagates **exceptional, non-local control flow** — when a method cannot complete its contract, it throws an exception object describing what went wrong, and the runtime unwinds the call stack looking for a `catch` block prepared to handle that exception type, running `finally` blocks along the way.
 
-### Why does it exist?
+#### Why does it exist?
 Before structured exception handling, error signaling relied on return codes (`int` error codes, `HRESULT`-style values) that could be silently ignored (nothing forces a caller to check a return value) and couldn't naturally carry rich context (a stack trace, an inner cause, arbitrary data) without significant additional plumbing. Exceptions make error propagation **impossible to silently ignore** (an unhandled exception terminates the operation, or the process, rather than continuing with corrupted state) and **carry rich diagnostic context automatically** (stack trace, type, message, inner exception chain).
 
-### When does this matter?
+#### When does this matter?
 - **Always**, since every.NET program uses exceptions for genuinely exceptional conditions — but *precisely when* to use exceptions versus a `Result<T>`-style return value or a `TryX`/boolean-return pattern is a design decision with real performance and API-clarity consequences.
 - **Critically** for designing library/API boundaries — a well-designed custom exception hierarchy communicates failure modes clearly to callers; a poorly-designed one (overly broad, uninformative, or inconsistent) makes robust error handling by callers difficult or impossible.
 - **Critically** for production reliability — understanding precisely what state remains valid after an exception (is a partially-updated object now corrupted? did a lock get released? did a `using` block dispose correctly?) is central to writing correct, resilient code.
 
-### How does it work (30,000-ft view)?
+#### How does it work (30,000-ft view)?
 
 ```csharp
 try
@@ -40,11 +223,9 @@ finally
 
 Mental model for interviews: **"An exception is an object describing a failure; throwing it unwinds the stack, running `finally` blocks along the way, until a matching `catch` is found (or the process terminates if none is). Exception filters (`when`) let you match on both type AND runtime conditions, without unwinding the stack to evaluate the filter."**
 
----
+### 2. Deep Dive
 
-## 2. Deep Dive
-
-### 2.1 Structured Exception Handling — the CLR/OS-Level Mechanism
+#### 2.1 Structured Exception Handling — the CLR/OS-Level Mechanism
 
 .NET's exception handling is built on top of the OS's native **Structured Exception Handling (SEH)** on Windows (and an equivalent unwind-table-based mechanism on Linux/macOS via the CLR's own portable exception-handling implementation). When a `throw` executes:
 1. The CLR captures the current stack trace **at the throw point** (not the catch point — a critical, frequently-tested fact) and packages it with the exception object.
@@ -53,20 +234,20 @@ Mental model for interviews: **"An exception is an object describing a failure; 
 
 **Critical fact**: because filter evaluation (`when`) happens during the **first pass, before any unwinding occurs**, a debugger attached at the moment of an exception can inspect the *exact* state of the stack at the throw point even when a filter ultimately doesn't match and the exception continues propagating further up — this is precisely why `catch (Exception ex) when (LogAndReturnFalse(ex))` is a legitimate, sometimes-used pattern for "log this exception's full context, but don't actually handle it here, let it keep propagating".
 
-### 2.2 The Real Cost of Throwing an Exception
+#### 2.2 The Real Cost of Throwing an Exception
 
 Throwing an exception is **expensive** relative to ordinary control flow — not because of the `try`/`catch` blocks themselves (entering a `try` block with no exception thrown has near-zero cost in modern.NET), but specifically because of:
 - **Stack trace capture**: walking and recording the full call stack at the throw point.
 - **The two-pass search-then-unwind mechanism** itself: significantly more expensive than a simple `return` or branch, since it involves runtime metadata lookups (finding which `catch` clauses exist in each frame, matching types) and OS-level unwinding machinery.
 - **Exceptions should never be used for ordinary, expected control flow** (e.g., "did this dictionary contain the key" via catching a `KeyNotFoundException` instead of `TryGetValue`) — this is a well-known, measurable anti-pattern precisely because of this cost, not merely a style preference. A `TryParse`/`TryGetValue`-style API avoids the exception path entirely for the "expected failure" case, reserving exceptions for genuinely exceptional conditions.
 
-### 2.3 `finally` Blocks — Guarantees and Their Limits
+#### 2.3 `finally` Blocks — Guarantees and Their Limits
 
 `finally` blocks are guaranteed to run whenever the corresponding `try` block is exited — via normal completion, an exception (caught or not, as long as the process doesn't hard-crash), a `return`, `break`, or `continue` inside the `try`. **Exceptions to this guarantee**: a `finally` block will **not** run if the process is terminated abruptly (`Environment.FailFast`, a `StackOverflowException` — which cannot be caught at all since.NET 2.0 specifically because the stack is already exhausted and there's no safe way to run handler code, or an unrecoverable CLR-level failure), and historically (pre-.NET Core, on classic.NET Framework) certain `catch`/`finally` execution could be skipped under specific `ThreadAbortException` scenarios (a legacy mechanism removed entirely in modern.NET Core/5+, since `Thread.Abort` itself now throws `PlatformNotSupportedException`).
 
 `using`/`using var` statements desugar directly into a `try`/`finally` calling `Dispose` — this is precisely how deterministic resource cleanup is guaranteed even when an exception occurs mid-block.
 
-### 2.4 Exception Filters (`when`) — Precise Semantics and Use Cases
+#### 2.4 Exception Filters (`when`) — Precise Semantics and Use Cases
 
 ```csharp
 try { CallExternalApi; }
@@ -87,7 +268,7 @@ An exception filter (`when (...)`) is evaluated **during the first pass**, befor
 
 **Caution**: filters **can** contain side effects (calling a logging method, as in the `LogAndDecide` example), but this is a debated practice — a filter with side effects executes even for exceptions the filter ultimately decides *not* to handle (if it returns `false`), meaning "logging as a filter side effect" logs on every attempted match, not just successful ones; used deliberately and sparingly (typically for "log full context regardless of whether we act on it here" scenarios) this is a legitimate, sometimes-cited idiom, but filters with substantial side effects/business logic embedded in them are a real anti-pattern since they make control flow significantly harder to reason about at a glance.
 
-### 2.5 Stack Trace Capture, `throw;` vs `throw ex;`, and `ExceptionDispatchInfo`
+#### 2.5 Stack Trace Capture, `throw;` vs `throw ex;`, and `ExceptionDispatchInfo`
 
 ```csharp
 try { DoWork; }
@@ -102,7 +283,7 @@ catch (Exception ex)
 
 For scenarios needing to **re-throw an exception from a different location than where it was caught** (e.g., capturing an exception on a background thread and rethrowing it on the calling thread — precisely what `Task`'s internal machinery does for you automatically,/), `System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex).Throw` preserves the original stack trace while allowing the actual `throw` to occur at a different point in the code/call stack than the original catch — the exact mechanism `Task.Wait`/`.Result`'s `AggregateException` unwrapping and `await`'s exception-rethrowing rely on internally to give you a *usably accurate* stack trace despite the exception having crossed a thread/continuation boundary.
 
-### 2.6 Custom Exception Design — the Standard Shape and Why
+#### 2.6 Custom Exception Design — the Standard Shape and Why
 
 ```csharp
 [Serializable] // legacy attribute, still conventionally included though binary serialization is largely deprecated
@@ -125,18 +306,16 @@ public class OrderValidationException: Exception
 ```
 The standard convention: **derive from `Exception` (or a more specific existing base like `InvalidOperationException`/`ArgumentException` if genuinely appropriate — for when), provide the conventional constructor overloads** (message-only, message + inner exception, and any custom-data constructors your exception needs), and **add strongly-typed properties for structured error data** (`ErrorCode`, `ValidationErrors`, etc.) rather than encoding that data only into the free-text `Message` string, which forces callers into fragile string-parsing to programmatically react to specific failure details.
 
-### 2.7 Choosing a Base Exception Type — the Decision That Actually Matters
+#### 2.7 Choosing a Base Exception Type — the Decision That Actually Matters
 
 - **`ArgumentException`/`ArgumentNullException`/`ArgumentOutOfRangeException`**: for invalid **arguments passed by a caller** — represents a **caller bug** (the calling code violated the method's contract), not a runtime/environmental failure. Should generally not be caught and "handled" by ordinary application logic — fixing the calling code is the correct response, not a `catch` block papering over it.
 - **`InvalidOperationException`**: the object/system is in a state where the requested operation doesn't make sense right now (e.g., calling `.Current` on an enumerator before the first `MoveNext`) — a very common, appropriately-broad choice for "this operation isn't valid given the current state" failures that aren't specifically about a bad argument.
 - **A custom exception deriving directly from `Exception`**: for genuinely domain-specific failure modes that callers are expected to specifically catch and handle differently from generic runtime failures (`InsufficientStockException`, `PaymentDeclinedException`) — these represent **expected, "part of the domain's normal failure vocabulary"** outcomes, not bugs, and deserve their own distinct type precisely so calling code can `catch` them specifically (often as an alternative to, or alongside, a `Result<T>`-style return value,, for cases where the "exceptional-ness" is genuine).
 - **Never throw the bare `System.Exception` type directly**, and (generally) **never catch bare `Exception` except at a small number of well-justified top-level boundaries** (a global unhandled-exception handler, a background-job runner's per-job isolation boundary) — catching `Exception` broadly elsewhere risks silently swallowing genuinely unexpected bugs (`NullReferenceException`, `OutOfMemoryException`) that should surface loudly, not be treated the same as an expected domain failure.
 
----
+### 3. Visual Architecture
 
-## 3. Visual Architecture
-
-### Two-Pass Exception Handling (ASCII)
+#### Two-Pass Exception Handling (ASCII)
 
 ```
 Call stack at throw time:
@@ -155,7 +334,7 @@ PASS 2 (unwind down to the matched frame):
  now actually execute the matched catch block's body
 ```
 
-### Exception Hierarchy Example
+#### Exception Hierarchy Example
 
 ```mermaid
 classDiagram
@@ -186,11 +365,9 @@ classDiagram
  ApplicationDomainException <|-- OrderValidationException
 ```
 
----
+### 4. Production Example
 
-## 4. Production Example
-
-### Scenario: Payment service — an over-broad `catch (Exception)` masking a critical bug for months
+#### Scenario: Payment service — an over-broad `catch (Exception)` masking a critical bug for months
 
 **Problem**: A payment-processing service had a top-level `catch (Exception ex) { LogError(ex); return PaymentResult.Failed("An error occurred"); }` wrapping its entire `ProcessPayment` method — a defensive pattern intended to ensure the API "always returns a clean result, never crashes." Months later, an investigation into a slow, gradual increase in "payment failed" support tickets revealed that a **`NullReferenceException`** caused by a genuine, unrelated bug (a race condition leaving a configuration object briefly null during a specific reload window) had been silently caught by this broad handler and reported to users as an ordinary "payment failed, please retry" message — masking a real, fixable production bug behind a generic, uninformative failure message for months, since the broad `catch` gave it exactly the same treatment as an expected `PaymentDeclinedException`.
 
@@ -209,135 +386,10 @@ classDiagram
 1. A broad `catch (Exception)` that treats every failure identically actively destroys the information needed to distinguish "expected domain outcome" from "unexpected bug" — precisely the distinction that matters most for triage and alerting.
 2. Logging the exception (even correctly) is not sufficient if nothing is actively monitoring/alerting on the *type* distribution of caught exceptions — the information being present in logs didn't prevent months of the bug going unrecognized, because no one was looking at exception-type breakdowns as a metric.
 3. A well-designed custom exception hierarchy (/) is precisely what makes granular, type-specific `catch` handling practical and maintainable — this incident's root cause and its fix are two sides of the same underlying principle.
-## 10. Interview Questions
 
-### Basic (10)
+### 11. Coding Exercises
 
-1. **Q: What does a `finally` block guarantee?**
- **A:** It runs whenever the corresponding `try` block is exited, whether normally, via a `return`, or via an exception (caught or not), with rare exceptions like process termination or `StackOverflowException`.
-
-2. **Q: What's the difference between `throw;` and `throw ex;`?**
- **A:** `throw;` rethrows the current exception preserving its original stack trace; `throw ex;` resets the stack trace to this new throw location, losing the original context.
-
-3. **Q: Should you catch `Exception` broadly throughout your application code?**
- **A:** Generally no — catch the most specific exception type you can meaningfully handle; broad catches conflate expected domain failures with unexpected bugs and can silently swallow critical issues.
-
-4. **Q: What does `using`/`using var` desugar into?**
- **A:** A `try`/`finally` block that calls `Dispose` on the resource in the `finally`, guaranteeing cleanup even if an exception occurs.
-
-5. **Q: What is an exception filter?**
- **A:** A `when` clause on a `catch` block that adds a runtime condition to whether that handler matches, evaluated before the stack unwinds.
-
-6. **Q: Is throwing an exception expensive compared to a normal `return`?**
- **A:** Yes — capturing the stack trace and the two-pass search/unwind mechanism make throwing meaningfully more expensive than ordinary control flow; entering a `try` block with no exception thrown, however, has near-zero cost.
-
-7. **Q: What is `InnerException` used for?**
- **A:** Preserving the original causing exception when wrapping/rethrowing a different exception type, maintaining a full causal chain for diagnosis.
-
-8. **Q: Should you use exceptions to check if a dictionary key exists?**
- **A:** No — use `TryGetValue` instead of catching a `KeyNotFoundException`; exceptions should be reserved for genuinely exceptional conditions, not routine, expected checks.
-
-9. **Q: What is the standard base class recommendation for a caller-supplied invalid argument?**
- **A:** `ArgumentException` (or the more specific `ArgumentNullException`/`ArgumentOutOfRangeException`) — representing a caller bug/contract violation.
-
-10. **Q: What is `catch (Exception ex) { }` (an empty catch block) an example of?**
- **A:** A dangerous anti-pattern — silently swallowing all exceptions, including critical unexpected bugs, with no logging or handling at all.
-
-### Intermediate (10)
-
-1. **Q: Explain precisely why `throw ex;` is worse than `throw;`, in terms of what information is lost.**
- **A:** `throw;` preserves the `StackTrace` property exactly as captured at the exception's original throw site; `throw ex;` is treated as a brand-new throw statement, resetting the stack trace to point at this rethrow location — the original call chain that actually caused the exception is lost, making production debugging significantly harder since you only see where it was rethrown, not where it originated.
-
-2. **Q: Why is a two-pass model (search, then unwind) used for exception handling instead of unwinding immediately while searching?**
- **A:** It lets exception filters (`when` clauses) and diagnostic tooling inspect the exact stack state at the throw point before any unwinding occurs — if unwinding happened during the search, that original stack context would already be destroyed by the time a filter (or a debugger) got to examine it, even for handlers further up the stack that ultimately don't match.
-
-3. **Q: What's the danger of putting side-effecting code (like logging) inside an exception filter?**
- **A:** The filter executes whenever that catch clause is considered, including for exceptions it ultimately decides not to handle (returns `false`) — a logging side effect inside a filter can therefore fire even when the filter "declines" to catch, which can be surprising and makes control flow harder to reason about if not done deliberately and narrowly.
-
-4. **Q: Why should custom exceptions include strongly-typed properties (like an `ErrorCode`) rather than encoding everything into the `Message` string?**
- **A:** A `Message` string requires fragile parsing for calling code to react programmatically to specific failure details; a strongly-typed property (`ex.ErrorCode`) lets callers branch on structured data directly and safely, without depending on message text staying stable across versions.
-
-5. **Q: When would you choose `InvalidOperationException` over a custom exception type?**
- **A:** When the failure is about the object/system being in an invalid state for the requested operation generically (not a specific, named domain concept callers need to catch distinctly) — `InvalidOperationException` is an appropriately broad, standard choice for this general case, reserving custom exception types for genuinely distinct domain failure modes.
-
-6. **Q: What is `ExceptionDispatchInfo` used for, and why can't you just use `throw;` in every "rethrow from elsewhere" scenario?**
- **A:** It captures an exception's state (including its original stack trace) so it can be rethrown later, from a **different location in the call stack** than where it was originally caught — `throw;` only works to rethrow the *currently-caught* exception from within the same `catch` block; `ExceptionDispatchInfo.Capture(ex).Throw` is needed when the rethrow must happen elsewhere (e.g., marshaling an exception from a background thread back to the original caller), which is exactly what `Task`'s internal exception-propagation machinery uses.
-
-7. **Q: Why is catching `Exception` broadly at a background-job processor's per-item boundary considered acceptable, when it's discouraged elsewhere?**
- **A:** It's a deliberate, well-justified architectural boundary specifically to isolate one malformed/failing item from crashing the entire worker process and interrupting all other queued work — the key distinction is that even here, the exception should still be logged/differentiated (expected vs. unexpected) rather than silently swallowed, and this remains a narrow, explicitly-designed exception to the general "catch specific types" guidance, not a justification for broad catches everywhere.
-
-8. **Q: What happens to a `finally` block if the corresponding `try` block's exception is never actually caught anywhere up the call stack?**
- **A:** The `finally` block still runs during the stack-unwinding process as the runtime searches upward for a handler (or ultimately fails to find one and terminates the process) — `finally` execution is tied to the `try` block being exited during unwinding, independent of whether a handler is ultimately found.
-
-9. **Q: Why is it important to include the original exception as `InnerException` when wrapping it in a custom exception type?**
- **A:** Without it, the original exception's type, message, and stack trace are lost entirely — anyone diagnosing the wrapped exception later only sees the wrapper's generic message, with no way to determine what actually caused the failure underneath it.
-
-10. **Q: What's the performance-relevant difference between a service that throws thousands of caught, handled exceptions per second for expected conditions versus one using `TryX`/`Result<T>` patterns for the same conditions?**
- **A:** The exception-based version pays real, measurable per-occurrence CPU and allocation cost (stack trace capture, two-pass unwind) for every one of those "expected" occurrences, even though each is fully handled and never surfaces as an error — a hidden throughput tax invisible in ordinary error-rate dashboards; the `TryX`/`Result<T>` version avoids the exception machinery entirely for these expected paths.
-
-### Advanced (10)
-
-1. **Q: Walk through, precisely, why a `NullReferenceException` caught by an over-broad `catch (Exception)` handler is a fundamentally different kind of event than a `PaymentDeclinedException` caught by the same handler, and why treating them identically is dangerous.**
- **A:** `PaymentDeclinedException` represents an **expected, normal domain outcome** — the payment gateway correctly, deliberately rejected a specific transaction for a legitimate business reason (insufficient funds, fraud flag) — this is "the system working as designed." `NullReferenceException` represents a **genuine, unanticipated bug** — some invariant the code assumed would always hold (a reference being non-null) was violated, indicating a real defect that needs investigation and a fix. Treating both identically (the incident) means the monitoring/alerting/triage process has no way to distinguish "nothing to see here, business as usual" from "there's an active bug degrading the system" — the danger isn't the broad catch itself crashing anything, it's that it actively destroys the *signal* needed to notice and prioritize fixing real problems, potentially for months, exactly as occurred in the production incident.
-
-2. **Q: Explain how `AggregateException` relates to `Task`-based exception handling, and a scenario where failing to understand its unwrapping behavior causes a bug (connecting to).**
- **A:** When a `Task` faults, its exception(s) are wrapped in an `AggregateException` (potentially containing multiple inner exceptions, e.g., from `Task.WhenAll` with multiple failed tasks/Intermediate Q6); `await`-ing a faulted `Task` automatically **unwraps** and rethrows just the first inner exception directly (via `ExceptionDispatchInfo`-based mechanics), giving you the "natural," expected exception type in a `catch` block — but calling `.Result`/`.Wait` on the same faulted `Task` does **not** unwrap automatically, surfacing the raw `AggregateException` instead. A bug pattern: code with a `catch (SpecificException ex)` block that works correctly when the async method is properly `await`-ed, but silently fails to match (falling through to a more general handler or going unhandled) if someone later "simplifies" the calling code to use `.Result` instead of `await`, since the actual thrown type at that call site is now `AggregateException`, not `SpecificException` directly — a subtle, easy-to-introduce regression when refactoring async code, tying directly back to the broader sync-over-async cautions.
-
-3. **Q: Design an exception-based retry classification scheme distinguishing "transient, retry-worthy" from "permanent, don't retry" failures for an HTTP client wrapper, and explain the exception-hierarchy design that supports it.**
- **A:** Define a marker interface `ITransientFailure` (or a common base `TransientException: Exception`) that specific exception types implementing/deriving from it represent (a timeout, a 503/429 HTTP response mapped to a custom `ServiceUnavailableException: TransientException`), versus other exception types (a 400 Bad Request mapped to `InvalidRequestException`, deriving directly from `Exception` or `ArgumentException`, NOT `TransientException`) representing permanent failures; the retry wrapper's catch logic becomes `catch (TransientException ex) { /* retry with backoff, */ }` versus a non-matching, non-transient exception propagating immediately without any retry attempt — the exception *hierarchy design itself* (not ad-hoc per-call-site conditional logic) is what makes the retry policy both correct and trivially reusable/composable across every call site using this HTTP client wrapper, directly connecting this module's exception-design principles to the resilience-pattern discussion.
-
-4. **Q: Explain why a `catch` clause's exception filter (`when`) evaluating during the first pass (before unwinding) matters specifically for debugging tools like `!printexception`/`dotnet-dump`, beyond just the language-semantics explanation.**
- **A:** Because the stack hasn't been unwound yet during filter evaluation, a crash-dump/live-debugging tool attached at exactly that moment (e.g., via a `when` filter deliberately written to trigger a breakpoint or dump capture for diagnostic purposes, a known advanced debugging technique) can inspect the complete, un-unwound call stack — every local variable and frame that existed at the moment of the original `throw` — even for a `catch` clause whose filter ultimately returns `false` and lets the exception continue propagating. This is precisely why some advanced debugging setups deliberately insert a `catch (Exception ex) when (CaptureDiagnosticSnapshot(ex))` (always returning `false`, so it never actually "handles" anything) purely to get a rich diagnostic snapshot at exactly the right moment without altering the program's actual exception-handling behavior at all.
-
-5. **Q: A candidate says "exceptions should never cross an async boundary because they're too expensive." Provide a precise correction.**
- **A:** Exceptions do cross async boundaries constantly and correctly in idiomatic C# (an `await`-ed faulted `Task` naturally propagates its exception to the awaiting code) — the *expense* concern (/) is about **throw frequency for expected, common conditions**, not about exceptions being fundamentally incompatible with async code. The precise, correct framing: "avoid throwing exceptions for expected, high-frequency conditions regardless of whether the code is sync or async; genuinely exceptional failures should propagate via normal exception mechanics even across `await` boundaries, since that's exactly what the language and `Task` machinery are designed to do correctly and idiomatically."
-
-6. **Q: How would you design a custom exception type intended to be thrown from a public NuGet-published library, considering versioning/compatibility concerns not relevant to purely internal exception types?**
- **A:** Follow the standard constructor conventions strictly since external consumers may rely on them (e.g., a logging framework's exception-wrapping code calling the message+innerException constructor reflectively); avoid changing a custom exception's base type or removing/renaming public properties in a later version without a major version bump, since consumer code may have `catch (MySpecificException ex) when (ex.SomeProperty ==...)` filters or type-hierarchy-dependent catch chains that would silently stop matching (or start matching differently) if the type hierarchy changes; consider **sealing** the exception type (or explicitly documenting whether it's designed to be further derived from) to avoid consumers building fragile inheritance-based extensions your library's own version upgrades might later break; document every exception type your public API can throw as part of the API's actual contract (the guidance, doubly important for external, non-recompiled-together consumers who can't simply read your source to discover this).
-
-7. **Q: Explain a scenario where a well-intentioned exception filter used for "log rich context but don't handle it here" actually introduces a subtle behavioral bug.**
- **A:** `catch (Exception ex) when (LogAndReturnFalse(ex))` intended purely as a "log everything passing through, then let it keep propagating" pattern — if `LogAndReturnFalse` itself ever throws (e.g., the logging call fails due to a downstream logging-infrastructure outage), that new exception from *within the filter* propagates in a way that can be confusing to reason about and, depending on the runtime/version, may itself interact with the two-pass search process in ways that obscure the *original* exception that triggered the filter in the first place — a filter is generally expected to be a simple, side-effect-light boolean condition precisely to avoid this class of confusing, filter-internal-failure scenario; if logging inside a filter is genuinely wanted, it should be wrapped in its own defensive `try`/`catch` (swallowing logging-specific failures) so a logging-infrastructure problem never masks or complicates the original exception's propagation.
-
-8. **Q: How would you explain, to a team debating it, whether a specific failure mode (e.g., "requested resource not found" in a repository method) should be modeled as a thrown exception or a `null`/`Result<T>` return value?**
- **A:** Frame it around *frequency and expectedness* (/the core criterion): if "not found" is a common, entirely expected outcome for many call sites (e.g., checking whether a username is already taken during registration), a `null`/`TryGetX`/`Result<T>` return avoids the real throw-cost tax (/) for what's essentially routine control flow, and forces callers to explicitly handle the "not found" case at the type level (a `Result<T>`'s two-armed nature,, makes ignoring the "not found" case a visible omission, unlike a thrown exception a caller could simply never catch and let bubble up unexpectedly). If "not found" genuinely represents an exceptional, rare, likely-a-bug-if-it-happens condition for a *specific* call site (e.g., looking up an order by an ID that was itself just returned from a prior, supposedly-guaranteed-to-succeed creation call moments earlier), a thrown exception communicating "this should never happen, and if it does, something is seriously wrong" is the more appropriate, honest signal. The team should decide per-scenario based on this expectedness criterion, not adopt a single blanket policy either way.
-
-9. **Q: Describe how you would retrofit exception-type-based retry classification (Advanced Q3) onto an existing, large codebase that currently uses a single flat custom exception type for all HTTP client failures, without a risky big-bang rewrite.**
- **A:** Introduce the new, more granular exception hierarchy (`TransientException`, `PermanentException`, etc.) **alongside** the existing flat type initially, with the existing flat exception type's constructor updated to also derive from the appropriate new granular type based on the underlying HTTP status code/failure reason it's already inspecting internally — meaning existing `catch (OldFlatException ex)` call sites throughout the codebase continue working entirely unchanged (since the new types are additive, and the old type could even become a common base class both new granular types derive from, preserving full backward compatibility for any existing broad catches), while new code (and the retry-wrapper logic specifically) can immediately start catching the new, more specific types. This is a direct application of the general "expand, don't break" incremental-migration principle relevant to many API/type-hierarchy evolution scenarios, applied here specifically to exception-type refactoring.
-
-10. **Q: As a Principal Engineer, how would you design an organization-wide policy for custom exception hierarchies to avoid every team independently inventing incompatible, redundant, or poorly-designed exception types across a large microservices estate?**
- **A:** Publish a small, shared "common exceptions" library defining a small number of **well-designed, genuinely cross-cutting base exception types** (e.g., a `TransientFailureException` base, a `ValidationException` base with a structured `Errors` collection, an `AuthorizationException`) that every service's own domain-specific exceptions derive from, giving cross-cutting infrastructure code (retry policies, API error-mapping middleware, logging/alerting pipelines) a consistent, shared vocabulary to key off regardless of which specific service/team's exception it's handling — while explicitly leaving each team free to define their own domain-specific derived exception types (`InsufficientStockException: ValidationException`) for their own bounded context, avoiding the alternative failure mode of an overly rigid, centrally-mandated exhaustive exception catalog that becomes a bottleneck for every team needing a new failure type. Pair this with the documented conventions / (constructor shape, `InnerException` preservation, structured data properties) as an org-wide coding standard, and require the "does this exception represent an expected domain outcome or an unexpected bug" classification (§Advanced Q1) to be a deliberate, documented decision for any new exception type introduced — converting this module's core distinctions into durable, shared organizational infrastructure rather than something each team rediscovers (or fails to) independently.
-
-### Expert (FinTech Principal Panel)
-
-1. **Q: A fraud/authorization-scoring service that every card transaction calls throws an exception (its ML model host is down). Do you fail *open* (approve) or fail *closed* (decline)? Walk through how you'd decide and implement it, and why "just catch and continue" is the wrong instinct.**
- **A:** This is a risk/business decision encoded in code, not a default — and "catch the exception and let the transaction through" (fail-open) silently disables fraud control during exactly the window an attacker might exploit, so it must never be an accidental consequence of a broad `catch`. Decide by weighing the cost of each failure mode: fail-closed (decline on error) protects against fraud/loss but harms availability and customer experience and can itself cause an outage-of-approvals incident; fail-open protects approvals but accepts fraud/regulatory risk. The mature answer is usually **neither blanket choice**: degrade to a **deterministic fallback policy** — e.g., approve low-risk amounts under a threshold, apply rule-based checks, or step-up-authenticate — rather than a binary open/closed, and make the chosen behavior an explicit, reviewed, monitored decision with alerting when the fallback path activates. Implementation: a specific `catch (FraudServiceUnavailableException)` (not `catch (Exception)`), a circuit breaker so you stop hammering a dead dependency, an emitted metric/alert on every fallback activation, and an audit record that *this* transaction was decided by the fallback (regulators will ask). The wrong instinct is treating the exception as noise to swallow; the failure mode *is* a business rule.
- **Why correct:** Frames it as an explicit risk decision, rejects accidental fail-open from broad catches, and offers a graduated fallback with circuit breaking, alerting, and auditability.
- **Common mistakes:** Broad `catch` that silently fails open; a hardcoded binary choice with no monitoring; no audit trail of fallback-decided transactions.
- **Follow-ups:** "How would a regulator view a fail-open default?" / "How do you alert and cap exposure while the fallback is active?" / "Where does the circuit breaker's half-open probe fit?"
-
-2. **Q: A `catch` block logs `ex.ToString` and returns the exception message in the API error response. In a payments system, why is this a serious defect, and how do you design exceptions and error handling to be safe by construction?**
- **A:** Two leaks. (1) **Sensitive data exposure / PCI-DSS violation:** exception messages and stack traces routinely capture parameter values, SQL, URLs, and object state — a PAN, CVV, full account number, or PII can end up in logs (often lower-security, widely-readable) and, worse, in the HTTP response to the caller. (2) **Information disclosure:** raw messages/stack traces reveal internal types, schema, and library versions useful to an attacker, and returning arbitrary server text can enable **log forging** if unsanitized. Design for safety: never put sensitive values in exception messages (carry them, if needed, in structured fields that logging is configured to redact); map exceptions to a **generic, stable client response** (RFC 7807 problem-details with a correlation ID) while logging full detail server-side under access control; scrub/redact at the logging boundary (a central `IExceptionToProblemDetails` mapper + a logging enricher that strips known-sensitive fields); and treat "what may appear in a message/log" as part of the exception type's design contract. The Principal framing: safe error handling is *by construction* — a redaction-at-the-boundary architecture — not a hope that every developer remembers not to log the wrong thing.
- **Why correct:** Names both the PCI/PII leak and info-disclosure, and lands on generic client responses + correlation IDs + boundary redaction as the systemic fix.
- **Common mistakes:** Returning `ex.Message`/stack traces to clients; logging full request objects containing card data; assuming per-developer discipline instead of a redaction boundary.
- **Follow-ups:** "What goes in the client response vs. the server log?" / "How do you prevent PANs from reaching logs at all (tokenization upstream)?" / "How do correlation IDs let support debug without exposing internals?"
-
-3. **Q: A Kafka/queue consumer processes settlement instructions with at-least-once delivery. One message consistently throws (malformed / references a missing account). Describe the exception-handling design so this "poison message" doesn't wedge the partition or get retried forever — and how idempotency ties in.**
- **A:** With at-least-once delivery, an unhandled exception means the message isn't committed and gets redelivered — a poison message throws forever, blocking the partition (ordered) or spinning (unordered). The design keys off the **transient-vs-permanent classification** (Advanced Q3): a *transient* failure (DB timeout, downstream 503) should retry with bounded backoff and a max attempt count; a *permanent* failure (malformed payload, business-rule rejection, missing referent) should **not** be retried — route it to a **dead-letter queue** with full context (original payload, error, attempt count, correlation ID) for out-of-band investigation, and commit the offset so the partition proceeds. Guard the retry count in the message metadata/headers so a redelivered message can't reset it. Idempotency is essential because *successful* processing can also be redelivered (crash after side effect, before commit): each instruction carries an idempotency key and the consumer records processed keys (or uses conditional writes) so reprocessing is a no-op — this is what makes "retry" safe in the first place. Principal point: DLQ + transient/permanent classification + idempotent consumers together turn at-least-once from a liability into a correctness guarantee; missing any one of them produces either stuck partitions, infinite retries, or double-applied settlements.
- **Why correct:** Distinguishes transient (retry+backoff+cap) from permanent (DLQ), prevents partition wedging, protects the retry counter, and ties idempotency to at-least-once redelivery of successes.
- **Common mistakes:** Infinite retry of a permanent failure; no DLQ; resetting attempt counts on redelivery; assuming exactly-once so consumers aren't made idempotent.
- **Follow-ups:** "Ordered vs unordered partitions — how does poison handling differ?" / "What do you put in the DLQ record and who owns triage?" / "How does the Outbox pattern relate on the producer side?"
-
-4. **Q: You wrap a synchronous downstream *charge* call and a `TimeoutException`/`HttpRequestException` fires. Advanced Q3 says classify transient vs permanent to drive retries. Why is a charge the dangerous exception to that rule, and how do you reconcile exception-driven retry with not double-charging?**
- **A:** The classification rule (transient → retry) is safe for **idempotent** operations, but a charge is a **non-idempotent financial mutation**, and a timeout is *ambiguous* — the request may have succeeded server-side even though the client saw an exception. Blindly retrying on `TimeoutException` because it "looks transient" is precisely how double-charges happen. Reconcile by making the operation idempotent *before* applying the retry policy: attach a stable **idempotency key** so the card network dedups a retried POST to the same logical charge; only then is exception-driven retry safe. If idempotency isn't available, a timeout must transition the record to **`Pending/Unknown`** (not `Failed`, not auto-retried) and be resolved by **reconciliation** (status query by key, or the settlement file) before any customer-visible action. So the exception type alone is insufficient — you also need the operation's *idempotency* and *side-effect semantics* to decide retry-ability. The Principal rule: "transient ⇒ retry" is conditioned on "and the operation is safe to repeat"; for money movement, that safety comes from idempotency keys + reconciliation, never from the exception type in isolation.
- **Why correct:** Correctly qualifies the transient-retry rule with idempotency/side-effect semantics and gives the industry-standard reconciliation-on-ambiguity handling for charges.
- **Common mistakes:** Retrying a timed-out charge because the exception looks transient; marking ambiguous timeouts as failed and inviting a customer re-attempt; classifying by exception type without considering idempotency.
- **Follow-ups:** "How is a `TimeoutException` semantically different from a `400`-mapped exception for retry purposes?" / "Where is the idempotency key generated and persisted across retries?" / "What's your SLA for resolving a `Pending` charge?"
-
----
-
-## 11. Coding Exercises
-
-### Easy — Fix a `throw ex;` stack-trace bug
+#### Easy — Fix a `throw ex;` stack-trace bug
 **Problem**: This logging wrapper destroys the original stack trace.
 ```csharp
 public T ExecuteWithLogging<T>(Func<T> operation)
@@ -370,7 +422,7 @@ public T ExecuteWithLogging<T>(Func<T> operation)
 ```
 **Discussion**: A one-word fix with an outsized production-debugging impact — this is precisely the kind of subtle, easily-overlooked bug that a code-review checklist item ("never `throw ex;`, always bare `throw;`") or a Roslyn analyzer rule (several community analyzers, and Visual Studio's own built-in suggestions, already flag this) should catch automatically rather than relying on manual review every time.
 
-### Medium — Replace exception-based control flow with `TryX`
+#### Medium — Replace exception-based control flow with `TryX`
 **Problem**: This method uses exceptions for an expected, common condition.
 ```csharp
 public decimal GetDiscountRate(string customerTier)
@@ -394,7 +446,7 @@ public decimal GetDiscountRate(string customerTier)
 ```
 **Discussion**: Beyond the performance win (/ — avoiding the throw path for what's evidently a routine, expected case given the simple default-value fallback), the `TryGetValue` version is also more *readable*: it makes the "unknown tier defaults to zero" logic immediately visible as ordinary control flow, rather than requiring a reader to recognize that an exception is being used here as a disguised if/else.
 
-### Hard — Design and implement a transient/permanent exception hierarchy with a generic retry wrapper
+#### Hard — Design and implement a transient/permanent exception hierarchy with a generic retry wrapper
 **Problem**: Implement the exception-hierarchy-driven retry classification from Advanced Q3, including the retry wrapper itself (building on the retry-with-backoff coding exercise).
 ```csharp
 public abstract class HttpClientException: Exception
@@ -444,7 +496,7 @@ public static class ResilientHttpCaller
 ```
 **Discussion points**: The exception filter `when (attempt < maxAttempts)` on the `TransientHttpException` catch clause is doing real, load-bearing work — on the *final* attempt, the filter evaluates `false`, so the exception is **not caught here at all**, and propagates directly to the caller exactly as a `PermanentHttpException` would, without needing a separate "final attempt, don't retry" branch of logic — a clean, idiomatic use of exception filters rather than a manual `if (attempt >= maxAttempts) throw;` inside the catch block. Note `PermanentHttpException` is never caught by this method at all — it propagates on the very first occurrence, precisely the intended "don't waste retries on failures retrying can't fix" behavior the exception-hierarchy design (Advanced Q3) exists to enable cleanly.
 
-### Expert — Implement a custom `ExceptionDispatchInfo`-based background-work exception marshaling utility
+#### Expert — Implement a custom `ExceptionDispatchInfo`-based background-work exception marshaling utility
 **Problem**: Implement a small utility that runs a synchronous, CPU-bound operation on a dedicated background thread (not the thread pool, e.g., for a long-running operation that shouldn't consume a pool thread) and correctly marshals any exception back to the calling thread with the original stack trace preserved — demonstrating the exact mechanism `Task`'s own internals rely on (/§Advanced Q2), built by hand for understanding.
 ```csharp
 public static class DedicatedThreadRunner
@@ -490,9 +542,7 @@ catch (InvalidOperationException ex)
 ```
 **Discussion points**: Without `ExceptionDispatchInfo`, the only way to "rethrow" `capturedException` on the calling thread would be a bare `throw capturedException;`-equivalent, which (exactly like `throw ex;`, the core lesson) would reset the stack trace to point at the `Run` method's rethrow line — completely losing the fact that the exception actually originated deep inside `RiskyComputation` on a different thread entirely. `ExceptionDispatchInfo.Capture(ex).Throw` is precisely the mechanism that preserves cross-thread stack-trace fidelity, and this exercise directly demystifies what `Task`'s internal machinery is doing on your behalf every time an exception correctly propagates from an `await`-ed background operation back to your calling code with an accurate, original stack trace — a genuinely valuable "build the primitive by hand once, to fully understand the abstraction you use daily" exercise.
 
----
-
-## 12. System Design
+### 12. System Design
 
 *(Narrow application — full System Design has its own module.)*
 
@@ -505,13 +555,11 @@ catch (InvalidOperationException ex)
 - **Monitoring**: Two entirely separate dashboards/alert channels: one tracking `ApiException`-derived (expected, documented) error rates per partner (useful for partner-facing SLA/usage conversations, not urgent internally), and a second tracking the catch-all "unexpected exception" rate as a core reliability/paging metric — directly mirroring the production-incident fix, now built into the platform's architecture from the start rather than retrofitted after an incident.
 - **Trade-offs**: Maintaining a documented, stable external error-code contract (rather than just returning raw internal exception messages, which would be far less work initially) is a genuine ongoing documentation/versioning commitment — justified specifically because external partners depend on it programmatically, unlike an internal-only API where a looser, less formal error contract might be acceptable.
 
----
-
-## 13. Low-Level Design
+### 13. Low-Level Design
 
 **Scenario**: Design a small, reusable **global exception-to-HTTP-response mapping middleware** for ASP.NET Core (a concrete instance of the system design, implemented at the code level), demonstrating the expected/unexpected exception distinction as executable middleware.
 
-### Class Diagram
+#### Class Diagram
 ```mermaid
 classDiagram
  class ApiException {
@@ -606,7 +654,7 @@ public sealed class ExceptionHandlingMiddleware
 }
 ```
 
-### Sequence Diagram
+#### Sequence Diagram
 ```mermaid
 sequenceDiagram
  participant Client
@@ -626,17 +674,15 @@ sequenceDiagram
  end
 ```
 
-### Design Patterns / SOLID
+#### Design Patterns / SOLID
 - **Chain of Responsibility** (middleware pipeline pattern) — this exception-handling middleware is itself one link in ASP.NET Core's broader middleware chain, a direct, practical instance of the classic pattern.
 - **S**: `ExceptionHandlingMiddleware` has exactly one responsibility — mapping exceptions to HTTP responses and appropriate-severity logging; it contains no business logic.
 - **O**: New `ApiException`-derived types (a future `AuthorizationApiException`) are handled automatically by the existing `catch (ApiException apiEx)` clause without modifying the middleware, as long as they correctly set `ErrorCode`/`HttpStatusCode` — genuinely open for extension.
 - This directly implements this module's central distinction (§Advanced Q1) as literal, executable code: the `ApiException` catch clause and the generic `Exception` catch clause receive deliberately different logging severity and different response detail, mechanically enforcing the "expected vs. unexpected" distinction at the one place in the codebase where every request's final exception handling converges.
 
----
+### 14. Production Debugging
 
-## 14. Production Debugging
-
-### Incident: Over-broad `catch (Exception)` masking a critical bug for months (full deep dive)
+#### Incident: Over-broad `catch (Exception)` masking a critical bug for months (full deep dive)
 - **Symptoms**: Gradual increase in generic "payment failed" tickets; underlying `NullReferenceException` from an unrelated race condition indistinguishable from expected payment declines.
 - **Investigation**: Filtering logs by exception *type* (not just outcome) eventually revealed the anomalous exception category.
 - **Tools**: Structured logging with exception-type-aware querying; once identified, standard debugging of the underlying race condition.
@@ -644,7 +690,7 @@ sequenceDiagram
 - **Fix**: Granular exception-type-specific handling; separate logging severity/alerting for the "unexpected" category.
 - **Prevention**: A dashboard tracking unexpected-exception rate as a first-class reliability metric, not an afterthought discovered only during incident investigation.
 
-### Incident: Lost stack trace delaying root-cause diagnosis
+#### Incident: Lost stack trace delaying root-cause diagnosis
 - **Symptoms**: A production crash's logged stack trace pointed only to a generic logging-wrapper method, giving no indication of where the actual failure originated — diagnosis took significantly longer than it should have.
 - **Investigation**: Code review of the logging wrapper (exactly the Easy exercise scenario) found `throw ex;` instead of bare `throw;`.
 - **Tools**: Code review, once the "the stack trace is suspiciously unhelpful/shallow" symptom prompted someone to actually inspect the rethrow code rather than trusting the logged trace at face value.
@@ -652,23 +698,21 @@ sequenceDiagram
 - **Fix**: Global find-and-fix of every `throw ex;` occurrence, replaced with bare `throw;`.
 - **Prevention**: Roslyn analyzer (several off-the-shelf ones exist) specifically flagging `throw <caught-exception-variable>;` patterns, enforced in CI.
 
-### Incident: Exception-driven timing side-channel in an authentication endpoint
+#### Incident: Exception-driven timing side-channel in an authentication endpoint
 - **Symptoms**: A security review (proactive, not incident-triggered) flagged a measurable timing difference between "invalid username" and "valid username, invalid password" responses on a login endpoint.
 - **Investigation**: Code review found the username-lookup path threw and caught an exception (an early, fast-failing path) for unknown usernames, while the password-verification path performed a genuine (slower) cryptographic hash comparison for known usernames — the exception-driven early exit was measurably faster, creating exactly the timing side-channel described.
 - **Root cause**: Using an exception-driven early-exit as a performance "optimization" for the common "unknown username" case, without considering the security implications of the resulting timing differential.
 - **Fix**: Restructured the authentication path to perform a constant-time operation (a dummy hash comparison against a fixed value) even for unknown usernames, removing the timing differential entirely, and switched the username-lookup itself to a non-exception-based `TryGetValue`-style check (also addressing the ordinary "don't use exceptions for expected lookups" anti-pattern, incidentally fixing two issues at once).
 - **Prevention**: Security-review checklist item specifically for authentication/authorization code paths, checking for exception-driven or otherwise data-dependent timing differences between "valid" and "invalid" outcomes.
 
-### Incident: Worker process crash from an uncaught exception in a queue consumer, without per-item isolation
+#### Incident: Worker process crash from an uncaught exception in a queue consumer, without per-item isolation
 - **Symptoms**: A background job worker processing a message queue crashed entirely and stopped consuming **all** messages (not just the one bad message) after encountering a single malformed message that caused an unhandled exception deep in the processing logic.
 - **Investigation**: Confirmed the worker's message-processing loop had no per-item exception boundary at all — an unhandled exception from processing one message propagated all the way out of the consumer loop itself, terminating the entire worker process (and, since it was the only consumer instance at the time, halting all queue processing until manually restarted).
 - **Root cause**: Missing the "well-justified top-level broad catch" boundary (/) specifically at the per-message-processing level — the team had correctly avoided broad catches in their business logic (a good instinct) but hadn't recognized that the queue-consumer loop itself was exactly the kind of deliberate isolation boundary that legitimately warrants one.
 - **Fix**: Added a `catch (Exception ex)` specifically around each individual message's processing (not around the loop as a whole, and not around any inner business logic), logging the failure, moving the malformed message to a dead-letter queue for later inspection, and continuing to the next message — isolating one bad item without affecting the rest of the queue's processing.
 - **Prevention**: Architectural review checklist item requiring every queue/batch/background-job consumer loop to have an explicit, documented per-item exception-isolation boundary as a standard, expected part of that architectural pattern — not something each new consumer implementation has to independently rediscover the need for.
 
----
-
-## 15. Architecture Decision
+### 15. Architecture Decision
 
 **Decision**: Choosing how a service represents and communicates "expected failure" outcomes to its own internal callers (not external API consumers, covered separately).
 
@@ -680,9 +724,7 @@ sequenceDiagram
 
 **Recommendation**: **Option B** as the default internal-API design posture — reserving exceptions for genuinely unexpected conditions, using `Result<T>`/`TryX`-style returns (directly connecting to the `Either<TLeft,TRight>`/`Result<T>` pattern) for routine, expected failure outcomes, exactly the distinction this entire module has built toward. **Option A** remains acceptable for genuinely low-frequency, truly-exceptional failure paths where the throw-cost tax is irrelevant (most application code, most of the time, for most exceptions) — the recommendation isn't "eliminate exceptions," it's "reserve them for what they're actually good at, and don't reach for them reflexively for routine, high-frequency conditions." **Option C should be avoided** for any codebase past a small, single-team scale — it discards the compile-time safety and resilience-pattern composability (Advanced Q3) that a properly-typed exception hierarchy (or an equivalent `Result<T>`-based discriminated-union approach) provides, in exchange for short-term convenience that compounds into long-term fragility.
 
----
-
-## 16. Enterprise Case Study
+### 16. Enterprise Case Study
 
 **Inspired by**: Widely-discussed.NET community and Microsoft-documented guidance around **"exceptions are for exceptional circumstances"** as a core.NET Framework Design Guidelines principle (documented in Microsoft's own long-standing "Framework Design Guidelines" book/documentation, co-authored by former BCL architects, explicitly codifying the `TryX`-pattern-alongside-throwing-overload convention seen throughout the BCL itself — e.g., `int.Parse` throws, `int.TryParse` doesn't, offered side-by-side for exactly this reason).
 
@@ -691,9 +733,7 @@ sequenceDiagram
 - **Scaling lesson**: A well-established language/framework-level convention (the `TryX` pattern) doesn't automatically propagate its underlying *design philosophy* into application-level code without explicit teaching — exactly the same "shallow adoption vs. deep understanding" gap identified regarding records/discriminated unions, recurring here for exception design; recognizing this as a *recurring pattern across multiple C# feature areas* (not a coincidence specific to exceptions) is itself a valuable piece of Staff/Principal-level synthesis.
 - **Lesson for principal engineers**: When establishing exception-design conventions for a team/organization, explicitly point to the BCL's own `X`/`TryX` pattern as the *proof* that this isn't merely a stylistic preference — it's a decades-validated design principle from the very framework the team already uses daily, making the case far more persuasive than an abstract "exceptions are expensive" argument alone, and worth explicitly generalizing into "does our own domain need a `TryX`-shaped alternative for this operation" as a standing question during API design review.
 
----
-
-## 17. Principal Engineer Perspective
+### 17. Principal Engineer Perspective
 
 - **Business impact**: The expected-vs-unexpected exception distinction (§Advanced Q1) has a direct, quantifiable business impact on incident-detection latency — the incident (a real bug masked for months) is the concrete, memorable illustration of why this distinction isn't academic type-design pedantry but a genuine reliability-engineering concern with real cost.
 - **Engineering trade-offs**: Exceptions (rich context, automatic propagation, but real throw-cost and risk of over-broad catching) vs. `Result<T>`/`TryX` (cheap, compiler-enforced handling, but more verbose call sites) — the Principal Engineer's job is establishing *which* failure modes in a given domain warrant which approach, and codifying that as a repeatable design heuristic rather than leaving it to ad-hoc, inconsistent per-engineer judgment calls.
@@ -704,11 +744,9 @@ sequenceDiagram
 - **Risk analysis**: Treat any `catch (Exception)` found outside a small, explicitly-documented set of deliberate architectural boundaries (a global handler, a queue-consumer per-item isolation point//the fourth incident) as a standing code-review red flag requiring justification — the default assumption should be "this is probably masking something," not "this is probably fine."
 - **Long-term maintainability**: Document, on every deliberate broad-catch boundary in a codebase, *why* it's there and how it differentiates expected from unexpected failures (exactly as the middleware example does structurally) — so a future engineer doesn't "simplify" it into a single undifferentiated catch-and-log-everything block, silently reintroducing the exact masking risk the incident was built around.
 
----
+### 18. Revision
 
-## 18. Revision
-
-### Key Takeaways
+#### Key Takeaways
 - Exception handling uses a two-pass model: search (evaluating filters, no unwinding) then unwind (running `finally` blocks) down to the matched handler — this is why filters can inspect un-unwound stack state.
 - `throw;` preserves the original stack trace; `throw ex;` resets it — always prefer bare `throw;` for rethrowing the currently-caught exception.
 - Throwing is expensive (stack capture + two-pass search/unwind); never use exceptions for routine, expected control flow — prefer `TryX`/`Result<T>` patterns, exactly following the BCL's own established `X`/`TryX` convention.
@@ -716,29 +754,29 @@ sequenceDiagram
 - Custom exceptions should follow standard constructor conventions, carry structured data as typed properties (not just message text), and preserve `InnerException` when wrapping.
 - Broad `catch (Exception)` is legitimate only at a small number of deliberate, well-justified architectural boundaries (global handlers, per-item queue-consumer isolation) — never as a default throughout ordinary business logic.
 
-### Interview Cheatsheet
+#### Interview Cheatsheet
 - `throw;` (preserves trace) vs `throw ex;` (resets trace) — a top-tier, frequently-asked distinguishing question.
 - Exception filters (`when`) evaluate during the first pass, before unwinding — enabling rich diagnostics even for non-matching filters.
 - `ExceptionDispatchInfo.Capture(ex).Throw` — preserves stack trace when rethrowing from a different location/thread than the original catch (what `Task` uses internally).
 - `ArgumentException` family = caller bug; `InvalidOperationException` = bad state for this operation; custom domain exception = expected, named domain failure mode.
 - BCL's `X`/`TryX` dual-API convention (`int.Parse`/`TryParse`) is the authoritative precedent for "reserve exceptions for genuinely exceptional conditions."
 
-### Things Interviewers Love
+#### Things Interviewers Love
 - Precisely explaining the two-pass search/unwind model and why filters run before unwinding, not just that `when` clauses exist.
 - Citing the BCL's `TryX` convention unprompted as the established precedent for avoiding exceptions-as-control-flow.
 - Immediately identifying the expected-vs-unexpected exception distinction as the key concern with a broad `catch (Exception)`, not just "it's bad practice."
 
-### Things Interviewers Hate
+#### Things Interviewers Hate
 - Using `throw ex;` in example code without recognizing the stack-trace-reset issue.
 - Treating all `try`/`catch` usage as equally "expensive" (entering a non-throwing `try` block is nearly free; only the throw-and-unwind path is costly).
 - Recommending broad `catch (Exception)` as a general "defensive" default without the expected/unexpected differentiation this module centers on.
 
-### Common Traps
+#### Common Traps
 - Assuming `finally` always runs unconditionally, without the process-termination/`StackOverflowException` caveats.
 - Forgetting that `.Result`/`.Wait` surfaces a raw `AggregateException` while `await` auto-unwraps it — a catch clause written for one may silently stop matching if the calling code is later changed to the other (Advanced Q2).
 - Treating a custom exception hierarchy purely as a stylistic/organizational choice, missing that it directly enables (or blocks) clean resilience-pattern logic (transient/permanent retry classification, Advanced Q3).
 
-### Revision Notes
+#### Revision Notes
 Cross-reference [[02-Async-Await-Internals]]/§Intermediate Q6 (`Task.WhenAll` exception aggregation, `AggregateException` unwrapping) and [[04-Delegates-Events-Closures]] (multicast delegate exception-abort behavior — a different but related "does a failure at step N affect steps N+1 onward" question) before an interview. This module completes the core `01-CSharp` domain (Modules 1–8): CLR/GC, async, Span/Memory, delegates/events, LINQ, generics/variance, records/pattern-matching, and now exception handling — expect Staff/Principal interviews to chain questions across these eight modules freely, since they were deliberately built to cross-reference and reinforce one another throughout.
 
 ---

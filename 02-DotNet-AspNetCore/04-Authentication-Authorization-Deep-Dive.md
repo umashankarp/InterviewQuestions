@@ -4,22 +4,206 @@
 
 ---
 
-## 1. Fundamentals
+## 1. Topic Description
 
-### What is authentication, and what is authorization?
+### Definition
+
+**Authentication** establishes *who* the caller is: an authentication handler for a named **scheme** validates a credential and populates `HttpContext.User` with a `ClaimsPrincipal`. **Authorization** decides whether that principal may perform *this* operation: the policy engine evaluates a named `AuthorizationPolicy` — a set of `IAuthorizationRequirement`s, each satisfied by one or more handlers — against the principal and, for resource-based checks, against a loaded object. The two run at different points in the pipeline for a structural reason: authorization needs the *selected endpoint's* metadata, so it must sit between `UseRouting` and endpoint execution, while authentication has no such dependency.
+
+### Core sub-concepts
+
+- **Schemes and handlers** — `AuthenticateAsync` / `ChallengeAsync` / `ForbidAsync`; the 401-versus-403 distinction and why confusing them causes client redirect loops.
+- **Multiple schemes** — default scheme semantics, per-endpoint scheme selection, mixing cookie/OIDC for browsers with bearer for machines.
+- **`ClaimsPrincipal` and `ClaimsIdentity`** — multiple identities from multiple schemes, and scoping a claim lookup to its source.
+- **Claims transformation** — `IClaimsTransformation` for enriching the principal once per request, with caching and staleness trade-offs.
+- **Policies, requirements and handlers** — requirements AND-ed, handlers for one requirement OR-ed, and why adding a handler can silently widen access.
+- **Default vs fallback policy** — the fallback applies to endpoints with *no* authorization metadata, making the system deny-by-default.
+- **`[AllowAnonymous]` precedence** — it overrides every policy including the fallback.
+- **Resource-based authorization** — `IAuthorizationService.AuthorizeAsync(user, resource, policy)` after loading the object; why attributes structurally cannot do this.
+- **Roles vs claims vs permissions** — role explosion, and policies named for operations as the indirection that survives an access-model redesign.
+- **Cookie authentication and Data Protection** — the key ring, sharing and persisting it, and what breaks on scale-out or restart.
+- **JWT validation parameters** — signature, issuer, audience, lifetime, algorithm; JWKS key rotation.
+- **Antiforgery and `SameSite`** — when CSRF protection is required (cookie-credentialed requests) and when it is not (bearer headers).
+- **Multi-tenant isolation and workload identity** — tenant from the principal not the payload; per-service identity for service-to-service calls.
+
+### Where it fits
+
+This sits inside the middleware pipeline and depends on the DI container for scheme and policy registration and on configuration for keys and issuer metadata. Upward it is the enforcement point for every data-access decision, and it is only *one* of the entry paths into an operation — a message consumer, a scheduled job or an internal call reaches the same code without passing any attribute, which is why authorization that lives only at the controller is bypassable by design.
+
+### Why it matters at scale
+
+These are the highest-severity defects a service can ship: they are silent, they pass every functional test written from the owner's perspective, and they are exactly what an attacker and an auditor both look for. Missing object-level authorization means any authenticated user reads any record by changing an ID. A `TenantId` accepted from the request body means one missing check is a cross-tenant breach. A Data Protection key ring that is not shared means users are randomly logged out the moment you scale to three replicas — an availability incident caused by a default. And in a regulated environment, an inability to answer "who could approve a payment, and under which policy version" is an audit finding regardless of whether anything was actually exploited.
+
+### Common pitfalls / anti-patterns
+
+- **`UseAuthorization` outside the routing/endpoint window** — before `UseRouting` there is no endpoint metadata to read, so policies silently do not apply.
+- **Relying on `[Authorize]` being remembered rather than setting a fallback policy** — a forgotten attribute is an open endpoint instead of a 401.
+- **Endpoint-level checks with no object-level check** — the classic broken-object-level-authorization flaw; the endpoint looks protected in review and leaks every record.
+- **Taking the tenant or user identifier from the request body** — lets the caller choose whose data they operate on; authorisation-relevant values must derive from the credential.
+- **Disabling signature, audience or lifetime validation to "make it work"** — audience skipping alone accepts tokens minted for a different service, which is cross-service privilege escalation.
+- **An unshared or unpersisted Data Protection key ring** — cookies issued by one instance are rejected by another and invalidated on restart, presenting as random logouts correlated with deployments.
+- **Modelling fine-grained access as roles** — combinatorial role explosion produces a set nobody can audit or reason about, and it cannot be changed without a deployment.
+- **Baking permissions into a long-lived token with no revocation path** — a permission change takes effect only at next sign-in, and the acceptance of that window is usually discovered during an incident.
+
+> Scope note: pipeline ordering belongs to `01-Middleware-Pipeline-Request-Internals`; DI registration mechanics to `02-DI-Container-Internals`; model binding and over-posting to `03-MinimalAPIs-vs-Controllers-ModelBinding`. Identity architecture, directories and privileged access live in `40-IAM`; OAuth2/OIDC flows, token lifecycle and PKCE in `41-OAuth2-OIDC-JWT-PKCE`.
+
+---
+
+## 2. Beginner (10 Q&A)
+
+
+**Q1. What is the difference between authentication and authorization in this framework, and where does each run?**
+**A:** Authentication establishes identity and populates `HttpContext.User` — it runs in `UseAuthentication`, before routing has any bearing on it. Authorization decides whether that identity may perform the selected operation, and runs in `UseAuthorization`, which must sit between `UseRouting` and endpoint execution because it needs the endpoint's metadata to know which policy applies. The clean mental model is that authentication is about the caller and authorization is about the caller *plus* the operation — which is why authorization cannot be a purely pipeline-level concern once resources are involved.
+*Follow-up: What happens if `UseAuthorization` is registered before `UseRouting`?*
+
+**Q2. When does the framework return 401 versus 403?**
+**A:** 401 is a *challenge*: the caller is not authenticated, or their credentials were not accepted, and the response tells them how to authenticate. 403 is a *forbid*: the caller is authenticated, we know who they are, and they are not permitted. Getting this wrong matters operationally — returning 401 for a permission failure causes clients to loop through re-authentication forever, and returning 403 for an expired token stops clients refreshing it. The framework picks the right one automatically if you use the authorization pipeline rather than hand-rolling checks.
+*Follow-up: A client is stuck in a redirect loop after their token expires. Which end of this is wrong?*
+
+**Q3. What is a `ClaimsPrincipal` and why can it contain multiple identities?**
+**A:** It is the representation of the authenticated caller: a collection of `ClaimsIdentity` objects, each a set of claims from one source. Multiple identities exist because a caller can be authenticated by more than one scheme at once — a cookie plus an API key, or an application identity plus a delegated user identity. That matters when checking claims, because a naive lookup searches across all identities and may find a claim from a source you did not intend to trust. Being explicit about which identity a claim came from is a real concern in systems with multiple schemes.
+*Follow-up: How would you check a claim only from a specific authentication scheme?*
+
+**Q4. Explain how policies, requirements and handlers fit together.**
+**A:** A policy is a named set of requirements; each requirement is a marker of something that must be satisfied; each handler evaluates one requirement and either succeeds or does nothing. The combination rule is the part people get wrong: multiple *requirements* in a policy must all succeed (AND), but multiple *handlers* for the same requirement mean any one succeeding is enough (OR). That OR behaviour is deliberate — it lets you satisfy "can edit this document" by being the owner or an admin — but it also means adding a handler can silently widen access.
+*Follow-up: How would you express "must be an owner AND must have completed MFA"?*
+
+**Q5. What is a fallback policy and why does it matter more than the default policy?**
+**A:** The default policy is what `[Authorize]` with no arguments means. The fallback policy is what applies to endpoints with *no* authorization metadata at all — so setting it to `RequireAuthenticatedUser` turns the system deny-by-default, meaning a forgotten `[Authorize]` results in a 401 rather than open access. That single configuration converts the most common authorization defect from a silent vulnerability into an obvious failure, which is why I would treat it as mandatory rather than optional in any service handling non-public data.
+*Follow-up: With a fallback policy set, how do you expose a genuinely public endpoint?*
+
+**Q6. How does `[AllowAnonymous]` interact with policies?**
+**A:** It wins. `[AllowAnonymous]` short-circuits authorization regardless of what policies are applied at controller, group or fallback level, so an accidentally-placed attribute silently exposes an endpoint that every other control believes is protected. Because it overrides everything, it deserves specific review attention and, in a sensitive codebase, an automated check that enumerates anonymous endpoints and compares them against an approved list. Treating it as an explicitly-registered exception rather than an ordinary attribute is the safer posture.
+*Follow-up: How would you enumerate every anonymous endpoint at startup?*
+
+**Q7. What is resource-based authorization and why can't attributes do it?**
+**A:** Attributes evaluate before the handler runs, so they only know the caller and the endpoint — they cannot know whether *this* caller owns *this* record, because the record has not been loaded yet. Resource-based authorization uses `IAuthorizationService.AuthorizeAsync(user, resource, policy)` after loading the resource, letting a handler compare the caller against the resource's owner or tenant. Missing this layer is the most common serious API vulnerability there is: authenticated users fetching other users' data by changing an ID.
+*Follow-up: Should a failed resource check return 403 or 404, and why?*
+
+**Q8. What does the Data Protection stack do, and what breaks when it is misconfigured?**
+**A:** It provides the keys used to encrypt and sign authentication cookies, antiforgery tokens and anything else using the protection APIs, managed as a key ring with automatic rotation. By default keys are stored locally and, in a container, ephemerally — so on scale-out each instance has different keys and a cookie issued by one instance is rejected by another, and on restart every existing cookie becomes invalid. The symptom is random logouts that correlate with deployments or load balancing. The fix is a shared, persisted key ring, itself encrypted at rest with a managed key.
+*Follow-up: You move to three replicas and users are randomly logged out. What exactly is happening?*
+
+**Q9. What must be validated on an incoming JWT, and what happens if any of it is skipped?**
+**A:** Signature against the issuer's current keys, issuer, audience, expiry and not-before, and the algorithm — never trusting the token's own header to choose it. Skipping signature validation means anyone can mint a token; skipping audience validation means a token issued for a different service is accepted here, which is a real cross-service privilege escalation; skipping expiry means a leaked token is valid forever. These get disabled during development to "make it work" and then ship, which is why validation configuration deserves explicit review and a test asserting a tampered token is rejected.
+*Follow-up: How do keys rotate without downtime, and what does your service need to do to keep up?*
+
+**Q10. When are antiforgery tokens needed and when are they not?**
+**A:** They defend against cross-site request forgery, which is only possible when the browser attaches credentials automatically — cookies. A cookie-authenticated form post needs antiforgery protection; an API authenticated with a bearer token in a header does not, because the browser will not attach that header cross-site. The nuance worth knowing is `SameSite` cookie behaviour, which mitigates much of the classic attack but is not a complete replacement, and the fact that a service using cookies for some endpoints and bearer tokens for others needs both models understood rather than one blanket setting.
+*Follow-up: An API uses cookie auth because it's called from the same site's SPA. What do you require?*
+
+---
+
+## 3. Intermediate (10 Q&A)
+
+
+**Q1. A service supports both a browser SPA and machine-to-machine callers. How do you configure schemes?**
+**A:** Register both schemes — cookie or OIDC for the interactive path, JWT bearer for machine callers — and select per endpoint rather than relying on a single default, since the default determines what a bare `[Authorize]` means and getting that wrong either breaks one class of caller or silently accepts the wrong credential type. Policies then specify the acceptable schemes explicitly. I would also make the challenge behaviour differ appropriately: a browser gets a redirect, an API client gets a 401 with a `WWW-Authenticate` header, and mixing those produces the classic "API client receives an HTML login page" bug.
+*Follow-up: How do you make a single endpoint accept either scheme?*
+
+**Q2. Roles versus claims versus policies — how do you decide?**
+**A:** Roles are coarse identity groupings and work only while the set stays small; they degrade badly, because expressing fine-grained access as roles produces combinatorial role explosion and roles named after individual features. Claims carry attributes about the caller; policies express the *decision* and can combine claims, roles, resource state and external checks. My guidance is to use policies as the unit that code depends on, with names describing the operation (`CanApprovePayment`) rather than the identity, so the underlying mapping from roles or permissions can change without touching endpoint code. That indirection is what makes the model survive an access-model redesign.
+*Follow-up: You have 40 roles and it's unmanageable. What's the migration to permissions?*
+
+**Q3. Where should authorization decisions live in a layered application?**
+**A:** Coarse decisions (is this caller allowed to invoke this operation at all) belong at the endpoint via policies; fine, data-dependent decisions belong close to the data, in the application or domain layer, because that is the only place with the resource in hand. The critical point is that the endpoint is *not* the only entry path — a message consumer, a scheduled job or an internal API call reaches the same operation without passing any attribute — so authorization that exists only at the controller is bypassable by design. Anything protecting data rather than an HTTP route needs to be enforced where the operation actually happens.
+*Follow-up: How do you handle authorization for an operation triggered by a queue message with no user?*
+
+**Q4. How do you implement multi-tenant isolation so a single missed check cannot leak data?**
+**A:** In depth, and never by relying on developers to remember a filter. Tenant identity comes from the authenticated principal, never from the request payload; a global query filter applies the tenant predicate automatically; and the database enforces it too, via row-level security or per-tenant credentials, so an application bug alone is not sufficient to cross the boundary. On top of that I would run automated tests that authenticate as tenant A and assert that every repository method returns nothing for tenant B's identifiers. The design principle is that isolation should be a property of the infrastructure, with the application layer as a second line rather than the only one.
+*Follow-up: A reporting job legitimately needs cross-tenant access. How do you permit that safely?*
+
+**Q5. How would you implement permission checks that depend on data without wrecking performance?**
+**A:** Load the permission set once per request into the principal or a scoped context, rather than querying per check — a handler that hits the database on every authorization evaluation turns one request into dozens of round-trips. `IClaimsTransformation` is the natural place to enrich the principal, with caching keyed on the user and invalidated on permission change. The trade-off to be explicit about is staleness: cached permissions mean a revoked permission remains effective until expiry, which is a business decision about the acceptable revocation window rather than a technical detail to default silently.
+*Follow-up: The business requires revocation to take effect within 60 seconds. How does that change your design?*
+
+**Q6. What are the operational consequences of long-lived versus short-lived tokens?**
+**A:** Long-lived tokens reduce load on the identity provider and simplify clients, but they extend the window in which a stolen token is usable and make revocation effectively impossible without introspection or a deny list. Short-lived tokens with refresh give you a real revocation window at the cost of more traffic to the IdP, which then becomes a critical dependency whose outage logs everyone out. The design decision is where you want the failure: I would generally take short access tokens with a resilient IdP and cached signing keys, and be explicit that token lifetime is a security-versus-availability trade with a named owner rather than a default nobody chose.
+*Follow-up: The identity provider goes down. What should your service do with tokens that are still valid?*
+
+**Q7. How do you test authorization meaningfully?**
+**A:** By testing the negatives, because the positive path is what everyone writes and what never fails. That means integration tests asserting: an unauthenticated request gets 401, an authenticated-but-unentitled request gets 403, a caller from tenant A cannot read tenant B's resource by ID, and every endpoint has an authorization policy attached. The last one is best done as a test that enumerates the endpoint data source and asserts on metadata, since it catches the newly-added endpoint that nobody remembered to protect. Unit tests of individual handlers are worth having, but they cannot catch the failure that actually happens, which is a policy not being applied at all.
+*Follow-up: How do you write that endpoint-enumeration test so it fails helpfully rather than cryptically?*
+
+**Q8. A user's permissions are changed but the change takes effect only after they log out. Why, and what do you do?**
+**A:** Because the permissions were baked into a token or cookie at sign-in and nothing re-evaluates them until it is reissued. The options are: short token lifetimes so the window is bounded; a server-side check on each request, which reintroduces the per-request lookup you were avoiding; validation events on the cookie handler that re-check a security stamp; or a revocation list checked at the gateway. Which is right depends on how quickly the business requires revocation to take effect, and that requirement should be stated explicitly — teams usually discover they have accepted a 24-hour window only when someone asks during an incident.
+*Follow-up: How does a security stamp work, and what does it cost per request?*
+
+**Q9. How do you handle authorization for service-to-service calls?**
+**A:** With workload identity rather than shared secrets: each service gets its own credential (managed identity, mTLS certificate, or a client-credentials token) so calls are attributable and revocable individually. Then decide explicitly whether the downstream service authorises the *calling service*, the *original user*, or both — propagating the user's identity via token exchange or an on-behalf-of flow when the downstream needs to enforce user-level rules. The anti-pattern is a shared "internal" credential with broad rights and an implicit assumption that anything inside the network is trusted, which fails completely once one service is compromised.
+*Follow-up: The downstream service needs the original user's identity. How do you propagate it without letting a service impersonate arbitrary users?*
+
+**Q10. How do you diagnose "this request is being denied and I don't know why"?**
+**A:** Authorization failures are deliberately uninformative to the caller, so the diagnosis must come from the server side: log the evaluated policy, which requirements failed, and the principal's relevant claims — with the caveat that logging claims can itself be a data-protection issue, so it needs to be scoped and access-controlled. The framework's authorization events and debug-level logging expose most of this. I would also make the response carry a correlation ID so a user's report maps to a specific decision in the logs. Building this before it is needed is the difference between a five-minute answer and a day of guessing.
+*Follow-up: Which claims are safe to log, and how would you enforce that?*
+
+---
+
+## 4. Expert / Architect (10 Q&A)
+
+
+**Q1. How would you design an authorization model for a large system that will outlive its current org chart?**
+**A:** Separate the three layers that people usually conflate: identity (who you are), entitlements (what has been granted, managed by the business), and enforcement (what code checks). Application code should depend on stable, operation-named permissions; the mapping from users and groups to those permissions belongs in a system the business can change without a deployment. That indirection is what lets roles be reorganised, a new business unit be onboarded, or an access review be conducted without touching services. I would also insist that entitlement changes are auditable and that every enforcement point is discoverable, because in a regulated environment the ability to answer "who can approve a payment and why" is a requirement, not a nice-to-have.
+*Follow-up: Where do you draw the line between RBAC and ABAC, and what does ABAC cost operationally?*
+
+**Q2. Centralised authorization service versus in-process policy evaluation — how do you choose?**
+**A:** Centralised gives consistency, one place for audit and change, and is attractive to compliance; the costs are a hot-path network dependency, availability coupling, and latency on every decision. In-process evaluation is fast and resilient but drifts, because each service ends up with its own interpretation of the rules. The pattern I favour is centralised *policy authoring and distribution* with local evaluation — policies and entitlement data pushed to services and evaluated in-process, with caching and a bounded staleness window. That keeps the hot path local while keeping the source of truth central, and it degrades to "last known good policy" rather than to an outage.
+*Follow-up: How do you handle policy propagation delay when a permission is revoked for cause?*
+
+**Q3. What is your approach to enforcing deny-by-default across dozens of services?**
+**A:** Make the secure configuration the inherited default: a platform package that sets the fallback policy, wires the standard schemes, and configures token validation correctly, so a service must actively opt out rather than actively opt in. Then verify rather than trust — a CI check that enumerates endpoints and fails on any without an authorization policy or an approved anonymous exemption, plus periodic scanning of deployed services. The organisational half is that anonymous endpoints require a recorded exception with an owner, which turns an invisible risk into a reviewable list. Guidance alone reliably fails here, because the failure is an omission and omissions are exactly what review misses.
+*Follow-up: A team disables the shared package's fallback policy to unblock a release. How do you find out and what do you do?*
+
+**Q4. How do you handle the migration from an old authentication mechanism to a new one with zero downtime?**
+**A:** Run both in parallel: accept the old and new credentials simultaneously, with telemetry attributing every authenticated request to its mechanism so you can see actual migration progress rather than guessing. Migrate clients in waves, keep a hard cut-off date with an owner, and ensure the old path is disabled by configuration so it can be turned off quickly if it turns out to be a liability. The parts teams underestimate are long-lived sessions and cached tokens — which extend the tail far beyond the client migration — and the Data Protection key ring, which must be preserved across the transition or every existing session breaks on the first deploy. I would also plan the rollback explicitly, because auth changes are the ones where an incident is severe.
+*Follow-up: Telemetry shows 0.3% of traffic still on the old mechanism after six months. How do you close it out?*
+
+**Q5. How do you make authorization decisions auditable to a standard that satisfies a regulator?**
+**A:** Every decision that matters — grants, denials on sensitive operations, privileged access use, and every entitlement change — needs a durable, tamper-evident record with who, what, when, on what resource, and under which policy version. That is distinct from application logging: it needs defined retention, restricted access, and completeness guarantees, so it should not be sampled or best-effort. Policy itself must be versioned so a past decision can be explained against the rules in force at the time, which is the requirement most systems fail. I would design the audit path to have its own delivery guarantee (an outbox or append-only store) and treat a failure to record as a first-class failure where the regulation demands it.
+*Follow-up: Recording synchronously adds latency to every sensitive operation. How do you evaluate that trade?*
+
+**Q6. What is your view on token size and claim bloat at scale?**
+**A:** It is a real operational problem: every claim is carried on every request, so a token stuffed with permissions costs bandwidth, can exceed header limits at proxies and gateways, and is expensive to validate and log. Beyond a few kilobytes you start hitting infrastructure limits that fail in confusing ways. The fix is to carry identity and a small set of stable claims in the token, and to resolve fine-grained permissions server-side with caching — which also improves revocation, since the token is no longer the source of truth for entitlements. I would set an explicit size budget and monitor it, because claim bloat accumulates one reasonable-sounding addition at a time.
+*Follow-up: A team wants to add a per-tenant permission array to the token. How do you respond?*
+
+**Q7. How do you approach authorization in an event-driven system where operations are triggered without a user?**
+**A:** By deciding explicitly what authority a message carries. The options are: propagate the original user's identity in the message so the consumer can enforce user-level rules; give the consumer its own service identity and authorise it as a system actor; or treat authorisation as having happened at the point of command acceptance and record that decision in the event. Each is defensible, and the failure is not choosing — which produces consumers that either enforce nothing or reconstruct identity inconsistently. I would also be careful that propagated identity in a message is signed or otherwise trustworthy, since a message on an internal bus is not automatically authentic, and long-lived messages can outlive the permissions they were issued under.
+*Follow-up: A message sits in a DLQ for three days and is replayed. Whose permissions apply?*
+
+**Q8. How would you assess the security posture of an inherited service's auth implementation in a day?**
+**A:** I would check, in order: is there a fallback policy or is protection per-endpoint; what does the anonymous-endpoint list look like; is token validation fully configured, including audience and signature; is Data Protection shared and persisted; is there any object-level authorization or only endpoint-level; where does tenant identity come from; and are there hand-rolled checks bypassing the policy engine. Each of those has a fast, concrete answer and each maps to a specific severe failure mode. I would also grep for disabled validation flags and for `AllowAnonymous`, which surface the most common deliberate weakening. That set gives a defensible risk picture quickly, which is what a day buys you.
+*Follow-up: You find object-level authorization missing entirely across 80 endpoints. How do you sequence the remediation?*
+
+**Q9. How do you balance security requirements against developer velocity when they genuinely conflict?**
+**A:** By moving the cost into the platform rather than onto every team: if the secure path is also the easy path — a package that configures everything correctly, templates that start deny-by-default, test helpers that make writing negative authorization tests trivial — the conflict largely disappears. Where a genuine conflict remains, I would frame it as a risk decision with a named owner and a documented acceptance rather than an engineering argument, because that is what it actually is. What I would not do is grant blanket exceptions to unblock a date, since auth exceptions have a way of becoming permanent and are exactly what shows up in a post-incident review.
+*Follow-up: A director asks you to ship with a known authorization gap to hit a regulatory deadline. How do you handle it?*
+
+**Q10. What does a mature authorization architecture look like five years in, and what usually goes wrong on the way?**
+**A:** Mature looks like: deny-by-default everywhere; permissions named for operations and decoupled from org structure; entitlements managed outside code with audit; enforcement close to the data so non-HTTP paths are covered; and automated verification that every entry point is protected. What goes wrong on the way is almost always accretion — roles added per feature until nobody can describe who can do what, authorization logic duplicated across services with subtle differences, and exceptions granted for migrations that never complete. The counter is treating the access model as a product with an owner and a periodic review, rather than as a thing each team extends locally. Without that ownership, the model degrades regardless of how well it was designed initially.
+*Follow-up: You've inherited exactly that accreted model. What's the first thing you'd change, and why that one?*
+
+---
+
+## 5. Reference Material
+
+> Retained from the original module: deep-dive internals, diagrams, production examples, exercises, system/low-level design, debugging walkthroughs and the Principal Engineer perspective.
+
+### 1. Fundamentals
+
+#### What is authentication, and what is authorization?
 **Authentication** answers *"who are you?"* — establishing the identity of the caller, producing a `ClaimsPrincipal` (a set of claims — key/value facts about the identity — grouped into one or more `ClaimsIdentity` objects) attached to `HttpContext.User`. **Authorization** answers *"are you allowed to do this?"* — a separate, subsequent decision evaluated **against** the already-established identity (and the specific resource/endpoint being accessed), producing a simple allow/deny result.
 
-### Why are they modeled as distinct, pluggable systems in ASP.NET Core?
+#### Why are they modeled as distinct, pluggable systems in ASP.NET Core?
 Because **many different mechanisms** can establish identity (a cookie, a JWT bearer token, an API key, a client certificate, a third-party OAuth provider) and **many different policies** can govern access (a simple role check, a complex multi-claim business rule, a resource-specific ownership check) — conflating the two into one monolithic system would prevent mixing/matching (e.g., "authenticate via JWT, but authorize using a rich, business-logic-driven policy" or "support both cookie and API-key authentication simultaneously for different client types on the same API"). ASP.NET Core's **authentication schemes** (pluggable identity-establishing mechanisms) and **authorization policies** (pluggable, composable access-decision logic) are deliberately independent, composable systems precisely to support this flexibility.
 
-### When does this matter?
+#### When does this matter?
 - **Always**, for any API/application with meaningful access control — but *deeply* understanding the mechanics matters specifically for:
  - Correctly supporting multiple simultaneous authentication schemes (a common real-world requirement — first-party web clients via cookies, third-party partners via API keys, service-to-service calls via JWT).
  - Designing authorization policies that go beyond simple role checks (resource-based/ownership-based authorization — "can this user edit *this specific* order," not just "is this user an Editor").
  - Diagnosing the very common "why did this request get a 401 instead of my custom logic running" / "why is `[Authorize(Roles = "Admin")]` not working" class of bug.
  - Interviewing — a genuinely deep answer here (policy-based authorization, claims transformation, scheme selection) is a strong Staff/Principal-level differentiator over a surface-level "we use `[Authorize]` attributes" answer.
 
-### How does it work (30,000-ft view)?
+#### How does it work (30,000-ft view)?
 
 ```csharp
 builder.Services.AddAuthentication(options => options.DefaultScheme = "Cookies")
@@ -41,23 +225,21 @@ app.MapPut("/orders/{id}", UpdateOrder)
 
 Mental model for interviews: **"Authentication middleware runs the appropriate scheme handler(s) to populate `HttpContext.User` with a `ClaimsPrincipal`. Authorization middleware then evaluates a policy — a composable set of requirements — against that principal and the current request/resource, producing allow or deny. Schemes and policies are independent, pluggable, and can be mixed and matched."**
 
----
+### 2. Deep Dive
 
-## 2. Deep Dive
-
-### 2.1 `ClaimsPrincipal`/`ClaimsIdentity`/`Claim` — the Identity Data Model
+#### 2.1 `ClaimsPrincipal`/`ClaimsIdentity`/`Claim` — the Identity Data Model
 
 - A **`Claim`** is a single key-value assertion about the identity (`ClaimTypes.Name = "alice"`, `"permission" = "orders:edit"`, `"tenant_id" = "acme-corp"`), optionally with an issuer.
 - A **`ClaimsIdentity`** is a named collection of claims, associated with a specific authentication scheme/method (`AuthenticationType`) — a principal can carry **multiple** identities simultaneously (e.g., one from a cookie scheme and one from an external OAuth provider, in a multi-scheme scenario), though the common case is one identity.
 - A **`ClaimsPrincipal`** wraps one or more `ClaimsIdentity` objects and is what `HttpContext.User` actually is — `User.Identity.Name`, `User.IsInRole(...)`, `User.HasClaim(...)` all operate across the principal's identities.
 
-### 2.2 Authentication Schemes — Precisely How Multiple Schemes Coexist
+#### 2.2 Authentication Schemes — Precisely How Multiple Schemes Coexist
 
 Each registered scheme (`AddCookie("Cookies")`, `AddJwtBearer("Bearer")`, a custom `AddApiKey("ApiKey")`) has its own **handler** implementing `IAuthenticationHandler`, responsible for: (a) `AuthenticateAsync` — attempt to extract and validate credentials from the current request (a cookie, an `Authorization: Bearer` header, an API-key header) and produce a `ClaimsPrincipal` if successful; (b) `ChallengeAsync` — what to do when an **unauthenticated** request hits a protected resource (redirect to a login page for cookies; return `401 WWW-Authenticate: Bearer` for JWT); (c) `ForbidAsync` — what to do when an **authenticated-but-not-authorized** request is denied (typically a `403`).
 
 **Scheme selection** for a given endpoint is determined by: an explicit `[Authorize(AuthenticationSchemes = "Bearer")]`/`.RequireAuthorization(...)` specifying which scheme(s) apply, or, absent that, the configured **default scheme** — `UseAuthentication` middleware runs **every** registered scheme's `AuthenticateAsync` unless scoped, populating `HttpContext.User` with whichever scheme(s) actually apply to the incoming request's credentials (a cookie present triggers the cookie scheme; a bearer token present triggers the JWT scheme) — **it is entirely possible, and common, for a single request to be simultaneously "authenticated" under multiple schemes** if it happens to carry credentials for more than one (rare in practice, but architecturally important to understand for correctly reasoning about multi-scheme APIs).
 
-### 2.3 Policy-Based Authorization — Requirements and Handlers
+#### 2.3 Policy-Based Authorization — Requirements and Handlers
 
 An authorization **policy** is a named collection of **requirements** (`IAuthorizationRequirement`), each evaluated by one or more **handlers** (`AuthorizationHandler<TRequirement>`). The built-in `RequireClaim`/`RequireRole`/`RequireAuthenticatedUser` are convenience methods that add pre-built requirement/handler pairs — but the real power is **custom requirements** for business-logic-driven decisions:
 
@@ -88,7 +270,7 @@ public class MinimumAccountAgeHandler: AuthorizationHandler<MinimumAccountAgeReq
 ```
 **Critical, frequently-tested fact**: a policy succeeds only if **every** requirement in it is satisfied — but an individual handler **choosing not to call `context.Succeed`** does not immediately fail the whole evaluation; it simply means that specific requirement remains unsatisfied, and **other handlers for the same requirement type** (multiple handlers can register for the same requirement) get a chance to satisfy it too (an "OR" relationship **between handlers for the same requirement**, combined with an "AND" relationship **across different requirements** in the same policy) — a genuinely subtle, commonly-misunderstood evaluation semantic worth knowing precisely.
 
-### 2.4 Resource-Based Authorization — Beyond "Is This User an Admin"
+#### 2.4 Resource-Based Authorization — Beyond "Is This User an Admin"
 
 The examples so far check claims/roles **independent of any specific resource** — but a huge, common real-world need is: **"can this specific user edit *this specific* order"** (an ownership/resource-based check), which requires the actual resource instance to be available at authorization-decision time:
 
@@ -114,21 +296,19 @@ if (!authResult.Succeeded) return Forbid;
 ```
 This is precisely why `[Authorize]` attributes alone (declarative, evaluated purely from endpoint metadata + the principal) **cannot** express ownership/resource-based checks — the resource itself (a specific `Order` instance) doesn't exist until the handler has already started executing and loaded it from the database; resource-based authorization is necessarily an **imperative** call to `IAuthorizationService.AuthorizeAsync(user, resource, policy)` from within the handler/action body, not a purely declarative attribute.
 
-### 2.5 Claims Transformation — `IClaimsTransformation`
+#### 2.5 Claims Transformation — `IClaimsTransformation`
 
 `IClaimsTransformation.TransformAsync(ClaimsPrincipal principal)` runs **after** authentication succeeds but **before** authorization evaluates — a hook for **augmenting** the principal with additional claims not present in the original token/cookie (e.g., looking up a user's current subscription tier from a database and adding it as a claim, so authorization policies can check it without every policy handler needing its own database call). **Critical gotcha**: `IClaimsTransformation` runs on **every single request** (it's not cached across requests by default) — a transformation performing an expensive database lookup on every request is a real, easily-introduced performance problem (/), and its result is **not** persisted back into the original authentication cookie/token, meaning the same lookup repeats every request unless the application explicitly implements its own caching layer around it.
 
-### 2.6 The 401 vs 403 Distinction, Precisely
+#### 2.6 The 401 vs 403 Distinction, Precisely
 
 - **`401 Unauthorized`** ("who are you? I don't recognize your credentials, or you provided none") — the correct response when **authentication** fails or is absent for a resource requiring it; triggered by the scheme handler's `ChallengeAsync`.
 - **`403 Forbidden`** ("I know who you are, but you're not allowed to do this") — the correct response when authentication **succeeded** but **authorization** subsequently denies the request; triggered by `ForbidAsync`.
 - A common, real bug: returning `401` for an authorization failure (leaking information about *why* access was denied in a subtly wrong way, and technically violating HTTP semantics) or, conversely, `403` for a genuinely unauthenticated request (some security guidance argues `401` is more appropriate specifically to avoid confirming a resource's existence to an unauthenticated caller, an intentional information-hiding consideration — worth knowing this is a deliberate design decision some APIs make, not just an implementation detail to get "right" or "wrong" universally).
 
----
+### 3. Visual Architecture
 
-## 3. Visual Architecture
-
-### Authentication + Authorization Sequence
+#### Authentication + Authorization Sequence
 
 ```mermaid
 sequenceDiagram
@@ -153,7 +333,7 @@ sequenceDiagram
  Note over AuthN,C: If AuthenticateAsync itself fails/no credentials:<br/>401 Unauthorized (ChallengeAsync), AuthZ never even runs
 ```
 
-### Requirement Evaluation Logic (ASCII)
+#### Requirement Evaluation Logic (ASCII)
 
 ```
 Policy "CanEditOrders" = [ RequireRoleRequirement("Editor"), MinimumAccountAgeRequirement(30 days) ]
@@ -172,11 +352,9 @@ Policy succeeds ONLY IF: (RequireRoleRequirement satisfied by ANY of its handler
  AND (MinimumAccountAgeRequirement satisfied by ANY of its handlers)
 ```
 
----
+### 4. Production Example
 
-## 4. Production Example
-
-### Scenario: Partner API platform — an `IClaimsTransformation` causing a slow, cascading authentication-layer outage
+#### Scenario: Partner API platform — an `IClaimsTransformation` causing a slow, cascading authentication-layer outage
 
 **Problem**: A B2B API platform serving multiple partner integrations via JWT bearer tokens experienced a severe, platform-wide latency degradation (p99 response times across **every** authenticated endpoint, not just one specific feature) that began shortly after a seemingly-minor feature addition: a new `IClaimsTransformation` implementation added to enrich the principal with the caller's **current, real-time partner-tier/rate-limit-quota information**, looked up from a database, "so authorization policies could reference it without each one needing its own database call" (directly following the pattern described).
 
@@ -196,135 +374,10 @@ Policy succeeds ONLY IF: (RequireRoleRequirement satisfied by ANY of its handler
 1. `IClaimsTransformation` runs on **every authenticated request across the entire application**, not scoped to specific endpoints by default — any expensive operation placed inside it has a platform-wide blast radius, not a feature-scoped one, making it a uniquely high-leverage (and high-risk) extension point.
 2. A seemingly-reasonable, well-intentioned feature addition ("enrich the principal so policies don't each need their own lookup") can silently become a platform-wide performance bottleneck if the actual, universal-execution semantics of the extension point aren't fully understood before use.
 3. Caching and, even better, endpoint-scoped conditional execution are both valid, complementary mitigations — caching reduces the cost of necessary work; scoping eliminates unnecessary work entirely, and combining both gives the strongest protection.
-## 10. Interview Questions
 
-### Basic (10)
+### 11. Coding Exercises
 
-1. **Q: What's the difference between authentication and authorization?**
- **A:** Authentication establishes who the caller is (producing a `ClaimsPrincipal`); authorization decides, given that established identity, whether the caller is allowed to perform a specific action.
-
-2. **Q: What is a `Claim`?**
- **A:** A single key-value assertion about an identity, such as a name, role, or permission.
-
-3. **Q: What does `UseAuthentication` middleware do?**
- **A:** Runs the appropriate registered authentication scheme handler(s) to attempt to establish the caller's identity, populating `HttpContext.User`.
-
-4. **Q: What status code should be returned for a failed authentication attempt, versus a failed authorization check?**
- **A:** `401 Unauthorized` for authentication failures; `403 Forbidden` for authorization failures (the caller is known but not permitted).
-
-5. **Q: What is an authorization policy?**
- **A:** A named collection of requirements that must all be satisfied for access to be granted.
-
-6. **Q: Can `[Authorize]` alone express "can this user edit this specific order"?**
- **A:** No — declarative `[Authorize]` attributes have no access to a specific loaded resource instance; this requires imperative, resource-based authorization via `IAuthorizationService.AuthorizeAsync(user, resource, policy)`.
-
-7. **Q: What is `IClaimsTransformation` used for?**
- **A:** Augmenting the `ClaimsPrincipal` with additional claims after authentication succeeds but before authorization runs.
-
-8. **Q: Does `IClaimsTransformation` run for every request, or only when a policy needs the added claim?**
- **A:** Every single authenticated request, unconditionally, unless explicitly scoped by the implementation itself.
-
-9. **Q: What is the purpose of specifying `AuthenticationSchemes` on an `[Authorize]` attribute?**
- **A:** To explicitly declare which authentication scheme(s) apply to that specific endpoint, rather than relying on the application's default scheme.
-
-10. **Q: What does a custom `AuthorizationHandler<TRequirement>` let you do that built-in `RequireRole`/`RequireClaim` don't?**
- **A:** Express arbitrary, custom business-logic-driven authorization decisions, not just simple claim/role presence checks.
-
-### Intermediate (10)
-
-1. **Q: Explain the relationship between requirements and handlers within a single authorization policy.**
- **A:** A policy is satisfied only if every requirement it contains is satisfied (an AND relationship across requirement types); for a given requirement, if multiple handlers are registered for it, any one of them succeeding is sufficient (an OR relationship between handlers for the same requirement).
-
-2. **Q: Why can a single `ClaimsPrincipal` contain multiple `ClaimsIdentity` objects?**
- **A:** A request might legitimately carry credentials recognized by more than one registered authentication scheme simultaneously — each scheme contributes its own identity, and the principal aggregates all of them.
-
-3. **Q: What's the danger of placing an expensive database call inside `IClaimsTransformation` without caching?**
- **A:** It executes on every single authenticated request across the entire application, adding that cost to every request's critical path platform-wide and potentially exhausting shared downstream resources like a database connection pool under real production load.
-
-4. **Q: Why is JWT authentication generally considered more horizontally-scaling-friendly than cookie-based authentication?**
- **A:** JWTs are self-contained and stateless — any replica with the shared signing/verification key can validate them independently, with no shared session store required, whereas cookie-based authentication typically requires either sticky sessions or an externalized, shared session/data-protection-key store.
-
-5. **Q: What happens if you don't configure a shared data-protection key ring across replicas for a cookie-authenticated, horizontally-scaled application?**
- **A:** Each replica generates/uses its own independent keys, so a cookie encrypted by one replica can't be validated by another — users can appear to get logged out unpredictably whenever their request happens to land on a different replica than the one that issued their cookie.
-
-6. **Q: Why might a security-conscious API deliberately return 401 for both unauthenticated and "authenticated but resource doesn't exist for you" scenarios, rather than the textbook 401/403/404 distinction?**
- **A:** To avoid confirming a protected resource's existence to an unauthenticated or unauthorized caller — a deliberate information-hiding/reconnaissance-prevention security decision, not a bug.
-
-7. **Q: What's the security risk of a custom authentication scheme handler trusting a claim value taken directly from a request header without further validation?**
- **A:** An attacker could forge that header value directly, since nothing about simply reading a header value inherently proves its authenticity — the handler must validate the credential against a trusted, server-side source before deriving any claims from it.
-
-8. **Q: Why would you write a unit test directly against an `AuthorizationHandler<T>` implementation rather than relying solely on end-to-end HTTP tests?**
- **A:** It gives faster, more precise, more isolated feedback specifically on the authorization rule's business-logic correctness, without needing to spin up a full HTTP pipeline/real authentication flow just to exercise the decision logic.
-
-9. **Q: What's the difference between `ChallengeAsync` and `ForbidAsync` on an authentication scheme handler?**
- **A:** `ChallengeAsync` runs when authentication is missing/failed (typically resulting in a 401 or a login redirect); `ForbidAsync` runs when the caller is authenticated but authorization subsequently denies the request (typically resulting in a 403).
-
-10. **Q: Why should you explicitly specify which authentication scheme(s) apply to a given endpoint in a multi-scheme application, rather than relying on the default?**
- **A:** It removes ambiguity about which credential mechanism is actually expected/validated for that specific endpoint, and prevents a potential security gap where a caller might authenticate via an unintended, possibly weaker scheme that happens to also be registered as valid by default.
-
-### Advanced (10)
-
-1. **Q: Walk through, precisely, why the platform-wide latency degradation in the incident affected endpoints that never referenced the newly-added claim at all.**
- **A:** `IClaimsTransformation.TransformAsync` executes unconditionally as part of the authentication middleware's processing for **every** authenticated request, entirely independent of which specific endpoint is ultimately being accessed or whether that endpoint's authorization policy actually reads the enriched claim — the expensive database lookup runs and completes (paying its full cost) **before** routing/authorization even determines which endpoint or policy applies, meaning the cost is incurred universally regardless of downstream relevance, which is exactly why the blast radius was platform-wide rather than scoped to the one feature that motivated the change.
-
-2. **Q: Explain how you would design an authorization system supporting both "any Editor can edit any order" (a simple role check) and "additionally, the original creator can always edit their own order regardless of role" (a resource-based override), combining both into one coherent policy.**
- **A:** Register a single policy (`"CanEditOrder"`) with one requirement (`EditOrderRequirement`), but register **two** handlers for that same requirement: one checking `context.User.IsInRole("Editor")` (calling `Succeed` if true), and a separate one checking `((Order)context.Resource).CustomerId == context.User.FindFirstValue(ClaimTypes.NameIdentifier)` (also calling `Succeed` if true) — per the "OR between handlers for the same requirement" semantics, the policy succeeds if **either** condition is met, precisely modeling "any Editor OR the resource's own creator" as a single, coherent, composable policy rather than duplicating an `if (isEditor || isOwner)` check inline at every call site.
-
-3. **Q: A candidate claims "JWT authentication doesn't need session state, so it has no scalability concerns at all." Provide a precise correction.**
- **A:** JWT's self-contained, stateless nature does eliminate the *session-store* scalability concern cookie-based auth has — but real JWT-based systems still commonly need **shared state** for token revocation (a blocklist of revoked-but-not-yet-expired tokens, since JWTs can't be "un-issued" once signed) and for refresh-token rotation/tracking — both of which reintroduce a shared-state/distributed-consistency concern, just a different, narrower one than full session storage. The precise claim: "JWT eliminates the need for shared session state to validate a token's *signature and claims*, but real-world JWT systems still typically need shared state for revocation and refresh-token management — it reduces, but doesn't entirely eliminate, the stateful-scaling-concern category."
-
-4. **Q: Design a caching strategy for `IClaimsTransformation` that correctly balances the performance concern against the security staleness concern, for a scenario involving account suspension (a claim indicating "this account is suspended" that must be enforced promptly).**
- **A:** Use a **short** TTL cache (seconds, not minutes) specifically for the suspension-status claim, since the business/security requirement here (promptly enforcing suspension) is more stringent than, e.g., a partner-tier claim's staleness tolerance (the original scenario) — additionally, implement an **explicit cache-invalidation hook**: when an account is suspended (via whatever administrative action triggers it), proactively evict that specific account's cached claim entry (if using a keyed cache like `IMemoryCache`) rather than relying on TTL expiration alone, giving both a fast-path (immediate invalidation on the triggering event) and a bounded worst-case staleness window (the short TTL, as a safety net for cases where the explicit invalidation hook itself might be missed/fail) — directly combining "cache for performance" with "invalidate proactively for security-critical staleness-sensitive claims" rather than treating all cached claims with a uniform, one-size-fits-all TTL policy.
-
-5. **Q: Explain a scenario where a multi-scheme authentication configuration creates a genuine security vulnerability if endpoint-level scheme scoping is missing, with a concrete example.**
- **A:** An application supporting both a legacy `ApiKey` scheme (simple, static-key-based, perhaps originally intended only for a small set of trusted internal batch jobs) and a modern `Bearer` (JWT) scheme (with rich, granular claims-based authorization) for its general API surface — if a sensitive endpoint (e.g., `DELETE /users/{id}`) only specifies `[Authorize(Policy = "AdminOnly")]` without scoping `AuthenticationSchemes`, and the `ApiKey` scheme's handler (perhaps for simplicity, or an oversight) attaches an `Admin` role claim to **every** successfully-validated API-key holder (since it was only ever tested/used by trusted internal jobs, "admin" seemed a reasonable default), then **any external caller possessing a valid API key** (perhaps issued for an entirely different, lower-trust purpose) could satisfy the "AdminOnly" policy via the API-key scheme, bypassing the intended, more rigorous JWT-based admin-verification path entirely — a real privilege-escalation vulnerability arising purely from the *combination* of multiple schemes and missing endpoint-level scheme scoping, not from either scheme being individually "broken."
-
-6. **Q: How would you architect authorization for a scenario requiring both coarse-grained, policy-based checks (declarative, fast, cacheable) AND fine-grained, resource-based checks (imperative, requires loading the resource), minimizing redundant database access?**
- **A:** Structure the endpoint handler to perform the **coarse-grained** check first, declaratively (`[Authorize(Policy = "HasOrderManagementAccess")]`, evaluated before the handler body even runs, short-circuiting cheaply for callers who fail this basic gate without any database access at all) — then, **only for callers who pass the coarse check**, load the specific resource (which the handler needs to load anyway for its actual business logic, so this isn't "extra" work solely for authorization's sake) and perform the **fine-grained**, resource-based check (`IAuthorizationService.AuthorizeAsync(user, order, "OrderOwnerPolicy")`) against it — this two-tier structure ensures the (potentially expensive) resource-loading and fine-grained check only happens for requests that already passed a cheap, declarative gate, directly mirroring §Advanced Q4's "short-circuit before expensive work" middleware-ordering principle, now applied specifically to the coarse-vs-fine authorization-check sequencing decision.
-
-7. **Q: Explain how you would test the `IClaimsTransformation` caching fix to ensure it doesn't reintroduce the original staleness-vs-performance trade-off incorrectly under concurrent load (e.g., a cache stampede on cold start).**
- **A:** A naive `IMemoryCache`-based cache is vulnerable to a **cache stampede**: if many concurrent requests for the *same* uncached partner ID arrive simultaneously (e.g., immediately after a cache eviction or on application cold-start), each one might independently trigger its own database lookup before any of them finishes populating the cache, momentarily reproducing the original "database call per request" problem for that specific burst — the correct fix uses a **per-key locking/deduplication mechanism** (e.g., `IMemoryCache.GetOrCreateAsync` combined with a `SemaphoreSlim`-per-key pattern, or a library like `Microsoft.Extensions.Caching.Memory`'s newer stampede-resistant patterns) ensuring only **one** concurrent lookup occurs per uncached key, with other concurrent requests for that same key awaiting the single in-flight lookup's result rather than each independently hitting the database — testing this specifically requires a concurrency-focused test (many simulated concurrent requests for the same uncached partner ID) asserting the underlying repository/database mock was called only **once**, not once-per-concurrent-request.
-
-8. **Q: A team wants to implement "step-up authentication" (requiring a fresh, recent re-authentication for a specific high-sensitivity action, like changing a password, even if the user has a valid, longer-lived session/token) — design this using the authorization concepts covered in this module.**
- **A:** Add an `authentication_time` claim (many JWT/OIDC flows already include this, `auth_time`) at authentication time reflecting when the credential was actually established; implement a custom `RecentAuthenticationRequirement(TimeSpan maxAge)` with a handler checking `DateTimeOffset.UtcNow - authTimeClaim <= maxAge`, succeeding only if the authentication is sufficiently recent — apply this policy specifically to the sensitive endpoints requiring step-up authentication (`[Authorize(Policy = "RecentAuthRequired")]`), while leaving ordinary endpoints governed by the normal, longer-lived session/token validity policy — if the requirement fails (the session, while still generally valid, is "too old" for this specific sensitive action), the endpoint returns a distinct response (e.g., a custom 403 variant or a specific error code) prompting the client to initiate a fresh re-authentication flow specifically for this action, directly demonstrating how custom requirements/handlers extend naturally to genuinely novel authorization concepts beyond the built-in role/claim conveniences.
-
-9. **Q: Explain why data-protection key management (the HA/DR incident) is architecturally a distinct concern from authentication scheme configuration itself, and what happens mechanically if it's misconfigured in a horizontally-scaled deployment.**
- **A:** ASP.NET Core's cookie-authentication scheme relies on the separate **Data Protection API** (`IDataProtectionProvider`) to encrypt/sign the cookie's contents — by default, each application instance generates and stores its own data-protection keys **locally** (e.g., in-memory or a local file), which works fine for a single-instance deployment but means each replica in a horizontally-scaled fleet has **independent, incompatible** keys unless explicitly configured to share a common key ring (via a persisted, shared store — Redis, a shared network file location, Azure Blob Storage). Mechanically, if unconfigured: a cookie encrypted by Replica A's key cannot be decrypted/validated by Replica B — the cookie-authentication scheme's `AuthenticateAsync` simply fails silently (treating the request as unauthenticated, not as an error), producing the exact "users get logged out randomly, seemingly depending on which server they hit" symptom, which can be genuinely confusing to diagnose without specifically knowing to look at data-protection key-ring configuration rather than the authentication scheme configuration itself, since the scheme setup can look entirely correct in isolation.
-
-10. **Q: As a Principal Engineer, how would you design an organization-wide authentication/authorization architecture standard that prevents the specific incident classes covered in this module (claims-transformation performance blast radius, missing resource-based checks, multi-scheme scope ambiguity) from recurring across many services?**
- **A:** Publish a shared library providing: (a) a pre-built, stampede-resistant, TTL-configurable claims-caching wrapper (directly the fix /Advanced Q7) that any team can use for their own claims-enrichment needs without independently rediscovering the caching/stampede pitfalls; (b) a standard base `AuthorizationHandler<TRequirement, TResource>` pattern/template with accompanying unit-test scaffolding, making resource-based authorization the well-supported, low-friction default rather than something each team has to figure out from documentation independently; (c) a mandatory architecture-review checklist item requiring explicit `AuthenticationSchemes` scoping for any endpoint in a multi-scheme service, with automated tooling (a custom analyzer, similar in spirit to this course's recurring analyzer-based governance pattern — §Advanced Q10,,/) flagging any `[Authorize]`/`.RequireAuthorization` call missing explicit scheme specification in a project with more than one registered scheme. This directly generalizes this module's specific incidents into durable, low-friction, largely-automated organizational safeguards, consistent with this course's recurring "codify hard-won lessons as shared tooling, don't rely on tribal knowledge" principle.
-
-### Expert (FinTech Principal Panel)
-
-1. **Q: Under PSD2/SCA, a payment approval must be bound to *this specific transaction* (amount + payee), not just "the user is authenticated." Design authentication/authorization for a payment-confirmation action implementing "dynamic linking," and explain why a plain step-up isn't enough.**
- **A:** Plain step-up (Advanced Q8) proves the credential is *recent*, but it doesn't prove the user approved *these* payment details — a session-riding or man-in-the-middle attacker could ride a fresh authentication to authorize a *different* amount/payee. **Dynamic linking** requires the authentication challenge itself to be cryptographically bound to the transaction: the confirmation the user sees and approves must include the specific amount and payee, and the resulting authorization artifact (a signed challenge, a WebAuthn assertion, or an OTP issued against a server-side transaction record) must be verifiable as covering *those exact details*, so any tampering invalidates it. Design: create an immutable server-side `PaymentIntent` (amount, payee, currency) with an ID; issue a challenge over a hash of those fields; the client authenticates (ideally with a phishing-resistant factor — WebAuthn/passkey signing the challenge, or a push with the amount+payee shown); on callback, verify the assertion binds to the intent's hash and that the intent is unchanged; only then authorize execution. Enforce single-use and a short expiry on the intent to stop replay. In ASP.NET Core this is a resource-based authorization check (`AuthorizeAsync(user, paymentIntent, "PaymentConfirmed")`) plus verification of the signed assertion — not merely `[Authorize]`. The Principal point: for money movement, authorization must attest to *what* is being authorized, not just *who* is authenticated and *how recently*.
- **Why correct:** Distinguishes recency from transaction-binding, implements dynamic linking via an immutable intent + challenge over its hash + phishing-resistant factor + single-use, which is exactly the SCA requirement.
- **Common mistakes:** Treating "fresh login" as sufficient to authorize a specific payment; not binding amount/payee into the challenge; reusable/long-lived confirmation tokens.
- **Follow-ups:** "Why is WebAuthn/passkey preferable to SMS OTP for the challenge?" / "How do you stop an attacker swapping the payee after approval?" / "What breaks if the intent is mutable?"
-
-2. **Q: Moving a large amount, or changing a beneficiary, requires "four-eyes" (maker-checker) approval — one user initiates, a *different, suitably-privileged* user approves, and no one can approve their own request. Design this authorization model and its pitfalls.**
- **A:** This is **segregation of duties**, and it can't be expressed as a single-request `[Authorize]` check — it's a stateful, multi-actor workflow. Model it as: a `maker` creates a pending `ApprovalRequest` (the action is *not* executed, only recorded with its full parameters and the maker's identity); a distinct `checker` later authorizes it, where the authorization requirement enforces (a) the checker holds the approver role/limit for this action *and amount band*, and (b) `checker.UserId!= maker.UserId` (the "no self-approval" invariant — the classic pitfall if omitted). Only on approval does the system execute the action, against the *originally recorded* parameters (never re-read from a mutable request the maker could alter post-submission — otherwise a maker edits the amount after approval). Additional controls: an immutable audit trail of who did what when (regulators require it), idempotent execution so a double-approve doesn't double-pay, expiry of stale requests, and possibly N-of-M approvals for the highest amounts. In ASP.NET Core: resource-based handlers on the `ApprovalRequest` for both the "can initiate" and "can approve" policies, with the self-approval and amount-band checks in the approve handler. The Principal framing: four-eyes is an authorization *invariant across two identities and time*, so the design centers on an immutable request record + a distinct-approver check + execute-from-recorded-parameters — getting any of those three wrong defeats the control.
- **Why correct:** Correctly models maker-checker as a stateful two-identity workflow with the no-self-approval invariant, execution from immutable recorded parameters, audit, and idempotency.
- **Common mistakes:** Omitting the distinct-approver check; executing from a mutable request the maker can alter after approval; no audit trail; non-idempotent execution on double-approval.
- **Follow-ups:** "Why execute from the recorded parameters, not the live request?" / "How do you handle amount-band-dependent approver levels?" / "What if the maker and checker collude — what other controls compensate?"
-
-3. **Q: A high-value banking API is a target for token theft. A stolen bearer JWT works from anywhere. How do you make tokens sender-constrained, and how do you handle revocation given JWTs can't be un-issued?**
- **A:** A plain bearer token is a bearer instrument — whoever holds it can use it, so theft = full impersonation until expiry. **Sender-constrain** it so the token is only usable by the party that holds a matching key: (a) **mTLS-bound tokens** (RFC 8705) — the token embeds a hash of the client certificate (`cnf.x5t#S256`), and the resource server checks the presented TLS client cert matches, so a stolen token is useless without the private key; (b) **DPoP** (RFC 9449) — the client signs each request with a proof-of-possession key referenced by the token, defeating replay by a thief who captured only the token. Combine with **short access-token lifetimes + rotating refresh tokens** (with reuse detection: a replayed refresh token invalidates the whole chain — a strong signal of theft). Revocation: since a signed JWT can't be recalled, maintain a **revocation/blocklist** (by `jti` or session ID) checked on sensitive operations, and keep access tokens short enough that the blocklist stays small and the exposure window bounded; refresh-token revocation is the primary lever for cutting off a compromised session promptly. The Principal framing: don't rely on secrecy of a bearer token for high-value operations — bind it to a key (mTLS/DPoP), keep it short-lived, and back it with refresh-token rotation + a targeted revocation list; that combination converts "stolen token = game over" into "stolen token = useless / quickly cut off."
- **Why correct:** Names mTLS/DPoP sender-constraining, short-lived + rotating refresh with reuse detection, and a `jti`/session revocation list — the real answer to bearer-token theft in banking.
- **Common mistakes:** Relying on plain bearer tokens for high-value APIs; long-lived access tokens; assuming JWT statelessness means no revocation is ever needed.
- **Follow-ups:** "mTLS-bound vs. DPoP — trade-offs?" / "How does refresh-token reuse detection signal theft?" / "Why keep access tokens short even with a blocklist?"
-
-4. **Q: In a payments microservices estate, dozens of services call each other (ledger, fraud, notification). How do you design service-to-service authentication and least-privilege authorization so a compromised low-trust service can't drive core money movement?**
- **A:** Human-user tokens are the wrong primitive for service-to-service calls — use **workload identity**: each service gets a cryptographic identity (SPIFFE/SVID, cloud workload identity, or short-lived certs) and calls are mutually authenticated with **mTLS** (a service mesh — later module — can enforce this transparently and rotate certs). Authorization is **least-privilege per service, per operation**: the fraud service can *read* transaction context but has no grant to *post* ledger entries; scopes/roles are attached to the workload identity, and the ledger service authorizes callers by their verified identity + the specific operation, not "is authenticated." Key controls: no shared "god" service account; tokens/certs short-lived and auto-rotated (no long-lived secrets to steal); network policy + mesh authorization as defense-in-depth so even a valid identity can only reach the endpoints it's authorized for; and full audit of which workload invoked which operation. So a compromised notification service, even with a valid identity, simply has no authorization to move money and no network path to the ledger's privileged endpoints. The Principal framing: treat every internal call as untrusted-until-authenticated (zero trust), give each workload the minimum grants for its job, and make blast radius a function of *that service's* privileges — never assume "internal = trusted."
- **Why correct:** Uses workload identity + mTLS, least-privilege per-operation grants, short-lived rotated credentials, and mesh/network defense-in-depth to bound blast radius — the zero-trust internal model.
- **Common mistakes:** Reusing user tokens for service calls; a shared over-privileged service account; long-lived static service secrets; trusting internal traffic implicitly.
- **Follow-ups:** "Why not a shared API key across services?" / "How does a service mesh enforce mTLS + authz without app changes?" / "What's the blast radius if the fraud service is popped, under this design vs. a flat-trust one?"
-
----
-
-## 11. Coding Exercises
-
-### Easy — Implement a simple role-based policy and apply it to an endpoint
+#### Easy — Implement a simple role-based policy and apply it to an endpoint
 **Problem**: Restrict an endpoint to users with the "Manager" role.
 ```csharp
 builder.Services.AddAuthorization(options =>
@@ -336,7 +389,7 @@ app.MapDelete("/orders/{id}", DeleteOrder).RequireAuthorization("ManagerOnly");
 ```
 **Discussion**: `RequireRole` is a convenience wrapper adding a pre-built `RolesAuthorizationRequirement` and its corresponding built-in handler — functionally equivalent to, but far less code than, hand-writing an equivalent custom `IAuthorizationRequirement`/`AuthorizationHandler<T>` pair for this simple case; reserve custom requirements/handlers for genuinely custom logic the built-ins can't express.
 
-### Medium — Implement resource-based (ownership) authorization
+#### Medium — Implement resource-based (ownership) authorization
 **Problem**: Ensure only the order's original customer (or a Manager) can view its details.
 ```csharp
 public class OrderAccessRequirement: IAuthorizationRequirement { }
@@ -373,7 +426,7 @@ app.MapGet("/orders/{id}", async (string id, IOrderRepository repo, IAuthorizati
 ```
 **Discussion**: Note the deliberate ordering — the resource (`order`) is loaded **first** (needed regardless, for the actual business logic if access is granted), **then** the resource-based authorization check runs against it — exactly the pattern described, and impossible to express as a purely declarative `[Authorize]` attribute since the attribute has no way to reference `order` before it's been loaded inside the handler body.
 
-### Hard — Implement a stampede-resistant, cache-invalidatable claims transformation (Advanced Q4/Q7)
+#### Hard — Implement a stampede-resistant, cache-invalidatable claims transformation (Advanced Q4/Q7)
 **Problem**: Fix the incident with both caching and explicit invalidation support, avoiding cache-stampede risk.
 ```csharp
 public class PartnerTierClaimsTransformation: IClaimsTransformation
@@ -423,7 +476,7 @@ public class PartnerTierClaimsTransformation: IClaimsTransformation
 ```
 **Discussion points**: The double-checked-locking pattern (checking the cache, acquiring a lock, checking **again** before doing the expensive work) is precisely what prevents the cache-stampede scenario from Advanced Q7 — without the second check inside the lock, every request that arrived while the lock was held would still redundantly perform the database lookup once it eventually acquired the lock, one at a time, rather than benefiting from the first request's now-populated cache entry. A production implementation would replace the single global `SemaphoreSlim` with a per-key locking mechanism (to avoid serializing lookups for *different* partner IDs behind one shared lock) — flagged here explicitly as a known simplification, exactly the kind of "here's what I'd improve for real production use" honesty valuable to demonstrate in an interview setting rather than presenting a simplified exercise as production-complete without qualification.
 
-### Expert — Implement step-up authentication (Advanced Q8) end-to-end
+#### Expert — Implement step-up authentication (Advanced Q8) end-to-end
 **Problem**: Implement the step-up (recent-authentication) authorization requirement from Advanced Q8, including the client-facing signal for triggering re-authentication.
 ```csharp
 public class RecentAuthenticationRequirement: IAuthorizationRequirement
@@ -477,9 +530,7 @@ public class StepUpAuthorizationMiddlewareResultHandler: IAuthorizationMiddlewar
 ```
 **Discussion points**: `IAuthorizationMiddlewareResultHandler` is a genuinely advanced, less-commonly-known extensibility point — it lets you **customize what happens when authorization fails**, distinct from customizing the *decision logic itself* (which is what `AuthorizationHandler<T>` does) — here used specifically to distinguish "you're not allowed at all" (an ordinary 403) from "you need to freshly re-authenticate for this specific action" (a custom signal the client can act on, e.g., by prompting for a password re-entry) — demonstrating that the authorization *system* itself, not just individual policies, has customizable extension points worth knowing about for genuinely advanced authorization UX requirements. Not calling `context.Fail` explicitly (per the code comment) is deliberate: `Fail` immediately and unconditionally fails the **entire** policy evaluation regardless of other requirements' outcomes, which would be inappropriate here if this requirement were ever combined with other, independent requirements in the same policy — simply not calling `Succeed` is the correct, more composable way to express "this specific requirement isn't met" without forcibly short-circuiting unrelated requirements.
 
----
-
-## 12. System Design
+### 12. System Design
 
 *(Narrow application — full System Design has its own module; a full OAuth2/OIDC/JWT/PKCE module covers token-issuance architecture separately.)*
 
@@ -492,13 +543,11 @@ public class StepUpAuthorizationMiddlewareResultHandler: IAuthorizationMiddlewar
 - **Monitoring**: Per-scheme authentication success/failure rates and per-policy authorization denial rates are tracked as distinct metrics, enabling the platform team to notice, e.g., an anomalous spike in `ApiKey`-scheme authentication attempts against endpoints that shouldn't accept that scheme at all (a potential probing/attack signal) distinctly from ordinary `Bearer`-scheme partner traffic patterns.
 - **Trade-offs**: Maintaining three distinct schemes with individually-scoped endpoint access is more configuration/governance overhead than a single unified scheme would be — accepted because each caller type has genuinely different trust/integration characteristics (a legacy batch job can't practically implement a full OAuth client-credentials flow; a partner integration shouldn't be issued long-lived static API keys) that a single scheme couldn't accommodate without meaningfully compromising either security or integration simplicity for at least one caller category.
 
----
-
-## 13. Low-Level Design
+### 13. Low-Level Design
 
 **Scenario**: Design a small, reusable **generic resource-based authorization helper** reducing the boilerplate of the "load resource → check ownership → return 403 if denied" pattern (Medium coding exercise) across many different resource types in a codebase.
 
-### Class Diagram
+#### Class Diagram
 ```mermaid
 classDiagram
  class IResourceAuthorizationHelper {
@@ -546,7 +595,7 @@ app.MapGet("/orders/{id}", async (string id, IOrderRepository repo, IResourceAut
 });
 ```
 
-### Sequence Diagram
+#### Sequence Diagram
 ```mermaid
 sequenceDiagram
  participant Endpoint
@@ -568,16 +617,14 @@ sequenceDiagram
  end
 ```
 
-### Design Patterns / SOLID
+#### Design Patterns / SOLID
 - **Facade pattern**: `IResourceAuthorizationHelper` is a thin facade over `IAuthorizationService`, specifically reducing repetitive boilerplate at every resource-based-authorization call site across a codebase — a small, high-leverage DRY improvement directly generalizing the Medium coding exercise's pattern into reusable, shared infrastructure.
 - **S**: The helper has exactly one responsibility — translating an authorization decision into a directly-returnable `IResult?`, with no knowledge of what any specific resource type or policy actually means.
 - This pattern is a good example of "the smallest reasonable abstraction that removes real, repeated boilerplate" — worth explicitly contrasting with over-engineering a much larger, more elaborate authorization-abstraction framework when this simple, narrow helper already solves the actual, observed repetition problem, directly consistent with this course's recurring "don't design for hypothetical future requirements" principle (the opening guidance, restated here in a DI/authorization-helper context).
 
----
+### 14. Production Debugging
 
-## 14. Production Debugging
-
-### Incident: Platform-wide latency degradation from an uncached `IClaimsTransformation` (full deep dive)
+#### Incident: Platform-wide latency degradation from an uncached `IClaimsTransformation` (full deep dive)
 - **Symptoms**: p99 latency degradation across every authenticated endpoint, not just the feature that motivated the change.
 - **Investigation**: APM tracing showed a database query inside claims transformation executing on every single request.
 - **Tools**: Distributed tracing (spans specifically around the authentication middleware stage), `dotnet-counters` for connection-pool contention.
@@ -585,30 +632,28 @@ sequenceDiagram
 - **Fix**: Short-TTL, stampede-resistant caching plus endpoint-scoped conditional execution.
 - **Prevention**: Load-testing the authentication path specifically for any future claims-transformation change; a shared, pre-built caching wrapper (Advanced Q10) to prevent every team independently rediscovering this pitfall.
 
-### Incident: Users randomly logged out after every deployment
+#### Incident: Users randomly logged out after every deployment
 - **Symptoms**: A cookie-authenticated web application's users reported being unexpectedly logged out shortly after every production deployment, seemingly at random, not affecting all users simultaneously.
 - **Investigation**: Confirmed the application had no shared data-protection key-ring configuration — each replica independently generated its own local keys on startup, meaning a rolling deployment (replacing replicas one at a time) caused any user whose next request landed on a newly-started replica (with different keys than the one that issued their cookie) to fail cookie validation silently, appearing logged out.
 - **Root cause**: Missing shared data-protection key-ring configuration for a horizontally-scaled, cookie-authenticated application (exactly Advanced Q9's mechanical explanation).
 - **Fix**: Configured `AddDataProtection.PersistKeysToStackExchangeRedis(...)` (or an equivalent shared-store provider) so all replicas share a common, persisted key ring surviving both horizontal scaling and rolling deployments.
 - **Prevention**: Added shared data-protection key-ring configuration to the organization's standard service template/checklist (directly extending/the shared-pipeline-template governance pattern) for any new cookie-authenticated service.
 
-### Incident: Privilege escalation via multi-scheme scope ambiguity
+#### Incident: Privilege escalation via multi-scheme scope ambiguity
 - **Symptoms**: A security review (proactive) discovered that a sensitive administrative endpoint was reachable via the legacy API-key scheme, not just the intended JWT-based admin path, exactly the Advanced Q5 scenario.
 - **Investigation**: Confirmed the endpoint's `[Authorize(Policy = "AdminOnly")]` attribute had no explicit `AuthenticationSchemes` specification, and the legacy API-key scheme's handler had, for historical/convenience reasons, attached a broad "Admin" role claim to all successfully-validated keys.
 - **Root cause**: Missing endpoint-level scheme scoping combined with an overly-broad claim-attachment convention in a legacy scheme handler originally designed for a narrower, more trusted use case than it had since grown into.
 - **Fix**: Added explicit `AuthenticationSchemes = "Bearer"` to every genuinely sensitive administrative endpoint; narrowed the legacy API-key scheme's attached claims to only the specific, narrow permissions the original trusted batch jobs actually needed, removing the broad "Admin" role attachment entirely.
 - **Prevention**: Mandatory, tooling-enforced (custom analyzer, per Advanced Q10) explicit scheme scoping for every `[Authorize]`/`.RequireAuthorization` usage in any multi-scheme application, converting this from a manual-review-dependent finding into an automatically-enforced build-time check.
 
-### Incident: Resource-based authorization gap allowing cross-customer order access
+#### Incident: Resource-based authorization gap allowing cross-customer order access
 - **Symptoms**: A customer reported being able to view another customer's order details by directly guessing/incrementing an order ID in the URL.
 - **Investigation**: Confirmed the endpoint only checked `[Authorize]` (any authenticated user) with no resource-based ownership verification at all — the order-loading logic never checked whether the authenticated caller actually owned the requested order ID.
 - **Root cause**: Missing resource-based authorization entirely — the endpoint relied solely on coarse-grained "is this user authenticated" rather than the fine-grained "does this user own this specific resource" check this module centers on (/).
 - **Fix**: Added the resource-based `OrderAccess` policy check (Medium coding exercise's exact pattern) to every order-detail endpoint, verified via a dedicated integration test attempting exactly this cross-customer access pattern and asserting a 403.
 - **Prevention**: Security-review checklist item requiring explicit verification that every endpoint accepting a resource identifier as a route/query parameter has a corresponding resource-based (not just coarse-grained authenticated-user) authorization check — a broad, systemic audit across the entire API surface, not just the one endpoint where the bug was first reported, given how easily this same gap could exist elsewhere undetected.
 
----
-
-## 15. Architecture Decision
+### 15. Architecture Decision
 
 **Decision**: Choosing a primary authentication mechanism for a new API service's external-facing surface.
 
@@ -620,9 +665,7 @@ sequenceDiagram
 
 **Recommendation**: **Option B (JWT)** as the default for API/service-to-service and mobile-client-facing surfaces, given its natural horizontal-scaling fit and rich claims-based authorization support; **Option A (cookies)** for first-party, browser-based web application front-ends specifically, with the shared data-protection key-ring requirement treated as a mandatory, non-negotiable setup step, not an optional hardening measure; **Option C (API keys)** reserved narrowly for genuinely trusted, low-stakes, service-to-service integrations (internal batch jobs), with strict, deliberate claim-scoping governance (the third incident's lesson) to prevent it from silently accumulating broader privileges than originally intended over time. Many real systems, per the system design, legitimately need **more than one** of these simultaneously for different caller categories — the recommendation isn't "pick exactly one," but "choose deliberately per caller-type, with explicit endpoint-level scheme scoping enforced wherever more than one is in use."
 
----
-
-## 16. Enterprise Case Study
+### 16. Enterprise Case Study
 
 **Inspired by**: The broad, well-documented industry evolution from monolithic, cookie-session-based web-application authentication toward token-based (JWT/OAuth2) authentication as API-first and microservices architectures became dominant — extensively covered in identity-and-access-management vendor documentation (Auth0, Okta, Microsoft Entra ID/Azure AD) and Microsoft's own ASP.NET Core Identity/authentication evolution across major framework versions.
 
@@ -631,9 +674,7 @@ sequenceDiagram
 - **Scaling lesson**: A "one true authentication mechanism for everything" architecture is rarely the right long-term answer for a system serving genuinely diverse client types — recognizing which caller categories exist and matching each to its best-fit mechanism (exactly the decision framework) is a more durable architectural approach than forcing a single scheme to serve every use case, even if that adds the governance overhead (explicit scheme scoping, per this module's repeated emphasis) of managing multiple schemes correctly.
 - **Lesson for principal engineers**: When evaluating "should we migrate from X authentication mechanism to Y," first ask whether the actual answer is "add Y alongside X for the caller categories that specifically benefit from it," rather than assuming a full, wholesale replacement is either necessary or even desirable — the industry's own broad authentication-architecture history strongly suggests multi-mechanism coexistence, correctly governed, is the more common and more durable end state than any single "final" universal mechanism.
 
----
-
-## 17. Principal Engineer Perspective
+### 17. Principal Engineer Perspective
 
 - **Business impact**: This module's incidents span the full severity spectrum — a platform-wide performance degradation, a confusing but non-security user-experience bug (the second incident), and a genuine privilege-escalation security vulnerability (the third incident) — a Principal Engineer should recognize that authentication/authorization code, more than almost any other application layer, has this unusually wide blast-radius range, warranting correspondingly rigorous review and testing discipline across the board.
 - **Engineering trade-offs**: Coarse-grained declarative policies (fast, cacheable, but limited to endpoint-metadata-visible information) vs. fine-grained imperative resource-based checks (necessarily requires loading the resource, more expensive, but the only way to express genuine ownership/business-rule-driven access decisions) — the two-tier combination (Advanced Q6) is usually the right answer, not a choice between them.
@@ -644,11 +685,9 @@ sequenceDiagram
 - **Risk analysis**: Treat any endpoint accepting a resource identifier without a corresponding resource-based authorization check, and any multi-scheme service without explicit per-endpoint scheme scoping, as standing, high-priority security-review findings — both are mechanically identifiable, common, and (per this module's incident log) demonstrated to cause real security/business impact, making them disproportionately high-value areas for systematic, tooling-assisted review.
 - **Long-term maintainability**: Document, for every authorization policy in a codebase, which specific business rule it encodes and why (a policy named `"OrderAccess"` should have clear, discoverable documentation of exactly what "access" means — owner-only? owner-or-manager? — per Medium exercise's example) — authorization logic is exactly the kind of code where an undocumented, seemingly-obvious-at-the-time business rule becomes a genuine audit/compliance liability years later if a future engineer can't quickly determine what access control is actually being enforced and why.
 
----
+### 18. Revision
 
-## 18. Revision
-
-### Key Takeaways
+#### Key Takeaways
 - Authentication (who are you) and authorization (are you allowed) are deliberately independent, pluggable systems — schemes establish identity; policies (requirements + handlers) decide access.
 - Requirements within a policy combine with AND semantics; multiple handlers for the same requirement combine with OR semantics — a subtle, frequently-misunderstood evaluation rule.
 - Resource-based (ownership) authorization requires the imperative `IAuthorizationService.AuthorizeAsync(user, resource, policy)` call — declarative `[Authorize]` attributes have no access to a specific loaded resource instance.
@@ -656,29 +695,29 @@ sequenceDiagram
 - Cookie-based authentication requires a shared data-protection key ring for correct behavior across horizontally-scaled, rolling-deployed replicas; JWT is naturally more horizontal-scaling-friendly but reintroduces shared-state needs for revocation.
 - Multi-scheme applications must explicitly scope `AuthenticationSchemes` per endpoint — relying on defaults risks privilege escalation via scheme confusion.
 
-### Interview Cheatsheet
+#### Interview Cheatsheet
 - 401 = who are you (authentication failure); 403 = I know who you are, but no (authorization failure).
 - Policy requirements: AND across types, OR within handlers for the same type.
 - Resource-based authorization = imperative `AuthorizeAsync(user, resource, policy)`, not declarative `[Authorize]`.
 - `IClaimsTransformation` = runs every request, unconditionally — cache and/or endpoint-scope anything expensive inside it.
 - Data-protection key ring must be shared across replicas for cookie auth to survive horizontal scaling/rolling deployments.
 
-### Things Interviewers Love
+#### Things Interviewers Love
 - Correctly stating the AND-across-requirements/OR-within-handler evaluation rule precisely, not just "policies combine requirements."
 - Immediately recognizing that `[Authorize]` alone can't express ownership checks, and naming `IAuthorizationService.AuthorizeAsync` as the correct mechanism.
 - Citing the `IClaimsTransformation`-runs-on-every-request gotcha unprompted when discussing claims enrichment.
 
-### Things Interviewers Hate
+#### Things Interviewers Hate
 - Treating authentication and authorization as one undifferentiated concept.
 - Assuming `[Authorize(Policy = "...")]` alone can express resource-based/ownership authorization.
 - Missing the shared-key-ring requirement for cookie authentication in a horizontally-scaled deployment.
 
-### Common Traps
+#### Common Traps
 - Placing expensive, uncached work inside `IClaimsTransformation` without realizing its universal, per-request execution scope.
 - Relying on a multi-scheme application's default scheme instead of explicit per-endpoint scheme scoping, risking privilege escalation.
 - Forgetting resource-based authorization entirely, relying only on "is authenticated" for endpoints that actually need "does this user own this specific resource."
 
-### Revision Notes
+#### Revision Notes
 Cross-reference [[01-Middleware-Pipeline-Request-Internals]] (the endpoint-metadata-driven authorization mechanism this module builds directly on) and [[02-DI-Container-Internals]] (custom `AuthorizationHandler<T>`/`IClaimsTransformation` implementations are ordinary DI-registered services, subject to the exact same lifetime considerations covered there) before an interview. A dedicated later module covers OAuth2/OIDC/JWT/PKCE token-issuance architecture in full depth — this module deliberately focused on ASP.NET Core's consumption-side authentication/authorization mechanics, which apply regardless of which specific token-issuance protocol produces the credentials being validated.
 
 ---

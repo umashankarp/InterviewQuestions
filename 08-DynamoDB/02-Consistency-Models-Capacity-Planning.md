@@ -4,18 +4,200 @@
 
 ---
 
-## 1. Fundamentals
+## 1. Topic Description
 
-### What are DynamoDB's consistency models, and what is capacity planning?
+### Definition
+
+DynamoDB's **consistency model** is a per-request choice on a replicated store: every item is held on multiple nodes, and a read either returns from any replica (eventually consistent, the default and half the cost) or from a quorum reflecting all prior successful writes (strongly consistent, double the cost, single-region only, and unavailable on GSIs). **Capacity** is the metering and admission-control layer: work is measured in Read and Write Capacity Units, allocated either as reserved throughput (**provisioned**, with auto-scaling) or billed per request (**on-demand**), and enforced per partition rather than per table — which is why capacity planning and key design are inseparable problems.
+
+### Core sub-concepts
+
+- **Replication and read consistency** — eventually consistent versus strongly consistent reads; the cost multiple; why GSIs offer no strong option.
+- **Transactional reads** — `TransactGetItems` for a consistent snapshot across items, and its capacity cost.
+- **Capacity units** — RCU and WCU definitions, how item size rounds up, and how consistency and transactions multiply consumption.
+- **Provisioned capacity** — reserved throughput, auto-scaling behaviour and its reaction latency, reserved capacity pricing.
+- **On-demand capacity** — per-request billing, instant accommodation of spikes, the previous-peak doubling behaviour, and the price premium.
+- **Burst capacity and adaptive capacity** — unused capacity banked for short spikes; automatic redistribution toward hot partitions and its limits.
+- **Per-partition throughput limits** — the hard ceiling on a single partition key regardless of table capacity.
+- **Throttling** — `ProvisionedThroughputExceededException`, SDK retry with exponential backoff, and distinguishing table, GSI and partition-level throttling.
+- **GSI capacity** — independently provisioned, and back-pressure onto base-table writes when a GSI throttles.
+- **Write amplification** — a single item write consuming capacity on every index whose projected attributes changed.
+- **Item size economics** — capacity rounding, attribute-name overhead, and compression or S3 offload for large payloads.
+- **Global tables** — multi-region replication, replicated write capacity units, last-writer-wins conflict resolution, replication lag.
+- **DAX and caching** — microsecond reads, write-through behaviour, and the consistency implications of caching in front of a store with tunable consistency.
+- **Backup, PITR and restore** — continuous backups, restore time, and what replication does not protect against.
+- **Observability** — consumed versus provisioned capacity, throttled requests, contributor insights for hot keys, and per-operation latency.
+
+### Where it fits
+
+This subtopic sits beneath the data model from `01-Data-Modeling-Partition-Key-Design` and above the application's read/write paths. The relationship is causal rather than adjacent: the partition key decides how work is distributed, and capacity is enforced per partition, so a key design problem presents as a *capacity* problem — throttling with headroom. Upward, the consistency choice is what determines whether a service can read its own writes, and the capacity mode is what determines its cost curve and its behaviour under an unexpected spike, both of which are architectural properties rather than tuning settings.
+
+### Why it matters at scale
+
+Capacity is enforced where the data lives, so the headline table number is an upper bound that a skewed workload never reaches — the characteristic incident is throttling at 20% of provisioned capacity because one partition key is absorbing the traffic. Consistency choices bite differently: because GSIs are only ever eventually consistent, a write-then-read-via-index flow works in testing and fails intermittently under production concurrency, and the resulting bug is attributed to almost everything except the index. On cost, write amplification is the usual surprise — each GSI touched by a write consumes its own capacity, so adding a fourth index can raise the write bill by a third with no change in traffic. And auto-scaling reacts over minutes, so a flash sale throttles a provisioned table long before scaling responds.
+
+### Common pitfalls / anti-patterns
+
+- **Reading your own write through a GSI** — GSIs are always eventually consistent, so the item may not be there yet; the failure is intermittent, load-dependent, and never reproduces in a quiet environment.
+- **Provisioning against table-level averages** — capacity is enforced per partition, so an even-looking average hides a hot key that throttles while the table appears underused.
+- **Relying on auto-scaling to absorb spikes** — it responds on a timescale of minutes, so a sudden surge throttles first and scales afterwards; burst capacity covers only a short window.
+- **Ignoring GSI write capacity** — every base write that changes projected attributes also writes the index, and a throttled GSI back-pressures the base table, so writes fail for a reason nowhere near the write path.
+- **Projecting `ALL` attributes into every GSI** — multiplies both storage and write capacity for attributes no query reads; projection should be the minimum that avoids a base-table fetch.
+- **Using strongly consistent reads everywhere by default** — double the read cost for a guarantee most reads do not need, and unavailable across regions anyway.
+- **Treating global tables' conflict resolution as a merge** — it is last-writer-wins by timestamp, so a concurrent write in another region is silently discarded rather than reconciled.
+- **Ignoring `UnprocessedItems` on batch calls or treating a throttle as a hard failure** — throttling is a normal backpressure signal that the SDK retries; code that surfaces it as an error creates incidents out of routine behaviour.
+- **Treating replication as backup** — global tables and multi-AZ replication faithfully replicate a bad delete; only PITR or on-demand backups recover from a logical error.
+
+---
+
+## 2. Beginner (10 Q&A)
+
+**Q1. What is the practical difference between an eventually and a strongly consistent read?**
+**A:** An eventually consistent read may be served by a replica that has not yet received the most recent write, so it can return stale data; a strongly consistent read reflects all successful prior writes. Strongly consistent reads cost twice as many read capacity units, add latency, are not available across regions, and cannot be used on a GSI at all. In practice the vast majority of reads tolerate eventual consistency, and the discipline is to identify the specific flows that do not rather than defaulting everything to strong.
+*Follow-up: How stale can an eventually consistent read actually be in practice?*
+
+**Q2. What are RCUs and WCUs, and what makes them add up faster than people expect?**
+**A:** One WCU covers a write of up to 1 KB; one RCU covers a strongly consistent read of up to 4 KB, or two eventually consistent reads of that size. The surprises are that item size rounds *up*, so a 4.1 KB item costs the same as an 8 KB one; that transactional operations cost double; and that every GSI touched by a write consumes its own WCUs. So a single logical write to an item with three indexes can consume several times the capacity the base write suggests.
+*Follow-up: Your average item is 1.2 KB. What does that mean for your write capacity planning?*
+
+**Q3. What is throttling and how should an application respond?**
+**A:** DynamoDB rejects requests that exceed the available capacity for the relevant partition or index, returning a throughput-exceeded error. The correct response is retry with exponential backoff and jitter, which the AWS SDKs implement by default — so throttling is a normal backpressure signal, not necessarily an incident. It becomes an incident when it is sustained, because that means capacity or distribution is genuinely inadequate. The mistake is surfacing a single throttle as a user-visible error rather than letting the retry absorb it.
+*Follow-up: How would you distinguish "normal, absorbed by retries" throttling from a real problem?*
+
+**Q4. Provisioned or on-demand — how do you choose?**
+**A:** On-demand for unpredictable, spiky or new workloads, and for anything where throttling would be a business incident, because it accommodates traffic changes instantly with no capacity management. Provisioned with auto-scaling for steady, predictable, high-volume workloads, where the per-request price is substantially lower and the savings are material. The judgement is really about whether you can forecast the load: if you cannot, the operational cost and risk of guessing wrong exceeds on-demand's premium.
+*Follow-up: On-demand has a limit based on your previous peak. What does that mean for a launch event?*
+
+**Q5. What is burst capacity?**
+**A:** DynamoDB banks a portion of your unused capacity from the preceding period and lets you draw on it during a short spike, so brief bursts above your provisioned level succeed rather than throttle. It is a smoothing mechanism, not headroom you can plan against: the reserve is finite and depletes quickly, and once exhausted throttling begins. Treating burst as spare capacity is how a workload appears fine in testing and throttles in production once the reserve has been consumed by earlier traffic.
+*Follow-up: Your load test passes but production throttles at the same rate. What might explain that?*
+
+**Q6. What is adaptive capacity and what are its limits?**
+**A:** DynamoDB automatically shifts throughput toward partitions receiving disproportionate traffic, so moderate imbalance is handled without intervention — it substantially reduces the hot-partition problem that older designs had to engineer around. Its limits are that it cannot exceed the hard per-partition ceiling, and it reacts rather than predicts, so a sudden concentration still throttles initially. So it removes the need to shard for mild skew but not for a genuinely hot key.
+*Follow-up: At what point do you conclude adaptive capacity isn't enough and you need write sharding?*
+
+**Q7. How does GSI capacity relate to the base table's?**
+**A:** In provisioned mode a GSI has its own read and write capacity, independent of the table's. Every base-table write that changes an attribute projected into the index also consumes that index's write capacity — so index writes are additive, not shared. Critically, if a GSI's write capacity is exhausted, the base table's writes are throttled too, because DynamoDB will not let the index fall arbitrarily behind. That back-pressure is why a write path can fail for a reason that is not visible anywhere in the write path.
+*Follow-up: Your base table has headroom but writes are throttling. Where do you look?*
+
+**Q8. What does index projection control, and why does it matter?**
+**A:** It determines which attributes are copied into the index: keys only, a specific list, or all attributes. It matters on both cost axes — projected attributes consume index storage and index write capacity — and on the read side, because a query that needs an attribute not projected must fetch the full item from the base table, adding latency and capacity. So projection is a trade between index cost and read amplification, and `ALL` is the lazy default that quietly multiplies write bills.
+*Follow-up: How would you decide the projection for a new GSI?*
+
+**Q9. What do global tables give you and what is the catch?**
+**A:** Multi-region, active-active replication with local read and write latency in each region, which is genuinely powerful for global applications and for regional failover. The catch is conflict resolution: concurrent writes to the same item in different regions are resolved last-writer-wins by timestamp, so one is silently discarded with no merge and no error. Replication is also asynchronous with a lag, so cross-region read-after-write is not guaranteed. Global tables therefore suit data whose write ownership is partitioned by region.
+*Follow-up: Two regions increment the same counter simultaneously. What's the result?*
+
+**Q10. What does point-in-time recovery protect against that replication does not?**
+**A:** Logical errors. Replication — across AZs or across regions — faithfully applies a bad `DeleteItem` or a buggy batch update everywhere within moments, so it protects against infrastructure failure and not against mistakes. PITR retains continuous backups allowing restore to any second within the retention window, into a *new* table, which is what you need after a bad deploy or an operator error. The restore-to-a-new-table detail matters operationally, because recovery involves a cutover rather than an in-place rollback.
+*Follow-up: You need to recover 200 items deleted an hour ago from a 5 TB table. What does that actually involve?*
+
+---
+
+## 3. Intermediate (10 Q&A)
+
+**Q1. A table throttles at 20% of its provisioned capacity. Walk me through the diagnosis.**
+**A:** Capacity is enforced per partition, so this is nearly always distribution rather than volume: one partition key is absorbing a disproportionate share and hitting the per-partition ceiling while the table's aggregate is idle. Contributor Insights identifies the specific keys, which is the fastest route to confirmation. The other candidate is a GSI throttling and back-pressuring base-table writes, which presents identically from the application's perspective. The fix is structural — write sharding for a genuinely hot key, or correcting a low-cardinality partition key — not more capacity, which will not be reachable either.
+*Follow-up: The hot key is a single large tenant. What's your short-term mitigation and your long-term fix?*
+
+**Q2. How do you plan capacity for a new workload?**
+**A:** Estimate from item size and request rate rather than from request rate alone, since size rounding and index amplification dominate — and then validate the *distribution*, because an accurate total with a skewed key still throttles. I would start on-demand for anything new so an estimation error is a cost surprise rather than an outage, gather several weeks of real consumption, and only move to provisioned once the shape is understood and the savings justify the management. I would also model the write amplification explicitly: base write plus one per index touched, doubled for transactions.
+*Follow-up: You move to provisioned and get it wrong on launch day. What's your rollback?*
+
+**Q3. When are strongly consistent reads actually necessary?**
+**A:** For read-after-write flows where the user must see their own change immediately, for read-modify-write sequences where acting on stale data would violate an invariant, and for conditional operations that depend on current state. Everything else — browsing, listing, reporting, most reads by far — tolerates eventual consistency and should use it, because the cost difference is a factor of two across the highest-volume operation type in most systems. The design habit worth building is to make strong consistency an explicit, justified choice at specific call sites rather than a global default.
+*Follow-up: A flow needs read-after-write but the query has to go through a GSI. What are your options?*
+
+**Q4. How do you handle the GSI eventual-consistency problem in a write-then-read flow?**
+**A:** Avoid needing it: return the written item from the write response rather than re-reading, or read the base table by primary key (which can be strongly consistent) rather than through the index. Where the index genuinely must be queried, the options are to accept and design for the delay in the user experience, to retry briefly, or to restructure the access pattern so the base-table key serves it. What does not work is assuming the delay is short enough not to matter — it is short until the system is under load, which is exactly when the flow is exercised most.
+*Follow-up: The UI lists items via a GSI immediately after creating one. How would you make that feel correct?*
+
+**Q5. How do you optimise DynamoDB costs without degrading the service?**
+**A:** Start with the biggest levers: eliminate scans, reduce item size (shorter attribute names genuinely matter at scale, and large blobs belong in S3), narrow GSI projections to what queries actually need, and remove indexes nothing uses. Then review consistency — strongly consistent reads used by default are a straightforward halving opportunity. Then capacity mode, comparing on-demand spend against a provisioned-plus-reserved model using real consumption data. I would sequence it that way because the first group reduces the work being done, which is durable, while capacity mode only changes how the same work is priced.
+*Follow-up: Which of those would you expect to give the biggest single saving in a typical table, and why?*
+
+**Q6. How does auto-scaling actually behave, and where does it fail you?**
+**A:** It watches consumed capacity against a target utilisation and adjusts provisioned capacity, but the loop involves CloudWatch alarms and takes minutes to react — so it handles gradual growth well and sudden spikes badly. During that lag, burst capacity absorbs some of the excess and then throttling begins. It also scales down cautiously, which is intentional but means you pay for headroom after a spike. For known events such as a sale or a batch window, scheduled scaling ahead of time is far more effective than reactive scaling, and for genuinely unpredictable spikes on-demand is the right answer.
+*Follow-up: You have a predictable 10x spike every weekday at 09:00. How do you configure for it?*
+
+**Q7. What are the failure modes of DAX in front of DynamoDB?**
+**A:** It is a write-through cache, so writes go through DAX to DynamoDB, but reads served from the cache reflect its own consistency, not DynamoDB's — so strongly consistent reads bypass the cache entirely and get no benefit. Items written directly to DynamoDB, bypassing DAX, produce stale cache entries until TTL. And DAX is a cluster you now operate and pay for, with its own failure modes. It earns its place for genuinely read-heavy workloads with high repeat-read rates where microsecond latency matters; it is not a general answer to DynamoDB cost or latency.
+*Follow-up: Half your writes go through DAX and half through the SDK directly. What happens?*
+
+**Q8. How do you monitor a DynamoDB table meaningfully?**
+**A:** Consumed versus provisioned capacity for reads and writes separately and per index; throttled request counts split by table and index; successful request latency; and Contributor Insights for key distribution, which is the one that identifies hot partitions before they become incidents. I would alert on sustained throttling rather than any throttling, since transient throttles absorbed by retries are normal, and on consumed capacity approaching provisioned so scaling decisions are proactive. Cost per table with an owner is the other metric that changes behaviour, because it makes index proliferation visible.
+*Follow-up: You see throttling on the table but not on any index, and no hot key in Contributor Insights. What now?*
+
+**Q9. How do you handle a large backfill or migration without disrupting production?**
+**A:** Rate-limit the writer explicitly rather than relying on throttling as flow control, because throttling affects production traffic sharing the same partitions. On a provisioned table I would temporarily raise capacity and use a token-bucket limiter in the migration job; on on-demand I would still rate-limit, because the previous-peak scaling behaviour means a burst can be throttled anyway and the cost is real. I would also make the job resumable with a checkpoint, since a multi-hour backfill will be interrupted, and run it in parallel segments keyed to spread across partitions rather than sequentially through one.
+*Follow-up: The backfill is throttling despite rate limiting. What's the likely cause?*
+
+**Q10. How do you decide GSI count and design at a table level?**
+**A:** Each GSI is a permanent tax on every write that touches its projected attributes, plus storage — so the question for each is which access patterns it serves and whether an existing index could serve them through overloading. Index overloading, where one GSI's generic key attributes serve several entity types and patterns, is the technique that keeps the count low. I would treat the index count as a budget requiring justification rather than something added per feature, and I would review usage periodically, since an index serving a removed feature keeps charging indefinitely.
+*Follow-up: How would you determine whether an existing GSI is actually being queried?*
+
+---
+
+## 4. Expert / Architect (10 Q&A)
+
+**Q1. How do you set consistency and capacity policy across an estate rather than per team?**
+**A:** Make the default correct and the deviation explicit: eventually consistent reads and on-demand capacity as the starting point for new tables, since those fail toward cost predictability and availability rather than toward outages. Strongly consistent reads and provisioned capacity both require a stated reason — a specific read-after-write flow, or a stable measured load profile. Deliver it through a shared data-access layer and infrastructure modules so the defaults are inherited, and expose per-table cost and throttling with an owner so the economics are visible to the team making the decisions. Policy that relies on each developer choosing correctly at each call site does not hold.
+*Follow-up: A team wants strongly consistent reads across the board "to avoid bugs". How do you engage?*
+
+**Q2. Design the capacity and consistency strategy for a global, multi-region application.**
+**A:** Partition write ownership by region so each item has a home region and global tables' last-writer-wins conflict resolution never actually fires — that is the design decision that makes multi-region viable, and everything else follows from it. Reads are served locally with eventual consistency, and any flow requiring read-after-write is routed to the item's home region or restructured to return the written value. Capacity must be provisioned per region against that region's load, not divided evenly, and replicated write capacity is an additional cost line that scales with the number of regions. I would state the replication lag and the failover data-loss window explicitly, because both are properties the business must accept.
+*Follow-up: A user travels and writes from a different region than their home. What happens?*
+
+**Q3. How would you approach a table whose cost has become a significant line item?**
+**A:** Attribute it first — reads, writes, storage, index writes and replication are separate drivers with different fixes, and teams routinely optimise the wrong one. Then work down the leverage: eliminate scans, shrink items, prune and narrow indexes, remove default strong consistency, and only then revisit capacity mode with real consumption data. I would set a cost target and track it, because optimisation without a target stops when someone gets bored. The framing to leadership is that most DynamoDB cost problems are design problems — a table that costs too much is usually doing more work than the access patterns require, which is a fixable and durable saving rather than a discount to negotiate.
+*Follow-up: The dominant cost is GSI writes on an index used by one low-traffic feature. What do you do?*
+
+**Q4. How do you decide when DynamoDB's consistency model is inadequate for a use case?**
+**A:** When the domain requires invariants across many items that cannot be reduced to a single item or a small transaction — an inventory system with complex allocation rules, or a ledger requiring multi-entity balance guarantees at high concurrency. DynamoDB gives per-item atomicity and bounded transactions, which covers a great deal, but the transaction limits and cost make it a poor fit where multi-entity consistency is the *dominant* pattern rather than an occasional need. I would surface that early, because the alternative is a design that fights the store with transactions everywhere and pays double capacity for it.
+*Follow-up: The team proposes putting a relational database alongside DynamoDB for those flows. What are your concerns?*
+
+**Q5. How do you make throttling a non-event operationally?**
+**A:** Design so that transient throttling is absorbed invisibly — SDK retries with backoff and jitter, idempotent writes so a retry is safe, and queues in front of write-heavy paths so bursts are smoothed rather than rejected. Then separate the signal: alert on *sustained* throttling and on capacity approaching limits, not on individual throttled requests, so the alert means something. Finally, ensure the key design cannot produce a hot partition under foreseeable load, since that is the one throttling cause retries cannot fix. The goal is that throttling is backpressure the system handles, and only a structural problem reaches a human.
+*Follow-up: Retries are absorbing throttling but P99 latency has tripled. Is that acceptable?*
+
+**Q6. What's your position on using DynamoDB Streams for capacity-sensitive derived data?**
+**A:** Streams are the right mechanism for maintaining derived views, search indexes and denormalised copies, and they decouple that work from the write path so it does not consume the caller's latency budget. The capacity consideration is that the consumer's writes back into DynamoDB consume capacity of their own, so a fan-out update triggered by one write can multiply capacity consumption considerably — that has to be modelled, not discovered. The other constraint is the 24-hour retention: a consumer outage beyond that loses changes permanently, so the recovery path must be a rebuild from the base table rather than a replay.
+*Follow-up: Your stream consumer writes 50 items per source write. How do you keep that from throttling the table?*
+
+**Q7. How do you evaluate DynamoDB against alternatives on total cost of ownership rather than unit price?**
+**A:** Include the operational cost that DynamoDB removes — no patching, no failover engineering, no capacity provisioning of servers, no backup infrastructure — because for many organisations that is larger than the database bill and it is the honest basis for comparison. Against that, include the costs it adds: design rigidity, a second system for analytics, and the engineering effort that up-front modelling requires. My experience is that DynamoDB wins clearly for high-scale, well-understood access patterns and loses for evolving models and ad hoc querying, and that unit-price comparisons against a self-managed database usually omit the operational side entirely.
+*Follow-up: A team benchmarks DynamoDB against self-managed PostgreSQL and finds Postgres cheaper. What's likely missing?*
+
+**Q8. How do you plan for a regional failure with DynamoDB?**
+**A:** Global tables give you a live copy in another region, so failover is a routing decision rather than a restore — but the design work is in what the application does about the replication lag and about writes that were in flight. That means an explicit RPO, idempotent writes so retries after failover are safe, and a tested runbook for the routing change. Capacity in the failover region must be provisioned for full load, not standby load, or you fail over into throttling. I would exercise the failover on a schedule, because an untested regional failover is a plan rather than a capability.
+*Follow-up: Your failover region is provisioned at 30% of primary capacity to save money. What happens during a failover?*
+
+**Q9. How do you govern index and capacity decisions across many teams?**
+**A:** At table creation, through a review that covers key design, index count and projection, capacity mode, and expected item size — because those are the decisions that are cheap now and expensive later. Then ongoing visibility: per-table cost with an owner, throttling and hot-key dashboards, and a periodic review of index usage, since unused indexes charge forever and nobody notices. I would also provide infrastructure modules encoding the defaults so most tables are created correctly without a review at all, reserving human attention for the unusual ones. The organisational failure to avoid is treating DynamoDB as self-service with no design gate, because its mistakes are the least reversible of any managed store.
+*Follow-up: How would you find every unused GSI across hundreds of tables?*
+
+**Q10. What separates an excellent answer from an adequate one on capacity and consistency?**
+**A:** An adequate answer knows RCUs, WCUs and the two read modes. An excellent one reasons about *where* capacity is enforced — per partition, per index — and therefore treats a throttling question as a key-distribution question; models write amplification across indexes and transactions rather than counting requests; chooses consistency per call site with a stated reason; knows that auto-scaling reacts over minutes and plans spikes accordingly; and connects the cost model back to design decisions rather than to pricing negotiations. It also says what it would monitor to catch each failure before it becomes an incident. The distinguishing quality is understanding that in DynamoDB, capacity problems are usually design problems wearing a billing costume.
+*Follow-up: Given that, what's the first thing you'd check when a team reports "DynamoDB is throttling us"?*
+
+---
+
+## 5. Reference Material
+
+> Retained from the original module: deep-dive internals, diagrams, production examples, exercises, system/low-level design, debugging walkthroughs and the Principal Engineer perspective.
+
+### 1. Fundamentals
+
+#### What are DynamoDB's consistency models, and what is capacity planning?
 DynamoDB offers a per-read, explicit choice between **eventually consistent reads** (default — may reflect a slightly stale view, but cost half the read-capacity of the alternative) and **strongly consistent reads** (guaranteed to reflect the most recent successful write, at full read-capacity cost, and unavailable on GSIs). **Capacity planning** covers choosing between DynamoDB's **provisioned** (pre-allocated read/write capacity units, cost-predictable but requiring accurate forecasting) and **on-demand** (auto-scaling per-request billing, operationally simpler but potentially costlier at sustained high volume) throughput modes.
 
-### Why does this matter?
+#### Why does this matter?
 The eventually-consistent-by-default behavior is a genuine, easy-to-miss correctness trap for any read immediately following a write within the same logical operation (a classic "read-your-own-write" requirement) — and provisioned-vs-on-demand is a real cost/operational-complexity trade-off with production consequences either way if chosen without deliberate analysis.
 
-### When does this matter?
+#### When does this matter?
 Every DynamoDB read operation implicitly makes a consistency choice (even if by not overriding the default); every table's throughput mode is a standing capacity-planning decision — the depth matters for correctly reasoning about read-your-writes requirements and for choosing capacity modes matching actual traffic patterns.
 
-### How does it work (30,000-ft view)?
+#### How does it work (30,000-ft view)?
 ```csharp
 var response = await client.GetItemAsync(new GetItemRequest
     {
@@ -25,26 +207,24 @@ var response = await client.GetItemAsync(new GetItemRequest
 });
 ```
 
----
+### 2. Deep Dive
 
-## 2. Deep Dive
-
-### 2.1 Eventual vs Strong Consistency — the Precise Mechanism
+#### 2.1 Eventual vs Strong Consistency — the Precise Mechanism
 DynamoDB replicates each item across **multiple Availability Zones** for durability — a write is acknowledged once a majority of these replicas confirm it, but an eventually-consistent read may be served by **any** replica, including one that hasn't yet received the most recent write's propagation (typically within a very short window, often single-digit milliseconds, but not zero). A strongly consistent read specifically routes to (or confirms with) a replica guaranteed to reflect the latest acknowledged write — architecturally the same underlying replication-lag concept as every prior module's consistency discussion (PostgreSQL, MongoDB, Redis), here exposed as a **per-read-request** parameter rather than a connection-level or database-wide setting, arguably the most granular consistency control of any engine covered in this course.
 
-### 2.2 The Read-Your-Own-Writes Trap
+#### 2.2 The Read-Your-Own-Writes Trap
 A common, realistic bug pattern: a service writes an item, then **immediately** reads it back (e.g., to return the newly-created resource in an API response, the 201-with-body pattern) using the default eventually-consistent read — under most conditions this works fine (the propagation window is typically very short), but under load or specific timing, the read can occasionally return stale (or, for a brand-new item, entirely absent) data, producing an intermittent, hard-to-reproduce "the item I just created doesn't exist yet" bug. The fix is straightforward once recognized: use `ConsistentRead: true` specifically for any read that must reflect a write from the *same logical operation/request*, while leaving unrelated, independent reads at the default eventually-consistent (cheaper) setting.
 
-### 2.3 Provisioned vs On-Demand Capacity
+#### 2.3 Provisioned vs On-Demand Capacity
 **Provisioned** capacity requires forecasting read/write capacity units (RCU/WCU) in advance — cost-efficient and predictable for steady, well-understood traffic, but risks throttling if actual traffic exceeds provisioned capacity (mitigated by auto-scaling, which itself reacts with some lag, not instantaneously). **On-demand** capacity automatically scales to actual request volume with no pre-provisioning, billed per-request — operationally simpler and safer against unexpected traffic spikes, but typically **more expensive per-request** than well-utilized provisioned capacity at sustained volume, making it better suited to unpredictable, spiky, or new/unknown-traffic-pattern workloads than steady, high-volume, well-forecasted ones.
 
-### 2.4 DAX (DynamoDB Accelerator) — a Managed, Write-Through Cache
+#### 2.4 DAX (DynamoDB Accelerator) — a Managed, Write-Through Cache
 DAX is a fully-managed, in-memory caching layer sitting in front of DynamoDB, API-compatible with the DynamoDB SDK (minimal application code changes) — providing microsecond-level read latency for cache hits, at the cost of introducing its **own** consistency consideration: DAX's item cache has its own TTL, and a strongly-consistent read *through* DAX still bypasses the cache entirely, going directly to DynamoDB (since DAX cannot guarantee cache freshness matches DynamoDB's own strong-consistency guarantee) — meaning DAX primarily accelerates eventually-consistent reads, and teams needing strong consistency on a hot read path don't get DAX's latency benefit for those specific reads.
 
-### 2.5 Time-To-Live (TTL) and Its Interaction with Streams/GSIs
+#### 2.5 Time-To-Live (TTL) and Its Interaction with Streams/GSIs
 DynamoDB's native TTL feature automatically deletes items past a specified epoch-timestamp attribute — a background process, not instantaneous (deletion can lag the actual expiration time by up to 48 hours in practice), and TTL-driven deletions **do** appear in DynamoDB Streams (marked distinctly from an application-initiated delete), enabling downstream consumers (e.g., an audit/archival Lambda) to react specifically to expiration-driven removals — directly relevant to the Outbox-pattern-via-Streams design §Advanced Q6/Hard exercise, where outbox items are commonly TTL'd for automatic cleanup after successful publication rather than requiring an explicit delete call.
 
-## 3. Visual Architecture
+### 3. Visual Architecture
 ```mermaid
 graph LR
  Write[Write] -->|majority ack| Primary["DynamoDB (multi-AZ replicas)"]
@@ -55,123 +235,12 @@ graph LR
  Client3 -.->|strongly consistent read requested| Primary
 ```
 
-## 4. Production Example
+### 4. Production Example
 **Scenario**: An order-creation API returned the newly-created order in its `201 Created` response body (the standard pattern) by writing the order item and then immediately performing a `GetItem` to construct the response — under normal load this worked reliably, but under a specific traffic pattern (a burst of concurrent order creations), a small but consistent percentage of responses intermittently returned an empty/stale result for the just-written order, confusing client integrations that expected the just-created resource to always be immediately retrievable. **Investigation**: confirmed the `GetItem` call used the default eventually-consistent read, and the failure rate correlated with request concurrency/load, consistent with the propagation-lag window occasionally exceeding the time between write and read under contention. **Fix**: added `ConsistentRead: true` specifically to this read-after-write path (accepting its doubled read-capacity cost only for this specific, low-volume-relative-to-overall-traffic operation), eliminating the intermittent empty-response bug entirely. **Lesson**: the default eventually-consistent read is usually fine for independent, unrelated reads, but any read explicitly reading back data from the *same* logical write operation needs strong consistency — a subtle, load-dependent bug that's easy to miss in low-concurrency testing and only manifests reliably under realistic production traffic patterns, directly echoing this course's recurring "test at representative scale" theme.
-## 10. Interview Questions
 
-### Basic (10)
-1. **Q: What is the default read consistency in DynamoDB?** **A:** Eventually consistent — a read may be served by a replica that hasn't yet received the latest write (staleness typically well under a second), which is why read-your-own-write flows must either request `ConsistentRead: true` or be designed to tolerate a just-written item briefly not appearing.
-2. **Q: How do you request a strongly consistent read?** **A:** Set `ConsistentRead: true` on the read request.
-3. **Q: What's the cost difference between eventually and strongly consistent reads?** **A:** Strongly consistent reads cost double the read-capacity units.
-4. **Q: Can a GSI serve a strongly consistent read?** **A:** No — GSIs only support eventually consistent reads.
-5. **Q: What's the difference between provisioned and on-demand capacity?** **A:** Provisioned requires pre-forecasted capacity, cost-efficient for steady traffic; on-demand auto-scales per-request, simpler but typically costlier at sustained volume.
-6. **Q: What is DAX?** **A:** DynamoDB Accelerator — a managed, in-memory, API-compatible caching layer in front of DynamoDB.
-7. **Q: Does a strongly consistent read through DAX use the cache?** **A:** No — it bypasses the DAX cache entirely and goes directly to DynamoDB.
-8. **Q: What is DynamoDB TTL?** **A:** A feature automatically deleting items past a specified expiration timestamp attribute.
-9. **Q: Is TTL deletion instantaneous at the exact expiration time?** **A:** No — it can lag by up to about 48 hours in practice.
-10. **Q: Do TTL-driven deletions appear in DynamoDB Streams?** **A:** Yes, marked distinctly from application-initiated deletes.
+### 11. Coding Exercises
 
-### Intermediate (10)
-1. **Q: Why can a read immediately following a write occasionally return stale/absent data under the default consistency setting?** **A:** The write is acknowledged once a majority of multi-AZ replicas confirm it, but an eventually-consistent read may be served by any replica, including one that hasn't yet received the write's propagation — typically a very short window, but not zero, especially under load/contention.
-2. **Q: Why should `ConsistentRead: true` be applied selectively rather than universally?** **A:** It doubles read-capacity cost — applying it only to reads genuinely needing to reflect a same-operation write (not every read in the system) keeps the added cost proportional to the actual correctness requirement.
-3. **Q: Why is on-demand capacity often more expensive per-request than well-utilized provisioned capacity?** **A:** On-demand's pricing bakes in the operational simplicity of not needing forecasting/auto-scaling reaction lag, at a per-request premium — provisioned capacity, correctly sized and consistently utilized, avoids paying that premium, but only pays off if the forecast is accurate.
-4. **Q: Why doesn't a strongly consistent read benefit from DAX's cache?** **A:** DAX's cached item may be stale relative to DynamoDB's own latest state — since strong consistency specifically requires the guaranteed-latest value, DAX cannot serve it from cache without potentially violating that guarantee, so it passes the request through to DynamoDB directly.
-5. **Q: Why might TTL's up-to-48-hour deletion lag matter for a design relying on it?** **A:** Any logic assuming an item is guaranteed gone immediately at its TTL timestamp (e.g., a uniqueness check relying on expired items being absent) could observe the "expired" item still present for a meaningful window afterward — TTL is a convenience for eventual cleanup, not a precise, immediate deletion guarantee.
-6. **Q: Why would provisioned capacity's auto-scaling not fully prevent throttling during a sudden traffic spike?** **A:** Auto-scaling reacts to observed utilization with some lag (it's not instantaneous), so a very sudden spike can exceed currently-provisioned capacity before auto-scaling has a chance to react and add more.
-7. **Q: What's a realistic scenario where a team would deliberately choose on-demand capacity despite having reasonably predictable traffic?** **A:** A new service with limited historical traffic data to forecast from — on-demand avoids the risk of under-provisioning (and resulting throttling) during the early period before enough real traffic data exists to make an informed provisioned-capacity forecast, with a later migration to provisioned capacity once patterns are well-understood.
-8. **Q: Why is DAX's write-through behavior relevant to cache consistency, beyond just read acceleration?** **A:** Writes going through DAX update both the cache and the underlying table, keeping DAX's cache reasonably fresh for subsequent eventually-consistent reads — without write-through, a separately-cached read layer could serve increasingly stale data as the underlying table changes without DAX's awareness.
-9. **Q: Why might a low-concurrency test suite fail to catch the read-your-own-writes bug that only manifests under production load?** **A:** The propagation-lag window is typically very short, and under low concurrency/no contention, a read shortly after a write is very likely to succeed even with eventual consistency — only under realistic concurrent load does the window's actual, non-zero duration become likely enough to occasionally manifest as a visible failure.
-10. **Q: Why would a team monitor DynamoDB's `ConsumedReadCapacityUnits`/`ConsumedWriteCapacityUnits` relative to provisioned capacity as a standing operational metric?** **A:** To proactively catch capacity utilization trending toward the provisioned ceiling (risking throttling) before it actually causes throttled requests, and to inform whether current provisioned levels still match actual traffic patterns as they evolve over time.
-
-### Advanced (10)
-1. **Q: Diagnose the read-your-own-writes production incident from first principles, and design the code-review practice preventing recurrence.**
- **A:** Root cause: an implicit assumption that a `GetItem` immediately following a `PutItem` would always reflect it, without recognizing the default eventually-consistent read doesn't guarantee this. Safeguard: a code-review checklist item explicitly flagging any read-immediately-following-a-write-in-the-same-operation pattern, requiring either `ConsistentRead: true` or, more robustly, avoiding the extra read entirely by constructing the response directly from the data just written (the values are already known in application code from the write itself, making the "read it back" step often unnecessary rather than merely needing a consistency-setting fix) — the *best* fix for this specific pattern is frequently eliminating the redundant read altogether, not just making it strongly consistent.
-2. **Q: Explain why "always use ConsistentRead: true everywhere, to be safe" is not a cost-free, obviously-correct universal policy.**
- **A:** It doubles read-capacity cost for every single read in the system, including the (likely large) majority of reads that are entirely independent of any recent write and have no read-your-own-writes requirement at all — applying it universally trades a substantial, ongoing cost increase for a correctness guarantee only a small fraction of reads actually need, precisely the same "don't apply a stronger guarantee everywhere when only specific paths need it" principle recurring throughout this course.
-3. **Q: Design a capacity-mode migration strategy for a service currently on on-demand capacity that has grown into steady, predictable, high-volume traffic, without risking a throttling regression during the transition.**
- **A:** Analyze several weeks/months of on-demand `ConsumedCapacityUnits` metrics to establish an accurate provisioned-capacity forecast (mean plus a safety margin for observed peak variance); switch to provisioned capacity with auto-scaling configured with a conservative minimum well above the forecasted baseline and a maximum with headroom above observed peaks; monitor closely during and after the transition for any throttling, ready to revert to on-demand quickly if the forecast proves inaccurate — treating the migration as a reversible, monitored experiment rather than a one-way, high-risk cutover.
-4. **Q: Explain a scenario where DAX's own failure/unavailability could cause a production incident distinct from a DynamoDB table's own availability issues, and how you'd design around it.**
- **A:** If application code has no fallback path and DAX becomes unavailable (its own cluster issue, not a DynamoDB problem), reads routed exclusively through the DAX client could fail entirely even though the underlying DynamoDB table is perfectly healthy — design the application's data-access layer to catch DAX-specific connectivity failures and fall back to querying DynamoDB directly (at higher latency, but still functional) rather than treating DAX as a single, unconditional dependency with no degradation path.
-5. **Q: How would you design a read-heavy access pattern to correctly balance DAX's latency benefit against the read-your-own-writes correctness requirement?**
- **A:** Route the overwhelming majority of independent, latency-sensitive reads (e.g., repeated catalog/product lookups) through DAX for its cache-hit latency benefit, while routing the specific, low-volume read-immediately-after-write path directly to DynamoDB with `ConsistentRead: true` (bypassing DAX entirely for that specific operation, since DAX wouldn't serve a strongly-consistent read from cache anyway) — a deliberate, access-pattern-specific routing strategy rather than uniformly routing every read through one single mechanism.
-6. **Q: Explain why relying on TTL's deletion timing for a business-logic uniqueness constraint (e.g., "no two active reservations for the same resource within a time window, using TTL to auto-expire old reservations") is a design risk, and how you'd fix it.**
- **A:** TTL's up-to-48-hour deletion lag means an "expired" reservation item can remain present and satisfy a uniqueness-check query for a meaningful window past its intended expiration, potentially blocking a legitimate new reservation that should be allowed once the old one is logically expired — the fix is checking the item's expiration timestamp attribute explicitly in the uniqueness-check query logic itself (treating TTL purely as an eventual storage-cleanup convenience), rather than relying on the item's physical absence (which TTL doesn't guarantee promptly) as the actual business-logic signal.
-7. **Q: Design a monitoring and alerting strategy distinguishing "normal, occasional auto-scaling-triggered throttling during a traffic ramp" from "sustained, capacity-forecast-error-driven throttling requiring an urgent capacity increase."**
- **A:** Track `ThrottledRequests` **duration/persistence**, not just occurrence — a brief throttling blip during auto-scaling's reaction lag to a sudden spike, resolving within the scaling adjustment's typical response time, is expected and self-resolving; sustained throttling persisting well beyond that expected reaction window indicates the provisioned baseline itself is genuinely mismatched to actual sustained demand, warranting an urgent, deliberate capacity increase (or a capacity-mode reconsideration, Advanced Q3) rather than waiting for auto-scaling to "eventually" resolve what's actually a forecasting error, not a transient spike.
-8. **Q: Explain how you would test for the read-your-own-writes bug class proactively, before it manifests in production under real load.**
- **A:** A load test specifically exercising the write-then-immediate-read code path at realistic production concurrency (not just correctness-level, low-concurrency testing) — directly the same "test at representative scale" principle §Advanced Q7 and, here applied specifically to consistency-window-dependent bugs rather than N+1 query-count-scaling bugs, since both bug classes share the property of being invisible at low test volume and only manifesting under realistic concurrent load.
-9. **Q: A team proposes enabling DAX universally across their entire DynamoDB-backed application "for the free latency win," without analyzing specific access patterns. Evaluate this as a Principal Engineer.**
- **A:** Push back on "free" — DAX has its own operational cost (cluster provisioning/management), its own potential single-point-of-failure risk if not designed with a fallback (Advanced Q4), and provides genuine latency benefit only for eventually-consistency-tolerant, sufficiently-read-heavy, cache-hit-friendly access patterns — for access patterns with poor cache-hit characteristics (highly unique, rarely-repeated key lookups) or those requiring strong consistency, DAX adds operational complexity without delivering its intended benefit; recommend a targeted rollout to specifically-identified, DAX-suited access patterns (validated via actual cache-hit-rate measurement) rather than a blanket, unanalyzed "enable it everywhere" adoption.
-10. **Q: As a Principal Engineer, how would you build organizational guidance helping teams correctly navigate DynamoDB's consistency/capacity trade-off space without requiring deep expertise from every engineer?**
- **A:** Publish a concrete decision matrix (this course's recurring governance-template pattern) explicitly mapping common scenarios to recommendations: "read-immediately-after-write in the same operation → ConsistentRead: true, or better, avoid the extra read"; "independent, latency-tolerant reads → eventually consistent, consider DAX if read-heavy and cache-hit-friendly"; "new/unpredictable traffic → on-demand capacity, migrate to provisioned once patterns stabilize (per Advanced Q3's process)"; require this matrix's reasoning to be referenced explicitly in any DynamoDB-related design review, converting this module's nuanced, easy-to-get-wrong trade-off space into a fast, reliable, broadly-usable decision process.
-
-### Expert (FinTech Principal Panel)
-
-1. **Q: A payments platform uses DynamoDB Global Tables (multi-region, active-active) for low latency and DR. What's the specific danger for money, and how do you design around it?**
- **A:** Global Tables replicate asynchronously and resolve concurrent cross-region writes to the same item with **last-writer-wins (LWW)** based on timestamps — which for money is dangerous: if the same account/item is written in two regions within the replication window, **one update silently overwrites the other** (a lost update — money created or destroyed), and there's no conflict *error*, just a silently-chosen winner. Also, a read in one region may not yet reflect a write in another (eventual cross-region consistency), so a balance check in Region B can miss a debit committed in Region A. Design around it: (1) **single-writer-region per entity** — route all writes for a given account to one "home" region (by account affinity/sharding), so the same item is never concurrently written in two regions and LWW conflicts can't arise; other regions read locally and forward writes to the home region. (2) **Conditional writes + idempotency** so even a mis-routed or retried write is guarded and exactly-once. (3) Treat the **authoritative money mutation as region-pinned**, using Global Tables for read locality and DR failover, not for concurrent multi-region writes to the same balance. (4) On regional failover, ensure a clean cutover of write ownership (fencing) so two regions don't both accept writes for the same account. The Principal framing: Global Tables' LWW is fine for read-scaling and DR but **unsafe as a concurrent multi-region writer for money** — pin each account's writes to one region (single-writer), use conditional/idempotent writes, and reserve the multi-region capability for locality and failover, because a silent LWW lost update on a balance is exactly the failure a payments platform cannot have.
- **Why correct:** Identifies LWW silent lost-update + cross-region read staleness and prescribes single-writer-region affinity + conditional/idempotent writes + fenced failover, scoping Global Tables to locality/DR.
- **Common mistakes:** Concurrent multi-region writes to the same balance under LWW; assuming replication is synchronous/conflict-safe; no write-ownership fencing on failover.
- **Follow-ups:** "Why is LWW a silent lost update rather than an error?" / "How does single-writer-region eliminate the conflict?" / "What must happen to write ownership during a regional failover?"
-
-2. **Q: To authorize a withdrawal you need the current balance, but DynamoDB reads are eventually consistent by default. Do you use a strongly consistent read — and is that even sufficient? Reason it through.**
- **A:** A default eventually-consistent read can return a **stale** balance that misses a just-committed debit, which would wrongly approve a withdrawal — so at minimum an authorization read must be **`ConsistentRead: true`** (strongly consistent, ~2× RCU, single-region only — it does *not* extend across Global Tables regions). But even a strong read is **not sufficient by itself**, because between the read and your subsequent write another transaction can change the balance (a read-then-write race — the classic lost-update/double-spend, same as elsewhere in this course). The robust answer is to **not authorize on a separate read at all**: enforce the invariant on the *write* with a **conditional update** — `UpdateItem SET Balance = Balance -:amt` with `ConditionExpression: "Balance >=:amt"` — which evaluates the current value atomically at write time, so only one of two racing withdrawals succeeds regardless of what any prior read saw. Use a strongly consistent read only when you genuinely need to *display/decide* on current state before writing, and even then back it with the conditional write as the actual guard. The Principal framing: an eventually-consistent read is unsafe for authorization (stale → over-approve), a strongly consistent read fixes staleness but not the read-then-write race, and the correct design pushes the invariant into an **atomic conditional write** so the datastore is the arbiter — a separate balance read is at best advisory, never the enforcement point.
- **Why correct:** Rules out eventually-consistent reads for authorization, notes strong reads fix staleness but not the race, and lands on the atomic conditional write as the real enforcement (with the single-region caveat of strong reads).
- **Common mistakes:** Authorizing on an eventually-consistent read; trusting a strong read + separate write (race); assuming `ConsistentRead` works across Global Tables regions.
- **Follow-ups:** "Why doesn't a strongly consistent read alone prevent double-spend?" / "Does `ConsistentRead` work across regions?" (no) / "How does the conditional write make the separate read unnecessary?"
-
-3. **Q: A real-time risk engine reads positions from a DynamoDB Global Table spanning three regions to compute intraday exposure limits. How do you bound the staleness a risk calculation might be operating on, and what happens if a limit breach is computed against stale data?**
- **A:** Global Tables replicate asynchronously — a region's local read (even a `ConsistentRead: true` request, which only guarantees consistency **within that region**, not against other regions' latest writes) can lag another region's most recent write by the current replication latency, which is typically sub-second but not bounded by any hard SLA guarantee from AWS. For a risk engine, this means a locally-strongly-consistent read is not equivalent to a globally-strongly-consistent one — a position update written in Region A moments ago may not yet be visible to a risk calculation running in Region B. Mitigation: (1) **pin the authoritative risk calculation to the same region as the position-update writer** (the single-writer-region pattern, Expert Q1) for any calculation where staleness has genuine financial-risk consequences, eliminating the cross-region staleness question entirely for that critical path; (2) where a genuinely multi-region risk view is unavoidable (aggregating global exposure across regional books), **instrument and expose the measured replication lag** (via CloudWatch's `ReplicationLatency` metric) as an input to the risk calculation itself — a risk engine that knows it might be working with data up to N seconds stale can apply a conservative buffer to its limit thresholds rather than treating the read as ground truth; (3) treat any limit-breach determination computed against cross-region data as **provisional**, triggering a same-region confirming read before an automated action (e.g., halting trading) is taken, since a false-positive breach from stale data has real business cost, and a false negative (missing a genuine breach due to staleness) has real risk cost — neither is acceptable to leave to chance. The Principal framing: staleness in a risk engine isn't a data-freshness inconvenience, it's a **quantifiable risk-model input** — measure it, bound it, and design the critical decision path (single-writer-region for authoritative calculations) to avoid depending on it at all where the stakes are highest.
- **Why correct:** Correctly identifies that regional strong consistency doesn't extend cross-region, prescribes single-writer-region pinning for the critical path, and treats measured replication lag as an explicit input to risk-threshold conservatism rather than an ignored detail.
- **Common mistakes:** Assuming `ConsistentRead: true` provides cross-region consistency; treating all regions' views as equally authoritative for a risk calculation; not distinguishing "this specific breach determination is provisional pending confirmation" from a final action.
- **Follow-ups:** "How would you measure and expose replication lag to the risk calculation?" / "What's the cost of pinning writes to a single region for a globally-distributed trading desk?" / "How do you handle a regional failover for the pinned writer region?"
-
-4. **Q: A settlement-batch system runs a predictable, massive write spike every night at 8pm (10x normal volume, for exactly 45 minutes) as trades settle. The team is debating on-demand vs. provisioned-with-auto-scaling vs. something else. Walk through the decision.**
- **A:** On-demand handles the spike safely but pays its per-request premium for the other 23+ hours/day of steady, well-below-peak traffic — a poor fit given how *predictable* (not just bursty) this pattern is. Provisioned-with-auto-scaling risks a throttling window at the start of each night's spike, because auto-scaling reacts to observed utilization with a polling-interval lag, and a spike arriving at a known, fixed time every night will trigger that same lag every single night — a recurring, self-inflicted incident rather than a rare surprise. The correct tool is **provisioned capacity with scheduled scaling** (§9.2): a pre-configured capacity increase (via Application Auto Scaling's scheduled actions, or a simple cron-triggered `UpdateTable` call) that raises WCU ahead of 8pm and reverts afterward — capturing on-demand's safety for the exact 45-minute window that needs it, at provisioned's steady-state cost efficiency for the remaining ~23 hours. This requires operational discipline the other two options don't (someone must configure and maintain the schedule, and a settlement-time change requires updating it), but for a genuinely calendar-predictable pattern, that operational cost is smaller than either on-demand's ongoing premium or provisioned-auto-scaling's recurring throttling risk. The Principal framing: "predictable" and "bursty" are different properties — on-demand is the right tool for **unpredictable** bursts, scheduled scaling is the right tool for **predictable** ones, and conflating them leads to either paying an unnecessary ongoing premium or accepting a recurring, avoidable throttling incident.
- **Why correct:** Distinguishes predictable from unpredictable bursts, correctly identifies unaided auto-scaling's recurring lag-driven throttling risk for a fixed-time spike, and prescribes scheduled scaling as the properly-fitted tool.
- **Common mistakes:** Defaulting to on-demand for any burst without checking whether it's actually predictable; assuming provisioned auto-scaling reacts fast enough for a spike whose timing is precisely known in advance; not accounting for the operational maintenance cost of a scheduled-scaling configuration.
- **Follow-ups:** "What if the settlement time occasionally shifts by an hour — how brittle is a fixed schedule?" / "How would you size the scheduled capacity increase?" / "What's your fallback if the scheduled scaling itself fails to apply in time?"
-
-5. **Q: A payment-processing service uses DynamoDB-stored idempotency keys with a 24-hour TTL to deduplicate retried payment requests, cached in front by DAX for latency. Walk through a scenario where DAX's write-through caching and TTL's deletion lag interact to create a subtle correctness gap, and how you'd close it.**
- **A:** DAX's write-through behavior updates the cache on writes, but **TTL-driven deletions are not application writes** — they're a DynamoDB-internal background process, and DAX's item cache has its **own independent TTL configuration**, separate from the DynamoDB table's TTL attribute. If DAX's own cache TTL is configured longer than the DynamoDB table's TTL (a plausible misconfiguration if the two were set independently, by different engineers, at different times), a scenario emerges: an idempotency-key item expires and is deleted from the base DynamoDB table (after the table's 24-hour TTL, itself subject to up to ~48 hours of lag, §2.5/§6), but DAX's cache — unaware of the base-table deletion, since deletion isn't a write DAX observes as a cache-invalidating event unless DAX itself is queried through for the delete — could still be serving a cached "yes, this idempotency key exists, here's the prior result" response for a stale cache entry past its own, longer TTL window, or conversely could be serving a cache **miss** (correctly reporting the key as gone) prematurely, before DynamoDB's lagged TTL deletion has even physically occurred — either direction is a subtle mismatch between what the cache believes and what the source of truth's *actual* (not nominal) state is. The fix: **align DAX's item-cache TTL to be equal to or shorter than the DynamoDB table's TTL configuration**, ensuring DAX never serves a cached idempotency result the base table itself would already consider expired (the safe-direction mismatch), and — more fundamentally — treat DAX's cache as strictly a **latency optimization for the exists-check**, never the sole arbiter of idempotency-key validity; the actual conditional write against DynamoDB (`attribute_not_exists`) remains the authoritative, correctness-bearing check regardless of what DAX's cache reported. The Principal framing: TTL's deletion-lag imprecision (§2.5) compounds with a second, independently-configured cache layer's own TTL — the two must be explicitly reasoned about together, and DAX should never be trusted as the sole source of idempotency truth, only as an accelerator in front of the conditional-write check that actually enforces it.
- **Why correct:** Identifies DAX's independent cache-TTL configuration as a second, separately-tunable staleness source compounding TTL's own deletion lag, and correctly keeps the conditional write as the sole authoritative idempotency check regardless of cache state.
- **Common mistakes:** Assuming DAX's write-through behavior also captures TTL-driven deletions as cache-invalidating events; configuring DAX's cache TTL independently of the base table's TTL without reasoning about the interaction; trusting a DAX cache hit/miss as the actual idempotency determination instead of the conditional write.
- **Follow-ups:** "Why doesn't DAX automatically invalidate its cache when a TTL deletion happens on the base table?" / "What TTL alignment would you configure, and why?" / "Should idempotency-key checks even go through DAX at all, given they need strong correctness?"
-
-6. **Q: A real-time compliance-monitoring system needs to detect a specific trading-limit breach within 2 seconds of it occurring, reading from a GSI (since the query pattern — "all trades exceeding threshold X across all accounts" — doesn't match the base table's account-scoped key). Given GSIs never support strong consistency, how do you meet a hard latency-to-detection SLA?**
- **A:** The GSI's own propagation lag (Module 27 §7.3, this module §7.3) — typically sub-second but not SLA-guaranteed, and capable of widening materially under write bursts — is in direct tension with a hard 2-second detection SLA, since GSI eventual consistency provides no upper bound on staleness the application can rely on contractually. Two complementary approaches: (1) **Don't route the detection path through the GSI at all** — instead, consume DynamoDB Streams directly (near-real-time, ordered, and not subject to a *separate* propagation-lag layer the way a GSI read is) with a stream-processing consumer (Kinesis Data Streams for DynamoDB, or a Lambda trigger) evaluating the threshold condition on each write event as it occurs, giving a detection latency bounded by Streams' own near-real-time delivery rather than GSI query-time propagation; the GSI remains useful for **retrospective** querying ("show me all breaches from the last hour") but is explicitly not the real-time detection mechanism. (2) Where a GSI-based query genuinely is part of the real-time path, **measure** `ReplicationLatency` continuously and treat a detection made through the GSI as **provisional pending a confirming direct base-table read** for the specific account/trade flagged — trading a small amount of additional latency for eliminating the unbounded-staleness risk on the specific item the alert concerns. The Principal framing: eventual consistency without a bound is fundamentally incompatible with a *hard* real-time SLA — the answer isn't to force the GSI to be "consistent enough," it's to recognize that DynamoDB Streams (an ordered, near-real-time event feed) is the architecturally correct primitive for real-time detection, with the GSI properly scoped to retrospective/reporting queries where its consistency model is actually an acceptable fit.
- **Why correct:** Recognizes GSI eventual consistency has no SLA-suitable staleness bound, and correctly redirects the hard-real-time detection requirement to DynamoDB Streams rather than trying to force GSI reads to meet a latency guarantee the underlying mechanism can't promise.
- **Common mistakes:** Trying to "tune" GSI propagation to meet a hard SLA it fundamentally can't guarantee; using the GSI for both real-time detection and retrospective reporting without recognizing they have different consistency requirements; not knowing DynamoDB Streams exists as a lower-latency alternative primitive for this exact class of problem.
- **Follow-ups:** "Why is DynamoDB Streams lower-latency than a GSI for this use case?" / "What happens if the Streams consumer itself falls behind under load?" / "How would you handle a false-positive detection from the Streams path?"
-
-7. **Q: Your team is debating whether "eventually consistent" in DynamoDB's documentation means the same thing as "eventually consistent" in a distributed system generally (e.g., DNS propagation, CDN cache invalidation). Clarify the distinction and explain why conflating them causes design mistakes.**
- **A:** DynamoDB's eventual consistency has a specific, narrow, well-bounded mechanism (§2.1): a write is majority-acknowledged across multi-AZ replicas within the same region, and an eventually-consistent read may hit a replica that hasn't yet received that specific write's propagation — typically resolving within milliseconds, not the seconds-to-minutes (or longer) staleness windows associated with DNS TTL propagation or CDN edge-cache invalidation, which involve entirely different mechanisms (independent caching layers with their own, often much longer, TTLs, potentially thousands of geographically distributed nodes). Conflating the two leads to two opposite mistakes: (1) **underestimating** DynamoDB's actual staleness window because "eventually consistent" sounds vague and scary, leading to unnecessarily defensive `ConsistentRead: true` usage everywhere (§7.1's cost problem) when the actual risk window is narrow and specific (read-immediately-after-write); (2) **overestimating** DynamoDB's freshness guarantee by assuming "it's basically instant, eventual consistency is a formality" and therefore not building any read-your-own-writes discipline at all, missing the genuine (if narrow) staleness window that DOES cause real, if infrequent, production bugs (Module 28's central incident). The correct mental model treats DynamoDB's eventual consistency as a **precisely-scoped, single-region, sub-second-typical** phenomenon with a specific cause (multi-AZ replication lag) — distinct from, and much tighter-bounded than, "eventual consistency" as a general distributed-systems term covering mechanisms with vastly different staleness characteristics.
- **Why correct:** Correctly distinguishes DynamoDB's specific, narrow replication-lag mechanism from the broader distributed-systems usage of "eventually consistent," and identifies the two opposite design mistakes (over- and under-caution) that conflating them produces.
- **Common mistakes:** Assuming "eventually consistent" always implies a large, unpredictable staleness window regardless of the specific system; assuming all "eventually consistent" systems are interchangeable in their staleness characteristics; applying a CDN/DNS-appropriate caution level to a fundamentally different, much-tighter-bounded DynamoDB mechanism (or vice versa).
- **Follow-ups:** "What specifically causes DynamoDB's replication lag, mechanistically?" / "Is there a documented upper bound on DynamoDB's eventual-consistency window?" / "How would you explain this distinction to a team defaulting to `ConsistentRead: true` everywhere out of caution?"
-
-8. **Q: On-demand capacity mode is billed per-request with automatic scaling. During an incident where a downstream service starts retrying failed calls aggressively (a retry storm) against a DynamoDB table in on-demand mode, what happens to cost and availability, and how do you defend against it?**
- **A:** On-demand mode's core value proposition — automatically absorbing traffic spikes without throttling — becomes a **liability** under a retry storm specifically because it removes the natural backpressure a provisioned table's throttling would otherwise provide: a provisioned table under a retry storm would throttle once its capacity ceiling is hit, which (while causing errors) at least **bounds the cost** and signals the problem loudly via `ThrottledRequests`; an on-demand table instead **scales to absorb the storm**, meaning every retried request succeeds and is billed — converting what should be a bounded, alarmed failure into an **unbounded, silently-expensive** one, since the system "working as designed" (successfully scaling) is exactly what masks the underlying problem (a downstream consumer stuck in a retry loop) from being loudly surfaced. Defense: (1) the retry logic itself must have **capped, backoff-based retries with a circuit breaker** (this course's standing resilience pattern) so a downstream failure doesn't translate into unbounded request volume against DynamoDB regardless of capacity mode; (2) even on on-demand tables, configure **AWS Budgets/CloudWatch billing alarms** on the table's cost specifically, since on-demand's "no throttling ceiling" removes the natural cost-bounding signal a provisioned ceiling provides; (3) monitor **request-rate anomalies** (a sudden, sustained multiple-of-baseline request volume) as its own alert, independent of throttling (which on-demand mode may never trigger even during a genuine incident) — the absence of throttling errors is not evidence the system is healthy under on-demand mode, precisely because on-demand is designed to prevent that signal from firing. The Principal framing: on-demand mode trades a *visible, bounded* failure mode (provisioned throttling) for an *invisible, unbounded* one (successfully-absorbed-but-expensive retry storms) — the mitigation isn't avoiding on-demand mode, it's ensuring the actual backpressure/circuit-breaking discipline lives in the calling code, not implicitly relying on DynamoDB's own capacity ceiling to provide it.
- **Why correct:** Correctly identifies that on-demand mode removes the natural cost-bounding/alerting signal a provisioned ceiling provides during a retry storm, and prescribes caller-side circuit breaking plus independent cost/request-rate alerting rather than relying on DynamoDB itself to surface the problem.
- **Common mistakes:** Assuming on-demand mode is strictly safer than provisioned because "it never throttles"; not recognizing that successfully-absorbed traffic under on-demand can still represent a serious, expensive incident; relying solely on `ThrottledRequests`-based alerting, which on-demand mode may never trigger.
- **Follow-ups:** "Why would a provisioned table's throttling actually be a useful signal here?" / "What billing-alarm threshold would you set, and how would you avoid false positives from legitimate growth?" / "Where should the circuit breaker actually live in the call chain?"
-
-9. **Q: Explain the difference between DAX's item cache and its query cache, and describe a scenario where relying on the wrong one produces stale results even though your consistency setting is technically correct.**
- **A:** DAX maintains two distinct caches with different invalidation behavior: the **item cache** stores individual item results (`GetItem` by primary key) and is invalidated per-item on a write-through basis for writes that go **through DAX itself** — reasonably fresh for the specific-item-lookup pattern. The **query cache** stores the **result sets** of `Query`/`Scan` operations, keyed by the full request parameters — and critically, is invalidated only by its own **separately configured TTL**, not by write-through, because DAX has no general way to know which specific writes would change a given arbitrary query's result set membership. The stale-result scenario: an application queries `Query(PK = ACCOUNT#123)` through DAX (populating the query cache with that result set), then a **new item** is written under that same partition key (e.g., a new ledger entry) — even through DAX itself (triggering item-cache invalidation for that specific new item), the **query cache's** previously-cached result set for `Query(PK = ACCOUNT#123)` is **not** invalidated by this write, since DAX doesn't attempt to determine which cached queries a given write might affect. A subsequent identical query, served from the (stale) query cache, would omit the newly-written item until the query cache's own TTL expires — even though `ConsistentRead` was never the issue and the item cache is behaving correctly. The fix: configure the query-cache TTL deliberately short for any access pattern where new items can appear that must be reflected promptly (or bypass the query cache entirely for that pattern, reading `Query` results directly from DynamoDB), and never assume a `Query` result served through DAX has the same write-through freshness guarantee a single-item `GetItem` through DAX provides. The Principal framing: DAX's two caches have fundamentally different consistency mechanisms — item-cache write-through freshness does not extend to the query cache, and a team assuming uniform DAX freshness behavior across both `GetItem` and `Query` access patterns will be surprised by stale `Query` results specifically.
- **Why correct:** Correctly distinguishes DAX's item cache (write-through invalidated) from its query cache (TTL-only invalidated, since arbitrary query-result-set membership can't be write-through-tracked), and identifies the specific stale-query-result failure mode this asymmetry produces.
- **Common mistakes:** Assuming DAX's write-through behavior applies uniformly to both item and query caches; not configuring the query cache's TTL deliberately for access patterns with frequently-changing result-set membership; debugging a stale-query-result symptom by checking `ConsistentRead` settings instead of the query-cache TTL.
- **Follow-ups:** "Why can't DAX write-through-invalidate the query cache the same way it does the item cache?" / "How would you detect this staleness in production before a user reports it?" / "Would bypassing the query cache for this access pattern eliminate the DAX benefit entirely?"
-
-10. **Q: As a Principal Engineer reviewing a proposal to migrate a steady, well-understood, high-volume DynamoDB table from provisioned to on-demand capacity "to simplify operations," what would you want quantified before approving it, and why might you push back?**
- **A:** "Simplify operations" is a real and legitimate benefit (no more capacity forecasting, no auto-scaling policy tuning, no throttling-during-organic-growth risk) — but it's not free, and a Principal-level review should quantify the trade rather than accept the simplification argument at face value. What I'd want quantified: (1) **actual cost delta** — pull the table's historical `ConsumedReadCapacityUnits`/`ConsumedWriteCapacityUnits` and compute what the same traffic would cost under on-demand's per-request pricing versus current provisioned spend; for genuinely steady, well-forecasted traffic, this is very often a **substantial cost increase** (on-demand's per-request premium is real), and "simplify operations" should be weighed explicitly against that number, not treated as free; (2) **retry-storm/cost-runaway exposure** (§Expert Q8) — does this table sit behind a call chain with adequate caller-side circuit breaking, or would on-demand's removal of the natural throttling backstop create new, unbounded-cost exposure during a downstream incident that provisioned mode's throttling ceiling currently (if painfully) bounds; (3) **whether the "operational simplicity" argument is solving a real, recently-experienced pain point** (repeated throttling incidents, frequent manual capacity adjustments) or a hypothetical one — if the team hasn't actually experienced provisioned-mode operational pain, the migration may be solving a problem that doesn't exist at meaningful cost. My likely recommendation for a **steady, well-understood, high-volume** table specifically: keep provisioned-with-auto-scaling (tuned correctly, this already handles organic growth reasonably well) and reserve on-demand for tables whose traffic is genuinely volatile or new — but I'd want the actual cost-delta number in front of me before making that call, not a general principle, because the right answer for the case in front of me is a quantified engineering trade-off, not a category-based, one-size-fits-all rule.
- **Why correct:** Refuses to accept "simplify operations" as a free win, insists on quantifying the actual cost delta and retry-storm exposure change before approving, and grounds the recommendation in whether the team has genuinely experienced provisioned-mode operational pain rather than a hypothetical one.
- **Common mistakes:** Approving a capacity-mode migration based on the qualitative "simpler" argument alone without a cost analysis; assuming on-demand is a strictly-safer default without considering the retry-storm cost-exposure trade-off; applying a blanket policy ("always use on-demand" or "always use provisioned") instead of evaluating the specific table's traffic characteristics.
- **Follow-ups:** "How would you present this cost-delta analysis to a stakeholder who just wants 'less to manage'?" / "What would make you approve the migration despite a cost increase?" / "How do you monitor after the migration to confirm the cost projection held?"
-
----
-
-## 11. Coding Exercises
-
-### Easy — Strongly consistent read for a read-after-write path
+#### Easy — Strongly consistent read for a read-after-write path
 ```csharp
 await client.PutItemAsync(new PutItemRequest { TableName = "Orders", Item = orderItem });
 
@@ -183,7 +252,7 @@ var readBack = await client.GetItemAsync(new GetItemRequest
 });
 ```
 
-### Medium — Eliminate the redundant read entirely (Advanced Q1's better fix)
+#### Medium — Eliminate the redundant read entirely (Advanced Q1's better fix)
 ```csharp
 public async Task<OrderDto> CreateOrderAsync(CreateOrderRequest request)
 {
@@ -196,7 +265,7 @@ public async Task<OrderDto> CreateOrderAsync(CreateOrderRequest request)
 ```
 **Discussion**: This is deliberately the preferred fix over merely adding `ConsistentRead: true` — it removes both the correctness risk and the doubled-read-capacity cost entirely, since the "read" was never actually necessary once recognized that the just-written values are already known in application code.
 
-### Hard — Capacity-aware retry with exponential backoff for throttled requests
+#### Hard — Capacity-aware retry with exponential backoff for throttled requests
 ```csharp
 public async Task<T> ExecuteWithThrottleRetryAsync<T>(Func<Task<T>> operation, int maxAttempts = 5)
 {
@@ -215,7 +284,7 @@ public async Task<T> ExecuteWithThrottleRetryAsync<T>(Func<Task<T>> operation, i
 }
 ```
 
-### Expert — DAX client with fallback to direct DynamoDB access (Advanced Q4)
+#### Expert — DAX client with fallback to direct DynamoDB access (Advanced Q4)
 ```csharp
 public class ResilientDaxClient
 {
@@ -238,11 +307,9 @@ public class ResilientDaxClient
 }
 ```
 
----
+### 12. System Design
 
-## 12. System Design
-
-### Scenario: A Real-Time Trade-Settlement Monitoring & Compliance Dashboard
+#### Scenario: A Real-Time Trade-Settlement Monitoring & Compliance Dashboard
 
 **Requirements**
 
@@ -281,7 +348,7 @@ graph TB
 
 **Trade-offs:** real-time correctness (Streams-based detection) is prioritized over query simplicity (a single GSI-based polling query would have been simpler to build but structurally cannot meet the 2-second SLA); scheduled scaling trades a small amount of operational maintenance for materially lower cost than pure on-demand at this workload's predictable-burst profile.
 
-## 13. Low-Level Design
+### 13. Low-Level Design
 
 **Class diagram**
 
@@ -350,7 +417,7 @@ sequenceDiagram
 
 **Concurrency/thread safety:** the same optimistic-locking (`Version` + `ConditionExpression`) pattern from Module 27 §13 applies to any settlement-status projection updated by both the primary write path and a correction/reconciliation process — a concurrent correction racing against a new settlement event is resolved by the conditional write rejecting the stale-versioned update rather than silently overwriting it.
 
-## 14. Production Debugging
+### 14. Production Debugging
 
 **Incident:** During a month-end settlement batch, the compliance dashboard (reading account status through DAX) displayed **correct** balances for most accounts but showed **zero new breach alerts** for a roughly 12-minute window despite the breach-detection Lambda's own CloudWatch logs confirming it processed and correctly flagged several genuine breaches during that exact window — the alerts fired (SNS delivered them), but the dashboard's "recent breaches" panel, which read via a `Query` against the GSI (not the Streams path), simply didn't show them yet.
 
@@ -362,7 +429,7 @@ sequenceDiagram
 
 **Prevention:** this is the **second occurrence** of the same GSI-hot-partition-under-burst pattern first seen in Module 27 §14 — formally documented as a recurring failure signature in the team's DynamoDB design-review checklist: "any dashboard/alerting panel with a latency-sensitive freshness requirement must not read through a GSI experiencing burst-correlated propagation lag; prefer a Streams-derived materialized view for any panel with a sub-minute freshness requirement." Naming the recurrence explicitly (rather than treating each incident as a one-off) is what converts it from "a surprising bug, twice" into a standing, checklist-enforced architectural rule.
 
-## 15. Architecture Decision
+### 15. Architecture Decision
 
 **Options considered for the breach-detection mechanism:**
 
@@ -377,7 +444,7 @@ sequenceDiagram
 
 **Recommendation:** DynamoDB Streams → Lambda, for the breach-detection path specifically, given the hard 2-second SLA and the now-twice-demonstrated (Module 27 §14, this module §14) unreliability of GSI-based reads for latency-sensitive panels under burst load. The GSI itself is **retained**, but explicitly re-scoped to retrospective reporting only — not removed, since it remains the right tool for its actual, non-latency-critical use case (§Expert Q6's framework).
 
-## 17. Principal Engineer Perspective
+### 17. Principal Engineer Perspective
 
 **Business impact:** a compliance-monitoring system that silently under-reports breaches for an 11-minute window during exactly the highest-volume period (month-end settlement) is a severe regulatory and business risk — the highest-volume window is precisely when a genuine breach is most likely to occur, making the failure's timing correlation with its likelihood of mattering the most damaging possible combination, not a coincidental inconvenience.
 
@@ -395,7 +462,7 @@ sequenceDiagram
 
 **Long-term maintainability:** document, alongside the schema, an explicit table of "which read path serves which consistency/freshness guarantee" (base table strong / base table eventual / GSI eventual-with-unbounded-propagation / Streams-derived near-real-time) — the single artifact that would have let a future engineer building the next dashboard panel avoid re-discovering this module's central incident a third time.
 
-## 18. Revision
+### 18. Revision
 **Key takeaways**: Eventually consistent reads (default) can occasionally miss a very recent write, especially under load — use `ConsistentRead: true` for any read-after-write-in-the-same-operation, or better, eliminate the redundant read entirely since the just-written values are already known. GSIs never support strong consistency. Provisioned (forecasted, cost-efficient for steady traffic) vs. on-demand (auto-scaling, simpler, costlier at sustained volume) capacity is a genuine trade-off, not a strictly-better-either-way choice. DAX accelerates eventually-consistent reads specifically — strongly consistent reads bypass its cache entirely, and DAX needs its own fallback-path design for resilience. TTL deletion can lag up to ~48 hours — never rely on it for precise-timing business logic.
 
 ---

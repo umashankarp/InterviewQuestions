@@ -4,15 +4,199 @@
 
 ---
 
-## 1. Fundamentals
+## 1. Topic Description
+
+### Definition
+
+**Health checks** are the machine-readable statements a service makes about its own fitness, consumed by an orchestrator or load balancer that will take *automated action* on them. They come in three semantically distinct forms: **liveness** ("restart me"), **readiness** ("send me traffic"), and **startup** ("I am still initialising"). **Observability** is the instrumentation that lets someone who did not build the service explain its behaviour: structured logs via `ILogger`, distributed traces via `ActivitySource`/`Activity` (the .NET implementation of spans, propagated with W3C `traceparent`), and metrics via `Meter` and the runtime's built-in counters — all exportable through OpenTelemetry.
+
+### Core sub-concepts
+
+- **Probe semantics** — liveness versus readiness versus startup, and what remedy each triggers.
+- **`IHealthCheck`, tags and filtered endpoints** — one registration set serving multiple audiences; health check publishers for push-based reporting.
+- **`Healthy` / `Degraded` / `Unhealthy`** — essential versus non-essential dependency classification, and what the orchestrator does with each.
+- **Structured logging** — message templates versus interpolation, level semantics defined by consequence, and interpolated-string handlers that skip formatting for disabled levels.
+- **Logging scopes** — attaching correlation, tenant and user to every log in a request, and their per-line ingest cost.
+- **`Activity` / `ActivitySource`** — spans, parent/child relationships, tags, automatic `AsyncLocal` propagation and W3C header propagation across HTTP.
+- **Context propagation boundaries** — message brokers, queued background work, manually-created threads, and uninstrumented HTTP handlers.
+- **`Meter`, counters, histograms and runtime counters** — the metric surface and the built-in ASP.NET Core / `HttpClient` / GC instrumentation.
+- **Cardinality** — labels as the dominant cost driver; bounded values only; route templates rather than raw paths.
+- **Sampling** — head-based versus tail-based, keeping errors and slow traces, and consistent sampling decisions across services.
+- **Correlation identity** — trace ID as the correlation ID, returned to clients and carried onto messages.
+- **Signal selection** — metric to detect, trace to localise, log to explain; alerting on symptoms rather than causes.
+- **Telemetry as governed data** — PII redaction, retention, residency and access control.
+
+### Where it fits
+
+Health endpoints are pipeline endpoints (often on a `Map` branch, which is exactly why they can accidentally bypass authentication), and instrumentation hangs off the middleware pipeline, the DI container and configuration for exporter setup. Upward, health signals drive orchestration and load-balancing decisions, and telemetry is the input to SLOs, error budgets and incident response. Downward, the built-in ASP.NET Core, `HttpClient` and GC instrumentation means a service gets most of its useful signal without writing any custom code.
+
+### Why it matters at scale
+
+Health checks are dangerous precisely because something acts on them automatically. A readiness-style check used for liveness means a database blip restarts the entire fleet, converting a recoverable dependency failure into a full outage with cold caches and a thundering herd on recovery. A readiness probe that fails on any of five dependencies couples your availability to the availability of everything you touch — the opposite of resilience. On the observability side, the cost driver is cardinality: adding a user ID or a raw URL path as a metric label turns one time series into millions, which can exceed the cost of all other telemetry combined and take down the metrics backend. And a trace that breaks at the message broker makes end-to-end diagnosis impossible for exactly the asynchronous flows that need it most.
+
+### Common pitfalls / anti-patterns
+
+- **One `/health` endpoint used for both liveness and readiness** — a transient dependency failure triggers restarts instead of removal from rotation.
+- **A liveness check that queries the database** — the only remedy for liveness failure is a restart, which does not fix a database, so this guarantees a fleet-wide restart storm during a dependency outage.
+- **Readiness failing on non-essential dependencies** — the service could still serve most endpoints, but every instance is pulled from rotation.
+- **An unauthenticated detailed health endpoint** — a full dependency report is a map of your internal architecture and useful reconnaissance.
+- **String-interpolated log messages** — destroys queryable structure, so the log store can only be searched by substring, and the string is built even when the level is disabled.
+- **Logging the same exception at every layer as it propagates** — one failure appears five times, making the error rate meaningless.
+- **Unbounded metric label cardinality** (user ID, raw path, trace ID) — millions of time series, exploding cost and often breaking the backend.
+- **Alerting on causes rather than symptoms** — produces noise that is routinely acknowledged without action, so the alert channel stops being trusted before the real incident arrives.
+
+> Scope note: pipeline placement of logging and exception middleware belongs to `01-Middleware-Pipeline-Request-Internals`; DI lifetimes for telemetry components to `02-DI-Container-Internals`; exporter configuration and secrets to `05-Configuration-Options-Pattern`. Platform-level observability architecture, SLOs, alerting design and cost/cardinality governance live in `27-Observability`.
+
+---
+
+## 2. Beginner (10 Q&A)
+
+
+**Q1. What are the three probe types and what should each actually check?**
+**A:** Liveness answers "is this process broken beyond recovery" — it should check almost nothing, because the only remedy is a restart, and a restart does not fix a broken database. Readiness answers "can this instance serve traffic right now" and legitimately checks the dependencies required to serve, because the remedy is removal from the load balancer. Startup answers "am I still initialising" and exists so a slow-starting service is not killed by an impatient liveness probe. Conflating them is the classic failure: a readiness-style check used for liveness means a dependency blip restarts your entire fleet.
+*Follow-up: Your database goes down. What should each of the three probes report, and why?*
+
+**Q2. Why should a liveness check not query the database?**
+**A:** Because a database outage would then fail liveness on every instance simultaneously, the orchestrator would restart them all, and you would convert a recoverable dependency failure into a full outage with cold caches and a thundering herd on recovery. Liveness has exactly one remedy — kill and restart — so it should only report conditions a restart actually fixes: a deadlocked process, an exhausted thread pool that cannot recover, a fatal internal state. Anything external belongs in readiness.
+*Follow-up: How would you detect a genuinely wedged process without checking dependencies?*
+
+**Q3. How do you expose different health endpoints for different purposes?**
+**A:** Register checks with tags and map several endpoints filtered by predicate — a liveness endpoint that runs no checks or only self-checks, a readiness endpoint that runs dependency-tagged checks, and optionally a detailed diagnostic endpoint. That way one registration set serves multiple audiences without duplicating logic. The detailed endpoint should not be publicly reachable, since a full dependency report is a map of your internal architecture and a useful reconnaissance tool.
+*Follow-up: How would you protect the detailed endpoint without breaking the orchestrator's access to the simple ones?*
+
+**Q4. What is the difference between `Degraded` and `Unhealthy`, and does it matter?**
+**A:** `Unhealthy` means this instance cannot serve; `Degraded` means it can serve but something is wrong — a non-essential dependency is down, a cache is cold, latency is elevated. It matters because it lets readiness distinguish "take me out of rotation" from "keep serving but alert someone," which is exactly the nuance that prevents unnecessary capacity loss. The design decision is which dependencies are essential: an outage of a recommendation service should degrade, not remove, a checkout service, and encoding that correctly is the point of the distinction.
+*Follow-up: How does the orchestrator interpret `Degraded`, and what do you have to configure for it to matter?*
+
+**Q5. Why are structured log message templates preferable to interpolated strings?**
+**A:** With a template, the message and the parameters are captured separately, so the log store can index and query on the values — every log for a given order ID, or an aggregation by status code. An interpolated string produces one opaque sentence per event, which can only be searched by substring. Templates also let the logging framework skip formatting entirely when the level is disabled, whereas interpolation has already built the string before the call — which the compiler's interpolated-string handler now mitigates, but only for code written to use it. The structure is the whole value of a modern logging pipeline.
+*Follow-up: What's the risk of using a different template text for the same logical event in two places?*
+
+**Q6. What are logging scopes and what problem do they solve?**
+**A:** A scope attaches properties to every log written within it, so a request's correlation ID, tenant and user appear on all its logs without being passed to each call. That is what makes it possible to filter a log store to one request's activity across many components. The trap is over-stuffing scopes, since every property is duplicated on every log line and contributes directly to ingest cost — and putting anything sensitive in a scope means it appears in far more places than intended.
+*Follow-up: How do scopes interact with async continuations that resume on a different thread?*
+
+**Q7. What is an `Activity` in .NET and how does it relate to a span?**
+**A:** `Activity` is .NET's built-in representation of a unit of traced work — it *is* the span, with an ID, a parent, tags and events. `ActivitySource` is how your code starts them, and OpenTelemetry listens to those sources and exports them, which is why you can instrument code without referencing OpenTelemetry directly. Context propagates automatically through async flow via `AsyncLocal` and across HTTP through the W3C `traceparent` header, which is what makes a trace span multiple services without explicit plumbing.
+*Follow-up: Where does that automatic propagation stop working?*
+
+**Q8. What's the difference between a log, a metric and a trace, and when do you reach for each?**
+**A:** A log is a discrete event with detail, good for explaining what happened in one case; a metric is an aggregate over time, good for detecting that something is happening at all and for alerting; a trace shows one request's path across components, good for locating *where* time or failure occurred. The practical workflow is metric to detect, trace to localise, log to explain — and a system missing any one of them forces you to compensate with the others expensively. Most cost blowouts come from using logs to do a metric's job.
+*Follow-up: You need to know P99 latency per endpoint. Which signal, and why not the others?*
+
+**Q9. What is cardinality and why does it dominate observability cost?**
+**A:** Cardinality is the number of distinct label combinations on a metric; each combination is a separate time series that must be stored and queried. Adding a user ID or a raw URL path with embedded identifiers as a label turns one series into millions, which can be orders of magnitude more expensive than the rest of your telemetry combined and can take down the metrics backend. The rule is that labels must be bounded and low-cardinality — route template rather than actual path, status class rather than exact message — with high-cardinality identifiers belonging on traces and logs instead.
+*Follow-up: You need per-tenant latency for 5,000 tenants. How do you do that without exploding cardinality?*
+
+**Q10. What should a correlation ID be, and where should it come from?**
+**A:** It should be the trace ID from the W3C trace context where one exists, so correlation and tracing are the same thing rather than two parallel schemes. If an inbound request supplies one, propagate it; if not, generate it at the edge. It must appear on every log via a scope, be returned to the client in a response header, and travel to downstream services and onto messages. The most common gap is messaging: a correlation that survives HTTP hops and dies at the queue makes end-to-end diagnosis impossible for exactly the flows that need it most.
+*Follow-up: How do you carry trace context through a message broker?*
+
+---
+
+## 3. Intermediate (10 Q&A)
+
+
+**Q1. A readiness probe checking five dependencies causes cascading outages. What's wrong and how do you fix it?**
+**A:** Readiness that fails on any dependency means one slow or flaky dependency removes every instance from rotation simultaneously — you have coupled your availability to the availability of everything you touch, which is the opposite of resilience. The fix is to check only what is genuinely required to serve *any* request, mark non-essential dependencies as degraded rather than unhealthy, and put a short timeout and a cache on each check so the probe cannot be slower than its interval. I would also confirm that the service actually cannot serve without the dependency — often it can serve most endpoints, in which case failing readiness is a worse outcome than serving partially.
+*Follow-up: The probe itself times out under load. What's happening and what do you change?*
+
+**Q2. How do you decide log levels in a way the team applies consistently?**
+**A:** By defining them in terms of consequences rather than severity feelings: Error means a request or operation failed in a way someone should investigate; Warning means something unexpected that the system handled; Information means a significant business or lifecycle event; Debug and Trace are for development and targeted diagnosis and are off in production. The concrete rules that matter most are that a handled-and-retried failure is not an Error, that client-caused failures are not Errors, and that Information should not be emitted per-loop-iteration. Without those, Error becomes noise and the level loses all signalling value.
+*Follow-up: Your error dashboard has 10,000 entries a day and nobody looks at it. How do you fix that?*
+
+**Q3. How would you instrument a service that already exists, without a big-bang project?**
+**A:** Start with what comes free: the framework's built-in `ActivitySource` and `Meter` instrumentation for ASP.NET Core, `HttpClient` and the database driver gives you request rate, latency, errors and dependency calls with no code changes — that alone answers most operational questions. Then add correlation and scopes so existing logs become queryable together. Only then add custom spans and metrics for the specific business operations that matter, driven by the questions you could not answer during the last incident. Instrumenting everything up front produces cost and noise; instrumenting from real unanswered questions produces signal.
+*Follow-up: Which three custom metrics would you add first to a payments service, and why those?*
+
+**Q4. Where does trace context propagation break, and how do you fix each case?**
+**A:** It breaks at boundaries the runtime does not know about: message brokers, where context must be written into and read from message headers explicitly; background work queued without flowing `ExecutionContext`; manually-created threads; and any component that constructs its own HTTP request without the instrumented handler. It also breaks across a third-party service that does not forward the header. The fixes are explicit propagator use at each boundary — and, importantly, a test that asserts a trace spans the full flow, because a broken trace is silent and only discovered when you need it.
+*Follow-up: How would you write an automated test that a trace survives a round trip through the message broker?*
+
+**Q5. What sampling strategy would you choose and why?**
+**A:** Head-based sampling at a modest rate is the simple default and keeps cost predictable, but it discards exactly the traces you want, because a failure is rare and unlikely to be sampled. Tail-based sampling — deciding after the trace completes so you can keep all errors and slow traces plus a sample of normal ones — is far better operationally at the cost of infrastructure to buffer and decide. My preference is tail-based where the platform supports it, otherwise head-based with an override that forces sampling for errors and for explicitly-flagged requests. The critical property either way is that the sampling decision propagates consistently, or you get partial traces that are worse than none.
+*Follow-up: A trace is sampled in service A but not service B. What went wrong?*
+
+**Q6. How do you keep PII out of telemetry?**
+**A:** By making redaction structural rather than remembered: classify data at the type level so sensitive values cannot be logged accidentally, redact in the logging pipeline with an allow-list of loggable fields, and never log whole request or response objects. Traces need the same treatment, since tags and baggage are just as exposed, and baggage is particularly dangerous because it propagates to services you do not control. I would pair that with automated scanning of the telemetry store for patterns that look like PII, because prevention will leak eventually and detection is what bounds the damage. Retention and access control on the telemetry store are part of this design, not separate from it.
+*Follow-up: You discover card numbers in six months of logs. What's your response sequence?*
+
+**Q7. How do you instrument a background worker or message consumer meaningfully?**
+**A:** Treat each message as the unit of work: start an `Activity` linked to the producer's trace context, record the outcome, and emit metrics for consumption rate, processing duration, retry count and lag. Lag is the signal that matters most and is the one most often missing — a consumer can look perfectly healthy while falling permanently behind. I would also make sure failures produce a log with the message identifier and enough context to reprocess, and that a message moved to a DLQ generates a distinct, alertable event rather than a warning nobody reads.
+*Follow-up: How do you distinguish "consumer is slow" from "producer is fast" from your dashboards?*
+
+**Q8. What's the performance cost of observability, and where does it actually show up?**
+**A:** Structured logging with templates and disabled-level checks is cheap; the costs come from string formatting that happens regardless of level, per-request allocation of scope dictionaries, synchronous or blocking sinks, and high-cardinality metric updates. Tracing costs a small amount per span plus the exporter's batching. The pathological cases are logging inside a hot loop, a sink that blocks on network I/O in the request path, and unbounded metric labels. In practice I would measure with instrumentation on and off under load, because teams either assume it is free or assume it is expensive and both assumptions misallocate effort.
+*Follow-up: A logging sink starts blocking under load. What does the failure look like from the outside?*
+
+**Q9. How do you make telemetry consistent across services so dashboards are comparable?**
+**A:** Standardise the names and attributes, ideally following OpenTelemetry semantic conventions so tooling and community dashboards work without translation, and ship that standard as a shared package that registers the sources, meters, exporters and enrichers. If each team names their latency metric differently, a cross-service dashboard is impossible and every incident starts with translation. I would also standardise resource attributes — service name, version, environment, region, team — because those are what allow ownership routing and version-correlated analysis, and they are exactly what gets forgotten in a per-team setup.
+*Follow-up: Two teams have already built incompatible conventions. How do you converge them?*
+
+**Q10. How do you validate that your observability actually works before you need it?**
+**A:** By exercising it deliberately: game days and fault injection where you induce a failure and check whether the existing dashboards and alerts let someone locate it without prior knowledge. Every incident postmortem should also ask what signal was missing and add it. I would additionally test the mechanics — an integration test asserting trace propagation, an assertion that health endpoints return expected shapes, and a synthetic check that alerts fire — because silent telemetry failure is common and is only discovered during the incident it was meant to help with.
+*Follow-up: Your alerting pipeline itself fails silently. How would you know?*
+
+---
+
+## 4. Expert / Architect (10 Q&A)
+
+
+**Q1. How do you define what health means for a service, and who owns that definition?**
+**A:** Health should be defined by the service's ability to fulfil its own contract, not by the state of everything it touches — which means the service team owns the definition, but the definition must be reviewed against the platform's automated responses, because those responses are what turn a health signal into an action. I would require each dependency to be classified explicitly as essential or non-essential with a stated rationale, since that classification is the actual design decision and it is usually made implicitly by whoever wrote the check. The failure I plan against is health definitions that drift as dependencies are added without anyone revisiting whether the new one should be able to take the service offline.
+*Follow-up: A new dependency is added and quietly included in readiness. How would you catch that?*
+
+**Q2. How do you manage observability cost at scale without losing the ability to debug?**
+**A:** Attack cardinality and volume separately, because they have different drivers. Cardinality is controlled by governing metric labels — bounded values only, route templates rather than paths, with a review or automated check on new labels. Volume is controlled by moving high-volume detail from logs into metrics and traces, sampling intelligently rather than uniformly, and tiering retention so recent data is queryable and older data is cheap or aggregated. What I would protect at all costs is the ability to reconstruct a single failed request end to end, since that is the capability whose absence turns a thirty-minute incident into a six-hour one. Cost conversations should be framed as that trade explicitly, not as a percentage cut.
+*Follow-up: Finance mandates a 50% cut. What specifically do you cut first?*
+
+**Q3. How would you design health checking for a service with a long, expensive warm-up?**
+**A:** Use the startup probe so the orchestrator waits without killing the process, keep readiness false until the warm-up genuinely completes, and make the warm-up observable so a stuck start is distinguishable from a slow one. The deeper architectural question is whether the warm-up should exist at all — cache priming, JIT warm-up and connection pool establishment can often be shortened or moved out of the critical path, which matters because long startup limits how fast you can scale during an incident. I would treat startup time as an availability characteristic with its own budget, since a service that takes four minutes to start cannot respond to a traffic surge no matter how good its autoscaling is.
+*Follow-up: Warm-up requires loading a 2 GB model. How do you make scale-out viable?*
+
+**Q4. What is your approach to alerting, and how does it relate to what you instrument?**
+**A:** Alert on symptoms users experience — error rate, latency, saturation of the thing that actually constrains you — not on causes, because causes are unbounded and cause-based alerts produce noise while missing novel failures. Every alert must be actionable, have a runbook, and page only if a human must act now; everything else is a dashboard or a ticket. The relationship to instrumentation is that you should instrument to answer diagnostic questions and alert on a much smaller set of service-level signals; conflating them produces hundreds of alerts nobody trusts. The clearest sign of a broken alerting practice is alerts that are routinely acknowledged without action.
+*Follow-up: How do you retire an alert that fires weekly and is always ignored, without losing coverage?*
+
+**Q5. How do you standardise observability across an estate without blocking teams?**
+**A:** Ship it as a platform capability: a package that configures logging, tracing, metrics, resource attributes and exporters correctly with one call, plus default dashboards and alerts generated from the standard signals. Teams then get useful observability by default and only invest effort in what is specific to their domain. The governance that matters is a small set of non-negotiables — resource attributes, trace propagation, correlation, PII handling — with everything else advisory. I would also invest in the paved path being genuinely better than rolling your own, since standardisation enforced by policy but inferior in practice gets circumvented.
+*Follow-up: A team's custom setup is better than the platform's. What do you do?*
+
+**Q6. How do health checks and observability change in a multi-region or cell-based architecture?**
+**A:** Health becomes hierarchical: instance health, cell health, and region health are different questions with different remedies, and the automated response differs at each level — draining an instance is routine, failing over a region is not. Telemetry must carry region and cell as resource attributes or you cannot tell a regional problem from a global one, which is the first question during an incident. I would also ensure the observability backend itself is not single-region, since losing visibility precisely when a region fails is a well-known and avoidable failure. Cross-region trace correlation needs explicit attention because requests may span regions in ways the default instrumentation does not capture.
+*Follow-up: Your observability backend is in the region that just failed. What's your fallback?*
+
+**Q7. What role does observability play in the case for or against an architectural change?**
+**A:** A decisive one, and it should be established before the change rather than after. If you cannot measure the current system's behaviour on the dimension you propose to improve, you cannot justify the change or verify it worked — which is how organisations end up with migrations that everyone believes helped and nobody can demonstrate. I would require that any significant change name its success metric, confirm the metric exists and is trustworthy today, and include a baseline. This is also the mechanism for stopping work that is not paying off, which is harder and more valuable than starting it.
+*Follow-up: The metric shows no improvement after a quarter of migration work. How do you handle that conversation?*
+
+**Q8. How do you handle observability for a regulated workload where telemetry itself is sensitive?**
+**A:** Treat the telemetry store as a data store with a classification: access controls, retention limits aligned to policy, encryption, and audit of who queried what — because in practice logs accumulate more sensitive data than any designed store, and they typically have the weakest controls. Data residency applies too, so a global telemetry backend may be non-compliant for some regions and needs regional isolation. I would separate audit records from diagnostic telemetry entirely, since audit has completeness and tamper-evidence requirements that a sampled, best-effort pipeline cannot meet. The design principle is that observability is not exempt from data governance just because it is operational.
+*Follow-up: Your APM vendor stores data outside the permitted region. What are your options?*
+
+**Q9. How would you evaluate migrating from a vendor APM to OpenTelemetry plus an open-source backend?**
+**A:** On three axes: vendor lock-in and cost trajectory, capability parity, and the operational burden you are taking on. OpenTelemetry instrumentation is worth adopting almost regardless, because it decouples instrumentation from backend and makes the backend a replaceable choice — that part is a strong yes. Self-hosting the backend is a separate decision, and the honest accounting includes engineers operating a high-volume storage system, which frequently costs more than the licence it replaced. My typical recommendation is to migrate instrumentation to OpenTelemetry first, keep the vendor backend, and only then evaluate self-hosting from a position where switching is actually possible.
+*Follow-up: The team wants to do both at once to avoid two migrations. What's your view?*
+
+**Q10. What would you look for to judge whether an organisation can actually operate its services?**
+**A:** Whether an engineer who did not write a service can diagnose it: is there a trace for a failed request, does the correlation ID in a user complaint lead anywhere, do the dashboards answer "is it us or a dependency" in under a minute, and does the alert that fired have a runbook. I would look at time-to-detect and time-to-localise in recent incidents rather than at tooling inventory, because good tooling with no conventions produces the same outcome as no tooling. The strongest single signal is whether postmortems consistently produce observability improvements — that indicates a team treating the ability to see the system as part of the system, which is what actually compounds over years.
+*Follow-up: Postmortems keep producing the same "we need better logging" action item. What's the underlying problem?*
+
+---
+
+## 5. Reference Material
+
+> Retained from the original module: deep-dive internals, diagrams, production examples, exercises, system/low-level design, debugging walkthroughs and the Principal Engineer perspective.
+
+### 1. Fundamentals
 **Health checks** (`Microsoft.Extensions.Diagnostics.HealthChecks`) let a service report its own operational status (`Healthy`/`Degraded`/`Unhealthy`) via a dedicated endpoint, consumed by orchestrators (Kubernetes liveness/readiness probes) and load balancers to decide whether to route traffic to or restart a given instance. **Observability** (structured logging, metrics via `System.Diagnostics.Metrics`, distributed tracing via `System.Diagnostics.Activity`/OpenTelemetry) is how a running system's internal behavior becomes externally inspectable. Both exist because a distributed system's individual components must be able to answer "am I working correctly" and "what is actually happening inside me" without a human manually inspecting each instance.
 
-## 2. Deep Dive
+### 2. Deep Dive
 
-### 2.1 Liveness vs Readiness — a Critical, Frequently-Confused Distinction
+#### 2.1 Liveness vs Readiness — a Critical, Frequently-Confused Distinction
 **Liveness** ("is this process alive, or should it be killed and restarted?") and **readiness** ("can this instance currently accept traffic?") are semantically distinct and must be mapped to **separate** health-check endpoints/tags — a check that's naturally transient (e.g., "database connection pool is momentarily exhausted") should fail *readiness* (temporarily stop routing traffic here) but must **never** fail *liveness* (which would cause Kubernetes to kill and restart a perfectly healthy process that's just waiting on a downstream dependency to recover) — conflating the two is a classic, severe production mistake: a downstream database outage can cascade into the **entire fleet being killed and restarted simultaneously** if a database-connectivity check is wired to the liveness probe instead of readiness.
 
-### 2.2 `IHealthCheck` and Tagging
+#### 2.2 `IHealthCheck` and Tagging
 ```csharp
 services.AddHealthChecks
 .AddCheck<DatabaseHealthCheck>("database", tags: new[] { "ready" })
@@ -23,13 +207,13 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = c => c
 ```
 Tags are precisely how one health-check registry serves both liveness and readiness endpoints with different check subsets — the liveness endpoint should include **only** checks verifying the process itself hasn't deadlocked/corrupted (rarely more than a trivial self-check), while readiness includes all genuine dependency checks (database, cache, downstream APIs).
 
-### 2.2b Distributed Tracing — `Activity` and `ActivitySource`
+#### 2.2b Distributed Tracing — `Activity` and `ActivitySource`
 `System.Diagnostics.Activity` is the.NET-native building block for distributed tracing (predating and now aligned with OpenTelemetry's semantic conventions) — an `Activity` represents one traced operation (a request, a database call), automatically correlated via a `TraceId`/`SpanId` propagated across process boundaries (via the `traceparent` HTTP header, W3C Trace Context standard) and across `async`/`await` boundaries within a process (via `AsyncLocal`-based `ExecutionContext` flow, directly the mechanism, now applied to tracing context instead of `SynchronizationContext`).
 
-### 2.3 Metrics — `System.Diagnostics.Metrics`
+#### 2.3 Metrics — `System.Diagnostics.Metrics`
 The modern (.NET 6+) built-in metrics API (`Meter`, `Counter<T>`, `Histogram<T>`) is vendor-neutral and OpenTelemetry-compatible by design — replacing older, provider-specific metrics APIs. A `Histogram<T>` recording request duration is the standard mechanism feeding p50/p99 latency dashboards.
 
-## 3. Visual Architecture
+### 3. Visual Architecture
 ```mermaid
 graph LR
  K8s[Kubernetes] -->|liveness probe| L["/health/live (self-check only)"]
@@ -40,142 +224,12 @@ graph LR
  Meter --> OTel[OpenTelemetry Collector] --> Dashboard[Grafana/Datadog/etc.]
 ```
 
-## 4. Production Example
+### 4. Production Example
 **Scenario**: A fleet-wide cascading restart. A shared database experienced a brief (90-second) connection-pool exhaustion under a traffic spike. Every replica's health check — a single, undifferentiated `/health` endpoint checking database connectivity, wired to **both** the Kubernetes liveness **and** readiness probes — failed simultaneously. Kubernetes, interpreting the liveness failure as "the process is broken," killed and restarted **every replica in the fleet at once**, converting a brief, self-recovering database blip into a full-platform outage (all replicas restarting simultaneously, cold-starting, and hitting the still-recovering database with a synchronized reconnection storm). **Fix**: split into separate liveness (`self`-only) and readiness (`database`-included) endpoints, with liveness probe configuration in Kubernetes pointed only at the former. **Lesson**: a health-check design mistake this subtle-looking has fleet-wide blast radius — exactly the "small config detail, catastrophic scale of impact" pattern recurring throughout this course.
-## 10. Interview Questions
 
-### Basic (10)
+### 11. Coding Exercises
 
-1. **Q: What's the difference between a liveness check and a readiness check?**
- **A:** Liveness answers "should this process be killed and restarted"; readiness answers "should traffic currently be routed to this instance" — they must use different check subsets.
-
-2. **Q: What does an `IHealthCheck` implementation return?**
- **A:** A `HealthCheckResult` — `Healthy`, `Degraded`, or `Unhealthy`, optionally with a description and data payload.
-
-3. **Q: Why are tags used on health checks?**
- **A:** To let one shared health-check registry serve multiple endpoints (liveness, readiness) each filtering to a different subset of checks via a `Predicate`.
-
-4. **Q: What is `System.Diagnostics.Activity` used for?**
- **A:** Representing one traced operation (a request, a database call) for distributed tracing, correlated via a `TraceId`/`SpanId`.
-
-5. **Q: What are `Meter`, `Counter<T>`, and `Histogram<T>`?**
- **A:** The building blocks of.NET's vendor-neutral metrics API — a `Meter` groups related instruments; `Counter<T>` records monotonically increasing counts; `Histogram<T>` records a distribution of values (like request durations).
-
-6. **Q: Why prefer structured logging over string-interpolated log messages?**
- **A:** Structured logging keeps individual fields (user ID, order ID, status code) as separately queryable data rather than embedding them unsearchably inside a formatted string.
-
-7. **Q: What HTTP status code does the health-checks middleware typically return for an unhealthy result?**
- **A:** `503 Service Unavailable` — a 5xx is required so load balancers and orchestrator probes (which key on status class, not body content) treat the instance as failing; `Degraded` returns 200 by default so it doesn't remove the instance from rotation.
-
-8. **Q: What is the W3C standard header used to propagate trace context across services?**
- **A:** `traceparent` (W3C Trace Context) — it carries the trace ID, parent span ID, and sampling flags, so a downstream service can attach its spans to the same distributed trace; `tracestate` optionally carries vendor-specific context alongside it.
-
-9. **Q: Why should health checks be kept lightweight and fast?**
- **A:** They're polled frequently by orchestrators; an expensive check adds recurring, avoidable load and can itself become a source of instability.
-
-10. **Q: What is OpenTelemetry?**
- **A:** A vendor-neutral, open standard and SDK for collecting traces, metrics, and logs, portable across many different observability backends.
-
-### Intermediate (10)
-
-1. **Q: Why must a downstream database's transient unavailability never be wired to the liveness probe?**
- **A:** Because liveness failure triggers a process kill-and-restart — if a database blip fails liveness, every replica hitting that same database gets killed simultaneously, converting a transient, recoverable dependency issue into a full, self-inflicted fleet outage.
-
-2. **Q: How does trace context propagate across an `await` boundary within a single process?**
- **A:** Via the same `AsyncLocal`-based `ExecutionContext` flow mechanism used for `AsyncLocal<T>` generally — `Activity.Current` is itself flowed this way, so it remains correctly set across asynchronous continuations without manual passing.
-
-3. **Q: How would you tag checks to serve three distinct endpoints: liveness, readiness, and a Kubernetes "startup" probe?**
- **A:** Tag each check with one or more of `"live"`, `"ready"`, `"startup"` as appropriate, then map three separate endpoints each filtering via `HealthCheckOptions.Predicate` to the matching tag — a startup probe commonly includes a superset of readiness checks but is polled only during the container's initial startup window before liveness/readiness take over.
-
-4. **Q: Why is `Histogram<T>`, not `Counter<T>`, the correct instrument for request latency?**
- **A:** A histogram records the full distribution of individual observed values (enabling p50/p95/p99 percentile calculations); a counter only tracks a running total/rate, which can't answer "what does the latency distribution look like" at all.
-
-5. **Q: How does structured logging enable the same expected-vs-unexpected triage discipline covered in the exception-handling module?**
- **A:** By tagging log entries with a consistent, queryable severity/category field distinguishing "expected domain outcome" from "unexpected failure," exactly as that module recommends for exception handling — structured fields make this distinction filterable/dashboardable at the logging layer, not just at the exception-catching layer.
-
-6. **Q: What's a realistic reason a readiness check might need to be more comprehensive than a liveness check but less comprehensive than a "deep" diagnostic endpoint?**
- **A:** Readiness needs to verify the dependencies actually required to serve traffic correctly (database, critical cache) without being so exhaustive (checking every possible downstream integration) that it becomes slow/expensive/fragile to transient blips in non-critical dependencies, which is better modeled as `Degraded` (Advanced/Hard exercise) than an all-or-nothing readiness failure.
-
-7. **Q: Why is a single health check testing "can I reach every downstream dependency" often the wrong design?**
- **A:** It conflates critical and non-critical dependencies into one pass/fail signal, and conflates liveness-appropriate and readiness-appropriate concerns — a single non-critical dependency blip would incorrectly take the whole instance out of rotation (or worse, if wired to liveness, kill it) even though the instance could otherwise serve most requests correctly.
-
-8. **Q: What does correlating logs, traces, and metrics via a shared `TraceId` actually let you do in practice?**
- **A:** Jump from a single slow/erroring request (found via a log entry or an alert) directly to its full distributed trace showing every downstream call and their individual durations, then to the aggregate metrics dashboard for the same time window — moving fluidly between "one specific incident" and "the aggregate pattern" using one shared identifier.
-
-9. **Q: Why is `Activity.Current` risk-prone specifically around `Task.Run`-offloaded work?**
- **A:** `Task.Run` queues work to the thread pool with a fresh `ExecutionContext` flow from the calling context by default (it does flow correctly in standard usage) — but code that explicitly suppresses execution-context flow (`ExecutionContext.SuppressFlow`) or uses certain older, non-flowing scheduling APIs can silently lose `Activity.Current`, producing a broken/orphaned trace span with no parent, an easy-to-miss gap in an otherwise-correct instrumentation setup.
-
-10. **Q: Why would a team choose to log at `Warning` or a distinct custom severity for an expected-but-notable outcome, rather than `Information` or `Error`?**
- **A:** To make the log queryable/alertable at a severity level distinct both from routine informational noise and from genuine unexpected errors — mirroring the exception-handling module's expected-vs-unexpected distinction, applied here as a deliberate logging-severity convention rather than left to default, inconsistent per-engineer judgment.
-
-### Advanced (10)
-
-1. **Q: Design a health-check strategy for a service with one critical dependency (its primary database) and one non-critical dependency (an optional recommendation cache), correctly using `Degraded`.**
- **A:** The database check returns `Unhealthy` on failure (tagged `"ready"`, causing readiness to fail and traffic to stop routing here); the cache check returns `Degraded` (not `Unhealthy`) on failure, tagged `"ready"` but configured so the aggregate readiness response still returns a 200-equivalent "degraded but serving" status for `Degraded` results specifically (via a custom `ResponseWriter`/status-code mapping) — the instance keeps serving traffic (recommendations gracefully disabled/falling back) rather than being needlessly pulled from rotation over a genuinely non-critical dependency.
-
-2. **Q: Explain precisely how `Activity.Current` flows across an `await` boundary, and identify a specific scenario where it breaks.**
- **A:** It flows via `ExecutionContext`, the same mechanism carrying `AsyncLocal<T>` values — it breaks specifically when code uses `ConfigureAwait(false)` combined with manual `SynchronizationContext`-bypassing in a way that also strips execution context (rare in ordinary code), or, more commonly, when a fire-and-forget `Task.Run(...)` is deliberately detached from the original request's lifetime in a way that intentionally starts a new, unparented `Activity` — the break is usually deliberate/architectural, not accidental, but must be understood so an "orphaned trace span" isn't mistaken for an instrumentation bug when it's actually the correct behavior for genuinely decoupled background work.
-
-3. **Q: Diagnose the fleet-wide cascading restart from first principles, without having seen the specific incident before.**
- **A:** Symptom: all replicas restart simultaneously during a downstream outage. First question: what health-check endpoint is wired to the liveness probe, and does it include any downstream dependency check? If yes, that's the root cause — liveness must check only local process health (self-check), never downstream dependencies, since a downstream outage affecting every replica identically will otherwise fail every replica's liveness identically and simultaneously, and Kubernetes has no way to know "these are all failing for the same external reason, don't restart everything at once."
-
-4. **Q: Design an alerting strategy distinguishing "one replica unhealthy" from "the whole fleet unhealthy."**
- **A:** Alert only on the **aggregate** readiness-failure rate across the fleet (e.g., ">50% of replicas failing readiness for >2 minutes") rather than any single replica's individual failure, which the orchestrator already handles automatically (removing it from rotation, and, for liveness, restarting it) without needing a human paged — reserve paging specifically for patterns indicating a systemic issue no amount of individual-replica self-healing will resolve (e.g., every replica failing the same downstream check simultaneously).
-
-5. **Q: Architect a full OpenTelemetry pipeline for a microservices estate, addressing sampling strategy explicitly.**
- **A:** Every service exports traces/metrics/logs to a local OpenTelemetry Collector sidecar/agent, which batches and forwards to a central collector tier; apply **tail-based sampling** at the central tier (deciding whether to retain a trace *after* seeing its full outcome) specifically so 100% of error/slow traces are retained regardless of a low overall sampling rate, while routine successful traces are sampled at a low percentage — this requires buffering complete traces at the collector tier (since the retain/discard decision needs the full trace) as opposed to simpler, cheaper **head-based sampling** (deciding at trace start, before the outcome is known, which discards error traces at the same rate as successful ones — a poor fit when errors are exactly what you most need visibility into).
-
-6. **Q: Design a health-check dependency graph where Service A's readiness check calls Service B, which has its own health check — how do you avoid cascading, circular, or redundant check storms?**
- **A:** Service A's check of Service B should call B's **already-computed, cached** health status (e.g., B's last-known readiness state, refreshed on B's own polling cadence) rather than triggering a fresh, synchronous health check of B on every single poll of A — and critically, B's check must never, even transitively, check back on A, which would create a circular dependency; the correct pattern is a strict, acyclic dependency direction (A depends on B's health, never the reverse) with each service's health check reflecting only its own immediate dependencies' cached status, not a live, recursive fan-out.
-
-7. **Q: Why might returning `Degraded` rather than `Unhealthy` for a non-critical dependency still need very careful monitoring, even though it doesn't remove the instance from rotation?**
- **A:** Because `Degraded` states can silently persist and compound — if the "optional" cache has been down for hours and every replica is serving in a permanently degraded mode without anyone noticing (since nothing failed loudly), a genuinely important, user-facing feature-quality regression can go unaddressed for a long time; `Degraded` needs its own dashboard/alerting distinct from binary healthy/unhealthy, not just "doesn't page, so it's fine."
-
-8. **Q: How would you decide the appropriate sampling rate for routine, successful traces in a high-volume service, balancing cost against debuggability?**
- **A:** Start from the actual, measured cost per trace at the observability backend's pricing model, multiplied by expected trace volume, to establish a cost ceiling; then choose the highest sampling rate the budget allows while ensuring the *retained* sample size remains statistically large enough to detect meaningful latency-distribution shifts (not just error traces, which tail-based sampling already retains at 100% regardless) — this is a genuine, quantifiable trade-off decision, not an arbitrary percentage choice, and should be revisited as traffic volume/backend pricing changes.
-
-9. **Q: Explain why "the deployment just happened, and the readiness checks are failing right after" might be entirely expected behavior rather than a bug.**
- **A:** A newly-started replica legitimately takes some time to warm up (JIT tiering,; connection-pool establishment) before it's genuinely ready to serve traffic efficiently — readiness probes are specifically designed to hold new replicas out of rotation during this window, and a "startup probe" (Intermediate Q3) with a longer initial grace period is the correct tool for this, rather than treating early readiness failures immediately after deployment as an incident.
-
-10. **Q: How would you extend this module's incident into a standing, automated safeguard preventing recurrence across an entire service fleet?**
- **A:** Add the liveness/readiness-separation requirement (distinct endpoints, distinct tag sets, liveness containing only a trivial self-check) to the organization's shared service template (directly the governance pattern established in the middleware and DI modules), plus a CI/deployment-gate check verifying a new service's Kubernetes manifest points its liveness and readiness probes at genuinely different paths before allowing deployment — converting this module's single, severe incident into a structurally-enforced standard rather than tribal knowledge.
-
-### Expert (10)
-
-1. **Q: A very large microservices estate is considering 100% trace sampling ("full observability, nothing missed") — evaluate this as a Principal Engineer.**
- **A:** Full sampling gives maximum debuggability but scales cost linearly with traffic — at genuinely large scale, this becomes a dominant, unbounded infrastructure cost line item; the better answer is near-100% retention specifically for *interesting* traces (errors, high latency, a sampled fraction of specific high-value transaction types) via tail-based sampling, which delivers the debugging value that matters (you almost never need to inspect a routine, fast, successful trace after the fact) at a small fraction of the cost — recommend this instead of blanket full sampling, with the sampling policy itself version-controlled and reviewed as infrastructure, not a one-time setup decision.
-
-2. **Q: Design a "canary readiness" mechanism where a newly-deployed replica's readiness check is intentionally more conservative than steady-state replicas', to catch a bad deployment before it receives full traffic.**
- **A:** Tag a canary-specific, stricter set of checks (verifying not just connectivity but a synthetic, representative transaction succeeds end-to-end) applied only during a replica's first few minutes post-deployment (distinguishable via a startup timestamp or explicit canary-phase flag), falling back to the ordinary, less strict readiness checks once the replica has been serving successfully for a defined warm-up period — this lets a genuinely broken deployment (passing basic connectivity checks but failing actual business transactions) be caught and rolled back automatically before it's promoted to serve full production traffic.
-
-3. **Q: How would you reason about whether liveness checks should have any dependency awareness at all, even something as seemingly safe as "is my own internal work queue backed up beyond a sane threshold"?**
- **A:** This is a legitimate, narrower exception to "liveness = self-check only" — an internal, self-contained signal (not a downstream dependency) genuinely indicating the process itself is stuck/deadlocked (as opposed to merely slow due to an external cause) is arguably appropriate for liveness, since restarting a genuinely deadlocked process is the correct remedy; the key distinguishing test is "would restarting this specific process actually fix the problem, or would every replica hit the identical failure again immediately because the root cause is external" — only checks passing that test belong on liveness.
-
-4. **Q: Explain the interaction between health-check-driven traffic shifting and the request-draining/graceful-shutdown behavior covered in the middleware module.**
- **A:** When a replica is marked not-ready (whether intentionally during shutdown, or due to a failing dependency), the orchestrator stops routing *new* traffic to it, but requests already in flight must still be allowed to complete within the graceful-shutdown grace period (the `RequestAborted`/hosting-lifetime discussion) — a health-check design that immediately terminates the process the instant readiness fails (rather than coordinating with graceful drain) would abruptly cut off in-flight requests instead of letting them finish, a subtle but important interaction between two mechanisms that are easy to design independently but must actually work together correctly.
-
-5. **Q: As a Principal Engineer, how would you evaluate a proposal to replace health checks with "just monitor error rates and let the orchestrator's own crash-loop-backoff handle everything"?**
- **A:** Push back: error-rate monitoring is a valuable **complementary** signal but a poor substitute for dedicated health checks — a replica can be perfectly capable of serving *most* requests successfully (low overall error rate) while a specific critical dependency it needs is down, with health checks providing an explicit, targeted, low-latency signal ("this specific thing is broken") long before an aggregate error-rate threshold would trip; recommend health checks as the primary, fast-acting mechanism for traffic-routing/restart decisions, with error-rate/latency monitoring as the complementary, slower, aggregate-pattern-detection layer for human alerting — not a replacement for either.
-
-### FinTech Principal Panel — High-Frequency Questions
-
-**FT1. Q: For a payment rail, infra dashboards (CPU, latency, error rate) are all green but money has silently stopped settling. What observability do you add so a *business*-level failure is detected as fast as an infra one?**
-**A:** Green infra with broken business outcomes is the classic FinTech observability gap — you must instrument the *money*, not just the machines. Add: (1) **synthetic transactions** — a canary that continuously pushes a small real (or shadow) payment end-to-end through the live rail and alerts if it doesn't complete within SLA, catching "requests succeed but nothing settles" that infra metrics miss; (2) **business invariants as monitored signals** — e.g., ledger **double-entry balance** (sum of debits == sum of credits) checked continuously, **outbox/queue lag** (are events draining?), **settlement lag** (time from authorization to settlement vs. SLA), **authorization approval-rate** anomaly detection (a sudden drop signals a broken dependency even at low error rate); (3) **reconciliation breaks** surfaced as alerts, not just end-of-day reports. These are first-class SLIs with their own SLOs and alerting, distinct from HTTP health. The Principal framing: in payments, "the service is up" and "money is flowing correctly" are different questions — infra health answers the first, business/reconciliation telemetry + synthetic transactions answer the second, and only the second protects the actual product. Health checks gate traffic; business SLOs page a human when the *outcome* is wrong.
-**Why correct:** Distinguishes infra health from business-outcome health and instruments the outcome via synthetic transactions + monitored invariants (balance, outbox/settlement lag, approval rate, reconciliation).
-**Common mistakes:** Assuming green infra dashboards mean the product works; treating reconciliation as a batch report rather than a live signal; no synthetic end-to-end probe.
-**Follow-ups:** "What's your SLI/SLO for settlement lag and who's paged?" / "How does a continuous double-entry balance check catch a bug infra metrics can't?" / "Shadow vs. real synthetic payments — trade-offs?"
-
-**FT2. Q: Your APM captures request payloads and exception detail into traces and logs. In a card-processing system, why is that a serious problem, and how do you get observability without creating a compliance incident?**
-**A:** Un-scrubbed telemetry is one of the most common ways PANs, CVVs, and PII end up in low-security, widely-readable stores — traces/logs routinely capture request bodies, headers, query strings, and exception state, and an APM backend is typically accessible to far more people (and third parties) than cardholder data ever should be, so this is a direct **PCI-DSS/GDPR violation**, not a hygiene nit. Get observability safely by: (1) **never letting sensitive data into telemetry at the source** — tokenize/redact upstream so raw PANs don't flow through app code that logs, and redact at the logging/tracing boundary (scrubbing processors, deny-lists for known-sensitive fields, structured logging that only emits allow-listed fields); (2) **correlation IDs, not payloads** — carry an ID that lets you join to a secured system of record for debugging instead of embedding the sensitive value in the trace; (3) keep **audit logs separate from telemetry** — regulatory audit trails have their own immutability, access-control, and retention requirements and are not the same thing as APM debugging telemetry (don't conflate them); (4) enforce with automated scanning/tests that fail if a known-sensitive field appears in a log/trace. The Principal framing: observability and compliance aren't in tension if you design redaction-at-the-boundary and debug via correlation IDs into a secured store — the mistake is treating "log everything" as a virtue in a regulated data environment.
-**Why correct:** Names the PCI/PII leak via telemetry, and fixes it with source-level redaction/tokenization, correlation-IDs-not-payloads, audit/telemetry separation, and automated enforcement.
-**Common mistakes:** Logging full request bodies/exceptions containing card data; conflating audit logs with APM telemetry; relying on developer discipline instead of boundary redaction.
-**Follow-ups:** "Audit log vs. telemetry — how do their requirements differ?" / "How do correlation IDs let you debug without the sensitive value?" / "How do you test that a PAN never reaches your traces?"
-
----
-
-## 11. Coding Exercises
-
-### Easy — Database health check with timeout
+#### Easy — Database health check with timeout
 ```csharp
 public class DatabaseHealthCheck: IHealthCheck
 {
@@ -199,7 +253,7 @@ public class DatabaseHealthCheck: IHealthCheck
 }
 ```
 
-### Medium — Separate live/ready endpoints
+#### Medium — Separate live/ready endpoints
 ```csharp
 app.MapHealthChecks("/health/live", new HealthCheckOptions
     {
@@ -211,7 +265,7 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 });
 ```
 
-### Hard — `Degraded` for a non-critical dependency, 200 status preserved
+#### Hard — `Degraded` for a non-critical dependency, 200 status preserved
 ```csharp
 public class RecommendationCacheHealthCheck: IHealthCheck
 {
@@ -240,7 +294,7 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 ```
 **Discussion**: The explicit `ResultStatusCodes` mapping is the key mechanism — without it, `HealthCheckResult.Degraded` still defaults to a non-200 status by the built-in writer in some configurations, which would incorrectly pull the replica from rotation over a genuinely non-critical dependency.
 
-### Expert — `ActivitySource`-wrapped `HttpClient` call with duration histogram
+#### Expert — `ActivitySource`-wrapped `HttpClient` call with duration histogram
 ```csharp
 public class InstrumentedApiClient
 {
@@ -273,27 +327,25 @@ public class InstrumentedApiClient
 ```
 **Discussion**: Modern `HttpClient` already propagates `traceparent` automatically via its built-in diagnostics handler as long as `Activity.Current` is set when the call is made — the explicit `StartActivity` here creates the **client-side span** itself (giving it a name/tags), not the propagation mechanism, which happens transparently underneath.
 
----
-
-## 12. System Design
+### 12. System Design
 A production-grade platform separates liveness/readiness /, exports OpenTelemetry traces/metrics to a central collector, and uses tail-based sampling (Advanced Q5/Expert Q1) to retain full traces for error/slow requests while sampling routine successful traces at low volume for cost control — directly the architecture described in Expert Q1.
 
-## 13. Low-Level Design
+### 13. Low-Level Design
 A small, shared `InstrumentedApiClient` base (Expert coding exercise) wrapping every outbound `HttpClient` call with consistent `ActivitySource`/`Histogram` instrumentation, registered via `IHttpClientFactory`, ensures every downstream call across a codebase is uniformly traced/measured without each team re-implementing instrumentation independently.
 
-## 14. Production Debugging
+### 14. Production Debugging
 The signature incident for this module: a fleet-wide cascading restart from an undifferentiated health check wired to both liveness and readiness — diagnosed via Advanced Q3's first-principles checklist; a second common incident class is a canary/newly-deployed replica failing readiness immediately post-deploy due to legitimate warm-up time, misdiagnosed as a bug rather than addressed with a proper startup-probe grace period (Intermediate Q3/Advanced Q9).
 
-## 15. Architecture Decision
+### 15. Architecture Decision
 Tail-based sampling (Advanced Q5) is recommended over head-based sampling for any service where errors/slow requests are the primary debugging interest (nearly universal) — head-based sampling's simplicity is only worth its cost-of-missed-errors trade-off for extremely high-volume, low-diagnostic-value traffic where near-100% of traces are routine and uninteresting even when they fail.
 
-## 16. Enterprise Case Study
+### 16. Enterprise Case Study
 OpenTelemetry's own emergence (a merger of the earlier, competing OpenTracing and OpenCensus standards) mirrors this course's recurring "the industry converges on one shared, vendor-neutral standard once enough competing, incompatible approaches exist" pattern — worth citing when justifying OpenTelemetry adoption over a provider-specific SDK to a team, since the entire point of the merger was ending exactly the vendor-lock-in/fragmentation problem provider-specific instrumentation creates.
 
-## 17. Principal Engineer Perspective
+### 17. Principal Engineer Perspective
 Liveness/readiness separation is a non-negotiable, template-enforced standard (Advanced Q10) given its demonstrated fleet-wide blast radius — treat any new service's Kubernetes manifest as requiring explicit verification that liveness and readiness point to genuinely different, correctly-scoped endpoints before deployment is approved, exactly the same "small config detail, catastrophic scale of impact" governance discipline applied to forwarded-headers and captive dependencies.
 
-## 18. Revision
+### 18. Revision
 **Key takeaways**: Liveness = "kill and restart me if I fail" (self-check only); readiness = "route traffic to me if I pass" (dependency checks belong here). Conflating them turns a transient downstream blip into a fleet-wide outage. `Activity`/OpenTelemetry = vendor-neutral tracing; `Meter` = vendor-neutral metrics.
 
 **Cross-reference**: [[01-Middleware-Pipeline-Request-Internals]] (HA/DR graceful shutdown) and (expected-vs-unexpected severity differentiation, directly reapplied to structured logging here).

@@ -4,18 +4,203 @@
 
 ---
 
-## 1. Fundamentals
+## 1. Topic Description
 
-### What is table partitioning, replication, and logical decoding?
+### Definition
+
+**Declarative partitioning** splits one logical table into physical child tables by range, list or hash on a partition key, so the planner can eliminate irrelevant children at plan or execution time and so whole partitions can be attached and detached as metadata operations. **Physical (streaming) replication** ships the write-ahead log byte-for-byte to standbys that replay it, producing an identical block-level copy usable for read scale-out and failover. **Logical decoding** reads that same WAL and, through an output plugin, reconstructs it as a stream of logical row changes (insert/update/delete with column values), which is what makes logical replication and change-data-capture possible. All three are WAL-derived: partitioning changes where rows live, physical replication copies the WAL, logical decoding interprets it.
+
+### Core sub-concepts
+
+- **Declarative partitioning** — `PARTITION BY RANGE | LIST | HASH`, the partition key, child tables, and multi-level partitioning.
+- **Partition pruning** — plan-time versus runtime (`EXECUTE`-time) pruning, and why a non-immutable or parameterised key expression defeats it.
+- **Partition-wise joins and aggregates** — matching partition bounds so work happens per partition rather than across the whole set.
+- **Constraint requirements** — the partition key must be part of every unique/primary key; global unique constraints are not available.
+- **`ATTACH` / `DETACH PARTITION`** — metadata-only lifecycle operations, `DETACH CONCURRENTLY`, and the validation scan `ATTACH` performs unless a matching constraint already exists.
+- **Partition maintenance** — pre-creating future partitions, dropping old ones instead of deleting rows, and `pg_partman` as automation.
+- **Write-ahead logging** — WAL as the shared substrate for durability, replication and decoding; checkpoints and WAL retention.
+- **Streaming physical replication** — primary/standby, hot standby reads, `wal_level`, WAL sender/receiver.
+- **Replication slots** — guaranteed WAL retention for a consumer, and the disk-fill and vacuum-horizon risk of an abandoned slot.
+- **Synchronous versus asynchronous commit** — `synchronous_commit` levels, `synchronous_standby_names`, and the durability-versus-latency trade.
+- **Replication lag and hot-standby conflicts** — `hot_standby_feedback`, `max_standby_streaming_delay`, and query cancellation on standbys.
+- **Failover and promotion** — automated managers (Patroni and similar), fencing/STONITH, split-brain, timeline divergence, `pg_rewind`.
+- **Logical replication** — publications and subscriptions, initial data copy, per-table selectivity, cross-version and cross-platform replication.
+- **Logical decoding internals** — output plugins (`pgoutput`, `wal2json`, `decoderbufs`), the reorder buffer, transaction ordering, and large-transaction spill.
+- **CDC pipelines** — Debezium-style consumers, at-least-once delivery, LSN as the resume position, snapshot-plus-stream startup.
+- **Logical replication limitations** — DDL is not replicated, sequences are not advanced, replica identity requirements for updates and deletes, conflict handling.
+- **RPO / RTO** — what each topology actually guarantees, and how backup plus WAL archiving (PITR) complements replication.
+
+### Where it fits
+
+Partitioning sits on top of the heap and index layer from `01`, and interacts directly with vacuum: it converts a table-wide cleanup problem into per-partition units and turns bulk deletes into partition drops. Replication and decoding sit beneath the application's read/write routing: physical replicas serve read scale-out and failover, while logical decoding is the seam where the transactional database feeds the wider event-driven architecture — outbox relays, search indexes, caches, analytics stores and downstream services all commonly originate here. This is therefore the boundary where a single-database design becomes a distributed one, with all the consistency questions that implies.
+
+### Why it matters at scale
+
+Getting partitioning wrong is expensive in both directions: partition on the wrong key and every query scans every child, so you have added planning overhead and object count for nothing; leave partitions uncreated and inserts fail outright when data arrives for a range that does not exist. Replication failures are worse because they are silent — an abandoned replication slot for a decommissioned replica retains WAL indefinitely, filling the primary's disk and pinning the vacuum horizon so bloat grows database-wide, and the first symptom is usually a full volume. Asynchronous replication means a failover loses every transaction not yet shipped, so an RPO nobody explicitly chose is discovered during the incident. And on the read path, replication lag produces read-your-own-writes failures that are invisible in testing and deeply confusing in production.
+
+### Common pitfalls / anti-patterns
+
+- **Choosing a partition key that queries do not filter on** — no pruning is possible, so every query scans every partition and you have paid planning and maintenance cost for a slower table.
+- **Too many partitions** — thousands of children inflate planning time, catalog size and memory per backend; partition count should follow retention and query patterns, not be maximised.
+- **Not pre-creating future partitions** — inserts for a date range with no matching partition fail; this is the classic New Year's Day outage for time-partitioned tables.
+- **Deleting rows instead of dropping partitions** — generates enormous dead-tuple volume that autovacuum must reclaim, where a `DROP` would have been instant metadata work.
+- **Leaving an unused replication slot** — WAL is retained forever, filling the disk and holding back the vacuum horizon; the damage is database-wide and unrelated to the replica that caused it.
+- **Assuming a standby gives zero data loss** — asynchronous replication has a non-zero RPO by definition; synchronous commit is what removes it, at a latency and availability cost.
+- **Reading from a replica for read-your-own-writes flows** — replication lag means the write may not be visible, producing behaviour that testing never reproduces.
+- **Expecting logical replication to carry DDL or advance sequences** — schema changes and sequence values are not replicated, so a subscriber silently diverges or a promoted node reissues identifiers.
+- **Updating or deleting on a logically-replicated table without a suitable replica identity** — the change cannot be applied downstream, so the subscriber errors or silently misses rows.
+- **Treating replication as a backup** — a `DROP TABLE` replicates faithfully; only backups with WAL archiving give point-in-time recovery.
+
+---
+
+## 2. Beginner (10 Q&A)
+
+**Q1. What does declarative partitioning actually give you, and what does it not?**
+**A:** It gives partition pruning — the planner or executor skips children that cannot contain matching rows — plus per-partition maintenance, so vacuum, index builds and retention operate on smaller units and old data can be dropped as metadata. It does not make an individual well-indexed lookup faster; a seek into a B-tree was already logarithmic. The real wins are on large scans that can be pruned, and on lifecycle management of time-series data.
+*Follow-up: For a query that filters only on a non-partition column, is a partitioned table faster or slower than an unpartitioned one?*
+
+**Q2. Explain plan-time versus runtime partition pruning.**
+**A:** Plan-time pruning happens when the partition key is compared against a constant the planner can evaluate, so the excluded children never appear in the plan at all. Runtime pruning happens when the value is only known at execution — a parameter, or a value from the other side of a nested loop — so the plan retains all partitions and the executor skips them as it goes. Both are valuable, but runtime pruning still pays planning cost for every partition, which is why partition count matters even when pruning works.
+*Follow-up: You wrap the partition key in a function in the `WHERE` clause. What happens to pruning?*
+
+**Q3. Why must the partition key be part of every unique constraint?**
+**A:** Because uniqueness is enforced by an index, and each partition has its own local index — there is no global index spanning children. To guarantee uniqueness across the whole table, the key must include the partition column so that any two rows with the same key are guaranteed to land in the same partition. The practical consequence is that you cannot have a globally unique surrogate key independent of the partition column, which frequently forces a composite primary key and surprises people migrating an existing table.
+*Follow-up: Your table has a globally unique `OrderId` and you want to partition by `CreatedDate`. What are your options?*
+
+**Q4. What is `ATTACH PARTITION` and why can it be slow?**
+**A:** It adopts an existing table as a partition of a parent. By default PostgreSQL must verify that every row satisfies the partition bounds, which is a full scan under a lock that blocks access to the table. You avoid that by first adding a `CHECK` constraint matching the bounds and validating it separately — then `ATTACH` can trust it and complete as a metadata operation. That two-step pattern is the difference between a routine load and an outage on a large table.
+*Follow-up: What does `DETACH CONCURRENTLY` change, and what limitation does it carry?*
+
+**Q5. What is the write-ahead log and why is it central to all three of these topics?**
+**A:** Every change is written to the WAL before the data pages themselves, which is what makes crash recovery possible: replay the log to reconstruct committed state. Physical replication ships those WAL records to standbys that replay them; logical decoding reads the same records and reconstructs them as row-level changes. So durability, replication and CDC are all consumers of one stream, and settings that affect WAL — `wal_level`, retention, archiving — affect all of them together.
+*Follow-up: What does raising `wal_level` to `logical` cost you?*
+
+**Q6. What is a replication slot?**
+**A:** A server-side marker recording how far a particular consumer — a physical standby or a logical subscriber — has progressed, so the primary retains WAL until that consumer has confirmed receipt. It removes the risk of a lagging replica falling irrecoverably behind because the WAL it needed was recycled. The cost is the symmetric risk: if the consumer disappears and the slot is not dropped, retention is unbounded and the primary's disk fills.
+*Follow-up: Beyond disk usage, what else does a stale logical slot hold back?*
+
+**Q7. Synchronous versus asynchronous replication — what are you choosing between?**
+**A:** Durability versus latency and availability. With asynchronous replication a commit returns as soon as it is durable locally, so failover can lose transactions that had not yet shipped — a non-zero RPO. With synchronous commit, the primary waits for a standby to confirm, giving zero data loss for committed transactions but adding a network round trip to every commit and making the primary's availability depend on a standby being reachable. The middle grounds are the intermediate `synchronous_commit` levels and quorum-based synchronous sets.
+*Follow-up: With one synchronous standby, what happens to the primary when that standby goes down?*
+
+**Q8. What is logical decoding, and how does it differ from physical replication?**
+**A:** Physical replication copies WAL records that describe *block-level* changes, so the standby is byte-identical and must run the same major version and architecture. Logical decoding runs the WAL through an output plugin that reconstructs *row-level* logical changes — table, operation, and column values — which can then be applied to a different major version, a different schema, or an entirely different system such as Kafka. That interpretation step is what makes CDC and selective replication possible.
+*Follow-up: Why can a logical subscriber run a different PostgreSQL major version when a physical standby cannot?*
+
+**Q9. What does logical replication *not* replicate?**
+**A:** DDL — schema changes must be applied to both sides separately, and a subscriber that has not received a new column will error or silently diverge. It also does not advance sequences on the subscriber, so a promoted subscriber will reissue identifiers already used. Large objects and truncations have their own caveats depending on version. These gaps are the main operational burden of logical replication and are the usual cause of a subscription breaking weeks after it was set up.
+*Follow-up: How would you sequence a schema change across a publisher and a subscriber safely?*
+
+**Q10. What is replica identity and when does it bite?**
+**A:** It tells logical decoding how to identify a row for `UPDATE` and `DELETE` on the subscriber. The default uses the primary key; a table without one needs `REPLICA IDENTITY FULL` (which logs the whole old row and is expensive) or a designated unique index. If it is not set appropriately, updates and deletes cannot be decoded and the subscription errors. It bites on tables that were fine for years under physical replication and are then added to a publication.
+*Follow-up: What's the performance cost of `REPLICA IDENTITY FULL` on a wide, frequently-updated table?*
+
+---
+
+## 3. Intermediate (10 Q&A)
+
+**Q1. How do you choose a partition key and a partition granularity?**
+**A:** From the queries and the retention policy together: the key must be something the dominant queries actually filter on, or pruning never happens; the granularity should make each partition large enough to be worth having and small enough that maintenance and drops are cheap. For time-series data, a range on the timestamp with monthly or daily granularity matched to the retention window is the standard shape. I would sanity-check the resulting partition count, because thousands of children inflate planning time and per-backend memory even when pruning works.
+*Follow-up: Queries filter on tenant *and* date. Would you partition by one, or use multi-level partitioning?*
+
+**Q2. When is hash partitioning the right choice over range or list?**
+**A:** When you want even distribution rather than lifecycle management — spreading write contention and keeping partitions similarly sized without a natural range. The trade-off is that you lose the operational benefits: you cannot drop old data by dropping a partition, and range queries cannot prune because adjacent values hash to different children. So hash suits distributing a hot table across partitions to reduce contention, and range suits time-series retention, and mixing up which problem you have produces a partitioned table that helps with neither.
+*Follow-up: You hash-partition by tenant and one tenant is ten times larger than the rest. What happens?*
+
+**Q3. Walk me through diagnosing a primary whose disk is filling.**
+**A:** WAL accumulation is the first hypothesis, and the usual causes are a replication slot whose consumer is gone or lagging, WAL archiving failing so files cannot be recycled, or a very long-running transaction. I would check slot restart LSNs and lag, then the archiver status, then the oldest transaction. The important second-order effect is that a stale *logical* slot also holds back the vacuum horizon, so alongside the disk problem you are accruing bloat across the whole database. The fix is to drop the slot if the consumer is genuinely gone — but only after confirming it is, since dropping a live slot forces a subscriber to re-seed.
+*Follow-up: The slot belongs to a CDC pipeline that's been down for two days. Drop it or wait?*
+
+**Q4. How do you handle read scale-out without breaking read-your-own-writes?**
+**A:** Route reads that must observe a just-completed write to the primary, and everything else to replicas — which means the routing decision has to be explicit in the code or the data-access layer rather than a global toggle. Alternatives are waiting for the replica to reach the write's LSN before reading, which trades latency for correctness, or designing the interaction so staleness is acceptable and visible. What does not work is assuming lag is small enough not to matter; it is small until a bulk load, a long checkpoint or a network blip makes it seconds.
+*Follow-up: How would you implement LSN-based read routing, and what does it cost?*
+
+**Q5. What are hot-standby conflicts and how do you manage them?**
+**A:** A standby replaying WAL may need to remove rows that a long-running query on that standby still needs to see, so PostgreSQL either delays replay or cancels the query. `max_standby_streaming_delay` sets how long replay will wait, and `hot_standby_feedback` makes the standby tell the primary to hold back vacuum for its running queries. Each option moves the pain: delaying replay increases lag and RPO exposure, while feedback causes bloat on the *primary* because vacuum is held back there. For a reporting replica I usually accept feedback plus monitoring on the primary's horizon, but it must be a conscious choice.
+*Follow-up: With `hot_standby_feedback` on, a report runs for six hours on the replica. What's happening on the primary?*
+
+**Q6. How would you set up CDC from PostgreSQL into a message broker?**
+**A:** A logical replication slot with an appropriate output plugin, consumed by a connector that publishes changes and periodically confirms its LSN so WAL can be released. The design points that matter are: delivery is at-least-once, so consumers must be idempotent; ordering is guaranteed within a transaction and by LSN, not globally across tables in the way people assume; the initial snapshot plus stream handover must be correct or you lose or duplicate a window of changes; and the slot is now a piece of critical infrastructure whose failure fills the primary's disk. I would monitor slot lag as a first-class alert from day one.
+*Follow-up: Your CDC consumer is down for a maintenance window. What do you need to have decided in advance?*
+
+**Q7. What breaks when a large transaction is decoded?**
+**A:** Logical decoding traditionally buffers a transaction's changes until commit, because it must emit them in commit order — so a transaction touching millions of rows accumulates in memory and then spills to disk, causing a latency spike and a burst of downstream traffic long after the work happened. Newer versions can stream in-progress transactions, which helps considerably but shifts complexity to the consumer, which must handle aborts. The practical mitigation is the same as for many PostgreSQL problems: batch large modifications rather than doing them in one enormous transaction.
+*Follow-up: How does streaming of in-progress transactions change what the consumer must handle?*
+
+**Q8. How do you perform a major-version upgrade with minimal downtime?**
+**A:** Logical replication is the standard route: build the new-version cluster, replicate into it while the old one serves traffic, then cut over when lag is near zero. That is precisely what physical replication cannot do, since it requires identical versions. The work is in the gaps — schema must be created on the target, sequences must be advanced at cutover, DDL changes must be frozen or applied to both sides during the migration window, and any table without a suitable replica identity must be fixed first. I would rehearse the cutover, including the rollback, because the sequence step is easy to forget and expensive to discover afterwards.
+*Follow-up: You cut over and discover sequences weren't advanced. What is the immediate symptom and the recovery?*
+
+**Q9. What does automated failover actually need to be safe?**
+**A:** Consensus about who the primary is, and fencing of the old one. Without fencing, a primary that was merely unreachable can keep accepting writes while a standby is promoted, producing split-brain and two divergent histories that cannot be automatically reconciled. A failover manager needs a quorum-based decision, a mechanism to isolate the old primary (network, storage, or shutting it down), and a way to bring the old node back as a standby — usually `pg_rewind` rather than a full re-seed. I would also require that failover is tested regularly, because an untested failover path is a belief rather than a capability.
+*Follow-up: After a failover, the old primary rejoins with divergent WAL. What are your options?*
+
+**Q10. How does partitioning interact with vacuum and bloat?**
+**A:** Favourably, and it is one of the better reasons to partition. Autovacuum works per table, so partitions are independent units — a hot recent partition gets vacuumed frequently while cold historical ones need almost nothing, instead of one enormous table where thresholds are either too aggressive or never met. More importantly, retention by `DROP PARTITION` produces zero dead tuples, whereas deleting the equivalent rows creates a mass of garbage that autovacuum must then reclaim. For a high-churn time-series table, that difference alone often justifies partitioning.
+*Follow-up: You partition an existing 2 TB table. How would you migrate the data without a long outage?*
+
+---
+
+## 4. Expert / Architect (10 Q&A)
+
+**Q1. How do you set an RPO and RTO for a PostgreSQL estate, and make them real rather than aspirational?**
+**A:** Start from the business consequence of losing data and of being unavailable, expressed per service tier, then choose the topology that delivers it: asynchronous replication has a non-zero RPO measured by lag, synchronous commit gives zero RPO for committed transactions at a latency cost, and PITR from base backups plus WAL archiving is what covers the cases replication cannot — a `DROP TABLE` replicates faithfully. Making them real means measuring: alert on replication lag against the RPO number, and time an actual restore and an actual failover on a schedule. I have seen far more organisations with a documented RPO and an untested restore than with a genuinely inadequate topology.
+*Follow-up: Your documented RPO is 5 seconds and measured lag peaks at 90 seconds during nightly loads. What do you do?*
+
+**Q2. How do you decide between physical replication, logical replication, and CDC into a separate system for a given consumer?**
+**A:** By what the consumer needs. A read replica for scale-out or failover wants physical: it is cheapest, complete, and needs no schema management. A consumer needing a subset, a different schema, or a different major version wants logical. A consumer that is not a database at all — a search index, a cache, an analytics store, another service — wants CDC into a broker, because that decouples its availability and pace from the database's. The mistake I would flag is using logical replication to feed several bespoke consumers, which turns the primary into the coupling point for all of them; a single decoding stream into a broker with many independent consumers scales far better.
+*Follow-up: Five teams each want their own logical subscription. What do you propose instead and why?*
+
+**Q3. What are the organisational risks of making CDC the backbone of an event-driven architecture?**
+**A:** The published events become your *internal table schema*, so every consumer is now coupled to your physical model and a column rename becomes a breaking change across the estate — that is the central risk, and it is architectural rather than technical. Second, the database team now owns availability for a pipeline they did not sign up for: a stalled slot fills the primary's disk. Third, table-level changes carry no business semantics, so consumers reconstruct intent by guessing. My preferred shape is CDC over an **outbox table** whose rows are deliberately-designed events, which keeps the decoupling benefit while making the contract explicit and owned.
+*Follow-up: How would you migrate an existing table-level CDC pipeline to an outbox without a flag day?*
+
+**Q4. How would you plan partitioning for a table expected to reach 10 TB?**
+**A:** Design the key from the access patterns and the retention policy first, then work out granularity from target partition size and the resulting child count — I would rather have a few hundred partitions of tens of gigabytes than tens of thousands of small ones, because planning cost and catalog size are real. Automate creation ahead of time and retention by dropping, because manual partition management fails on the day nobody is watching. I would also verify that the dominant queries prune, using actual plans rather than assumption, and check the constraint implications early since the partition key must join every unique key — that is the requirement most likely to force a data-model change.
+*Follow-up: The business later wants to query across all 10 TB by a non-partition column. What do you offer?*
+
+**Q5. How do you approach multi-region PostgreSQL?**
+**A:** Accept that synchronous cross-region commit costs a round trip per commit, which for most workloads is unacceptable, so cross-region replicas are usually asynchronous with a corresponding RPO. That means a single writable primary per region-set and reads served locally, with the application designed for the staleness that implies. Multi-primary is where architectures get into trouble: PostgreSQL does not offer it natively, and bolt-on solutions push conflict resolution into the application, which is a much larger design commitment than teams expect. I would prefer partitioning the *data* by region so each region owns its writes, rather than trying to make one dataset writable everywhere.
+*Follow-up: A regulator requires that EU customer data never leaves the EU. How does that shape the topology?*
+
+**Q6. What monitoring would you mandate for replication and slots across an estate?**
+**A:** Slot lag in bytes and in time, per slot, with alerting well before disk pressure — this is the single highest-value alert because the failure is silent and the consequence is a full primary. Then replication lag per standby against the RPO target, WAL archive success rate, standby replay conflicts and cancellations, and — for logical slots — the vacuum horizon they pin, since that is the second-order damage people miss. I would also monitor slot *existence* against an expected inventory, because the dangerous slot is usually one nobody remembers creating.
+*Follow-up: What threshold would you set for slot lag, and how would you derive it rather than guess?*
+
+**Q7. How do you evaluate a managed PostgreSQL service against these capabilities?**
+**A:** Check what is actually exposed: whether logical replication out is permitted (this determines whether you can ever migrate away, so it is a lock-in question as much as a feature one), which output plugins and extensions are available, what the failover mechanism and measured RTO are, whether you can control synchronous commit and slot management, and whether cross-region replicas are supported in the shape you need. Managed services remove enormous operational cost, which usually decides it — but I would treat "can I get my data out as a live stream" as a hard requirement, because a platform you cannot replicate out of is a platform you cannot leave without downtime.
+*Follow-up: The service supports logical replication only to another instance of the same service. Does that satisfy you?*
+
+**Q8. How do you handle schema evolution across a logical replication or CDC boundary?**
+**A:** Treat it as a distributed contract change rather than a migration. Additive changes are applied to the subscriber first, then the publisher, so the downstream is always ready for what arrives. Destructive changes go through a deprecation cycle with the consumers, not a coordinated release. For CDC into a broker, a schema registry with enforced compatibility rules does the job that a deploy gate does for APIs, and it is the only mechanism that scales past a handful of consumers. The failure mode to design against is a publisher change that the subscriber cannot apply, which stops the subscription and starts WAL accumulating — so schema management and disk-space risk are the same problem here.
+*Follow-up: A column must be dropped from a table that three CDC consumers read. Walk me through the sequence.*
+
+**Q9. How would you migrate a large, actively-written table to a partitioned one with minimal downtime?**
+**A:** Create the partitioned parent alongside, backfill historical data into partitions in batches, and use a mechanism to keep the new structure current during the backfill — dual-write from the application, or a trigger, or logical replication into the new shape depending on constraints. Then cut over inside a short transaction that renames, having verified row counts and constraints beforehand. The alternative that sometimes wins is `ATTACH`ing the existing table as the initial partition and partitioning only future data, which is far cheaper and adequate when the value is retention rather than pruning historical queries. I would decide between those two by what the partitioning is actually for.
+*Follow-up: Which of those two would you pick for a table where 95% of queries touch the last 30 days?*
+
+**Q10. What signals tell you an organisation's replication and partitioning practice is mature?**
+**A:** Failover and restore are tested on a schedule rather than documented; slot inventory is monitored and reconciled; RPO and RTO are numbers derived from business impact and verified against measured lag; partitions are created and dropped by automation rather than by a person; and CDC consumers are fed from a deliberately-designed contract rather than from raw table changes. The clearest negative signal is a team that can describe their topology but cannot say when they last promoted a standby — because every failure mode in this area is silent until the day it is catastrophic, and the only evidence of readiness is having exercised it.
+*Follow-up: You join a team with untested failover and a production estate. What do you do in the first month?*
+
+---
+
+## 5. Reference Material
+
+> Retained from the original module: deep-dive internals, diagrams, production examples, exercises, system/low-level design, debugging walkthroughs and the Principal Engineer perspective.
+
+### 1. Fundamentals
+
+#### What is table partitioning, replication, and logical decoding?
 **Partitioning** splits one logically-unified table into multiple physical sub-tables (partitions), each holding a subset of rows (typically by date range or a hash/list key), transparently queried as if it were one table. **Replication** copies data from a primary database to one or more replicas — **physical** (streaming) replication copies raw WAL (Write-Ahead Log) bytes for a byte-identical replica; **logical** replication copies decoded, table-level changes, allowing selective, cross-version, or cross-schema replication. **Logical decoding** is the underlying mechanism extracting a stream of row-level changes from the WAL in a structured, consumable format — the foundation both logical replication and Change Data Capture (CDC) pipelines are built on.
 
-### Why do these exist?
+#### Why do these exist?
 A single, monolithic table eventually becomes too large for efficient maintenance (vacuum, index rebuilds, archival deletion) — partitioning lets these operations target individual partitions (e.g., dropping an entire old-data partition instantly instead of a slow `DELETE`). Replication exists for both **high availability** (a standby ready to take over) and **read scaling** (routing read traffic to replicas). Logical decoding exists specifically to expose database changes in a consumable form for use cases beyond simple byte-for-byte replication — CDC pipelines feeding a message queue, cross-database sync, audit trails.
 
-### When does this matter?
+#### When does this matter?
 Partitioning matters once a table's size makes maintenance operations (vacuum, backup, archival) genuinely slow or disruptive; replication matters for any production system requiring HA/DR or read-scaling; logical decoding/CDC matters for event-driven architectures needing to react to database changes without polling.
 
-### How does it work (30,000-ft view)?
+#### How does it work (30,000-ft view)?
 ```sql
 CREATE TABLE orders (id bigint, created_at date,...) PARTITION BY RANGE (created_at);
 CREATE TABLE orders_2024 PARTITION OF orders FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
@@ -23,26 +208,24 @@ CREATE TABLE orders_2025 PARTITION OF orders FOR VALUES FROM ('2025-01-01') TO (
 -- Queries against `orders` transparently route to the correct partition(s) via partition pruning.
 ```
 
----
+### 2. Deep Dive
 
-## 2. Deep Dive
-
-### 2.1 Partitioning Strategies and Partition Pruning
+#### 2.1 Partitioning Strategies and Partition Pruning
 **Range partitioning** (by date, the most common pattern for time-series/log-style data) lets old partitions be dropped instantly (`DROP TABLE orders_2020` — an O(1) metadata operation, versus a slow, vacuum-generating `DELETE FROM orders WHERE year = 2020`) and lets vacuum/maintenance operate on smaller, individually-manageable units. **List partitioning** splits by discrete key values (e.g., by region). **Hash partitioning** distributes rows pseudo-randomly across a fixed partition count, useful for write-load distribution without a natural range/list key. **Partition pruning** — the query planner recognizing that a `WHERE created_at >= '2024-06-01'` predicate can only match rows in specific partitions, skipping the rest entirely — is what makes partitioning a genuine performance win, not just an administrative convenience; pruning requires the partition key to appear in a sargable form in the query's predicate, or pruning fails and every partition is scanned, defeating the purpose.
 
-### 2.2 Streaming (Physical) Replication vs Logical Replication
+#### 2.2 Streaming (Physical) Replication vs Logical Replication
 **Physical replication** streams WAL records byte-for-byte to a replica applying them at the same physical location — the replica is a byte-identical copy, **must run the same major PostgreSQL version**, and typically replicates the **entire cluster** (all databases), not a subset. **Logical replication** decodes WAL into logical row-change events (insert/update/delete on specific tables) and applies them via ordinary SQL on the subscriber — enabling replication **between different major versions**, **selective** table-level replication, and replication into a **different schema/structure** on the subscriber (useful for consolidating multiple sources into one reporting database, or migrating between major versions with near-zero downtime via a logical-replication-based cutover).
 
-### 2.3 Synchronous vs Asynchronous Replication — the CAP-Theorem Trade-off Made Concrete
+#### 2.3 Synchronous vs Asynchronous Replication — the CAP-Theorem Trade-off Made Concrete
 **Asynchronous replication** (the default): the primary commits and acknowledges the client immediately, without waiting for any replica to confirm receipt — fast, but a primary crash before a replica catches up means **committed data can be lost** on failover (the replica promotes to primary without ever having received the most recent commits). **Synchronous replication** (`synchronous_commit = on` with `synchronous_standby_names` configured): the primary waits for at least one designated replica to confirm receipt before acknowledging the client's commit — eliminates that data-loss window, at the direct cost of added commit latency (and, if the synchronous replica becomes unavailable, either blocking all commits entirely or requiring a carefully-configured quorum/fallback policy) — a textbook, concrete instantiation of the availability-vs-consistency trade-off a later CAP theorem module will formalize.
 
-### 2.4 Change Data Capture (CDC) via Logical Decoding
+#### 2.4 Change Data Capture (CDC) via Logical Decoding
 A **replication slot** with a **logical decoding output plugin** (e.g., `pgoutput`, or `wal2json` for a JSON-formatted change stream) lets an external consumer (Debezium being the dominant open-source CDC tool, feeding changes into Kafka) subscribe to a structured stream of every row-level change — enabling event-driven architectures reacting to database changes without polling, and directly providing the underlying mechanism for the **Outbox pattern** (a later dedicated module) in its "CDC-based" variant (reading committed outbox-table rows via CDC instead of a separate polling process).
 
-### 2.5 Replication Slot Retention Risk
+#### 2.5 Replication Slot Retention Risk
 A replication slot retains WAL on the primary **for as long as the slot exists and hasn't been consumed** — if a logical-replication subscriber or CDC consumer disconnects and never resumes (a crashed, forgotten, or decommissioned consumer whose slot was never dropped), the primary **retains WAL indefinitely** waiting for that slot to be consumed, which can silently fill up disk space until the primary itself runs out of storage — a genuinely severe, easy-to-overlook operational failure mode distinct from ordinary replication lag monitoring.
 
-## 3. Visual Architecture
+### 3. Visual Architecture
 ```mermaid
 graph LR
  subgraph "Physical Replication"
@@ -55,123 +238,12 @@ graph LR
  end
 ```
 
-## 4. Production Example
+### 4. Production Example
 **Scenario**: A production PostgreSQL primary's disk usage grew steadily over several weeks despite stable data volume and properly-tuned autovacuum (the lesson already applied), eventually triggering an out-of-disk-space alert. **Investigation**: `pg_replication_slots` revealed an **inactive** logical replication slot from a decommissioned CDC pipeline (a Debezium connector removed months earlier during an architecture change) — the slot itself was never dropped, so the primary had been retaining every WAL segment generated since that connector's last activity, for months, waiting for a consumer that would never return. **Fix**: dropped the orphaned slot (`SELECT pg_drop_replication_slot('old_cdc_slot');`), immediately reclaiming the retained WAL space; added a standing monitoring check specifically for replication-slot `restart_lsn` lag (how far behind the slot's confirmed position is from the current WAL position) as a distinct, proactive alert. **Lesson**: replication slots are a "silent until catastrophic" resource-retention risk with no natural expiration — any consumer decommissioning process must explicitly include dropping its associated replication slot as a mandatory step, and slot-lag monitoring deserves the same proactive attention as vacuum-bloat monitoring.
-## 10. Interview Questions
 
-### Basic (10)
-1. **Q: What is table partitioning?** **A:** Splitting one logical table into multiple physical sub-tables, transparently queried as one, typically by date range, list, or hash.
-2. **Q: What is partition pruning?** **A:** The query planner recognizing a predicate can only match specific partitions, skipping the rest entirely.
-3. **Q: What's the difference between physical and logical replication?** **A:** Physical streams raw WAL bytes for a byte-identical, same-version replica; logical decodes and applies row-level changes, supporting cross-version and selective replication.
-4. **Q: What is a replication slot?** **A:** A primary-side marker tracking a specific replica/subscriber's consumption progress, retaining WAL until that position is consumed.
-5. **Q: What's the difference between synchronous and asynchronous replication?** **A:** Synchronous waits for a replica's confirmation before acknowledging commit (no data loss on failover, added latency); asynchronous acknowledges immediately (fast, but can lose recently-committed data on failover).
-6. **Q: What is logical decoding?** **A:** The mechanism extracting a structured stream of row-level changes from the WAL, underlying logical replication and CDC.
-7. **Q: What does CDC stand for?** **A:** Change Data Capture — streaming every committed insert/update/delete out of the database (in PostgreSQL, via logical decoding of the WAL) so downstream systems (caches, search indexes, event pipelines) can react to data changes without polling or dual writes.
-8. **Q: Can physical replication replicate between different PostgreSQL major versions?** **A:** No — physical replication requires the same major version; logical replication can cross versions.
-9. **Q: What's a risk of leaving an orphaned, unconsumed replication slot?** **A:** The primary retains WAL indefinitely waiting for it, potentially exhausting disk space.
-10. **Q: What is Debezium?** **A:** A dominant open-source CDC tool consuming PostgreSQL's logical decoding stream, commonly feeding changes into Kafka.
+### 11. Coding Exercises
 
-### Intermediate (10)
-1. **Q: Why does range partitioning make archival/retention dramatically faster than a plain `DELETE`?** **A:** Dropping an entire partition is an O(1) metadata operation; a `DELETE` targeting the same rows in an unpartitioned table must individually mark each row dead, generating substantial vacuum work afterward.
-2. **Q: Why can a partitioned table's query fail to benefit from partitioning at all?** **A:** If the query's predicate doesn't reference the partition key in a form the planner can use for pruning (e.g., wrapped in a non-sargable function, mirroring the general sargability concern), every partition is scanned, providing none of the intended performance benefit.
-3. **Q: Why must physical replication use the same major version on primary and replica?** **A:** It replicates raw WAL bytes representing the exact on-disk physical format, which can differ between major versions — logical replication instead operates at the logical row-change level, insulated from physical-format differences.
-4. **Q: Why does synchronous replication add commit latency?** **A:** The primary must wait for the designated synchronous replica's acknowledgment before returning success to the client, adding at least one network round-trip's worth of latency to every commit.
-5. **Q: How does a replication slot's WAL retention differ from ordinary WAL retention/archiving?** **A:** Ordinary WAL is retained only until it's no longer needed for crash recovery/archiving (governed by `wal_keep_size`/archiving configuration); a replication slot additionally retains WAL until *that specific slot's* consumer catches up, regardless of ordinary retention settings — an inactive slot can force retention far beyond what normal settings would otherwise keep.
-6. **Q: Why would a team choose hash partitioning over range partitioning?** **A:** When there's no natural, evenly-distributed range/list key suited to the workload's access patterns, or when the goal is primarily distributing write load evenly across partitions rather than enabling range-based archival/pruning.
-7. **Q: What's the difference between `pg_stat_replication` and `pg_replication_slots`, and why check both?** **A:** `pg_stat_replication` shows currently-connected replication clients and their real-time lag; `pg_replication_slots` shows all *registered* slots including ones with no currently-connected consumer — an orphaned slot (the incident) is invisible in `pg_stat_replication` (nothing's connected) but clearly visible in `pg_replication_slots` as an inactive slot still retaining WAL.
-8. **Q: Why might a CDC-based Outbox pattern implementation be preferable to a polling-based one?** **A:** Polling introduces both latency (the polling interval) and unnecessary load (repeated queries even when nothing changed); CDC-based consumption reacts to committed changes as they occur, with lower latency and no wasted polling queries, at the cost of the additional replication-slot-management operational responsibility this module covers.
-9. **Q: Why is `EXPLAIN` (not just "we partitioned the table") the correct way to verify a partitioning strategy is actually effective?** **A:** Partitioning's performance benefit depends entirely on pruning actually occurring for real query patterns — `EXPLAIN`'s plan output directly shows which partitions were considered/scanned, the only reliable way to confirm the intended benefit is materializing rather than assuming it from the schema design alone.
-10. **Q: Why would a major-version PostgreSQL upgrade commonly use logical replication rather than a simple dump-and-restore or physical replication approach?** **A:** Logical replication allows setting up the new-version instance as a subscriber while the old-version primary continues serving live traffic, then cutting over with minimal downtime once the subscriber has caught up — physical replication can't cross major versions at all, and dump-and-restore requires a full downtime window proportional to data size.
-
-### Advanced (10)
-1. **Q: Diagnose the orphaned-replication-slot incident from first principles, and design the standing safeguard preventing recurrence.**
- **A:** Root cause: no process step tied replication-slot lifecycle to consumer lifecycle — decommissioning the CDC pipeline removed the *consumer* but not the *slot* it left behind on the primary. Safeguard: (a) mandatory slot-lag monitoring alerting on any slot whose `restart_lsn` falls behind current WAL position by more than a threshold, regardless of *why*; (b) a decommissioning checklist explicitly requiring `pg_drop_replication_slot` as a required step, not an optional cleanup task; (c) periodic automated auditing cross-referencing `pg_replication_slots` against a registry of currently-expected-active consumers, flagging any slot without a corresponding active, known consumer.
-2. **Q: Design a partitioning strategy for a multi-tenant SaaS platform's largest table, balancing tenant isolation, query performance, and maintenance operations.**
- **A:** List-partition by `tenant_id` (or a tenant-tier grouping, if tenant count is very large) combined with range sub-partitioning by date within each tenant partition — this lets a specific tenant's data be dropped/archived independently (e.g., for a tenant offboarding, an entire tenant's partition can be dropped in one O(1) operation) while also supporting date-range-based archival within each tenant, and ensures per-tenant query patterns (which almost always filter by `tenant_id`) prune efficiently to that tenant's specific partition subset rather than scanning the entire multi-tenant table.
-3. **Q: Explain the failure mode where synchronous replication with a single synchronous standby can itself cause a primary outage, and how you'd design around it.**
- **A:** If the single designated synchronous standby becomes unreachable (network partition, crash), the primary — by default, with strict synchronous commit configured — will **block all commits** waiting for an acknowledgment that will never come, effectively taking the primary down for writes even though it's otherwise healthy; the standard mitigation is configuring multiple synchronous candidates with a quorum (`synchronous_standby_names = 'ANY 1 (replica1, replica2)'`), so any *one* of several standbys acknowledging is sufficient, tolerating a single standby's failure without blocking the primary.
-4. **Q: How would you design a near-zero-downtime major-version upgrade using logical replication, and what limitations would you need to plan around?**
- **A:** Stand up a new-version instance as a logical-replication subscriber of the old-version primary, let it catch up fully while the old primary continues serving live traffic, then perform a brief cutover (redirect application traffic to the new instance once replication lag is confirmed near-zero); plan around logical replication's known limitations — it doesn't replicate DDL automatically (schema changes must be applied manually/coordinated on both sides), doesn't replicate large objects, and sequences aren't automatically synchronized (requiring an explicit sequence-value catch-up step as part of the cutover) — all real, specific gaps that must be explicitly addressed in the migration runbook, not assumed away.
-5. **Q: Explain how you would use logical decoding to build a custom audit-trail system, and what advantage this has over application-level audit logging.**
- **A:** Subscribe a CDC consumer (via a replication slot with `wal2json` or a custom output plugin) to every table requiring an audit trail, writing each decoded change (old/new values, transaction metadata) to a durable, append-only audit store — the advantage over application-level audit logging (explicit `INSERT INTO audit_log` calls in application code) is that it captures **every** change regardless of which code path made it (including direct database access, a bulk-load script, or a bug bypassing the application's own audit-logging code), providing a genuinely complete, code-path-independent audit trail exactly analogous to Row-Level Security's (§Advanced Q8) database-enforced-rather-than-application-trusted safety property.
-6. **Q: Design a strategy for detecting and gracefully handling replication lag that's growing but hasn't yet triggered a hard failure, for a read-replica-serving reporting workload.**
- **A:** Monitor replica lag (`pg_stat_replication`'s `replay_lag` on the primary, or the replica's own `pg_last_wal_replay_lsn` compared against the primary's current position) as a continuous metric; for read queries routed to replicas where staleness matters (e.g., a "show my recent order" page that shouldn't show data staler than a few seconds), have the application check current lag before routing to a replica, falling back to the primary if lag exceeds an acceptable threshold for that specific query's staleness tolerance — a graceful degradation strategy rather than either blindly trusting replica freshness or avoiding replicas entirely.
-7. **Q: Explain a scenario where hash partitioning's even distribution property becomes a disadvantage rather than an advantage.**
- **A:** If query patterns predominantly filter by a *range* (e.g., "orders from the last 30 days"), hash partitioning (which distributes rows pseudo-randomly regardless of any range-correlated attribute) provides **no** pruning benefit for that access pattern — every partition would need to be scanned since matching rows are spread evenly across all of them, unlike range partitioning by date, which would prune to just the relevant recent partitions; hash partitioning is the wrong tool when the dominant query pattern is range-based rather than needing even write-load distribution.
-8. **Q: How would you reason about whether a system needs synchronous replication at all, versus accepting asynchronous replication's small data-loss window?**
- **A:** Weigh the business cost of losing the most recently committed (but not-yet-replicated) transactions during an unplanned primary failure against synchronous replication's added latency cost on every single commit — a financial ledger or payment system's committed-transaction-loss cost is typically severe enough to justify synchronous replication's latency tax; a high-throughput, latency-sensitive system logging non-critical telemetry, where losing a few seconds of recent data during a rare failover is an acceptable, bounded cost, may reasonably prefer asynchronous replication's lower latency — this is a genuine, deliberate business-risk-vs-performance trade-off, not a purely technical default.
-9. **Q: Explain how you would validate that a partitioning migration (converting an existing large, unpartitioned table into a partitioned one) doesn't silently break existing queries relying on assumptions the partitioned structure changes.**
- **A:** Audit existing queries/ORM-generated SQL against the table for any that would fail to prune (Advanced Q7's hash-partitioning-mismatch scenario is one example, but also non-partition-key-referencing queries generally) using `EXPLAIN` before and after the migration on a representative staging copy; verify any unique/primary-key constraints correctly include the partition key (a PostgreSQL requirement — a partitioned table's unique constraints must include the partitioning column), which can require schema changes to existing constraint definitions the application layer wasn't necessarily designed to accommodate; and stage the migration with a full regression-test pass against representative production-scale data volume (§Advanced Q7's "test at representative scale" principle, directly applicable here too), not just correctness-sufficient small-scale testing.
-10. **Q: As a Principal Engineer, how would you build organizational capability preventing both this module's and the operational-risk classes (vacuum bloat, orphaned replication slots) from recurring across a growing PostgreSQL fleet?**
- **A:** Establish a shared, standard PostgreSQL operational-health dashboard template (directly this course's recurring shared-template governance pattern) tracking, for every PostgreSQL instance in the fleet: dead-tuple ratios per table, replication-slot lag/retained-WAL-size per slot (this module), and autovacuum activity — deployed automatically for any new PostgreSQL instance provisioned, rather than each team independently discovering these operational concerns only after their own incident; pair this with a mandatory decommissioning checklist (Advanced Q1) for any service that creates a replication slot/CDC consumer, converting both this module's and the prior module's hard-won, incident-driven lessons into structurally-enforced, fleet-wide standard practice.
-
-### Expert (FinTech Principal Panel)
-
-1. **Q: A core banking ledger must not lose a committed transaction even if a whole datacenter is lost (RPO≈0), while staying available. Design the replication/DR posture, and be honest about the CAP trade-off at failover.**
- **A:** RPO≈0 means a commit is not acknowledged to the client until it's durable on **more than one independent failure domain**, so use **synchronous replication with quorum** (`synchronous_standby_names = 'ANY 1 (r1, r2)'`) across separate AZs/DCs — any one standby's ack suffices, so you tolerate losing a single standby without blocking the primary (Advanced Q3) *and* no committed transaction exists on only one node. The honest CAP trade-off: synchronous commit couples the primary's write latency and availability to reaching a quorum — if quorum is unreachable (multi-node/network partition), you must choose to **block writes (favor consistency/no-data-loss)** rather than accept commits that could be lost; for a ledger that's the correct choice (a payment you can't durably record is a payment you must refuse). RTO is handled by automated, **fenced** failover: promote a caught-up standby, but **prevent split-brain** (STONITH/fencing so the old primary can't keep accepting writes) — two primaries both taking payments is catastrophic. Define RPO/RTO targets explicitly, and rehearse failover regularly. The Principal framing: for money, RPO≈0 via quorum synchronous replication is bought by accepting that a partition means *refuse writes, not risk loss*, and failover must be fenced to avoid split-brain — consistency and durability win over availability precisely because a lost or double-recorded transaction is unacceptable.
- **Why correct:** Uses quorum synchronous replication for RPO≈0, states the consistency-over-availability choice under partition for a ledger, and requires fenced failover to prevent split-brain.
- **Common mistakes:** Async replication for a ledger (data-loss window); a single synchronous standby (blocks primary if it dies); failover without fencing (split-brain, double-spend).
- **Follow-ups:** "What do you do when quorum is unreachable — block or accept?" / "How do you prevent the old primary from accepting writes after promotion?" / "How is a single-sync-standby setup a self-inflicted outage risk?"
-
-2. **Q: You need to reliably publish every ledger change to a Kafka stream for downstream services (fraud, notifications, analytics). Compare using PostgreSQL logical decoding/CDC (e.g., Debezium) versus an application-level transactional outbox table. Which, and why?**
- **A:** Both solve the **dual-write problem** (never write the DB and publish to the broker as two non-atomic steps). (a) **Application-level outbox**: within the same transaction as the business change, insert an outbox row; a relay reads and publishes it, then marks it done (`SKIP LOCKED` worker). Pros: explicit control over event shape/schema (you emit a clean domain event, not raw row diffs), DB-agnostic, easy to reason about. Cons: you build/operate the relay, and the outbox table needs cleanup. (b) **CDC via logical decoding/Debezium**: a connector tails the WAL and emits change events straight to Kafka. Pros: no app code to publish, captures **every** change including out-of-band ones (like the audit-trail advantage, Advanced Q5), strong ordering per table from the WAL. Cons: events are *row-level diffs* (leaks schema, not domain events — downstream couples to your table structure), replication-slot operational risk (an orphaned/lagging slot retains WAL and can fill disk), and transformation is needed to get clean events. Both are **at-least-once**, so consumers must be **idempotent**. Recommendation: prefer the **outbox** when you want clean, decoupled *domain* events and control over the contract (typical for payments events consumed by other teams); prefer **CDC** when you need to capture all changes with minimal app change or are integrating legacy writers you don't control — often teams use outbox for domain events and CDC for analytics/replication. The Principal framing: it's outbox (clean domain-event contract, more code) vs. CDC (all changes, less code, but row-diff coupling + slot ops) — both need idempotent consumers, and the deciding factor is whether downstream should couple to your *events* or your *schema*.
- **Why correct:** Frames both as dual-write solutions, contrasts domain-event control vs. row-diff coupling + slot ops, and requires idempotent consumers, with a decision rule.
- **Common mistakes:** Publishing to Kafka outside the DB transaction (dual-write); exposing raw CDC row diffs as a public event contract; ignoring replication-slot disk risk; assuming exactly-once.
- **Follow-ups:** "Why do both still need idempotent consumers?" / "What's the coupling cost of exposing CDC row diffs?" / "How does an orphaned slot from CDC threaten the primary?"
-
-3. **Q: Regulation requires certain customers' data to physically reside in-region (data residency / GDPR / local banking law). How do partitioning and replication design change, and what are the pitfalls?**
- **A:** Data residency makes *where bytes live* a correctness/legal constraint, not just a performance one. Approaches: (1) **Partition/shard by region** and place each region's data in infrastructure physically located in that jurisdiction — list-partition or separate databases per region, with replicas also constrained to compliant locations (a replica in the wrong country is itself a violation, so replication topology must respect residency). (2) **Route at the app/data layer** by the customer's residency attribute so a customer's reads/writes only ever touch their compliant store. Pitfalls: **replication and DR** must stay in-region (your cross-region DR standby can't sit in a disallowed jurisdiction — you may need in-region DR pairs per region); **backups** and even **logs/CDC streams** carry the data and must also be residency-compliant (an easily-missed leak — a global Kafka topic or a centralized log store can exfiltrate regulated data across borders); **aggregate/analytics** that combine regions may be prohibited or require anonymization; and cross-region *joins* become impossible or must go through compliant aggregation. The Principal framing: data residency turns replication topology, backups, logs, and CDC into compliance surfaces — the design is region-scoped partitions/databases with residency-constrained replicas, DR, backups, *and* telemetry, because the data leaks through the least-obvious pipe (a backup or a log shipped cross-border), not just the primary store.
- **Why correct:** Region-scoped partitioning/databases with residency-constrained replication/DR, and flags the non-obvious leaks (backups, logs, CDC, cross-region analytics).
- **Common mistakes:** Constraining only the primary while replicas/backups/logs cross borders; a global CDC/log pipeline exfiltrating regulated data; cross-region analytics on raw personal data.
- **Follow-ups:** "Where can your DR standby for an in-region customer live?" / "How can backups or logs violate residency even if the DB doesn't?" / "How do you do cross-region reporting without moving regulated data?"
-
-4. **Q: Two regions run bidirectional logical replication (via pglogical/BDR) so either region can accept writes for low-latency local reads. A customer's balance-adjustment row is updated concurrently in both regions during a brief network partition; when connectivity restores, one region's update silently vanishes. Explain the mechanism, and how you'd design around it for financial data.**
- **A:** PostgreSQL's native logical replication (and pglogical/BDR by default) resolves same-row concurrent-update conflicts via **last-writer-wins** at the column/row level, typically using a timestamp or replication-origin-based tiebreak — it is **not** a CRDT-style merge (the connection to a sibling domain's finding): the losing region's update is discarded entirely, not combined, exactly as an LWW-Register discards a concurrent write's content rather than merging it. For a balance adjustment, this means one region's legitimate, committed adjustment can silently disappear with no error, no conflict surfaced to the application, and no reconciliation trigger — a severe correctness gap for financial state specifically because the "loser" transaction already returned success to its caller before the conflict was later, silently resolved away. Design around it: for genuinely multi-region-writable financial state, either (a) route writes for a given account to a single owning region (eliminating the possibility of the conflict, the same single-writer principle Module 21's ledger guidance and the sibling CRDT module's fix both converge on), or (b) if true multi-region write availability is a hard requirement, model the adjustment as an **append-only, commutative operation** (a signed delta row, not an in-place balance update) so concurrent inserts from both regions are individually meaningful and mergeable, with the current balance computed as a sum/fold over all deltas rather than a directly-replicated mutable field — restructuring the data model to be genuinely commutative rather than relying on logical replication's LWW default to behave safely for non-commutative state. The Principal framing: logical replication's default conflict resolution is silent and lossy for non-commutative financial fields — the fix is either eliminating the conflict via single-writer routing or reshaping the data model into something genuinely commutative, never trusting LWW's silent discard to be safe for money.
- **Why correct:** Correctly identifies LWW as logical replication's default conflict-resolution behavior, explains why it's dangerous for financial state, and gives both valid architectural fixes.
- **Common mistakes:** Assuming logical replication automatically merges concurrent updates safely; discovering the silent-loss behavior only via a reconciliation break rather than by design review before go-live.
- **Follow-ups:** "Why is this the same failure shape as an LWW-Register CRDT?" / "How does modeling balance as append-only deltas make the field genuinely commutative?" / "What would make single-writer-per-account routing insufficient?"
-
-5. **Q: Design an automated, fenced failover system for a PostgreSQL primary serving a payments platform, explicitly preventing split-brain during a network partition between the primary and its orchestrator.**
- **A:** Use a consensus-based orchestrator (**Patroni** backed by **etcd/Consul/ZooKeeper** as the distributed configuration store) — each PostgreSQL node runs a Patroni agent that periodically renews a **leader lease** in the consensus store; only the node holding a currently-valid lease serves writes. On a network partition isolating the primary from the consensus store, the primary's lease **expires** (it cannot renew what it cannot reach) and Patroni on the primary **self-fences** — demoting the local PostgreSQL instance to read-only *before* a new leader is elected elsewhere, specifically to close the split-brain window where an isolated-but-still-running primary keeps accepting writes while a newly-promoted standby also starts accepting writes. The consensus store's own quorum requirement (a majority of etcd/Consul nodes, themselves spread across failure domains) is what prevents the classic distributed-systems failure of *both* sides of a partition believing they're the leader — only the side that can reach quorum can elect/hold a leader. Additional fencing (STONITH-style, e.g., revoking the old primary's network route or forcibly stopping its PostgreSQL process) provides defense-in-depth beyond the self-fencing lease-expiry mechanism, for the case where a still-partially-functioning old primary doesn't cleanly self-demote. The Principal framing: automated failover without leader-lease-based self-fencing is not actually safe automated failover — it's a race condition waiting for the specific partition pattern that produces two simultaneously-active primaries, and the fix is a consensus-store-backed leader lease whose *expiry*, not merely a health-check failure, drives demotion.
- **Why correct:** Correctly describes Patroni/etcd's lease-based leader-election mechanism and precisely explains how it prevents split-brain via self-fencing on lease expiry plus quorum.
- **Common mistakes:** Designing failover around a simple health-check-triggers-promotion mechanism without a leader-lease/quorum foundation, which cannot prevent both an old and new primary being simultaneously active during a partition.
- **Follow-ups:** "Why must the old primary demote itself, rather than relying only on the new primary's promotion?" / "What happens if the consensus store itself loses quorum?" / "How does this connect to Expert Q1's fencing requirement for the ledger DR posture?"
-
-6. **Q: A nightly settlement-reconciliation job joins and aggregates two large range-partitioned tables (`trades`, partitioned by trade_date; `settlements`, partitioned identically by settlement_date, which for same-day settlement equals trade_date) over a 90-day window. Explain partition-wise join/aggregate, and why matching partitioning schemes between the two tables matters here.**
- **A:** By default, PostgreSQL treats each table's partitions as separate relations and must potentially join *every* partition of `trades` against *every* partition of `settlements` unless the planner can prove a narrower match — with `enable_partitionwise_join = on` (and both tables partitioned identically, same boundaries, same partition key semantics), the planner instead performs a **partition-wise join**: joining each `trades` partition only with its *correspondingly-dated* `settlements` partition, and — with `enable_partitionwise_aggregate = on` — computing partial aggregates within each partition pair before combining, dramatically reducing both the join's working-set size and the total comparison count relative to a single monolithic join across the full unpartitioned cross-product of partitions. This only engages when the two tables' partition boundaries genuinely align (same date ranges, same partition key) — if `settlements` were instead partitioned by month while `trades` is partitioned by day, the planner cannot establish the 1:1 partition correspondence and falls back to the full-cross-product join behavior, silently losing the entire optimization despite both tables individually being "partitioned." The Principal framing: partition-wise join/aggregate is a genuine, substantial performance lever for multi-table analytics over partitioned data, but it's contingent on a *cross-table* partitioning-scheme design decision (matching boundaries deliberately across related tables) made at schema-design time, not something that can be retrofitted via query tuning alone once the tables' partition schemes have diverged.
- **Why correct:** Correctly explains partition-wise join/aggregate's mechanism and precisely states the cross-table partition-alignment precondition for it to engage.
- **Common mistakes:** Assuming any two partitioned tables automatically benefit from partition-wise join regardless of whether their partition boundaries actually align; not verifying via `EXPLAIN` that the optimization is actually engaging (Module 21's recurring "verify, don't assume" pruning discipline, applied here to a related planner optimization).
- **Follow-ups:** "What would you check in `EXPLAIN` to confirm partition-wise join is engaging?" / "Why does misaligned partition granularity between the two tables silently disable this?" / "How would you redesign the schema if the two tables' natural partitioning needs genuinely differ?"
-
-7. **Q: A 24/7 trading platform needs to add a new monthly partition to a hot `trades` table and eventually detach old partitions for archival, without blocking live inserts/selects against the table even momentarily. What PostgreSQL features make this possible, and what's the trade-off?**
- **A:** `ALTER TABLE trades ATTACH PARTITION trades_2026_09 FOR VALUES FROM (...) TO (...);` by default requires briefly taking an `ACCESS EXCLUSIVE` lock on the parent table to validate the new partition's constraint, which — however brief — blocks all concurrent reads/writes against the entire partitioned table for that duration, unacceptable for a genuinely 24/7 hot table. PostgreSQL 14+ provides `ALTER TABLE trades DETACH PARTITION trades_2024_01 CONCURRENTLY;` for detach, which takes only a `SHARE UPDATE EXCLUSIVE` lock (permitting concurrent reads/writes to continue against the rest of the table) at the cost of the detach itself running as a longer, two-phase background operation rather than an instant metadata change. For attach, the standard technique to avoid the exclusive lock is: create the new partition table standalone first (with an explicit `CHECK` constraint matching the intended partition bounds), attach it — PostgreSQL can then skip the full validation scan because the `CHECK` constraint already proves the data fits the bounds, reducing (though not always fully eliminating, depending on version) the lock duration — or, for a genuinely empty new future-dated partition (the common case, attaching next month's partition ahead of any data arriving in it), the attach is inherently fast since there's no existing data requiring validation. The trade-off: `CONCURRENTLY` detach trades instant completion for a longer-running, non-blocking operation, and pre-constraining a to-be-attached partition trades upfront schema-design discipline for a faster/lock-minimized attach — both are worth the added process complexity specifically because the alternative (a blocking exclusive lock against a 24/7 hot table) is operationally unacceptable. The Principal framing: partition maintenance on a genuinely always-on table requires deliberately using the concurrent/pre-validated variants of attach/detach, not the default, simpler syntax that silently assumes a maintenance window exists.
- **Why correct:** Correctly identifies the default attach/detach locking behavior, the `CONCURRENTLY` detach mechanism, and the pre-constrained-attach technique, with the trade-offs of each.
- **Common mistakes:** Running default `ATTACH`/`DETACH PARTITION` against a live, latency-sensitive table assuming it's always a fast metadata-only operation; not pre-creating and constraining a new partition before a scheduled cutover.
- **Follow-ups:** "Why does an empty, future-dated partition attach fast even without pre-constraining?" / "What lock does `DETACH... CONCURRENTLY` actually take, and why does that matter?" / "How would you schedule partition maintenance to minimize even this reduced lock/operational impact?"
-
-8. **Q: You're standing up a new logical-replication subscriber for a 2TB `trades` table on a live, high-TPS primary. The initial sync (`COPY`-based table snapshot) takes six hours, during which primary WAL retention (for the slot backing this subscription) grows continuously. Explain the risk and how you'd manage it.**
- **A:** Logical replication's initial sync copies the entire published table's current contents via `COPY` before switching to streaming ongoing changes — during that copy, the replication slot backing the subscription must retain **every WAL segment generated since the slot was created**, because once streaming begins, the subscriber needs to apply every change that occurred *during* the copy window, not just those after it completes. On a high-TPS primary, six hours of retained WAL can be substantial (directly the same disk-exhaustion risk mechanism as the orphaned-slot incident, except here the slot is actively wanted and working as designed, not orphaned — the risk is scale, not neglect). Mitigations: (a) size the primary's WAL-archive/local-disk headroom explicitly against the *worst-case* expected initial-sync duration for the largest table being subscribed, not just steady-state replication-lag tolerance; (b) where supported, seed the subscriber from a recent physical backup/snapshot restored independently, then create the logical subscription with `copy_data = false` and manually align the subscriber's starting LSN to the backup's known-consistent point — avoiding the live `COPY`-driven WAL-retention window entirely, at the cost of a more complex, manually-coordinated setup; (c) monitor `pg_replication_slots`' retained-WAL size for the *new* slot specifically during the sync window as an active, expected-but-bounded condition, alerting only if it exceeds the pre-sized headroom, not treating any growth as automatically anomalous. The Principal framing: initial sync of a large table is a known, sizeable, and bounded WAL-retention event that must be capacity-planned explicitly before starting the sync, distinct from the orphaned-slot incident's *unbounded*, unplanned retention — the same underlying mechanism (slot-driven WAL retention) produces two different risk profiles depending on whether the retention is planned-and-bounded or accidental-and-unbounded.
- **Why correct:** Correctly explains why initial sync drives WAL retention, distinguishes this planned/bounded case from the orphaned-slot incident's unplanned/unbounded one, and gives concrete capacity-planning and alternative-seeding mitigations.
- **Common mistakes:** Not sizing WAL/disk headroom ahead of a known-large initial sync, discovering the retention growth only via a disk-space alert; treating any slot-driven WAL growth as automatically anomalous rather than distinguishing planned sync growth from orphaned-slot growth.
- **Follow-ups:** "How does `copy_data = false` change the WAL-retention profile?" / "Why does this differ in risk shape from the orphaned-slot incident despite the same underlying mechanism?" / "How would you monitor this slot differently from a steady-state replication slot?"
-
-9. **Q: A high-TPS payments primary's WAL generation rate has grown to the point where `checkpoint` I/O spikes are visibly correlated with brief replication-lag spikes on synchronous standbys, occasionally pushing commit latency above SLA. Diagnose the checkpoint/WAL interaction and give concrete tuning levers.**
- **A:** A **checkpoint** flushes all dirty buffer-cache pages to disk and, critically, the *first* modification to any page after a checkpoint must write a **full-page image** to WAL (`full_page_writes = on`, the default and generally required for crash-safety against torn-page writes) before any subsequent incremental change to that page — meaning WAL volume spikes sharply in the period immediately following each checkpoint, as pages across the working set get their first post-checkpoint full-page image written. On a high-TPS primary, this WAL-volume spike increases the byte volume a synchronous standby must receive and acknowledge before the primary can complete a commit, directly explaining the correlated commit-latency spike. Tuning levers: (a) `checkpoint_completion_target` (raise toward 0.9) spreads a checkpoint's dirty-page-flush I/O more evenly across the checkpoint interval rather than bursting it, smoothing rather than eliminating the WAL-volume spike; (b) `max_wal_size`/`min_wal_size` sized to allow checkpoints to occur less frequently (time- or WAL-volume-triggered, whichever is less frequent) reduces the *number* of full-page-image bursts per unit time, trading larger crash-recovery replay time for fewer, less-frequent spikes; (c) `wal_compression = on` (Module 21 §7) reduces the actual byte volume of full-page images specifically, directly shrinking what a synchronous standby must transfer and acknowledge; (d) confirm the synchronous standby's own I/O/network isn't independently the bottleneck (it must durably persist what it receives before acknowledging under `synchronous_commit = on`) — checkpoint-driven WAL spikes and standby-side I/O capacity are two distinct, compounding contributors to the same symptom and must be diagnosed separately via `pg_stat_bgwriter`/`pg_stat_replication`'s `write_lag`/`flush_lag`/`replay_lag` columns individually. The Principal framing: checkpoint-driven full-page-write bursts are an inherent, structural WAL-volume pattern, not a misconfiguration — the tuning goal is smoothing and shrinking the burst (completion target, WAL size, compression), and separately verifying the standby's own capacity isn't compounding it, rather than treating the symptom as a single undifferentiated "replication is slow" problem.
- **Why correct:** Correctly explains the checkpoint/full-page-write WAL-spike mechanism, connects it precisely to synchronous-commit latency, and gives specific, individually-justified tuning levers plus the standby-side differential diagnosis.
- **Common mistakes:** Tuning only `synchronous_standby_names`/network settings without addressing the checkpoint-driven WAL-volume-spike root cause; treating `write_lag`, `flush_lag`, and `replay_lag` as interchangeable rather than diagnosing which specific stage is contributing.
- **Follow-ups:** "Why does the very first write to a page after a checkpoint cost more WAL than a later write to the same page?" / "What's the trade-off of raising `max_wal_size` to reduce checkpoint frequency?" / "How would you tell from `pg_stat_replication` whether the standby's own I/O is the bottleneck versus the primary's WAL-generation burst?"
-
-10. **Q: Compare native PostgreSQL logical replication against a purpose-built multi-master extension (BDR/pglogical) for a genuinely active-active, multi-region ledger requiring both regions to accept writes with sub-second local latency. What does native logical replication lack, and is multi-master the right answer at all?**
- **A:** Native logical replication is fundamentally **uni-directional per subscription** (a subscriber applies a publisher's changes; it has no native mechanism to also act as a publisher back to the same table on the same node pair without manually configuring a second, reverse subscription) and has **no built-in conflict resolution** — configuring bidirectional native logical replication naively risks both infinite replication loops (a change replicated back to its own origin, re-applied, re-replicated) and silent LWW-style data loss on genuine concurrent conflicts (Expert Q4). BDR/pglogical are purpose-built to address exactly this: origin-tracking to prevent replication loops, and configurable conflict-resolution policies (LWW by default, but with hooks for custom, business-aware resolution logic) for genuinely bidirectional, multi-master topologies. Even with BDR/pglogical's tooling, though, the deeper question (Expert Q4's real point) is whether the *data model* itself is safe for multi-master writes at all — a purpose-built extension solves the *replication-mechanics* problem (loop prevention, configurable conflict policy) but does not, by itself, make a non-commutative financial field (a mutable balance) safe to write concurrently in two regions; that requires the same commutative-remodeling (append-only deltas) or single-writer-routing fix regardless of which replication tooling sits underneath. Recommendation for a ledger specifically: prefer **single-writer-per-account routing** (each account has one owning region; the "active-active" property is achieved at the routing layer, not the replication layer) over true multi-master writes for the core balance-mutating path, reserving BDR/pglogical-style multi-master (or native bidirectional logical replication) for genuinely commutative, non-ledger data where its added operational complexity is actually justified by a real multi-writer requirement. The Principal framing: native logical replication's gaps (no loop prevention, no conflict policy) are real and BDR/pglogical close them at the replication-mechanics layer — but for a ledger, the harder, unavoidable question is whether the data itself is safe to write concurrently from two regions at all, which no replication extension answers for you.
- **Why correct:** Correctly identifies native logical replication's specific gaps versus BDR/pglogical, and correctly separates the replication-mechanics question from the deeper data-model-commutativity question, giving the right recommendation for ledger data specifically.
- **Common mistakes:** Assuming BDR/pglogical's conflict-resolution tooling alone makes arbitrary financial data safe for multi-master writes, without addressing the underlying data-model commutativity question from Expert Q4.
- **Follow-ups:** "Why does naive bidirectional native logical replication risk an infinite replication loop?" / "What does 'origin-tracking' in BDR actually prevent?" / "Why is single-writer-per-account routing still preferable even with BDR available?"
-
----
-
-## 11. Coding Exercises
-
-### Easy — Range partitioning with instant archival drop
+#### Easy — Range partitioning with instant archival drop
 ```sql
 CREATE TABLE events (id bigint, occurred_at timestamptz, payload jsonb) PARTITION BY RANGE (occurred_at);
 CREATE TABLE events_2024_q1 PARTITION OF events FOR VALUES FROM ('2024-01-01') TO ('2024-04-01');
@@ -181,7 +253,7 @@ CREATE TABLE events_2024_q2 PARTITION OF events FOR VALUES FROM ('2024-04-01') T
 DROP TABLE events_2024_q1;
 ```
 
-### Medium — Verify partition pruning via EXPLAIN
+#### Medium — Verify partition pruning via EXPLAIN
 ```sql
 EXPLAIN SELECT * FROM events WHERE occurred_at >= '2024-05-01' AND occurred_at < '2024-06-01';
 -- Correct output shows ONLY "events_2024_q2" scanned, not events_2024_q1 -- confirms pruning is active.
@@ -189,7 +261,7 @@ EXPLAIN SELECT * FROM events WHERE occurred_at >= '2024-05-01' AND occurred_at <
 -- (the sargability concern, applied here to partition pruning specifically).
 ```
 
-### Hard — Detect orphaned replication slots (/Advanced Q1's safeguard)
+#### Hard — Detect orphaned replication slots (/Advanced Q1's safeguard)
 ```sql
 SELECT slot_name, active, restart_lsn,
  pg_wal_lsn_diff(pg_current_wal_lsn, restart_lsn) AS retained_bytes
@@ -201,7 +273,7 @@ ORDER BY retained_bytes DESC;
 -- before dropping (per Advanced Q1's audit process), never drop blindly without verification.
 ```
 
-### Expert — Synchronous replication with quorum-based fallback tolerance (Advanced Q3)
+#### Expert — Synchronous replication with quorum-based fallback tolerance (Advanced Q3)
 ```sql
 -- postgresql.conf on the primary:
 synchronous_commit = on;
@@ -211,9 +283,7 @@ synchronous_standby_names = 'ANY 1 (replica_a, replica_b, replica_c)';
 ```
 **Discussion**: The `ANY 1 (...)` quorum syntax is precisely what closes the single-synchronous-standby outage risk from Advanced Q3 — with three candidates and a quorum of just one required, the primary continues accepting commits as long as at least one of the three replicas remains reachable, a meaningfully more resilient configuration than naming a single synchronous standby.
 
----
-
-## 12. System Design
+### 12. System Design
 
 **Scenario:** Design the partitioning, replication, and CDC topology for a global settlement platform: a core ledger primary in one region-of-record, a synchronous DR standby for zero-committed-loss failover, asynchronous read replicas for regional reporting, and a CDC pipeline streaming every settlement event to a downstream fraud/analytics platform.
 
@@ -241,9 +311,7 @@ synchronous_standby_names = 'ANY 1 (replica_a, replica_b, replica_c)';
 
 **Trade-offs:** CDC via logical decoding is chosen over a per-service application outbox for this platform's cross-legacy-system event-capture requirement, accepting the added replication-slot operational burden (Production Example) as the direct cost of that choice — a trade-off explicitly weighed, not defaulted into.
 
----
-
-## 13. Low-Level Design
+### 13. Low-Level Design
 
 **Requirements:** Model partition-maintenance operations as safe, non-blocking, and idempotent; model replication-slot lifecycle as explicitly tied to consumer lifecycle; support graceful degradation when a read replica's lag exceeds a query's staleness tolerance (Advanced Q6).
 
@@ -299,9 +367,7 @@ sequenceDiagram
 
 **Concurrency/thread safety:** `DetachConcurrently` must be safe to invoke while live queries continue against the parent table (the `SHARE UPDATE EXCLUSIVE` lock is specifically chosen for this); `ReadRouter`'s staleness check must read replica lag atomically relative to the routing decision, avoiding a race where lag is checked, found acceptable, but grows past threshold before the query actually executes against the chosen replica — mitigated by treating the staleness threshold with a safety margin rather than a razor-thin cutoff.
 
----
-
-## 14. Production Debugging
+### 14. Production Debugging
 
 **Incident:** Six months after the settlement platform's CDC pipeline (§12) went live, the fraud-detection team reported receiving settlement events roughly 40 minutes late during specific, recurring windows — not continuously, only during the platform's known monthly-archival maintenance job.
 
@@ -315,9 +381,7 @@ sequenceDiagram
 
 **Prevention:** The schema-design documentation's attach/detach guidance (Expert Q7) was cross-linked directly into the archival job's own code comments and its onboarding runbook, closing the specific knowledge-transfer gap that let a correctly-documented discipline fail to reach a new contributor — the same cross-team-communication pattern Module 21 §14's deadlock incident illustrates, recurring here at the partition-maintenance layer instead of the application-locking layer.
 
----
-
-## 15. Architecture Decision
+### 15. Architecture Decision
 
 **Context:** Choosing how to deliver settlement events to downstream fraud/analytics consumers — application-level outbox versus CDC via logical decoding (Expert Q2's general framing, now applied as a concrete decision for this platform).
 
@@ -327,9 +391,7 @@ sequenceDiagram
 
 **Recommendation: Option B**, specifically because this platform's defining constraint — several legacy writers to the ledger that cannot all be practically updated to write outbox rows — makes Option A's per-writer integration cost prohibitive, while Option B's operational costs (slot monitoring, partition-maintenance discipline) are addressable via the structural safeguards this module develops (the slot registry in §13, the regression test in §14) rather than being irreducible. Add a thin transformation layer between Debezium's raw row-level events and the Kafka topics fraud/analytics actually consume, closing Option B's schema-leakage disadvantage without giving up its legacy-writer-coverage advantage.
 
----
-
-## 17. Principal Engineer Perspective
+### 17. Principal Engineer Perspective
 
 **Business impact:** A 40-minute CDC lag spike (§14) delayed fraud-detection signal freshness during exactly the archival-job window least likely to be scrutinized as "a replication concern" — the business cost of a delayed fraud signal is bounded but real (a fraudulent pattern detected 40 minutes later than it should have been), illustrating why even a "just an archival job" change requires the same design-review rigor as a change to the replication topology itself, since the two are more coupled than their ownership boundaries suggest.
 
@@ -347,9 +409,7 @@ sequenceDiagram
 
 **Long-term maintainability:** What decays over time, across both this module's incidents, is the correspondence between an original, correctly-designed operational discipline (slot cleanup on decommissioning, concurrent detach for live tables) and the system's current, evolved set of contributors and code paths who may never have encountered the original incident that produced the discipline — the sustained countermeasure, consistent with this course's recurring guidance, is embedding the discipline structurally (registries, regression tests, linked documentation) rather than relying on it being independently rediscovered or remembered indefinitely.
 
----
-
-## 18. Revision
+### 18. Revision
 **Key takeaways**: Partitioning (range/list/hash) enables instant archival and smaller-unit maintenance, but only delivers a genuine performance win if partition pruning is verified (via `EXPLAIN`) to actually occur. Physical replication = byte-identical, same-version-only; logical replication = row-level, cross-version, selective. Synchronous replication trades commit latency for eliminating failover data loss — use quorum-based (`ANY N`) configuration to avoid a single-standby-failure outage. Replication slots retain WAL indefinitely for an unconsumed/orphaned consumer — a severe, easy-to-overlook resource-exhaustion risk requiring proactive monitoring and mandatory slot-cleanup on consumer decommissioning.
 
 ---

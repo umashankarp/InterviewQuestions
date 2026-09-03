@@ -4,18 +4,207 @@
 
 ---
 
-## 1. Fundamentals
+## 1. Topic Description
 
-### What is API security, and what is rate limiting?
+### Definition
+
+**API security** is the set of controls applied at the API boundary to ensure that each request is attributable to a known caller, permitted for the specific operation *and the specific object* it names, and unable to consume disproportionate resources. **Rate limiting** is the family of mechanisms that bound how much a caller may consume: *rate limiting* bounds request speed, a *quota* bounds total volume over a longer commercial period, *concurrency limiting* bounds simultaneous in-flight work, and *load shedding* is the system protecting itself regardless of any individual caller's entitlement. These are four different controls that teams routinely conflate into one.
+
+### Core sub-concepts
+
+- **Broken object-level authorization (BOLA/IDOR)** — endpoint-level checks without per-object checks; the most common serious API flaw.
+- **Broken function-level authorization** — reaching an operation, not just an object, that the caller should not have.
+- **Mass assignment** — binding client input into models containing privilege- or scope-bearing fields.
+- **Excessive data exposure** — returning full internal entities and relying on the client not to display sensitive fields.
+- **Authorisation-relevant values from the credential, never the payload** — tenant and user identity derived server-side.
+- **Credential types** — bearer tokens, mTLS, API keys; what each actually authenticates; hashing, scoping, rotation and revocation.
+- **Input handling as a trust boundary** — body size caps, JSON depth and element limits, collection bounds, request timeouts.
+- **Deserialisation safety** — closed sets of permitted polymorphic types; type-name handling as a remote-code-execution class.
+- **Rate-limiting algorithms** — fixed window (boundary burst), sliding window, token bucket (burst plus steady rate), leaky bucket, concurrency limits.
+- **Limiter keying** — authenticated principal versus IP behind proxies; never a client-supplied unauthenticated identifier.
+- **Distributed limiter state** — per-instance state multiplying the effective limit by replica count; shared counters, lease/batch models, and fail-open versus fail-closed.
+- **The 429 contract** — `Retry-After`, quota headers, and which limit was hit.
+- **Layering** — edge/gateway versus in-process versus dependency-boundary controls, and what each protects.
+- **CORS** — a browser-enforced read policy, not an access control.
+- **Enumeration defence** — non-sequential identifiers, uniform 404-versus-403 responses, and detection of enumeration patterns.
+- **TLS placement and internal traffic** — where encryption terminates and what runs unencrypted behind it.
+
+### Where it fits
+
+These controls sit at the outermost layer of the API — some in the gateway, some in the pipeline, some inside the handler where the loaded object is available. They depend on the authentication and authorization machinery of the framework and on the contract design that determines what identifiers and payloads exist at all. Upward they are what makes an API safe to expose to partners, to the public, or to other teams whose code you do not review.
+
+### Why it matters at scale
+
+Object-level authorization is where APIs actually get breached: the check must be written on *every* handler, it is invisible in code review because the endpoint looks protected, and functional tests written from the owner's perspective never exercise it. Rate limiting fails differently — it fails *quietly*. A limiter with per-instance state on twenty replicas enforces twenty times the configured limit, so the team believes they are protected while a single caller consumes the fleet. A fixed-window limiter permits double the limit across every boundary. And a 429 without `Retry-After` invites immediate retries, turning the protective control into a load amplifier during exactly the incident it existed to prevent.
+
+### Common pitfalls / anti-patterns
+
+- **Authorising the endpoint but not the object** — changing an ID in the URL returns another user's or tenant's record; the single most common severe API vulnerability.
+- **Trusting a tenant or user ID from the request body or a header** — lets the caller select whose data they operate on, one missing check away from a cross-tenant breach.
+- **Per-instance rate-limiter state** — the effective limit is silently multiplied by the replica count, so the configured number means nothing.
+- **Keying limits on client IP** — shared behind NAT and corporate proxies (punishing legitimate users) and trivially rotated by an attacker.
+- **Fixed-window limiting on a contractual limit** — a burst at the end of one window plus a burst at the start of the next doubles the allowed rate at every boundary.
+- **Treating CORS as an access control** — it is enforced only by browsers; curl, scripts, servers and mobile apps ignore it entirely.
+- **Secrets or tokens in URLs** — logged by web servers, proxies, CDNs and browser history, and leaked in `Referer` headers to third parties.
+- **Returning 403 where 404 would be safer** — confirms the existence of another tenant's resource, enabling enumeration.
+- **No request size, depth or collection limits** — a single small payload becomes a memory-and-CPU denial of service needing no authentication.
+- **Failing open on authentication or authorization when a dependency times out** — serving data because the check was unavailable is a breach, not a degradation.
+
+> Scope note: resource modelling, status codes, versioning and pagination belong to `01-REST-Design-Fundamentals`; OpenAPI, SDKs and contract testing to `03-API-Documentation-Contract-Testing`. Framework-level authentication schemes and policy mechanics live in `02-DotNet-AspNetCore/04-Authentication-Authorization-Deep-Dive`; identity architecture in `40-IAM`; token protocols in `41-OAuth2-OIDC-JWT-PKCE`.
+
+---
+
+## 2. Beginner (10 Q&A)
+
+
+**Q1. What is broken object-level authorization and why is it the most common serious API flaw?**
+**A:** It is when an endpoint checks that the caller is authenticated and permitted to *use the endpoint*, but never checks that they are permitted to access the *specific object* identified in the request — so changing an ID in the URL returns someone else's data. It is the most common serious flaw because the check is per-object and therefore must be written on every handler, it is invisible in functional tests written from the owner's perspective, and the endpoint looks correctly protected in a code review. Preventing it structurally — a repository that always filters by the caller's scope — is far more reliable than remembering a check per endpoint.
+*Follow-up: Should a failed object-level check return 403 or 404?*
+
+**Q2. Why is trusting a tenant or user ID from the request body dangerous?**
+**A:** Because it lets the caller choose whose data they operate on. Any identifier that determines authorisation scope must come from the authenticated principal — the token's claims — not from anything the client controls. This shows up as a "convenience" parameter that an internal tool needed, then gets exposed publicly. The rule is simple and worth stating absolutely: authorisation-relevant values are derived server-side from the credential, and request-supplied values are only ever used to *narrow* within an already-authorised scope.
+*Follow-up: An admin genuinely needs to act on another tenant's behalf. How do you design that?*
+
+**Q3. What is mass assignment and how do you prevent it?**
+**A:** Binding request data straight into a model that contains fields the caller should not control — `role`, `isVerified`, `balance`, `tenantId` — so a crafted payload sets them. Prevention is to bind to an explicit request type containing only client-settable fields, and to map deliberately. Allow-lists in attributes work but rot, because the danger arrives when someone adds a property later and does not revisit the attribute. This is one of the clearest cases where the "extra DTO" that developers resist as boilerplate is actually a security control.
+*Follow-up: How would you detect this class of bug across an existing codebase?*
+
+**Q4. Compare the main rate-limiting algorithms.**
+**A:** Fixed window counts requests per calendar interval — trivial to implement, but allows up to double the limit around a boundary, since a burst at the end of one window and the start of the next both pass. Sliding window (log or weighted) fixes that at higher storage or computation cost. Token bucket permits bursts up to the bucket size while enforcing a long-run average rate, which usually matches what you actually want from an API. Leaky bucket smooths output to a constant rate, which suits protecting a fixed-capacity downstream. Concurrency limiting bounds simultaneous in-flight requests rather than rate, and is often the better protection for expensive operations.
+*Follow-up: For an API where some endpoints are 100x more expensive than others, which do you choose and how do you configure it?*
+
+**Q5. What should you key a rate limiter on?**
+**A:** On the authenticated principal — API key, client ID, or user — because that is the entity you have a relationship with and can hold accountable. IP is a poor key: it is shared behind NAT and corporate proxies, so you punish legitimate users, and it is trivially rotated by an attacker with a botnet or cloud addresses. IP-based limits are still useful as a coarse pre-authentication defence, since unauthenticated traffic has no better key. What you must never key on is a client-supplied identifier that is not authenticated, because the client will simply vary it.
+*Follow-up: Behind a load balancer, `RemoteIpAddress` is the proxy's. How do you get the real one safely?*
+
+**Q6. What does a well-behaved 429 response look like?**
+**A:** Status 429 with `Retry-After` telling the client when to try again, plus headers exposing the limit, remaining quota and reset time so a well-written client can pace itself rather than probing. The body should say which limit was hit, since a client hitting a per-endpoint limit needs different action from one hitting an account quota. Returning 429 without `Retry-After` invites immediate retries, which is how a rate limiter becomes a load amplifier during an incident.
+*Follow-up: A client ignores `Retry-After` entirely. What's your escalation?*
+
+**Q7. What does CORS actually protect, and what does it not?**
+**A:** It is a browser-enforced policy controlling which origins may read responses from cross-origin JavaScript. It protects users of browsers from a malicious site reading data using their credentials. It does *not* protect your API from anything else: curl, a script, a mobile app or a server ignores CORS entirely, so a permissive CORS policy is not itself a breach but a restrictive one is not a security control either. Treating CORS as access control is a common and consequential misunderstanding — the actual control is authentication and authorization on every request.
+*Follow-up: Someone sets `Access-Control-Allow-Origin: *` with credentials enabled. What happens?*
+
+**Q8. Why should secrets never appear in a URL?**
+**A:** Because URLs are logged everywhere — web servers, proxies, load balancers, CDNs, browser history, and `Referer` headers sent to third parties — so a token in a query string leaks into systems with weaker controls and longer retention than you intended. It is also cached and shared when users copy links. Credentials belong in headers, which are not routinely logged in full, and where they are, the logging pipeline can redact them by name. This is a case where the correct behaviour costs nothing and the incorrect one produces a credential leak with no attacker skill required.
+*Follow-up: You find tokens in six months of access logs. What's your response?*
+
+**Q9. What input limits should every API enforce by default?**
+**A:** Maximum request body size, maximum JSON nesting depth and element count, maximum array lengths on any collection parameter, maximum string lengths, and a request timeout. Without these, a single small request can consume disproportionate memory and CPU — a deeply nested or enormous payload is a cheap denial of service that needs no authentication if the endpoint is public. These limits belong at the platform layer so every endpoint inherits them, with per-endpoint overrides where genuinely needed rather than per-endpoint implementation.
+*Follow-up: An endpoint legitimately accepts a 100 MB upload. How do you handle it differently?*
+
+**Q10. What's the difference between rate limiting, quotas and load shedding?**
+**A:** Rate limiting bounds the *speed* of requests from a caller, protecting fairness. A quota bounds *total volume* over a longer period — a day or a month — and is usually a commercial construct tied to a plan. Load shedding is the system protecting *itself*: rejecting requests because it is near capacity, regardless of whether any individual caller is over their limit. They are complementary and often confused: a system with rate limits but no load shedding still collapses when many compliant callers arrive at once, and a system with shedding but no limits lets one caller degrade everyone.
+*Follow-up: You're shedding load. Which requests do you drop first and how do you decide?*
+
+---
+
+## 3. Intermediate (10 Q&A)
+
+
+**Q1. You deploy a rate limiter and traffic is still ten times the configured limit. What happened?**
+**A:** Almost certainly per-instance state: each replica enforces the limit independently, so with ten replicas the effective limit is ten times what was configured. Other candidates are a limiter keyed on something the client varies, requests bypassing the limiter through a different route or an internal path, or the limiter being applied after an expensive middleware so it protects nothing. The fix for the common case is shared state — a distributed counter — with the trade-offs that introduces, or partitioning traffic consistently so each caller always reaches the same instance. I would first confirm which of these it is by measuring per-instance counters rather than assuming.
+*Follow-up: A distributed counter adds a network round trip to every request. How do you avoid that cost?*
+
+**Q2. How do you implement distributed rate limiting without making the store a single point of failure?**
+**A:** Keep the shared store off the strict critical path: use local counters with periodic synchronisation, accepting slight over-admission, or a token-bucket lease model where each instance draws a batch of permits and refills asynchronously. Then decide the failure behaviour explicitly — fail open (serve traffic, lose protection) or fail closed (reject, lose availability) — which is a business decision that differs by endpoint: fail open on a read API, fail closed on something expensive or abusable. Whatever the choice, it should be configured and tested, because the default behaviour of most implementations under store failure is not what teams assume.
+*Follow-up: You fail open and the store is down during an attack. What compensating control do you want?*
+
+**Q3. How would you structure limits for an API with wildly different endpoint costs?**
+**A:** Weighted or cost-based limiting rather than a single request count: assign each endpoint a cost reflecting its resource consumption, and deduct that from the caller's budget, which is how most mature public APIs work. Alongside that, concurrency limits on the genuinely expensive endpoints, because rate alone does not stop ten simultaneous expensive queries. I would publish the costs so clients can plan, and separate limits per resource class so a client exhausting their reporting budget can still make cheap operational calls — otherwise one heavy background job takes out the client's interactive traffic.
+*Follow-up: A client complains the cost model is unpredictable. How do you make it explainable?*
+
+**Q4. What's the right layering of rate limiting across gateway, service and dependency?**
+**A:** Coarse volumetric and per-client limits at the edge, where rejection is cheapest and protects everything behind it; application-level limits in the service for anything requiring business context such as per-tenant plans; and concurrency limits at the dependency boundary so a slow database cannot be overwhelmed by the service itself. Each layer protects a different resource, so they are complementary rather than redundant. The failure mode to avoid is limits configured independently at each layer such that nobody can predict the effective limit — I would document the composed behaviour explicitly, since that is what clients actually experience.
+*Follow-up: A legitimate client is being throttled and nobody can tell which layer is doing it. How do you fix that?*
+
+**Q5. How do you protect against enumeration attacks?**
+**A:** Non-sequential identifiers so guessing is impractical, uniform responses so a caller cannot distinguish "does not exist" from "not yours" — which is the main reason to return 404 rather than 403 on unauthorised object access — and rate limits on the endpoints that would be used for enumeration. Timing differences also leak, so an authorisation check that short-circuits faster than a real lookup is a side channel, though usually a lower-priority one. I would also monitor for the pattern itself: a caller producing a high rate of 404s on identifier-shaped paths is a strong signal worth alerting on, and detection is often more practical than perfect prevention.
+*Follow-up: Your public API needs human-readable slugs, which are enumerable by design. What do you do?*
+
+**Q6. What are the risks of deserialisation, and how do you mitigate them?**
+**A:** Permissive deserialisation that resolves types named in the payload is a remote code execution class — it has affected every major platform and is not a theoretical risk. Even without that, deeply nested or enormous payloads consume memory and CPU disproportionately, and polymorphic handling can instantiate types with side effects in their constructors. The mitigations are a closed, declared set of permitted types, hard limits on depth and size, rejecting unknown fields where the contract allows it, and never enabling type-name handling on untrusted input. I would treat any endpoint accepting polymorphic client input as requiring an explicit threat-model note.
+*Follow-up: A legacy client sends payloads with an embedded type discriminator. How do you migrate safely?*
+
+**Q7. Where should TLS terminate and what about traffic behind that point?**
+**A:** Terminating at the edge is normal, but the question that matters is what happens after: unencrypted internal traffic assumes the network is trusted, which is exactly the assumption zero-trust architectures exist to remove, and it means anyone with network access or a compromised pod can read tokens and data in flight. I would push for TLS or mTLS internally — a service mesh makes this cheap — particularly for anything crossing a trust boundary or carrying credentials. The other decision is certificate lifecycle: automated issuance and rotation, because manual certificate management reliably produces an expiry outage roughly once a year.
+*Follow-up: mTLS everywhere adds latency and operational complexity. Where would you not do it?*
+
+**Q8. How do you handle API keys well?**
+**A:** Treat them as credentials, not identifiers: high entropy, stored hashed rather than in plaintext, scoped to specific permissions rather than granting everything, rotatable without downtime through overlapping validity, and revocable immediately. Each key should be attributable to a client and an owner so it can be audited and disabled, and usage per key should be visible so an anomalous pattern is detectable. The common failure is a long-lived shared key with full access embedded in a client application, which cannot be rotated because nobody knows who uses it — the mitigation for that is discovering the problem before an incident forces it.
+*Follow-up: A key is leaked in a public repository. Walk me through the first hour.*
+
+**Q9. How do you decide fail-open versus fail-closed for a security control?**
+**A:** By the consequence of each failure. Authentication and authorization fail closed without exception — serving data because the check was unavailable is a breach. Rate limiting and quota may fail open on read paths where availability matters more than perfect enforcement, but should fail closed on expensive or abusable operations. The important discipline is that this is a deliberate, documented decision per control with a named owner, not an emergent property of how the library happens to behave when its dependency times out. I would also test the degraded path, because untested failure behaviour is usually different from the assumed behaviour.
+*Follow-up: Your authorization service is down. The business asks you to fail open for 30 minutes. What's your answer?*
+
+**Q10. How do you tell abuse from a legitimate traffic spike?**
+**A:** By baselining behaviour per client rather than looking at aggregate volume: legitimate spikes usually preserve the shape of traffic — similar endpoint mix, similar error rate, similar session patterns — while abuse tends to concentrate on one endpoint, produce elevated 4xx rates, or exhibit machine-like regularity. Attribution matters more than volume: a known client doubling is different from a new credential appearing at high rate. In practice I would combine per-client anomaly detection with a graduated response — throttle before block, alert a human before automating a ban — because a false positive that cuts off a major customer is also an incident.
+*Follow-up: Your automated blocking cuts off your largest customer during their peak. How do you prevent recurrence?*
+
+---
+
+## 4. Expert / Architect (10 Q&A)
+
+
+**Q1. How do you build defence in depth for an API without producing an unmanageable pile of controls?**
+**A:** Map controls to the specific threats they address and to a layer, so each one has a stated purpose and nothing is retained out of habit. Typically: volumetric and bot defence at the edge, authentication and coarse authorization at the gateway, fine-grained and object-level authorization in the service, and data-level enforcement in the store. The discipline is that no single layer is assumed sufficient and no layer is added without a threat it counters — otherwise controls accumulate, latency grows, and nobody can say what would break if one were removed. I would also periodically test that each layer works independently, since defence in depth that has silently collapsed to one working layer is the common real state.
+*Follow-up: How would you verify that the service-layer authorization works if the gateway is bypassed?*
+
+**Q2. How do you approach rate limiting as a product concern rather than only a protective one?**
+**A:** Limits are part of the contract clients build against, so they need to be published, stable, explainable and tied to a plan — a limit that changes without notice breaks integrations as surely as a schema change. That means quota headers on every response, documentation of the algorithm and burst behaviour, a way to request an increase, and telemetry clients can see. Internally it means limits are versioned and changes are rolled out with notice and monitoring. Treating limits as an ops setting that anyone can tune is how you get outages in customers' systems that they attribute to you correctly.
+*Follow-up: You need to reduce a limit for capacity reasons. How do you roll that out?*
+
+**Q3. How would you design API security for a system handling regulated financial data?**
+**A:** Start from the control requirements rather than the technology: strong authentication with per-workload identity, authorization enforced at the data layer as well as the application, full audit of access to sensitive data with tamper-evidence, encryption in transit and at rest with managed keys, and data residency respected across every store including logs and telemetry. Then design for evidence — an auditor asks who accessed what and under what authority, and that must be answerable from records, not reconstructed. I would also insist on segregation of duties in the deployment path, since the ability of one engineer to deploy a change that reads production data unobserved is itself a finding.
+*Follow-up: Which of those is hardest to retrofit into an existing system, and why?*
+
+**Q4. How do you evaluate a WAF or bot-management product?**
+**A:** By being clear about what it can and cannot do. It is good at known attack signatures, volumetric filtering, credential-stuffing patterns and buying time during a zero-day — genuinely valuable. It is not a substitute for authorization, input validation or safe deserialisation, and treating it as one produces a system that is one bypass away from full exposure. The practical evaluation criteria are false-positive rate against your real traffic, the operational cost of tuning, whether rules can be tested before enforcement, and whether it terminates TLS in a way that is acceptable for your data classification. I would deploy in monitoring mode first, because a WAF blocking legitimate traffic is a self-inflicted outage.
+*Follow-up: The WAF blocks a legitimate payload pattern used by one important client. What's your process?*
+
+**Q5. How do you handle security for internal service-to-service APIs?**
+**A:** By not treating "internal" as a trust boundary. Each service gets its own identity with mTLS or workload identity, calls are authenticated and authorised individually, and traffic is encrypted — because a flat internal network means one compromised component reaches everything, which is exactly how a contained incident becomes a breach. Where the downstream must enforce user-level rules, the user's identity is propagated explicitly with a mechanism that prevents arbitrary impersonation. The cost is real operational complexity, which is why a service mesh or platform-provided identity is usually the practical route — asking each team to implement mTLS themselves reliably produces inconsistent results.
+*Follow-up: A legacy service can't do mTLS. How do you accommodate it without weakening the model?*
+
+**Q6. How do you make security testing part of the delivery process rather than a gate at the end?**
+**A:** Shift the cheap checks left and reserve human effort for what tooling cannot do: dependency scanning and secret detection on every commit, static analysis for the classes it detects reliably, and automated tests asserting the security-relevant behaviours — unauthenticated requests rejected, cross-tenant access denied, limits enforced. Then periodic penetration testing focused on business logic and authorization, which is where the real findings are and where scanners are weakest. The organisational element that matters is that findings have owners and SLAs by severity; a backlog of unactioned findings is worse than not scanning, because it creates a documented record of known unremediated risk.
+*Follow-up: A scanner produces 400 findings, most false positives. How do you make it useful?*
+
+**Q7. How do you protect an API from a client that is legitimate but badly behaved?**
+**A:** Contain rather than block: per-client concurrency limits so they cannot monopolise capacity, separate resource pools or bulkheads so their traffic cannot exhaust connections shared with others, and cost-based limits so an inefficient usage pattern costs them their own budget rather than everyone's. Then make the behaviour visible to them with usage telemetry and specific guidance, because most badly-behaved clients are unintentionally so and will fix it when shown. Escalation should be graduated and communicated. The architectural principle is that a multi-tenant API needs isolation designed in, since relying on all clients being well-behaved is not a strategy.
+*Follow-up: The badly-behaved client is your largest revenue source. Does anything change?*
+
+**Q8. What is your view on API gateways as the primary security control point?**
+**A:** They are valuable for consistency — one place for authentication, coarse authorization, rate limiting, TLS and logging — and that consistency is worth a lot across many services. The danger is treating the gateway as the *only* control point, because service-to-service traffic often bypasses it entirely, an internal caller or a compromised pod reaches services directly, and a gateway misconfiguration then exposes everything at once. My position is that the gateway enforces the baseline and services still enforce what matters to them, particularly object-level authorization which the gateway cannot do. I would also treat the gateway's own configuration as high-risk change requiring review, since it is a single point of catastrophic misconfiguration.
+*Follow-up: How would you detect a service being reached directly, bypassing the gateway?*
+
+**Q9. How do you respond to a suspected API credential compromise?**
+**A:** Contain first: revoke or rotate the credential, which requires that revocation actually works and is fast — something worth testing before you need it. Then assess blast radius from access logs: what that credential accessed, over what period, and whether the access pattern indicates data exfiltration. Then notify according to the regulatory and contractual obligations, which have clock-driven deadlines that start earlier than most teams expect. Afterwards, the structural questions are why the credential was long-lived, why the scope was broad enough to matter, and whether the anomalous usage was detectable — those three usually produce more durable improvement than the incident-specific fix.
+*Follow-up: The credential was in a mobile app binary. How does that change containment?*
+
+**Q10. How do you balance security controls against latency and developer velocity?**
+**A:** By putting the cost in the platform rather than in each team, so the secure path is also the default and the fast one — inherited middleware, templates that start with the right posture, test helpers that make security assertions easy to write. Where a control genuinely costs latency, measure it rather than argue about it, and place it where the cost is lowest: caching authorization decisions with a bounded staleness window, evaluating policies locally rather than over the network, terminating TLS efficiently. Where a real conflict remains, it is a risk decision with a named owner and an expiry, not an engineering debate. The failure to avoid is security controls that are so painful that teams route around them, which produces worse outcomes than a slightly weaker control that is actually used.
+*Follow-up: A team has built a bypass around a control because it was too slow. How do you handle that?*
+
+---
+
+## 5. Reference Material
+
+> Retained from the original module: deep-dive internals, diagrams, production examples, exercises, system/low-level design, debugging walkthroughs and the Principal Engineer perspective.
+
+### 1. Fundamentals
+
+#### What is API security, and what is rate limiting?
 API security is the set of practices protecting an API's endpoints, data, and downstream systems from unauthorized access, abuse, and resource exhaustion — spanning authentication/authorization, input validation, transport security (TLS), and abuse-prevention mechanisms. **Rate limiting** is a specific abuse-prevention mechanism: capping how many requests a given caller (or the system overall) may make within a time window, protecting the API and its downstream dependencies from being overwhelmed — whether by a malicious attacker, a buggy client in a retry loop, or simply legitimate traffic exceeding provisioned capacity.
 
-### Why do these exist?
+#### Why do these exist?
 Any publicly (or even internally, cross-team) reachable API is a genuine attack surface — without deliberate security controls, it's vulnerable to credential attacks, injection, data exposure, and resource-exhaustion abuse. Rate limiting exists specifically because **without it, a single caller (malicious or merely buggy) can consume unbounded capacity**, degrading service for every other caller — this is true even for entirely well-intentioned callers (§Expert Q6's thundering-herd/retry-storm scenario).
 
-### When does this matter?
+#### When does this matter?
 Every externally-facing (and most internally-facing, cross-team) API needs both; the depth matters for correctly implementing rate limiting that's actually effective at fleet scale (not just per-replica, which is trivially bypassable by spreading requests across replicas) and for recognizing the specific, common API-security vulnerability classes (broken object-level authorization, mass assignment, excessive data exposure) that dominate real-world API breaches.
 
-### How does it work (30,000-ft view)?
+#### How does it work (30,000-ft view)?
 ```csharp
 builder.Services.AddRateLimiter(options =>
     {
@@ -30,29 +219,27 @@ app.UseRateLimiter;
 app.MapGet("/orders", GetOrders).RequireRateLimiting("per-client");
 ```
 
----
+### 2. Deep Dive
 
-## 2. Deep Dive
-
-### 2.1 The OWASP API Security Top 10 — Why It's Distinct from the General OWASP Top 10
+#### 2.1 The OWASP API Security Top 10 — Why It's Distinct from the General OWASP Top 10
 The OWASP API Security Top 10 exists as a **separate** list from the general OWASP Top 10 because APIs have distinctive risk patterns not centered in traditional web-app security: **Broken Object Level Authorization (BOLA/IDOR)** — the single most common API vulnerability — occurs when an API checks *authentication* but not *per-object authorization* (exactly the resource-based authorization gap, restated as an industry-recognized top vulnerability class); **Excessive Data Exposure** — returning a full internal entity/DTO with more fields than the client actually needs, relying on the client to "just not display" sensitive fields, rather than the server withholding them; **Broken Function Level Authorization** — a caller reaching an admin-only *operation* (not just a specific object) they shouldn't; **Mass Assignment** — directly the over-posting vulnerability, now recognized as an API-specific OWASP category in its own right.
 
-### 2.2 Rate Limiting Algorithms — Precise Trade-offs
+#### 2.2 Rate Limiting Algorithms — Precise Trade-offs
 - **Fixed window**: count requests per fixed time bucket (e.g., per calendar minute) — simple, but has a **boundary-burst problem**: a client can send the full limit at 11:59:59 and another full limit at 12:00:01, doubling the effective allowed rate right at the window boundary.
 - **Sliding window (log or counter-based)**: tracks requests within a continuously-moving window, avoiding the boundary-burst problem at the cost of more state (a log of timestamps, or a weighted blend of the current and previous fixed windows).
 - **Token bucket**: a bucket holds tokens, refilled at a steady rate, consumed per request — naturally allows **bursts** up to the bucket's capacity while enforcing a steady-state average rate, the most commonly used algorithm for API rate limiting specifically because it models "occasional bursts are fine, sustained abuse isn't" well.
 - **Leaky bucket**: requests queue and are processed at a strictly constant output rate — smooths bursts entirely (no burst allowance) at the cost of added latency for bursty-but-legitimate traffic.
 
-### 2.3 Distributed Rate Limiting — the Fleet-Scale Requirement
+#### 2.3 Distributed Rate Limiting — the Fleet-Scale Requirement
 A per-replica, in-memory rate limiter (`System.Threading.RateLimiting`'s built-in limiters used with default, local state) only limits **that specific replica's** view of a client's traffic — across N horizontally-scaled replicas, a client could receive N times the intended limit by simply having requests load-balanced across replicas. Genuine fleet-wide rate limiting requires **shared, external state** (a Redis-backed atomic counter/token-bucket, evaluated via a Lua script for atomicity) — directly the pattern first introduced §Expert Q6, now contextualized as the standard, necessary architecture for any rate limit meant to apply to a caller's *aggregate* traffic across an entire fleet, not just one replica's slice of it.
 
-### 2.4 Rate Limit Response Contract — `429` and `Retry-After`
+#### 2.4 Rate Limit Response Contract — `429` and `Retry-After`
 A rate-limited response should return `429 Too Many Requests` with a `Retry-After` header (seconds, or an HTTP date) telling the well-behaved client exactly when to retry — this directly enables correct client-side backoff (the retry patterns) rather than the client guessing an arbitrary backoff interval; omitting `Retry-After` forces every client to implement its own guessed backoff strategy, often producing exactly the synchronized-retry-storm problem (§Expert Q7) rate limiting exists to prevent in the first place.
 
-### 2.5 Input Validation as a Security Boundary
+#### 2.5 Input Validation as a Security Boundary
 Every API input boundary must validate: type/shape (model binding), size limits (request body size caps, preventing a single oversized payload from being a resource-exhaustion vector — directly the `stackalloc`-sizing caution generalized to any input-driven allocation), and business-rule validity (422) — treating client input as untrusted by default, never assuming a "friendly" first-party client always sends well-formed data, since any input boundary is also reachable by a malicious or compromised caller regardless of who the API was originally designed for.
 
-## 3. Visual Architecture
+### 3. Visual Architecture
 ```mermaid
 graph LR
  Client -->|request + API key| Gateway["API Gateway / Rate Limiter"]
@@ -64,101 +251,12 @@ graph LR
  AuthZ --> DTO["Narrow response DTO<br/>(excessive-exposure prevention)"]
 ```
 
-## 4. Production Example
+### 4. Production Example
 **Scenario**: A partner API experienced a BOLA (Broken Object Level Authorization) vulnerability — an endpoint `GET /invoices/{id}` checked only that the caller was *authenticated* (any valid API key), never that the requested invoice actually belonged to *that specific* caller's account, allowing any partner to enumerate and read every other partner's invoices by simply incrementing the ID. **Investigation**: found via a routine security audit (not an incident) specifically testing this exact pattern across every resource-ID-accepting endpoint. **Fix**: added resource-based authorization (the exact pattern) verifying `invoice.PartnerId == currentPartnerId` before returning data, across every affected endpoint, plus a systemic audit of the entire API surface for the same gap. **Lesson**: BOLA is the single most common real-world API vulnerability precisely because "the endpoint requires authentication" is trivially confused with "the endpoint enforces authorization" — they are not the same, and this module's OWASP-API-Top-10 framing exists specifically to keep that distinction front-of-mind.
-## 10. Interview Questions
 
-### Basic (10)
-1. **Q: What is BOLA?** **A:** Broken Object Level Authorization — an API checks authentication but not whether the caller is authorized to access the *specific* requested object.
-2. **Q: What is mass assignment?** **A:** Binding a request body directly onto a rich entity type, letting a client set unintended fields.
-3. **Q: What status code should a rate-limited request return?** **A:** 429 Too Many Requests — a distinct, machine-recognizable signal (separate from 4xx client errors and 5xx server failures) that well-behaved clients and SDKs interpret as "back off and retry later," ideally accompanied by a `Retry-After` header.
-4. **Q: What header tells a client when to retry after a 429?** **A:** `Retry-After` — expressed as either seconds-to-wait or an HTTP date; emitting it (ideally with jittered values) shapes client behavior into coordinated backoff instead of leaving every client to guess and hammer the API in synchronized retry waves.
-5. **Q: What's the boundary-burst problem with fixed-window rate limiting?** **A:** A client can send the full limit at the very end of one window and again at the very start of the next, doubling the effective rate at the boundary.
-6. **Q: What does a token bucket allow that a leaky bucket doesn't?** **A:** Bursts up to the bucket's capacity, while still enforcing a steady-state average rate.
-7. **Q: Why doesn't a per-replica in-memory rate limiter work correctly at fleet scale?** **A:** Each replica only sees its own slice of a client's traffic, so the effective limit multiplies by replica count.
-8. **Q: What is excessive data exposure?** **A:** Returning more fields in a response than the client legitimately needs, relying on the client not to misuse them rather than the server withholding them.
-9. **Q: Why is the OWASP API Security Top 10 a separate list from the general OWASP Top 10?** **A:** APIs have distinctive risk patterns (BOLA, mass assignment, broken function-level authorization) not centered in traditional web-app security concerns.
-10. **Q: What should an API do with an oversized request body?** **A:** Reject it early via a configured size limit, before it reaches business logic.
+### 11. Coding Exercises
 
-### Intermediate (10)
-1. **Q: Why is BOLA the most common real-world API vulnerability?** **A:** Because "requires authentication" is easily and commonly confused with "enforces authorization" — an endpoint can correctly reject unauthenticated callers while still failing to check whether the authenticated caller owns the specific requested resource.
-2. **Q: How does a sliding-window rate limiter avoid the fixed-window boundary-burst problem?** **A:** It tracks requests within a continuously-moving window (via a timestamp log or a weighted blend of adjacent fixed windows) rather than resetting a hard counter at fixed boundaries, so there's no single instant where two full allowances stack.
-3. **Q: Why is Redis (or another shared store) required for genuine fleet-wide rate limiting?** **A:** It provides the single, shared, atomically-updatable counter/bucket state every replica reads and writes to, so a client's aggregate usage across the whole fleet is correctly tracked, not just one replica's local view.
-4. **Q: What's the security risk of omitting per-object authorization even when using a resource ID that "looks unguessable" (a GUID)?** **A:** Unguessability isn't authorization — an attacker with a leaked/logged/observed GUID (e.g., from a referrer header, a shared link, or another vulnerability) can still access the resource if no ownership check exists; GUIDs reduce enumeration risk but do not substitute for authorization.
-5. **Q: Why should a rate limiter's response include `Retry-After` instead of leaving clients to guess their backoff interval?** **A:** It gives the client an authoritative, server-determined retry time, preventing every client from independently guessing (and potentially synchronizing on) their own backoff interval, which itself can create a retry storm.
-6. **Q: What's the difference between rate limiting a specific endpoint versus rate limiting a client's aggregate usage across an entire API?** **A:** Per-endpoint limiting protects that specific operation's cost profile (useful if one endpoint is disproportionately expensive); aggregate limiting protects overall fair-usage/capacity allocation across a client's entire traffic — many production systems apply both simultaneously, at different granularities.
-7. **Q: Why is returning a full domain entity from an endpoint a security concern even if the client "shouldn't" read certain fields?** **A:** Relying on client-side restraint (not displaying a field) provides no actual security — any caller can inspect the raw HTTP response directly, so genuinely sensitive fields must be withheld server-side, not merely hidden in the client UI.
-8. **Q: How would you rate-limit differently for authenticated versus unauthenticated traffic on the same endpoint?** **A:** Key the rate limiter by authenticated user/API-key identity when present (a higher, per-identity limit) and fall back to IP-based limiting for unauthenticated requests (typically a stricter limit, since IP-based keying is coarser and more easily shared among unrelated legitimate users behind NAT).
-9. **Q: What's a realistic scenario where request-size limiting itself becomes a rate-limiting-adjacent concern?** **A:** An attacker sending many moderately large (but individually within-limit) payloads can still exhaust bandwidth/parsing capacity faster than small payloads would — request-size limits and rate limits are complementary controls, not substitutes for each other.
-10. **Q: Why does a security audit specifically test BOLA by attempting to access another tenant's/user's resource with a valid but different identity, rather than just checking "does authentication work"?** **A:** Because authentication working correctly says nothing about whether authorization is also correctly enforced per-resource — the only way to verify BOLA protection is to actually attempt cross-account access and confirm it's denied, exactly mirroring the contract-consistency testing philosophy from earlier modules (test the actual behavior, not just the presence of a mechanism).
-
-### Advanced (10)
-1. **Q: Design a token-bucket rate limiter backed by Redis with correct atomicity under concurrent requests.**
- **A:** Use a Redis Lua script (executed atomically server-side) that reads the current token count and last-refill timestamp, computes the number of tokens to add based on elapsed time, caps at the bucket capacity, and atomically decrements if a token is available — all within one atomic script execution, avoiding the read-then-write race that a naive "GET count, check, SET count" sequence (non-atomic across two round-trips) would be vulnerable to under concurrent requests from the same client.
-2. **Q: Explain how you would systematically audit an existing large API surface for BOLA vulnerabilities.**
- **A:** Enumerate every endpoint accepting a resource identifier (route parameter or body field); for each, write an automated test authenticating as User/Tenant A and attempting to access a resource known to belong to User/Tenant B, asserting a 403/404 (not the actual data) — run this systematically across the entire endpoint inventory rather than spot-checking, since BOLA gaps are endpoint-specific and one fixed instance doesn't imply others are also fixed.
-3. **Q: How would you design rate limiting to protect a third-party API with its own strict, contractual rate limit, across a fleet of your own services calling it?** **A:** Directly §Expert Q6's distributed proactive rate limiter — a shared, Redis-backed token bucket sized to the third party's actual contractual limit, checked by every calling replica before issuing the outbound call, combined with local per-replica bounded concurrency and retry-with-backoff as defense-in-depth beneath the proactive limiter.
-4. **Q: A team argues excessive data exposure isn't a real risk for an internal-only API since "we control both sides." Push back with a concrete scenario.**
- **A:** Internal APIs are frequently consumed by more teams/services over time than originally anticipated, and a full-entity response (including, e.g., internal cost data, other customers' aggregate data, or soon-to-be-deprecated fields) becomes an unintended, hard-to-track dependency the moment any other team starts parsing fields "just in case" — when the API owner later wants to remove or restrict that field, they discover an undocumented internal consumer depends on it; narrow, intentional response contracts prevent this accidental coupling regardless of whether the API is "internal only."
-5. **Q: Design a rate-limiting strategy that adapts dynamically based on current system load (adaptive rate limiting) rather than a fixed threshold.**
- **A:** Monitor a leading load indicator (CPU, database connection-pool utilization, downstream dependency latency) and dynamically adjust the token-bucket refill rate/capacity downward as load increases — trading strict predictability for graceful degradation under genuine system stress, at the cost of a less deterministic, harder-to-document contract for API consumers (a real trade-off to discuss explicitly, not a strictly superior approach).
-6. **Q: Explain why a rate limiter keyed purely by IP address is both under- and over-inclusive, and how would you address each failure mode.**
- **A:** Under-inclusive: a determined attacker distributes requests across many IPs (a botnet), evading any single-IP threshold entirely — address via behavioral/anomaly-based detection layered on top, not IP-keying alone. Over-inclusive: many legitimate users can share one IP (corporate NAT, mobile carrier-grade NAT), so an aggressive per-IP limit can collectively throttle many unrelated innocent users — address via combining IP-based limiting (for unauthenticated traffic) with authenticated-identity-based limiting (a much more precise key) wherever authentication is available.
-7. **Q: How would you design an API's error responses to avoid leaking information useful for a BOLA/enumeration attack?** **A:** Return an identical `404 Not Found` (not a distinguishing `403 Forbidden`) for both "resource doesn't exist" and "resource exists but you're not authorized to see it" — returning a distinguishing 403 confirms the resource's existence to an attacker probing IDs, information a pure 404 doesn't reveal (directly the 401-vs-403 information-hiding discussion, applied here to 403-vs-404).
-8. **Q: A payment API's rate limiter is itself becoming a single point of failure (the Redis-backed limiter's own outage blocks all traffic). How would you design around this?** **A:** Implement a fail-open-with-monitoring or fail-closed decision deliberately per business risk: for most APIs, briefly failing open (allowing requests through without rate-limiting enforcement) during a rate-limiter-infrastructure outage is preferable to a full API outage, provided it's paired with aggressive alerting on the rate-limiter's own health and a fast-acting circuit breaker reverting to fail-open only for a bounded window; for an API where unbounded abuse during any gap is unacceptable (e.g., a scarce, expensive third-party pass-through), fail-closed may be the correct, deliberate choice instead — the decision should be explicit and documented, not a default neither team consciously chose.
-9. **Q: Explain how excessive data exposure and mass assignment are two sides of the same underlying architectural mistake.**
- **A:** Both stem from binding directly to/from a rich internal entity type instead of a dedicated, narrowly-scoped DTO at the API boundary — mass assignment is the input-side manifestation (a client sets fields it shouldn't), excessive exposure is the output-side manifestation (a client reads fields it shouldn't); the single, unifying fix (dedicated request/response DTOs) addresses both simultaneously.
-10. **Q: As a Principal Engineer, how would you make BOLA prevention structurally enforced across an organization rather than dependent on every team remembering to add resource-based authorization checks?** **A:** Combine: (a) a shared repository/service-layer base class or helper (the `IResourceAuthorizationHelper`) making the correct pattern the path of least resistance; (b) mandatory automated BOLA-probing tests (Advanced Q2) as a required CI gate for any endpoint accepting a resource identifier; (c) an architecture-review checklist item requiring explicit justification for any endpoint that intentionally omits per-object authorization (e.g., genuinely public resources) — converting "remember to check ownership" from tribal knowledge into layered, automated, and governance-enforced protection.
-
-### Expert (FinTech Principal Panel)
-
-1. **Q: Your card-authorization API is being used for "card testing" — attackers running many small auths to validate stolen card numbers (and BIN enumeration). Your per-IP/per-key rate limits don't stop it. Why not, and what actually defends against this?**
- **A:** Generic rate limiting keys on the *caller* (IP/API key), but card testing distributes across many IPs/keys and stays under per-caller thresholds while abusing many *cards* — so the abused dimension isn't the caller, it's the card/BIN/velocity of attempts, which caller-keyed limits don't see. Defenses are **fraud/velocity controls**, distinct from security rate limiting: (1) **velocity limits keyed on the resource under attack** — attempts per card, per BIN, per device, per shipping/billing tuple, over rolling windows; (2) **anomaly detection** — a spike in low-value auths, high decline ratios, or many distinct cards from one device/session is the actual signal; (3) **device fingerprinting / proof-of-work / CAPTCHA** on suspicious flows to break automation; (4) **decline-rate circuit breakers** that tighten automatically when the auth-decline ratio spikes; (5) feed confirmed abuse back into a shared block/deny list. Also **don't leak an oracle** — uniform responses/timing so an attacker can't distinguish "valid card, wrong CVV" from "invalid card" (that turns your API into a card validator). The Principal framing: rate limiting protects *capacity and fairness per caller*; card testing is a *fraud* problem on the card dimension — you need velocity + anomaly + device signals + non-oracle responses, and treating it as "just tune the rate limit" fails because you're limiting the wrong dimension.
- **Why correct:** Explains why caller-keyed limits miss card-dimension abuse and prescribes velocity/anomaly/device controls + decline circuit breakers + non-oracle responses.
- **Common mistakes:** Assuming rate limiting stops card testing; leaking a validity oracle via distinct responses/timing; keying controls only on caller, never on card/BIN/device.
- **Follow-ups:** "What dimensions do you key velocity limits on?" / "How does your API avoid becoming a card-validation oracle?" / "Rate limiting vs. fraud controls — where's the line?"
-
-2. **Q: Design the defense-in-depth layering for a public, internet-facing money-movement API. Name each layer, what it stops, and why no single layer suffices.**
- **A:** Layer controls so a bypass of one is caught by the next, from edge inward: (1) **Edge/WAF + DDoS protection + TLS/mTLS** — volumetric attacks, known exploit patterns, transport security; (2) **Authentication** (sender-constrained tokens/mTLS for high value) — proves *who*; (3) **Rate limiting** (per-identity + per-IP) — caller fairness/capacity; (4) **Authorization** — coarse function-level (`[Authorize]`) *and* per-object BOLA checks (the most common real gap) — proves *allowed to touch this object*; (5) **Input validation + size/depth limits + DTO binding** — mass assignment, injection, DoS payloads; (6) **Fraud/velocity controls** — abuse on the money/card dimension (Q1); (7) **Idempotency + transactional integrity** — no double-charge; (8) **Output minimization** — no excessive data exposure; (9) **Audit + observability** — detect and prove. No single layer suffices because each addresses a different threat class and each *will* occasionally be bypassed (a valid token can be stolen, an auth check can be forgotten on one endpoint, a fraud model has false negatives) — defense-in-depth means the blast radius of any one failure is bounded by the others. The Principal framing: security for a money API is a *layered system* with an explicit threat per layer and no single point of total trust; the design goal is that compromising one control still leaves an attacker facing the rest.
- **Why correct:** Enumerates distinct layers each mapped to a threat class and articulates why single-layer trust is unsafe (each layer fails sometimes; layering bounds blast radius).
- **Common mistakes:** Treating auth *or* rate limiting as "the" security; forgetting per-object authorization; no fraud layer; relying on a single control.
- **Follow-ups:** "Which layer most commonly has the real-world gap?" (per-object authorization / BOLA) / "How does idempotency function as a security control?" / "What's the blast radius if a token is stolen, under this stack?"
-
-3. **Q: The same transaction resource is consumed by a customer app, a partner integrator, and internal ops — each should see a *different subset* of fields (e.g., only ops sees the internal risk score; PAN is masked for everyone but tokenized-vault access). How do you design field-level authorization beyond "use a DTO"?**
- **A:** A single response DTO isn't enough when the *same* resource must expose different fields to different audiences — you need **scope/role-driven field authorization**. Approaches: (1) **audience-specific representations** — distinct DTOs/projections per consumer scope (customer view, partner view, ops view), selected by the caller's scope/role, so each audience only ever gets its allowed fields and adding a sensitive field can't accidentally leak to a narrower audience; (2) **field-level policy** — a serialization layer that includes/redacts individual fields based on the caller's scopes (useful when field visibility is fine-grained), with a **default-deny** posture (a new field is hidden unless explicitly allowed for a scope); (3) **always mask/tokenize the most sensitive data** (PAN, full account number) at rest and in every representation, exposing raw values only through a separately-authorized vault path with its own audit. Enforce with tests asserting each scope's response contains *only* its permitted fields (the output-side analogue of BOLA testing). The Principal framing: "use a DTO" solves accidental full-entity exposure, but multi-audience financial data needs *scope-driven, default-deny field authorization* so that who-you-are determines which fields you receive — and the crown-jewel fields (PAN) are masked/tokenized universally with vault-gated, audited access.
- **Why correct:** Moves past a single DTO to scope-driven, default-deny field authorization with audience-specific projections, universal masking/tokenization of crown-jewel data, and per-scope output tests.
- **Common mistakes:** One DTO for all audiences; opt-out (default-visible) field exposure; exposing raw PAN anywhere instead of tokenizing; no per-scope output assertions.
- **Follow-ups:** "Default-deny vs. default-allow for new fields — why does it matter?" / "How do you expose a PAN only to an authorized, audited path?" / "How would you test that the partner scope never sees the internal risk score?"
-
-4. **Q: An attacker has stolen a valid, unexpired OAuth2 access token for a payments API (via a compromised logging pipeline that captured Authorization headers). Standard bearer-token validation passes. How do you detect and stop this specific attack, and how would you have prevented the token from being stolen this way in the first place?**
- **A:** Bearer tokens are inherently "possession = access" — once stolen, they're indistinguishable from legitimate use to a validator checking only the signature and expiry. Detection: **anomaly signals on token usage** — a sudden change in calling IP/geolocation/device fingerprint for a token that previously showed a stable pattern; concurrent use of the same token from two geographically implausible locations; a token suddenly exercising scopes/endpoints it's never used before. Stopping it: revoke the specific token (and, if the theft vector suggests broader compromise, the entire session/refresh-token family) via a revocation list checked on every request (accepting the resulting look-aside cost, or using short-lived tokens to bound exposure without needing revocation at all). Prevention of the theft vector itself: **never let bearer tokens reach logs** — redact/mask `Authorization` headers at the logging middleware layer as a mandatory, structural control (not a per-team convention), and move toward **sender-constrained tokens** (DPoP/mTLS-bound, §8) so that even a captured token is useless without the corresponding private key, which a log-scraping attacker doesn't have. The Principal framing: bearer tokens are a *convenience* trade-off (bearer = access, no extra proof required) that's only safe if the token genuinely never leaks — the moment logging, tracing, or error-reporting infrastructure can incidentally capture one, bearer tokens become a structural liability, and the durable fix is sender-constrained tokens plus mandatory redaction, not merely "be more careful with logs."
- **Why correct:** Distinguishes detection (anomaly-based, since validation alone can't tell theft from legitimate use) from prevention (structural redaction + sender-constraining), and correctly frames bearer-token risk as a design trade-off, not an implementation bug.
- **Common mistakes:** Assuming token expiry alone bounds the risk adequately for a money-movement API; treating "redact logs" as a one-off fix rather than a mandatory, centrally-enforced middleware control; not distinguishing revoking one token from revoking a compromised session's entire token family.
- **Follow-ups:** "Why does DPoP defeat this specific theft vector where a short expiry alone doesn't fully?" / "What's the operational cost of checking a revocation list on every request?" / "How would you retroactively audit how far back the logging pipeline captured tokens?"
-
-5. **Q: Your rate limiter is correctly implemented (Redis-backed, atomic, correctly fleet-wide) and correctly blocks a single client from exceeding its limit — yet a coordinated attack using thousands of newly-registered free-tier accounts, each individually staying under its own per-account limit, still degrades your API's overall capacity. What's the actual gap, and how do you close it without punishing legitimate free-tier growth?**
- **A:** Per-identity rate limiting protects **fairness between individual callers**, but says nothing about **aggregate capacity consumption across a coordinated set of callers** — a limiter correctly enforcing "each account gets 100 req/min" provides zero protection against 10,000 newly-registered accounts each legitimately using their full 100 req/min allotment simultaneously. This requires a *second*, orthogonal control layer: (1) **global/tenant-tier capacity ceilings** — an aggregate cap across the entire free tier (or a specific cohort), independent of individual account limits, that triggers tighter admission control (e.g., a queue, a CAPTCHA gate on new signups, or a tightened per-account limit applied fleet-wide) once crossed; (2) **signup-velocity anomaly detection** — a spike in new-account creation rate from correlated signals (shared IP ranges, shared device fingerprints, disposable-email patterns) is itself the leading indicator, actionable *before* the accounts start consuming capacity; (3) **cohort-based, not purely identity-based, rate limiting** — grouping newly-registered, unverified accounts into a stricter shared pool distinct from established, verified accounts' pool, so the blast radius of a coordinated signup-and-abuse attack is contained to the new-account cohort's own budget rather than the platform's total capacity. The Principal framing: per-identity fairness and aggregate-capacity protection are two distinct controls answering two distinct questions ("is this one caller fair?" vs. "can the platform survive many simultaneously-fair callers?") — a system that only implements the first has a coordinated-abuse gap regardless of how correctly the first is built.
- **Why correct:** Identifies that per-identity correctness doesn't imply aggregate-capacity protection, and proposes a cohort/global-ceiling layer plus signup-velocity anomaly detection as the orthogonal fix, without simply tightening individual limits (which would punish legitimate users).
- **Common mistakes:** Concluding the rate limiter is "broken" when it's functioning exactly as designed for its actual scope (per-identity fairness); fixing this by tightening every account's individual limit, degrading legitimate free-tier UX for a problem that's actually about aggregate, cohort-level capacity.
- **Follow-ups:** "Why does cohorting new accounts separately help contain, not just detect, this attack?" / "What signup-time signals would you correlate to catch this before capacity is even consumed?" / "How is this the same underlying gap as the card-testing problem, restated for account signup instead of payment authorization?"
-
-6. **Q: Design the authorization model for a webhook endpoint that must accept inbound calls from an external payment processor (e.g., Stripe/Adyen) — a caller you cannot issue your own API keys or OAuth tokens to. What's the correct authentication/authorization approach, and what happens if you get it wrong?**
- **A:** A webhook receiver can't use your normal inbound-auth model (you don't control the caller's credential-issuance flow) — the standard, correct pattern is **HMAC signature verification**: the payment processor signs the raw request body with a shared secret (provisioned out-of-band, at webhook-endpoint registration time) and sends the signature in a header (e.g., Stripe's `Stripe-Signature`); your endpoint independently recomputes the HMAC over the *exact raw, unparsed* request body using the shared secret and compares in constant time, rejecting any mismatch. Critical details often gotten wrong: (1) **verify against the raw body bytes**, not a re-serialized/re-parsed version — any framework middleware that parses-then-re-serializes JSON before your handler sees it can silently change byte-for-byte content (key ordering, whitespace), breaking legitimate signatures; (2) **timestamp/nonce checking** to prevent **replay** of a captured, legitimately-signed webhook payload being re-sent later — a valid signature alone doesn't prove freshness; (3) **constant-time comparison** for the signature check itself, avoiding a timing side-channel that could help an attacker forge a valid signature byte-by-byte; (4) idempotent processing of the webhook's payload regardless of verification (the payment-idempotency discipline this course establishes generally), since the processor's own retry behavior means the same legitimately-signed webhook may arrive more than once. Getting this wrong (e.g., trusting an unsigned `X-Forwarded-For`-style "trust the source IP" check, or skipping signature verification because "it's just a notification") means **anyone who discovers the webhook URL can inject fabricated payment-status events** — directly forgeable "payment succeeded" notifications, a severe integrity failure for a money-movement system. The Principal framing: an inbound webhook is an *unauthenticated-by-default* surface unless you build explicit, correctly-implemented signature verification — the risk isn't hypothetical, it's the same class of vulnerability as a completely unauthenticated write endpoint, just less obviously so because the payload looks like routine, benign infrastructure traffic.
- **Why correct:** Names the correct pattern (HMAC over raw body, verified constant-time, plus replay protection) and is explicit about the severe consequence (forgeable payment events) of getting it wrong.
- **Common mistakes:** Trusting source-IP allowlisting alone as sufficient authentication (spoofable, and processors' IP ranges change); verifying the signature against a re-parsed/re-serialized body instead of the raw bytes; treating webhook payload processing as safe to run without idempotency handling.
- **Follow-ups:** "Why does verifying against re-parsed JSON break legitimate signatures?" / "How does replay protection differ from signature verification — why do you need both?" / "What's the blast radius if this endpoint is compromised for a money-movement API?"
-
-7. **Q: Synthesize this module's full defense-in-depth stack (Expert Q2) against a single, concrete attack scenario: an attacker with a leaked, low-privilege partner API key attempts to escalate to reading and modifying other partners' payment data. Walk through every layer that should stop them, and identify which single layer's failure would be most catastrophic if it alone were missing.**
- **A:** Walking the layered stack (Expert Q2) against this specific attacker: (1) **Edge/WAF** — doesn't stop this attack; the key is valid, so requests look legitimate at the transport layer. (2) **Authentication** — passes; the key is genuinely valid, just low-privilege. (3) **Rate limiting** — doesn't stop a slow, patient enumeration attempt staying under threshold; limits abuse *volume*, not scope. (4) **Authorization — function-level** — should block any admin-only *operation* the low-privilege key attempts; this stops privilege-escalation-via-operation. (5) **Authorization — per-object (BOLA)** — should block reading/modifying any specific resource (another partner's invoice/payment) not owned by this key's partner; this is the layer that actually stops the described attack (enumerating and reading other partners' data), and it is, per this module's own findings, the single most commonly missing or incompletely-implemented layer in real systems. (6) **Input validation** — irrelevant to this specific attack vector. (7) **Fraud/velocity controls** — might eventually flag unusual read-volume-per-key as anomalous, a secondary, slower-acting safety net, not the primary stop. (8) **Output minimization** — even if BOLA fails, narrow response DTOs limit how much sensitive data leaks per successful unauthorized read, bounding damage rather than preventing it. (9) **Audit/observability** — doesn't prevent the attack but is what allows detecting it occurred and scoping the blast radius after the fact. Conclusion: **per-object authorization (BOLA prevention) is the layer whose absence would be most catastrophic for this specific scenario** — every other layer either doesn't apply to this attack shape or only mitigates its severity/detects it after the fact; BOLA is the only layer that actually *prevents* the core harm (unauthorized cross-tenant data access) outright. This is consistent with, and a direct synthesis of, this module's repeated finding that BOLA is simultaneously the most common real-world gap and the layer carrying disproportionate weight for this exact attack class.
- **Why correct:** Walks the full defense-in-depth stack against one concrete scenario (not abstractly), correctly identifies which layers are inapplicable versus load-bearing for this specific attack, and justifies naming BOLA as the single most consequential layer with a scenario-specific argument rather than merely restating the general claim.
- **Common mistakes:** Claiming every layer "helps" without distinguishing which layers actually prevent versus merely detect or bound this specific attack; failing to notice that rate limiting and WAF are essentially irrelevant to a valid-credential, low-volume enumeration attack.
- **Follow-ups:** "Which layer would matter most if the attacker instead had a *stolen* (not merely low-privilege) key with full partner scope?" (Likely audit/observability plus anomaly detection, since authorization would correctly pass for the legitimate partner's own data.) / "How would output minimization alone have bounded the damage even with a BOLA gap present?" / "Why is function-level authorization insufficient on its own here?"
-
----
-
-## 11. Coding Exercises
-
-### Easy — Add resource-based authorization closing a BOLA gap
+#### Easy — Add resource-based authorization closing a BOLA gap
 ```csharp
 // BEFORE (vulnerable): only checks authentication
 app.MapGet("/invoices/{id}", async (string id, IInvoiceRepository repo) =>
@@ -178,7 +276,7 @@ app.MapGet("/invoices/{id}", async (string id, IInvoiceRepository repo, ClaimsPr
 }).RequireAuthorization;
 ```
 
-### Medium — Token-bucket rate limiting with `Retry-After`
+#### Medium — Token-bucket rate limiting with `Retry-After`
 ```csharp
 builder.Services.AddRateLimiter(options =>
     {
@@ -195,7 +293,7 @@ builder.Services.AddRateLimiter(options =>
 });
 ```
 
-### Hard — Distributed Redis-backed token bucket (Advanced Q1)
+#### Hard — Distributed Redis-backed token bucket (Advanced Q1)
 ```lua
 -- Redis Lua script: atomic token-bucket check-and-decrement
 local key = KEYS[1]
@@ -221,7 +319,7 @@ end
 ```
 **Discussion**: Running this as a single Lua script executed atomically by Redis (`EVAL`) is what prevents the read-then-write race a naive two-round-trip implementation would suffer under concurrent requests from the same client — exactly Advanced Q1's requirement.
 
-### Expert — DTO-based mass-assignment/excessive-exposure prevention with automated BOLA test
+#### Expert — DTO-based mass-assignment/excessive-exposure prevention with automated BOLA test
 ```csharp
 public record InvoiceResponse(string Id, decimal Amount, DateTime DueDate); // narrow, no PartnerId, no internal cost fields
 
@@ -238,9 +336,7 @@ public async Task GetInvoice_Should_Return_404_For_Other_Partners_Invoice
 }
 ```
 
----
-
-## 12. System Design
+### 12. System Design
 
 **Scenario:** Design the security and rate-limiting architecture for a public-facing Payment Initiation API serving thousands of third-party partner integrators (each issued a partner API key/OAuth client) and processing money-movement requests, deployed across a horizontally-scaled, multi-region fleet.
 
@@ -266,9 +362,7 @@ public async Task GetInvoice_Should_Return_404_For_Other_Partners_Invoice
 
 **Trade-offs:** centralizing rate-limit and authorization state in Redis adds an external dependency and a genuine single-point-of-failure risk to every request — accepted deliberately because per-replica local state (the alternative) is trivially bypassable at fleet scale, making the centralization non-negotiable despite its operational cost.
 
----
-
-## 13. Low-Level Design
+### 13. Low-Level Design
 
 **Requirements:** every resource-ID-accepting request is authorized per-object before data access; rate-limit checks are atomic and fleet-consistent; webhook signatures are verified against raw bytes with replay protection; response DTOs never leak unintended fields.
 
@@ -331,9 +425,7 @@ sequenceDiagram
 
 **Concurrency/thread safety:** the Redis Lua-script token-bucket check (Advanced Q1) is the mechanism that makes concurrent requests from the same partner across multiple replicas race-free; authorization checks are inherently read-only and stateless per request, requiring no additional locking.
 
----
-
-## 14. Production Debugging
+### 14. Production Debugging
 
 **Incident:** A partner integration began receiving sporadic `429 Too Many Requests` responses despite the partner's dashboard showing usage well under its contracted limit, causing the partner's own retry logic to compound the problem into a cascading failure on their side.
 
@@ -347,9 +439,7 @@ sequenceDiagram
 
 **Prevention:** added an explicit architecture-review requirement that any new edge/CDN layer's rate-limiting configuration be reviewed against the application-level limiter's configuration for consistency before deployment, and added a monitoring dashboard specifically distinguishing edge-rejected versus application-rejected 429s, so a future edge/application limit mismatch surfaces as a dashboard anomaly rather than requiring a partner complaint to discover.
 
----
-
-## 15. Architecture Decision
+### 15. Architecture Decision
 
 **Context:** Choosing where and how to enforce rate limiting and authentication across a multi-layer edge (CDN/WAF, API gateway, application service).
 
@@ -373,9 +463,7 @@ sequenceDiagram
 
 **Recommendation: Option C, with an explicit, documented boundary — the edge layer handles only volumetric/DDoS protection, never partner-aware rate limiting; the application-layer Redis-backed limiter is the sole source of truth for any identity-scoped enforcement.** This is the option that structurally prevents the incident's root cause (two independently-configured layers both claiming identity-aware rate-limiting authority) rather than merely detecting it faster after the fact — the review-checklist prevention fix is a necessary but insufficient safeguard without this clean, non-overlapping ownership boundary defined up front.
 
----
-
-## 17. Principal Engineer Perspective
+### 17. Principal Engineer Perspective
 
 **Business impact:** a partner-facing API's security and rate-limiting posture directly gates partner trust and integration velocity — an incident like this module's BOLA vulnerability or the edge/application rate-limit mismatch damages a partner relationship's credibility in a way that's disproportionately expensive to repair relative to the engineering cost of preventing it upfront.
 
@@ -391,7 +479,7 @@ sequenceDiagram
 
 **Long-term maintainability:** every defense this module builds (resource-based authorization, narrow DTOs, fleet-wide atomic rate limiting, HMAC webhook verification, layered edge/application ownership) degrades the same way over time if not actively maintained: a new endpoint, a new edge-layer configuration change, or a new partner integration can silently reintroduce a gap that automated, CI-enforced testing and periodic architecture review are what keep from recurring — the discipline, not the one-time implementation, is what actually protects the system long-term.
 
-## 18. Revision
+### 18. Revision
 **Key takeaways**: BOLA = authentication without per-object authorization, the #1 real-world API vulnerability. Mass assignment (input) and excessive data exposure (output) are the same architectural mistake (binding directly to rich entities) manifesting on both sides of the API boundary. Token bucket = the standard rate-limiting algorithm, allowing bursts while enforcing steady-state limits. Distributed (Redis-backed, Lua-atomic) rate limiting is required for genuine fleet-wide enforcement — per-replica limiting is trivially bypassed. Always return 429 + `Retry-After`; return 404 (not 403) to avoid confirming a resource's existence to an unauthorized caller.
 
 ---

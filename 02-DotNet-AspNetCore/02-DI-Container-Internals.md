@@ -4,21 +4,203 @@
 
 ---
 
-## 1. Fundamentals
+## 1. Topic Description
 
-### What is dependency injection, and what is the DI container?
+### Definition
+
+`Microsoft.Extensions.DependencyInjection` separates **registration** from **resolution**. `IServiceCollection` is a list of `ServiceDescriptor` records — service type, implementation type or factory or instance, and lifetime — built at startup; `IServiceProvider` is the resolved graph that constructs objects on demand. Lifetime is enforced per **scope**: a transient is created on every resolve, a scoped instance once per scope, a singleton once per provider. Critically, a "scope" is whatever creates one — ASP.NET Core creates one per request, but a background service, a message consumer or a test must create its own, which is where most lifetime bugs originate.
+
+### Core sub-concepts
+
+- **`ServiceDescriptor` and the registration model** — service type, implementation type / factory / instance, lifetime.
+- **The three lifetimes** — transient, scoped, singleton, and what "scoped" means outside a request.
+- **Root scope vs child scopes** — `IServiceScopeFactory`, scope granularity, and disposal timing.
+- **Captive dependencies** — a longer-lived service capturing a shorter-lived one; scope validation and what it cannot see.
+- **Container-owned disposal** — which instances the container disposes and which it does not (`AddSingleton(instance)`), and transient-disposable accumulation in long-lived scopes.
+- **Registration semantics** — `Add` vs `TryAdd`, last-registration-wins for a single resolve, `IEnumerable<T>` for all.
+- **Open generic registration** — `typeof(IHandler<>)` → `typeof(Handler<>)`, and generic decorators.
+- **Constructor selection rules** — greediest satisfiable constructor, and why multiple constructors are a design smell.
+- **Service locator** — injecting `IServiceProvider`, why it hides dependencies, and the narrow legitimate cases.
+- **Factories for runtime parameters** — typed factories, `Func<TParam, TService>`, or passing the value as a method argument.
+- **Keyed services and `IServiceProviderIsService`** — resolving by key; querying registration without resolving, which is how minimal APIs decide body-versus-service binding.
+- **Composition root as an architectural control point** — layered registration extension methods, architecture tests, validate-on-build.
+
+### Where it fits
+
+The container is the wiring layer between every other part of an ASP.NET Core service: the pipeline resolves middleware dependencies from the request scope, options and configuration are surfaced as registered services, authentication handlers and health checks are registrations, and EF Core's `DbContext` lifetime is a container decision. The composition root is the one place the entire dependency structure is visible, which makes it the natural point to enforce direction — domain depending on nothing, infrastructure implementing domain-owned abstractions.
+
+### Why it matters at scale
+
+Lifetime defects are silent, load-dependent and expensive. A scoped `DbContext` captured by a singleton accumulates tracked entities — a memory leak *and* a source of stale data — and any per-request state it holds leaks across users, which in a multi-tenant system is a data-exposure bug rather than a correctness one. Transient disposables resolved from the root scope are tracked for disposal that never comes, producing steady memory growth attributed in dumps to the provider itself. And a composition root that does real work — assembly scanning, constructors performing I/O, configuration providers making network calls — turns startup into a 45-second operation, which caps how fast you can scale out during exactly the incident where you need capacity.
+
+### Common pitfalls / anti-patterns
+
+- **Injecting a scoped service into a singleton (captive dependency)** — one request's instance is captured for the process lifetime; it works in development where there is one request at a time and fails under concurrency.
+- **Resolving scoped services from the root provider in a `BackgroundService`** — the instance lives for the application's lifetime and is never disposed; the correct pattern is `IServiceScopeFactory` with a scope per unit of work.
+- **`AddSingleton(new Foo())` for a disposable** — the container did not create it, so it will not dispose it; ownership silently transferred to you.
+- **Transient `IDisposable` resolved repeatedly inside a long-lived scope** — every instance is retained for disposal at scope end, so memory grows until the scope ends (for the root scope, never).
+- **Injecting `IServiceProvider` and resolving inside methods** — hides the real dependency set, defeats container validation, and turns a missing registration into a runtime failure on some code path.
+- **Real work in a constructor** — I/O, blocking calls or configuration parsing turn object construction into a latency and failure source, and multiply across the graph.
+- **Multiple public constructors on an injectable type** — the container silently picks the greediest satisfiable one, so a missing registration produces a degraded object instead of a clear error.
+
+> Scope note: pipeline ordering and per-request scope creation belong to `01-Middleware-Pipeline-Request-Internals`; `IOptions` and configuration binding to `05-Configuration-Options-Pattern`; authentication scheme and policy registration to `04-Authentication-Authorization-Deep-Dive`.
+
+---
+
+## 2. Beginner (10 Q&A)
+
+
+**Q1. Explain the three lifetimes precisely, including what "scoped" means outside a web request.**
+**A:** Transient produces a new instance on every resolve. Singleton produces one instance for the provider's lifetime, shared by everything. Scoped produces one instance per scope, and a scope is whatever creates one — in ASP.NET Core the framework creates one per request, but a background service, a message consumer or a test must create its own via `IServiceScopeFactory`. The common misconception is that scoped means "per request"; it means "per scope," and code that assumes a request exists is exactly what breaks when the same service is reused in a worker.
+*Follow-up: What happens if you resolve a scoped service directly from the root provider?*
+
+**Q2. What is a captive dependency and why is it dangerous?**
+**A:** It is a shorter-lived service captured by a longer-lived one — most commonly a scoped service injected into a singleton. The singleton holds that one instance forever, so every request shares it: a `DbContext` accumulates tracked entities and becomes a memory leak and a source of stale data, and any per-request state it holds leaks across users, which in a multi-tenant system is a data-exposure bug rather than a correctness one. It is dangerous because it usually works in development, where there is one request at a time, and fails under concurrency.
+*Follow-up: How does the framework's scope validation detect this, and what does it miss?*
+
+**Q3. Which services does the container dispose, and which does it not?**
+**A:** It disposes instances it created that implement `IDisposable` or `IAsyncDisposable` — scoped instances when their scope ends, singletons when the root provider is disposed, and transients when the scope that created them ends. It does *not* dispose an instance you constructed yourself and registered with `AddSingleton(instance)`, because the container did not create it and does not assume ownership. That asymmetry surprises people: registering a pre-built disposable object means you own its lifetime. The related trap is a transient `IDisposable` resolved repeatedly within a long-lived scope, which accumulates instances until the scope ends.
+*Follow-up: You register a transient `HttpClient`-like disposable and resolve it in a loop inside a singleton's scope. What happens?*
+
+**Q4. How does the container choose a constructor when there are several?**
+**A:** It selects the constructor with the most parameters that it can satisfy from the registered services — not the one you intended, necessarily. If two constructors are equally satisfiable and neither is a superset of the other, it throws as ambiguous. The practical implication is that multiple constructors on an injectable type is a design smell: it makes the resolved dependency set implicit and can silently pick a fallback constructor when a registration is missing, producing an object in a degraded configuration instead of a clear error. One public constructor is the rule I would enforce.
+*Follow-up: What error do you get when a dependency is missing versus when it's ambiguous, and why does that distinction matter?*
+
+**Q5. What is the difference between `Add` and `TryAdd`, and between multiple registrations and `IEnumerable<T>`?**
+**A:** `Add` appends a registration unconditionally; `TryAdd` appends only if the service type is not already registered, which is what library authors use so that a consumer's own registration wins. When several registrations exist for one service type, resolving `T` returns the *last* one, while resolving `IEnumerable<T>` returns all of them in registration order. That is how pluggable sets — validators, handlers, health checks — are built, and also how a duplicate registration silently changes behaviour without any error.
+*Follow-up: How would you replace an existing registration rather than adding another?*
+
+**Q6. What is an open generic registration and where is it used?**
+**A:** Registering `typeof(IValidator<>)` to `typeof(Validator<>)` lets the container close the generic on demand, so one registration serves every closed type — the mechanism behind handler, validator and repository patterns without registering each type individually. It only works when the implementation's generic arity and constraints match. This is the alternative to assembly scanning with reflection for many cases, and it is both faster and more AOT-friendly.
+*Follow-up: How would you register a decorator that wraps every closed `IHandler<T>`?*
+
+**Q7. Why is the service-locator pattern discouraged even though the container supports it?**
+**A:** Because injecting `IServiceProvider` and resolving inside a method hides the class's real dependencies: the constructor no longer tells you what it needs, so the compiler cannot help, tests must configure a whole container instead of passing fakes, and a missing registration becomes a runtime failure on some code path rather than a startup error. It also defeats the container's own validation. The legitimate uses are narrow — factories that must resolve by a runtime value, and infrastructure that genuinely cannot know its dependencies until runtime — and even then a typed factory abstraction is preferable to passing the provider around.
+*Follow-up: You need to resolve a handler based on a message type known only at runtime. What's the cleanest design?*
+
+**Q8. How do you correctly use a scoped service inside a `BackgroundService`?**
+**A:** Inject `IServiceScopeFactory`, create a scope per unit of work, resolve the scoped services inside it, and dispose the scope when that unit completes. A `BackgroundService` is a singleton, so injecting a scoped service directly into its constructor is a captive dependency, and resolving from the root provider gives you an instance tied to the application's lifetime that will never be disposed. Getting the scope granularity right also matters: one scope for the whole loop means a `DbContext` accumulating state forever, so the scope should match the logical work item.
+*Follow-up: Your worker processes a batch of 1,000 messages. How many scopes, and why?*
+
+**Q9. What is scope validation and when is it enabled?**
+**A:** It is a startup check that walks registrations and fails if a singleton depends on a scoped service, or if a scoped service is resolved from the root provider. It is enabled by default in the Development environment and off elsewhere for performance, which is why the classic failure mode is a captive dependency that is caught locally but not in production if validation was disabled or the dependency is resolved dynamically. I would enable both scope and on-build validation in every environment during startup, because paying a few milliseconds at boot to catch a class of bug that otherwise corrupts data is an obviously good trade.
+*Follow-up: What kinds of captive dependencies does validation fail to detect?*
+
+**Q10. When would you use a third-party container instead of the built-in one?**
+**A:** When you need capabilities the built-in container deliberately does not have: interception and dynamic decoration, property injection, convention-based assembly scanning with complex rules, child containers with different registrations, or richer diagnostics. The built-in container is intentionally minimal and fast, and for most services that is the right trade. The cost of switching is a dependency on a library that must keep pace with the framework, plus registration syntax the whole team must learn, so I would only do it for a concrete capability need rather than preference.
+*Follow-up: Keyed services arrived in the built-in container recently. What problem did that remove the need to solve elsewhere?*
+
+---
+
+## 3. Intermediate (10 Q&A)
+
+
+**Q1. A `DbContext` throws `ObjectDisposedException` intermittently under load. Walk me through the diagnosis.**
+**A:** The pattern points at a scope-lifetime mismatch, and the usual causes are: work started from a request and continued after the response (so the request scope was disposed underneath it), a scoped service captured by a singleton, or a background operation resolving from the root provider. Intermittency under load is the tell, because it depends on the race between the continuation and the scope disposal. I would look for fire-and-forget calls, un-awaited tasks and event handlers registered from request-scoped objects. The fix is an explicit scope for any work that outlives the request, and structurally, treating "no work escapes the request scope" as a rule enforced by review and by banning un-awaited tasks.
+*Follow-up: The offending code is `_ = SomeAsyncMethod(scopedService)`. Why does this fail only sometimes?*
+
+**Q2. How do you decide a service's lifetime?**
+**A:** Start from state and cost. Stateless services with cheap construction can be transient or singleton with little difference; anything holding per-operation state must be scoped; anything expensive to build and safe to share concurrently should be a singleton. The decisive question for singleton is thread safety, because a singleton is used concurrently by definition and any mutable field is a race. I would default to scoped for application services in a web app because it matches the unit of work and avoids captive-dependency risk, and reserve singleton for genuinely shared, immutable or internally-synchronised infrastructure.
+*Follow-up: A service is expensive to construct but not thread-safe. How do you handle it?*
+
+**Q3. What is the cost of DI resolution, and when does it actually matter?**
+**A:** Resolution walks the graph and constructs objects, so the cost scales with graph depth and breadth, but for a typical request it is microseconds against milliseconds of real work — invisible. It matters when a deep graph is resolved per item in a loop rather than per request, when constructors do real work such as I/O or configuration parsing, and at startup where thousands of registrations plus assembly scanning delay boot noticeably for a scale-to-zero or frequently-restarted workload. The rule I apply is that constructors must be trivial: assignments only, no I/O, no computation, no blocking. That single rule prevents most DI-related performance problems.
+*Follow-up: A constructor calls a configuration API that hits the network. What goes wrong and when?*
+
+**Q4. How would you implement the decorator pattern with the built-in container?**
+**A:** Register the concrete implementation, then register the interface with a factory that resolves the inner implementation and wraps it — or, more cleanly, use a small extension that rewrites the existing `ServiceDescriptor` so the decoration composes and works for open generics. The built-in container has no first-class decoration support, which is why this is one of the more common reasons teams reach for Scrutor or a third-party container. The design point worth making is that decoration is the right way to add cross-cutting behaviour to a service — caching, retry, logging, authorization — because it keeps the core implementation free of concerns and is testable in isolation.
+*Follow-up: You have four decorators on one service. How do you keep the ordering intentional and visible?*
+
+**Q5. How does DI interact with `IDisposable` in a way that leaks memory?**
+**A:** The container tracks every disposable it creates within a scope so it can dispose them, which means a transient disposable resolved many times inside a long-lived scope — a singleton's scope is the root, which lives forever — accumulates references that are never released. The symptom is memory growth that a heap dump attributes to the provider's disposables list. Two rules avoid it: do not register disposables as transient if they may be resolved from long-lived scopes, and prefer explicit `using` ownership for short-lived disposables the container need not track at all. This is one of the few genuinely container-caused leaks and worth recognising on sight.
+*Follow-up: A dump shows thousands of objects rooted by `ServiceProviderEngineScope`. What do you conclude?*
+
+**Q6. How do you handle a dependency that needs a runtime parameter?**
+**A:** Not by putting the parameter in the container. The clean options are a typed factory registered as a service, which takes the runtime value and returns a configured instance; a `Func<TParam, TService>` registration for simple cases; or passing the value as a method parameter rather than a constructor one, which is often the honest answer because the value belongs to the operation rather than the service. Injecting `IServiceProvider` to resolve with parameters is the pattern to avoid, because it hides the dependency and makes construction implicit.
+*Follow-up: The runtime parameter is the tenant ID and it's needed by ten services. How do you avoid threading it through everything?*
+
+**Q7. How should a shared library expose its registrations?**
+**A:** As one extension method on `IServiceCollection` with a clear name, using `TryAdd` so consumers can override any part of it, accepting an options delegate for configuration, and registering nothing it does not own. What a library must not do is register competing implementations of common abstractions, replace consumer registrations, or perform work at registration time — registration should build descriptors only, with anything expensive deferred to first use or to a hosted service. I would also expose its abstractions separately from its implementation package so consumers can depend on the contract without the wiring.
+*Follow-up: Two libraries both register `IHttpClientFactory`-adjacent services and conflict. How do you resolve it?*
+
+**Q8. What does `IServiceProviderIsService` let you do, and where is it useful?**
+**A:** It lets you ask whether a type is registered without resolving it, which is what minimal APIs use to decide whether a handler parameter should come from DI or from the request. It is useful in framework-level code and in conditional registration — enabling a feature only when its dependency is present — while being a smell in application code, where a conditional dependency usually means the design is unclear. Knowing it exists matters most for understanding why minimal API parameter binding behaves as it does, which otherwise looks like magic.
+*Follow-up: How does that affect a minimal API handler taking a type that is sometimes registered?*
+
+**Q9. How do you test code that uses DI without turning every unit test into an integration test?**
+**A:** Unit tests should construct the class under test directly with test doubles — that is the whole point of constructor injection, and building a container in a unit test usually indicates the class has too many dependencies or uses a service locator. Where container behaviour itself is the thing under test, build a minimal `ServiceCollection` with only the relevant registrations. Separately, I would have one integration test that builds the real composition root and validates it, since that catches missing and mis-lifetimed registrations that unit tests never see. That combination gives fast feedback plus a real guarantee that the application can actually start.
+*Follow-up: How would you fail the build when a registration is missing, without running the whole app?*
+
+**Q10. A class has twelve constructor dependencies. What is your review response?**
+**A:** That the number is a symptom rather than the problem — it means the class has too many responsibilities, and DI is just making that visible, which is one of its useful side effects. I would look at whether the dependencies cluster into two or three cohesive groups that should be separate classes, or whether several of them are really one collaborator that should be a facade. What I would resist is the common workaround of injecting `IServiceProvider` or bundling the dependencies into a settings-like object, both of which hide the coupling without reducing it. The refactor is a design conversation, not a DI one.
+*Follow-up: The class is a controller and the dependencies are genuinely unrelated endpoints' needs. What do you suggest?*
+
+---
+
+## 4. Expert / Architect (10 Q&A)
+
+
+**Q1. How do you use the composition root as an architectural control point?**
+**A:** It is the one place where the entire dependency structure is visible, so it is where you can enforce direction — that the domain depends on nothing, that infrastructure implements domain-owned abstractions, that no application service depends on a web type. Concretely I would organise registrations by layer with each layer owning its own extension method, keep the composition root free of business logic, and back it with architecture tests asserting the dependency rules, since the composition root can express a clean structure that individual projects then violate through direct references. The value is that this is a place where a single reviewer can see the shape of the whole system, which is rare.
+*Follow-up: An architecture test fails because a domain project references a persistence type. What's your remediation path?*
+
+**Q2. How do you standardise DI patterns across many teams without imposing a framework?**
+**A:** By shipping the composition, not the rules: a platform package that registers the standard cross-cutting services with one call, so teams inherit correct lifetimes, disposal and configuration by default. Alongside that, a small set of enforceable conventions — one public constructor, no service locator, no work in constructors, validation enabled — implemented as analyzers or architecture tests rather than as documentation. I would deliberately avoid a mandated abstraction layer over DI itself, because that adds a concept every engineer must learn for no benefit and makes upgrading the framework harder. The goal is that the easy path and the correct path are the same one.
+*Follow-up: Two teams want different lifetimes for the same shared service. How do you resolve it?*
+
+**Q3. What are the implications of DI for NativeAOT and startup-sensitive workloads?**
+**A:** Reflection-based registration — assembly scanning, convention discovery, dynamic generic closing — is exactly what AOT cannot support and what makes startup slow, so a codebase relying on it has quietly foreclosed both. Explicit registration and open-generic registration are AOT-friendly; scanning is not. For scale-to-zero or frequently-restarted workloads, container build time and the cost of constructing the graph become a visible share of request latency, which is where trimming registrations, avoiding deep graphs and deferring expensive construction actually pay. I would make this an explicit architectural constraint when AOT is a goal, since discovering it during a migration is far more expensive than deciding it up front.
+*Follow-up: You need convention-based registration but also AOT. What's the path?*
+
+**Q4. How do you diagnose and fix a service whose startup time has grown to 45 seconds?**
+**A:** Measure the phases first — host build, configuration providers, container build, hosted-service startup — because the cause is usually one of them rather than DI generally. The recurring culprits are assembly scanning across many assemblies, constructors doing I/O, configuration providers making network calls (a secrets store or config service on a cold path), eager singleton construction, and hosted services doing full initialisation before signalling started. Fixes in order: make registration explicit rather than scanned, move work out of constructors to lazy initialisation, make readiness reflect actual warm-up rather than blocking startup, and parallelise independent initialisation. In a Kubernetes context the readiness-versus-startup distinction matters a lot here, because a slow start need not be an outage if probes are configured correctly.
+*Follow-up: One dependency legitimately takes 30 seconds to warm. How do you deploy that safely?*
+
+**Q5. How do you handle multi-tenant service resolution where each tenant needs different implementations or configuration?**
+**A:** Resolve tenant identity at the boundary into a scoped context, then use it to select behaviour rather than to build separate containers — either a factory that returns the right strategy for the tenant, keyed services, or configuration objects resolved per tenant from a named-options pattern. I would avoid a container per tenant, which multiplies memory and startup cost and creates a lifetime model nobody can reason about, unless tenant isolation genuinely requires it. The critical requirement is fail-closed behaviour: if the tenant cannot be determined, resolution must fail rather than fall back to a default, because a default tenant in a multi-tenant system is a data-leak path.
+*Follow-up: A background job runs for all tenants. How do you structure the scopes and contexts?*
+
+**Q6. What is your view on DI abstractions in a library — should a library depend on `IServiceCollection` at all?**
+**A:** A library's *core* should not: it should depend on its own abstractions and be constructible manually, so consumers using a different container, or no container, are not excluded. The DI wiring belongs in a separate integration package that provides the extension method. This split matters more than it sounds, because a library that can only be used through one container's extension method is untestable in isolation, hard to use from a console tool or a test harness, and couples every consumer to the Microsoft abstractions' version. The pattern to follow is what the BCL itself does with abstraction packages separated from implementation and integration packages.
+*Follow-up: That doubles the number of packages you publish. Is it worth it for an internal library?*
+
+**Q7. How do you make lifetime bugs impossible rather than merely detectable?**
+**A:** Reduce the surface where they can occur. Ban singletons that hold mutable state by convention and review; make anything holding per-operation state obviously scoped by naming and placement; and design background work so it always creates its own scope through a shared helper rather than each team hand-rolling scope management. Then enforce with validation enabled in all environments, an integration test that builds and validates the composition root, and analyzers where they exist. Where the risk is highest — anything carrying tenant or user identity — I would prefer designs that pass context explicitly rather than holding it, since a value that is passed cannot be captured by a longer-lived object.
+*Follow-up: A singleton legitimately needs to use a scoped service occasionally. What's the correct pattern?*
+
+**Q8. How does the choice of DI container affect testability and maintainability over a system's life?**
+**A:** Less than teams expect, provided constructor injection is used consistently — most testability comes from the pattern, not the container. Where the container does matter over time is in what it makes easy: property injection and auto-registration reduce friction but hide dependencies, and interception adds behaviour invisible at the call site, which is powerful and genuinely hard to debug years later. My preference is the simplest container that meets the need, because container-specific features are a form of lock-in that accumulates, and the migration cost lands on whoever inherits the system. If a third-party container is chosen, its use should be confined to the composition root rather than spread through the code.
+*Follow-up: You inherit a system using interception heavily for cross-cutting concerns. How do you assess whether to keep it?*
+
+**Q9. A team proposes replacing DI with static factories for performance. How do you evaluate that?**
+**A:** By asking for the measurement, because DI resolution is microseconds and almost never a real bottleneck in a service doing I/O — the proposal usually originates from a benchmark of resolution in isolation. If the workload is genuinely startup- or allocation-sensitive (AOT, serverless, very high throughput with trivial handlers), there is a legitimate conversation, but the answer is normally to reduce graph depth, avoid scanning and defer construction rather than to abandon DI. What I would push back on hardest is the cost side: static factories make testing harder, hide dependencies, and reintroduce the coupling DI removed, which is a large permanent cost for a usually-immeasurable gain. I would ask for the profile and be prepared to say no with evidence.
+*Follow-up: The profile does show container overhead at 8% in a minimal-API service with trivial handlers. Now what?*
+
+**Q10. How would you migrate a large legacy application from a third-party container to the built-in one, or vice versa?**
+**A:** Incrementally, and only with a real reason — this migration has no user-visible benefit, so it competes with feature work and must be justified by something concrete like AOT support, a maintenance risk, or removing a capability nobody uses. Technically, the hard parts are the features that do not map: property injection, interception, child containers and complex conventions all need explicit replacements, and each is a design decision rather than a translation. I would start by inventorying which advanced features are actually used, since teams usually find most registrations are ordinary; then replace the exotic ones with explicit patterns first, so that the final container swap is mechanical. I would keep the composition root behind a stable set of extension methods throughout so the change is contained to one project.
+*Follow-up: The audit finds interception used for transaction management across 200 services. What's your plan?*
+
+---
+
+## 5. Reference Material
+
+> Retained from the original module: deep-dive internals, diagrams, production examples, exercises, system/low-level design, debugging walkthroughs and the Principal Engineer perspective.
+
+### 1. Fundamentals
+
+#### What is dependency injection, and what is the DI container?
 **Dependency Injection (DI)** is a design pattern where a class receives its dependencies (collaborating objects it needs to do its work) from the outside — typically via constructor parameters — rather than constructing them itself internally. The **DI container** (`Microsoft.Extensions.DependencyInjection`, built into ASP.NET Core) is the infrastructure that: (1) holds a registry of "when something asks for type `T`, here's how to produce an instance," (2) resolves an entire object graph automatically (constructing `A`, which needs `B`, which needs `C`, all wired together), and (3) manages each object's **lifetime** (how long a given instance is reused before a new one is created).
 
-### Why does it exist?
+#### Why does it exist?
 Without DI, classes construct their own dependencies directly (`new SqlOrderRepository` inside `OrderService`'s constructor) — this **tightly couples** a class to one specific concrete implementation, making it difficult to substitute a different implementation (a mock for testing, a different database provider) without modifying the class itself. DI inverts this: a class depends only on an **abstraction** (`IOrderRepository`), and something external (the DI container, configured once at startup) decides which concrete implementation to actually supply — this is the concrete mechanism behind the **Dependency Inversion Principle** (the "D" in SOLID — a later dedicated module), and the container automates what would otherwise be a large amount of manual object-graph-wiring code ("poor man's DI," hand-constructing every object and its dependencies at the application's composition root).
 
-### When does this matter?
+#### When does this matter?
 - **Always** in any non-trivial ASP.NET Core application — DI is baked into the framework's own design (controllers, middleware, minimal API handlers all receive dependencies via constructor/parameter injection automatically).
 - **Critically** for understanding **service lifetimes** (`Transient`, `Scoped`, `Singleton`) correctly —/ already flagged the captive-dependency bug (a `Scoped` service incorrectly captured by a `Singleton`) as one of the most dangerous, silent DI mistakes; this module goes deep into *why* it happens and how the container can catch it.
 - **Critically** for testability — DI is what makes unit testing practical (substituting a test double for a real dependency without modifying the class under test).
 - **For interviews**: "explain service lifetimes and the captive-dependency problem" is asked at nearly every ASP.NET Core interview; a genuinely deep answer (covering the container's internal resolution mechanics, not just the three lifetime names) is a strong differentiator.
 
-### How does it work (30,000-ft view)?
+#### How does it work (30,000-ft view)?
 
 ```csharp
 // Registration (composition root, Program.cs):
@@ -42,23 +224,21 @@ public class OrderService
 
 Mental model for interviews: **"The container is a registry mapping abstractions to concrete implementations plus a lifetime. When something asks for a registered type, the container recursively resolves its entire dependency graph, reusing or creating instances according to each dependency's own registered lifetime — and the single most important rule governing correctness is: a longer-lived object must never hold a direct reference to a shorter-lived one."**
 
----
+### 2. Deep Dive
 
-## 2. Deep Dive
-
-### 2.1 The Three Lifetimes — Precise Semantics
+#### 2.1 The Three Lifetimes — Precise Semantics
 
 - **`Transient`**: A **new instance every single time** it's requested/injected — including multiple times within the *same* object graph resolution (if two different services in one dependency graph both depend on the same `Transient` type, they each get their **own separate instance**, not a shared one).
 - **`Scoped`**: **One instance per scope** — in ASP.NET Core, a scope is created automatically per HTTP request, so all services resolved during that one request that depend (directly or transitively) on a given `Scoped` type share the **same** instance; a new request gets a brand-new instance.
 - **`Singleton`**: **One instance for the entire application's lifetime** — created once (either eagerly at startup if registered via an instance/factory evaluated immediately, or lazily on first request, depending on registration style) and reused for every subsequent resolution, across every request, for as long as the process runs.
 
-### 2.2 The Captive Dependency Problem — the Precise Mechanism
+#### 2.2 The Captive Dependency Problem — the Precise Mechanism
 
 The container's dependency graph resolution has exactly one hard safety rule: **a service cannot depend on another service with a shorter lifetime than itself** — specifically, a `Singleton` must never depend on a `Scoped` or `Transient`-that-wraps-a-`Scoped` service, and a `Scoped` service must never depend on a `Transient`-that-wraps-something-`Scoped` in a way that outlives the scope (this second case is rarer and more subtle; the dominant, most commonly-tested case is `Singleton` capturing `Scoped`).
 
 **Why this is dangerous, precisely**: A `Singleton` is constructed **once** — if its constructor accepts a `Scoped` dependency (e.g., `IOrderRepository`, itself backed by a `Scoped` `DbContext`), the container resolves that `Scoped` dependency **at the moment the `Singleton` is first constructed**, using whatever scope happens to be active at that exact moment (the very first request that triggers the `Singleton`'s lazy construction, or — worse — the application's root scope if the `Singleton` is eagerly constructed at startup, outside any request scope at all). That **one specific instance** of the `Scoped` dependency is then held forever inside the `Singleton`'s field, silently reused for **every subsequent request**, for the rest of the application's lifetime — completely defeating the "new instance per request" guarantee `Scoped` is supposed to provide, and (for a `DbContext` specifically) causing exactly the concurrent-access/stale-data corruption described in the third incident.
 
-### 2.3 `ValidateScopes` and `ValidateOnBuild` — How the Container Catches This
+#### 2.3 `ValidateScopes` and `ValidateOnBuild` — How the Container Catches This
 
 ASP.NET Core's DI container supports two opt-in validation modes (enabled by default when `IsDevelopment` is true, but **off by default in other environments** unless explicitly configured):
 - **`ValidateScopes = true`**: at runtime, throws an `InvalidOperationException` the moment a `Scoped` service is resolved from the **root** service provider (rather than from a request-scoped `IServiceProvider`) — this is precisely the situation that occurs when a `Singleton`'s constructor tries to resolve a `Scoped` dependency, since the `Singleton` itself lives in the root container, not any particular request's scope.
@@ -66,13 +246,13 @@ ASP.NET Core's DI container supports two opt-in validation modes (enabled by def
 
 **Interview-critical fact**: because these validations default to **on** in `Development` but **off** in `Production`/other environments (a deliberate performance trade-off — the validation itself has a real, if usually small, startup-time cost), a captive-dependency bug can pass all local development testing perfectly (where the validation would have caught it) and only manifest in production if the environment-specific configuration doesn't also enable it there — explicitly configuring `ValidateOnBuild = true` (and ideally `ValidateScopes = true`) for **all** environments, not just Development, is a specific, high-value hardening step many teams miss (directly connecting to the fourth-incident prevention step).
 
-### 2.4 Resolution Mechanics — How `Build` and Constructor Selection Work
+#### 2.4 Resolution Mechanics — How `Build` and Constructor Selection Work
 
 When the container resolves a requested type, it: (1) looks up the registration (interface → concrete type mapping, or a factory delegate, or a pre-built instance); (2) if a concrete type, inspects its **public constructors** and selects the one whose parameters can **all** be satisfied by the currently-registered services (if multiple constructors are viable, the container picks the one with the **most** parameters that can all be resolved — a specific, sometimes-surprising tie-breaking rule); (3) recursively resolves each constructor parameter the same way; (4) constructs the instance, caching it according to its lifetime if applicable (`Scoped`/`Singleton`) or simply returning a fresh instance (`Transient`).
 
 **A genuinely surprising, frequently-tested detail**: if a concrete type has **two constructors** and the container **cannot unambiguously determine** which one to use (e.g., two constructors with the same parameter count, both fully resolvable), the container throws an exception at resolution time (`InvalidOperationException: Multiple constructors accepting all given argument types have been found`) — **ambiguous constructor resolution is a hard runtime failure, not a silent "pick the first one" fallback**, a detail that differs from typical C# overload-resolution intuition (which does have well-defined tie-breaking rules for ordinary method calls) and trips up engineers who assume DI constructor selection follows the same rules as normal C# method overload resolution.
 
-### 2.5 `IServiceScopeFactory` — Correctly Creating Scopes Outside a Request
+#### 2.5 `IServiceScopeFactory` — Correctly Creating Scopes Outside a Request
 
 For any component that genuinely needs its own independent `Scoped`-service instances **outside** the context of an HTTP request (a background service, `IHostedService`, a timer callback, or — precisely per the fourth incident's fix — a `Singleton` that needs to *use* a `Scoped` service correctly rather than capturing it) — the correct pattern is to inject `IServiceScopeFactory` (itself a `Singleton`-registered service, safe to inject anywhere) and explicitly create a new scope **at the point of use**, not at construction time:
 
@@ -99,7 +279,7 @@ public class OrderProcessingBackgroundService: BackgroundService
 ```
 This is precisely the mechanism that lets a long-lived component (a `Singleton`/`BackgroundService`) safely use short-lived (`Scoped`) dependencies **correctly**, over and over, without ever violating the captive-dependency rule — the key distinction from the anti-pattern is that `IServiceScopeFactory` itself has no state tied to any particular scope; it's a **factory**, safe to be long-lived, that produces fresh scopes on demand.
 
-### 2.6 Open Generic Registrations
+#### 2.6 Open Generic Registrations
 
 The container supports registering an **open generic type** to satisfy any closed generic request:
 ```csharp
@@ -109,15 +289,13 @@ services.AddScoped(typeof(IRepository<>), typeof(EfRepository<>));
 ```
 This directly reuses the generics/JIT-specialization mechanics (each closed generic type gets its own container-tracked lifetime instance/registration, exactly mirroring the per-value-type JIT specialization discussion, though here the "specialization" is about DI registration resolution, not native code generation) — a single open-generic registration line covers an unbounded number of closed generic types, a genuinely powerful, concise pattern for generic repository/handler-style abstractions.
 
-### 2.7 `IEnumerable<TService>` — Multiple Registrations for One Interface
+#### 2.7 `IEnumerable<TService>` — Multiple Registrations for One Interface
 
 Registering the same interface multiple times (`services.AddScoped<INotificationHandler<OrderShipped>, EmailHandler>; services.AddScoped<INotificationHandler<OrderShipped>, SmsHandler>;`) doesn't overwrite the first registration — resolving a single `INotificationHandler<OrderShipped>` returns the **last**-registered implementation, but resolving `IEnumerable<INotificationHandler<OrderShipped>>` returns **all** registered implementations, in registration order — this is precisely the mechanism underlying the DI-mediator pattern (`_serviceProvider.GetServices<INotificationHandler<TNotification>>`), now explained at the container-mechanics level rather than treated as a given.
 
----
+### 3. Visual Architecture
 
-## 3. Visual Architecture
-
-### Lifetime Scope Nesting (ASCII)
+#### Lifetime Scope Nesting (ASCII)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -149,7 +327,7 @@ Scoped dependency -- it gets locked to ONE specific scope's instance
  (WRONG: Request #2 gets Request #1's stale/disposed instance)
 ```
 
-### Dependency Graph Resolution
+#### Dependency Graph Resolution
 
 ```mermaid
 graph TB
@@ -162,11 +340,9 @@ graph TB
  style BadSingleton fill:#844,color:#fff
 ```
 
----
+### 4. Production Example
 
-## 4. Production Example
-
-### Scenario: Multi-tenant SaaS platform — silent cross-tenant data leakage from a captive `DbContext`
+#### Scenario: Multi-tenant SaaS platform — silent cross-tenant data leakage from a captive `DbContext`
 
 **Problem**: A multi-tenant application (each request scoped to a specific tenant, with a `Scoped` `ITenantContext` service resolving the current tenant from the request's JWT claims, and a `Scoped` `TenantAwareDbContext` applying a global query filter based on that tenant context) exhibited an intermittent, severe bug: occasionally, a request for **Tenant A** would return data belonging to **Tenant B** — a critical, potentially breach-notification-triggering multi-tenancy isolation failure.
 
@@ -185,129 +361,10 @@ graph TB
 1. The captive-dependency validation being **environment-gated by default** (on in Development, off elsewhere) is a genuine, easy-to-overlook configuration gap — this incident would have been caught **at build/deploy time in staging**, months earlier, had the validation simply been enabled everywhere from the start.
 2. A seemingly innocuous refactor (adding one constructor parameter to a `Singleton` for what seemed like a reasonable convenience) is exactly how this bug class is introduced in practice — it requires no obviously "risky"-looking code change, which is precisely why static, automated validation (not just code review) is the appropriate defense.
 3. Multi-tenant systems have an especially severe blast radius for this specific bug class — a captive-dependency bug that would merely be "annoying/incorrect" in a single-tenant system becomes a genuine security/compliance incident (cross-tenant data leakage) in a multi-tenant one, raising the stakes for proactive prevention substantially.
-## 10. Interview Questions
 
-### Basic (10)
+### 11. Coding Exercises
 
-1. **Q: What are the three built-in DI lifetimes in ASP.NET Core?**
- **A:** `Transient` (new instance every resolution), `Scoped` (one instance per request/scope), `Singleton` (one instance for the application's entire lifetime).
-
-2. **Q: What creates a new DI scope in ASP.NET Core, by default?**
- **A:** Each incoming HTTP request automatically gets its own new scope.
-
-3. **Q: What is a captive dependency?**
- **A:** A longer-lived service (typically `Singleton`) holding a direct reference to a shorter-lived one (typically `Scoped`), causing the shorter-lived instance to be incorrectly reused far beyond its intended lifetime.
-
-4. **Q: What does `ValidateOnBuild = true` do?**
- **A:** Performs a static analysis pass over the entire registered service graph at application startup, proactively detecting captive-dependency violations immediately rather than waiting for them to manifest at runtime.
-
-5. **Q: How does the container choose which constructor to use when a class has multiple?**
- **A:** It selects the constructor whose parameters can all be resolved by currently-registered services, preferring the one with the most resolvable parameters if multiple qualify.
-
-6. **Q: What happens if you resolve `IEnumerable<IMyService>` when multiple implementations are registered for `IMyService`?**
- **A:** You get all registered implementations, in registration order — resolving just `IMyService` alone, by contrast, returns only the last-registered implementation.
-
-7. **Q: Should you register `DbContext` as `Singleton`?**
- **A:** No — `DbContext` is not thread-safe for concurrent use and is designed to be `Scoped` (one instance per request), which is also its default registration lifetime via `AddDbContext`.
-
-8. **Q: What is the Service Locator anti-pattern in the context of DI?**
- **A:** Injecting `IServiceProvider` itself and calling `.GetService<T>` throughout a class's methods, instead of declaring dependencies as constructor parameters — hides the class's true dependencies.
-
-9. **Q: Why shouldn't you create a new `HttpClient` directly with `new HttpClient` in application code?**
- **A:** It bypasses `IHttpClientFactory`'s connection-pool management, risking socket exhaustion (if created/disposed frequently) or DNS-change-blindness (if never disposed) — `IHttpClientFactory` manages the underlying connection-pooling lifetime correctly.
-
-10. **Q: What is `IServiceScopeFactory` used for?**
- **A:** Explicitly creating a new DI scope (with its own independent `Scoped` service instances) outside the context of an HTTP request — e.g., inside a background service.
-
-### Intermediate (10)
-
-1. **Q: Explain precisely why a `Singleton` capturing a `Scoped` `DbContext` causes data corruption, not just an exception.**
- **A:** The `Singleton`'s constructor resolves the `Scoped` `DbContext` once, at whichever moment the `Singleton` is first constructed — that one specific `DbContext` instance is then held and reused by the `Singleton` for every subsequent request across the application's entire lifetime, even though EF Core's `DbContext` is explicitly not designed for concurrent/cross-request reuse — this produces unpredictable behavior (stale cached entities, concurrent-access exceptions, or silently incorrect query results) rather than a clean, immediate failure, since nothing prevents the code from technically continuing to run.
-
-2. **Q: Why is `ValidateScopes = true` specifically effective at catching captive dependencies, mechanically?**
- **A:** It throws whenever a `Scoped` service is resolved from the **root** service provider rather than a request-scoped one — a `Singleton`'s constructor executes in the context of the root provider (since `Singleton`s live at the root, not inside any particular request's scope), so attempting to resolve a `Scoped` dependency during that construction is exactly the condition this validation is designed to detect and reject immediately.
-
-3. **Q: Why might a captive-dependency bug pass all local development testing yet still reach production?**
- **A:** `ValidateScopes`/`ValidateOnBuild` default to enabled only when `IsDevelopmentEnvironment` is true — if a team never explicitly enables them for staging/production environments, the validation that would have caught the bug locally simply doesn't run in those environments, letting the bug through undetected until it manifests as a runtime symptom.
-
-4. **Q: What's the correct way for a `Singleton` service to make use of `Scoped` functionality?**
- **A:** Inject `IServiceScopeFactory` (itself safely `Singleton`-injectable, since it holds no scope-specific state itself) and explicitly call `CreateScope` at the actual point of use, resolving the needed `Scoped` service fresh from that new scope each time, then disposing the scope when done.
-
-5. **Q: Why does registering the same interface multiple times not cause a resolution error?**
- **A:** The container simply accumulates all registrations for that service type; resolving the single interface type returns the last one registered (a "last registration wins" rule for singular resolution), while resolving `IEnumerable<TService>` returns the complete, ordered list of all registrations — both are valid, intentional resolution modes for different use cases.
-
-6. **Q: What's the risk of registering a `Singleton` with unsynchronized mutable instance state?**
- **A:** Since a `Singleton` is shared across every concurrently-handled request, any mutable state it holds is subject to genuine multi-threaded concurrent access — without proper synchronization (locks, concurrent collections, immutable data structures), this is a real race-condition risk, unlike `Scoped`/`Transient` services which are never concurrently shared across requests by construction.
-
-7. **Q: Why is the Service Locator pattern considered an anti-pattern even though it technically achieves loose coupling from concrete implementations?**
- **A:** While it does decouple from concrete types, it hides the class's actual dependency graph from its public interface (the constructor) — anyone reading the class's signature can no longer tell what it depends on without reading through its entire implementation, defeating the transparency/reviewability and easy-testability benefits that constructor injection provides for essentially the same loose-coupling benefit.
-
-8. **Q: What does an open generic registration (`services.AddScoped(typeof(IRepository<>), typeof(EfRepository<>))`) let you avoid?**
- **A:** Having to write a separate explicit registration line for every closed generic type (`IRepository<Order>`, `IRepository<Customer>`, etc.) individually — one open-generic registration line covers all of them automatically.
-
-9. **Q: Why should a background service (`IHostedService`) generally not directly inject a `Scoped` service into its own constructor?**
- **A:** `IHostedService`/`BackgroundService` implementations are themselves registered as `Singleton` by the hosting infrastructure — directly injecting a `Scoped` dependency into their constructor would be exactly the captive-dependency violation this module centers on; they must instead use `IServiceScopeFactory` to create scopes on demand during their execution.
-
-10. **Q: What's a scenario where `IHttpClientFactory` solves a problem that simply making `HttpClient` a `Singleton` registration wouldn't fully address?**
- **A:** A single long-lived `HttpClient` instance (even as a `Singleton`) can become "DNS-blind" — it caches DNS resolution for the lifetime of its underlying connection pool and won't notice if a target host's IP address changes (e.g., during a cloud failover), continuing to connect to a stale address; `IHttpClientFactory` manages handler rotation specifically to balance both concerns (avoiding both too-frequent disposal, which exhausts sockets, and never-disposing, which causes DNS blindness) — a `Singleton HttpClient` registration alone only solves the socket-exhaustion half of the problem.
-
-### Advanced (10)
-
-1. **Q: Walk through, precisely, what happens if a `Scoped` service depends on a `Transient` service, which itself depends on another `Scoped` service further down the graph — is this a captive dependency, and why or why not?**
- **A:** This is generally **safe**, not a captive dependency — the `Transient` service, despite having a shorter *nominal* lifetime than `Scoped`, doesn't independently persist anywhere on its own; it's constructed fresh as part of resolving the outer `Scoped` service's graph and simply passes through to whatever `Scoped` dependency it itself needs, which resolves to the **same** `Scoped` instance already active for the current scope (since `Scoped` instances are cached per-scope regardless of how deep in the graph they're requested from). The captive-dependency danger specifically arises when a **longer**-lived service (`Singleton`) holds onto (captures, via a field) a reference to something shorter-lived that will not remain valid for the `Singleton`'s full lifetime — a `Transient` wrapping a `Scoped` dependency, itself consumed by a `Scoped` parent, doesn't create this danger because nothing here outlives the scope itself.
-
-2. **Q: Explain a scenario where `ValidateOnBuild`'s static analysis might fail to catch a captive-dependency-equivalent bug that only manifests via a different mechanism (not direct constructor injection).**
- **A:** If a `Singleton` service resolves a `Scoped` dependency not via constructor injection but by holding an injected `IServiceProvider` (the Service Locator anti-pattern) and calling `.GetService<IScopedThing>` **inside a method**, rather than the constructor — `ValidateOnBuild`'s static graph analysis, which examines *registered constructor dependencies*, cannot detect this dynamic, runtime-only resolution pattern at all, since it isn't expressed as a declared dependency the analysis can see. This is a second, independent, and arguably even more compelling reason (beyond the general transparency argument /Intermediate Q7) to avoid the Service Locator pattern: it doesn't just hide dependencies from human readers, it hides them from the container's own automated safety analysis too.
-
-3. **Q: Describe how you would design a `Singleton`-lifetime, thread-safe, periodically-refreshed in-memory cache that needs to read from a `Scoped` data source (e.g., a database) to populate itself, without violating the captive-dependency rule.**
- **A:** The cache itself (`Singleton`) should not directly depend on the `Scoped` repository in its constructor; instead, it should depend on `IServiceScopeFactory`, and its refresh logic (triggered by a timer or `IHostedService`, itself potentially the very same component) creates a **fresh scope** for each refresh cycle, resolves the `Scoped` repository from that fresh scope, reads the data needed to repopulate the cache, and then disposes the scope — the cache's own internal storage (a `ConcurrentDictionary` or similar thread-safe structure, given the `Singleton`'s concurrent-access requirement) is updated with the freshly-read data, entirely independent of any single `Scoped` instance's lifetime, directly combining the on-demand-scope pattern with the thread-safety requirement for `Singleton` state into one cohesive design.
-
-4. **Q: Explain why the container's "most resolvable parameters wins" constructor-selection tie-breaking rule can itself be a subtle source of bugs during refactoring, with a concrete example.**
- **A:** Consider a class with two constructors: `MyService(IFoo foo)` and `MyService(IFoo foo, IBar bar)` — if `IBar` is currently registered, the container selects the **second** (more-parameters) constructor; if a later, unrelated change removes `IBar`'s registration (e.g., a different team removes a service they believed was unused), the container silently falls back to selecting the **first** constructor instead, without any compile-time signal that this happened — `MyService`'s actual runtime behavior may now differ subtly (if the two constructors weren't perfectly equivalent in what they initialize, which is a common reason to have two constructors in the first place) purely because of an unrelated registration change elsewhere in the codebase, a genuinely surprising and hard-to-trace class of bug specifically enabled by this tie-breaking rule's implicit, non-obvious registration-dependent behavior. This is a strong argument for generally preferring exactly one DI-facing constructor per class, precisely to eliminate this failure mode entirely.
-
-5. **Q: How would you explain to a team why enabling `ValidateOnBuild`/`ValidateScopes` universally (not just in Development) is a security control, not merely a "nice to have" correctness check, referencing the specific incident class?**
- **A:** Frame it directly around blast radius and detectability: a captive-dependency bug in a multi-tenant system isn't merely "sometimes returns stale data" — it can literally serve one tenant's private data to a different tenant, which is a reportable data-breach/compliance-incident-class event, not an ordinary bug; and because this bug class produces no distinctive error/exception under normal operation (the code runs "successfully," just against the wrong captured instance), it can persist silently, undetected by ordinary QA/monitoring, for an extended period — exactly the profile of risk that automated, proactive, build-time-static-analysis (rather than hoping to catch it via manual testing or eventually noticing symptoms) is specifically well-suited to close, at a startup-cost overhead that is essentially free relative to the severity being prevented.
-
-6. **Q: Explain how a `Singleton` service intentionally designed to hold an injected `IOptionsMonitor<T>` (rather than `IOptions<T>`) interacts with configuration reloading, and why this doesn't create a captive-dependency-style problem despite the `Singleton` "holding onto" something.**
- **A:** `IOptionsMonitor<T>` is itself registered as `Singleton` and is specifically designed to be safely held long-term — it doesn't capture a *fixed* configuration snapshot; instead, it's a live, self-updating wrapper that internally re-reads/re-binds configuration whenever the underlying configuration source changes (e.g., a reloaded `appsettings.json`), exposing `.CurrentValue` (always fresh) and a `.OnChange` callback registration mechanism — this is architecturally different from the captive-dependency problem (which involves capturing a *specific, static* instance of something meant to vary per-scope) precisely because `IOptionsMonitor<T>` was deliberately designed from the ground up to be a long-lived, ever-fresh view over changing configuration, not a snapshot frozen at construction time — the distinction between "safe to hold long-term because it's designed for it" (`IOptionsMonitor<T>`, `IServiceScopeFactory`) versus "unsafe to hold long-term because it's a per-scope snapshot" (`Scoped` services generally) is the precise, general principle this question is testing.
-
-7. **Q: Describe a testing strategy that would have caught the multi-tenant captive-dependency bug even without `ValidateOnBuild`, using integration tests rather than static container validation.**
- **A:** An integration test suite that spins up the full application (via `WebApplicationFactory<T>`, §Advanced Q9) and sends two sequential requests **as two different tenants**, asserting that data returned for Tenant A's request never includes anything belonging to Tenant B, would have caught this specific bug's *symptom* directly (cross-tenant data leakage), even without understanding or targeting the captive-dependency mechanism specifically — this is a valuable complementary defense-in-depth layer to `ValidateOnBuild` (which catches the *mechanism* generically, for any captive dependency, even ones that wouldn't necessarily manifest as an obviously-wrong test assertion) precisely because integration tests catch the *observable business-impact symptom* regardless of root cause, while static DI validation catches the *underlying mechanism* regardless of whether a specific test happens to exercise the exact code path that triggers it — neither approach alone is sufficient; the combination is what provides robust protection against this bug class recurring in different forms.
-
-8. **Q: Explain why open generic registrations don't create a captive-dependency risk across different closed generic instantiations, even though they share one registration line.**
- **A:** Each closed generic type (`IRepository<Order>`, `IRepository<Customer>`) is resolved and lifetime-managed **independently** by the container, despite sharing one open-generic registration — `services.AddScoped(typeof(IRepository<>), typeof(EfRepository<>))` means "for **any** closed generic request matching this pattern, apply the `Scoped` lifetime," not "share one single instance across all closed generic types" — resolving `IRepository<Order>` within a request gives you a `Scoped`-per-request `EfRepository<Order>` instance, entirely independent of whatever `EfRepository<Customer>` instance also exists within that same scope for `IRepository<Customer>` requests; the "one registration, many independent lifetime-managed instances" behavior here directly parallels the "one generic type definition, many independently-specialized closed instantiations" point, now expressed at the DI-container level instead of the JIT-compilation level.
-
-9. **Q: How would you design an automated CI check (beyond just `ValidateOnBuild` at application startup) to catch captive-dependency risks even earlier, at pull-request time, before the application is even deployed to a staging environment where it would run?**
- **A:** Add a dedicated, fast-running unit/integration test (not a full end-to-end test) that specifically constructs the application's full `IServiceCollection`/`ServiceProvider` with `ValidateOnBuild = true` and `ValidateScopes = true` explicitly enabled, calling `.Build` in the test itself and asserting it doesn't throw — this converts a "would be caught the next time we deploy to staging with the flag enabled" safety net (still valuable, but late) into a "caught within seconds, in CI, on every single pull request, before merge" safety net — a small, cheap, high-leverage addition to a CI pipeline specifically targeting this bug class, directly generalizing the "shift correctness-checking as early as possible in the development lifecycle" principle that recurs throughout this course (the exhaustiveness-warnings-as-errors, the static-analysis-for-`throw ex;`, and now here for DI captive dependencies).
-
-10. **Q: As a Principal Engineer, a team proposes eliminating `Scoped` lifetime entirely from their codebase, using only `Transient` and `Singleton`, arguing this simplifies reasoning about lifetimes and eliminates the captive-dependency risk category entirely (since `Transient` can never "capture" anything meaningfully persistent, and `Singleton` capturing `Transient` is architecturally different). Evaluate this proposal.**
- **A:** This doesn't actually eliminate the risk category, and introduces a new, arguably worse one: `DbContext` and similar per-request-consistency-requiring resources are specifically designed around the `Scoped` (one-instance-per-logical-unit-of-work) model — if forced into `Transient`, a single request's business logic that resolves the same "repository" abstraction multiple times across different services would get **multiple independent `DbContext` instances within one request**, breaking transactional consistency/change-tracking correctness within that single request's unit of work (each `DbContext` instance has its own independent change-tracker, so updates made via one instance wouldn't be visible to code holding a different instance within the supposedly-same logical request) — trading the captive-dependency risk (preventable via `ValidateOnBuild`/design discipline, per this entire module) for a *guaranteed*, constant, and much harder-to-detect correctness problem (silent transactional/consistency fragmentation within every single request, all the time, not just an occasional misconfiguration). The correct recommendation: keep `Scoped` as the appropriate lifetime for genuinely per-request-consistent resources, and rely on the container's built-in validation (`ValidateOnBuild`/`ValidateScopes`) plus the design discipline this module covers (the `IServiceScopeFactory` pattern) to manage the captive-dependency risk correctly, rather than discarding a correctly-designed lifetime model to avoid a risk that's actually well-understood and preventable through simpler, more targeted means.
-
-### Expert (FinTech Principal Panel)
-
-1. **Q: A payments service routes to different processors (Stripe, Adyen, an in-house rail) chosen per-transaction by currency/region/merchant config. How do you model provider selection with DI so it's testable, supports fallback, and doesn't become a `switch` statement everyone edits?**
- **A:** Register each processor as an implementation of a common `IPaymentProcessor` and select at runtime with either **keyed services** (.NET 8+: `AddKeyedScoped<IPaymentProcessor, StripeProcessor>("stripe")`, resolved via `IServiceProvider.GetRequiredKeyedService` or `[FromKeyedServices]`) or a **factory abstraction** `IPaymentProcessorFactory.For(context)` that maps routing rules → processor. Prefer the factory when selection logic is non-trivial (currency + region + merchant + health), because it centralizes the routing decision in one testable, owned component rather than scattering `GetKeyedService(key)` calls with ad-hoc key computation across call sites. Fallback/resilience: the factory can return a decorator that wraps the primary with a circuit breaker and a secondary processor, so a processor outage fails over without touching business code. Testability: the factory and each processor are independently unit-testable, and integration tests can register a fake processor under the same key. Avoid the `switch (provider)` anti-pattern — it violates OCP (adding a processor edits shared code) and can't be composed with cross-cutting decorators. The Principal framing: DI turns "which processor" into a configuration/registration concern with a single, tested selection seam, and lets resilience be layered as decorators rather than hand-coded per call site.
- **Why correct:** Uses keyed services/factory for a single tested selection seam, layers fallback as decorators, and rejects the shared-`switch` anti-pattern on OCP/composability grounds.
- **Common mistakes:** A `switch` on provider string; scattering keyed lookups with duplicated key logic; baking failover into business handlers.
- **Follow-ups:** "Keyed services vs. a factory — when each?" / "How do you add a new processor without touching existing code?" / "Where does the circuit breaker live in this composition?"
-
-2. **Q: In a multi-tenant banking SaaS, each tenant has its own database/connection string (and possibly encryption key). How do you resolve tenant-scoped dependencies through DI so that a request for Tenant A can *never* touch Tenant B's data, and what's the failure mode you're guarding against?**
- **A:** Establish tenant identity **early and authoritatively** — middleware (after authentication, from a validated claim, never from a client-supplied header alone) sets an `ITenantContext` on the request scope. Tenant-specific resources (`DbContext`, encryption key provider) are registered `Scoped` and resolved through a factory that reads `ITenantContext` to pick the correct connection string/key at construction time within that scope, so each request's scope is bound to exactly one tenant. The failure mode to guard against is the **captive-dependency / cross-tenant leak** (Advanced Q1/Q5): a `Singleton` (or an accidentally-cached `Scoped`) that captured Tenant A's `DbContext`/connection and then serves Tenant B — a reportable data-breach class event. Guards: `ValidateScopes`/`ValidateOnBuild` in CI and prod (Advanced Q9); tenant not resolvable from ambient statics; the connection/key selection derived *only* from the request-scoped `ITenantContext`; a defense-in-depth **row-level or database-level isolation** so even a bug can't cross tenants; and the two-tenant integration test (Advanced Q7) asserting no bleed. The Principal point: DI lifetime correctness here is a *security control*, not a style choice — the whole design exists so that "wrong tenant's data" is structurally impossible, not merely unlikely.
- **Why correct:** Roots tenant identity in a validated claim, binds one tenant per scope via a context-reading factory, and names the captive-dependency leak plus layered guards (validation, DB isolation, tests).
- **Common mistakes:** Deriving tenant from an unvalidated header; caching a tenant's connection in a singleton; relying solely on app-layer filtering with no DB isolation.
- **Follow-ups:** "Why must tenant come from a claim, not a header?" / "How does `ValidateScopes` catch a leak the tests miss?" / "Physical DB-per-tenant vs. shared DB with RLS — DI implications?"
-
-3. **Q: A low-latency service resolves services per message on a hot path. A colleague says "DI resolution is basically free." As the Principal, when is that true, when is it not, and how do you keep DI from becoming a latency/allocation problem?**
- **A:** For `Singleton`/`Transient` graphs `Microsoft.Extensions.DependencyInjection` resolution is fast (compiled/cached factories), but it is *not* free at extreme rates: every `Transient` in the graph is a fresh allocation (GC pressure —), creating a **scope per message** has real cost, and deep graphs multiply construction work per resolve. When it matters: a hot loop resolving a large graph millions of times/sec, or `Transient` services that could be `Singleton`, adds measurable allocation and CPU. Keep it in check: resolve once and reuse where lifetime allows (don't re-resolve per iteration); make stateless services `Singleton` so no per-use allocation occurs; avoid per-message scope creation unless you genuinely need scoped state; for the very hottest paths, resolve dependencies at pipeline setup and capture them, so the steady-state loop touches no container at all. And measure — `[MemoryDiagnoser]`/`dotnet-counters` allocation rate — rather than assume. The Principal framing: DI is a startup/composition concern; a latency-critical steady-state loop should have *already resolved* its collaborators and be allocating near-zero, so the container is out of the hot path entirely. "DI is free" is true at web-request rates and false at market-data rates.
- **Why correct:** Calibrates the claim by rate, identifies Transient allocation/scope-per-op/graph-depth as the costs, and moves resolution out of the steady-state loop with measurement.
- **Common mistakes:** Re-resolving a graph per iteration; a scope per message when no scoped state exists; unnecessary `Transient` where `Singleton` fits; assuming with no measurement.
- **Follow-ups:** "Why does `Transient` cost more than `Singleton` on a hot path?" / "When is a per-message scope actually required?" / "How would you prove the container isn't in your hot path?"
-
----
-
-## 11. Coding Exercises
-
-### Easy — Fix a captive-dependency registration
+#### Easy — Fix a captive-dependency registration
 **Problem**: This registration causes a captive-dependency bug.
 ```csharp
 services.AddSingleton<INotificationDispatcher, NotificationDispatcher>;
@@ -330,7 +387,7 @@ public class NotificationDispatcher: INotificationDispatcher
 ```
 **Discussion**: The simplest, most robust fix for a captive-dependency bug is frequently not "use `IServiceScopeFactory`" (which is the right tool when the `Singleton` genuinely needs autonomous, self-initiated access to scoped data) but simply **removing the dependency entirely** and having the correctly-`Scoped` calling code pass the needed data explicitly as a parameter — the smallest, least-mechanism-heavy fix is usually best when it's available, reserving `IServiceScopeFactory` for cases where the `Singleton` genuinely needs to *initiate* its own scoped-data access (background timers, the coding exercise below) rather than simply being handed data by an already-scoped caller.
 
-### Medium — Implement `ValidateOnBuild`-catchable registration as a CI-testable pattern (Advanced Q9)
+#### Medium — Implement `ValidateOnBuild`-catchable registration as a CI-testable pattern (Advanced Q9)
 **Problem**: Implement a fast CI unit test that validates the entire application's DI container for captive-dependency issues, without deploying anywhere.
 ```csharp
 public class DiContainerValidationTests
@@ -355,7 +412,7 @@ public class DiContainerValidationTests
 ```
 **Discussion**: This test's real value is running in **seconds**, on **every pull request**, catching this entire bug class before merge — dramatically cheaper and faster feedback than discovering it via a staging deployment (as in the incident) or, worse, in production. Note this requires the application's service-registration logic to be **extractable/callable independently** from the full hosting startup sequence (a `Startup.ConfigureServices(IServiceCollection, IConfiguration)` static method, or equivalent, rather than registration logic inextricably tangled into `Program.cs`'s top-level statements) — a good architectural reason, beyond just testability in general, to keep registration logic in a separately-callable method.
 
-### Hard — Implement a `Singleton` background cache refresher using `IServiceScopeFactory` (Advanced Q3)
+#### Hard — Implement a `Singleton` background cache refresher using `IServiceScopeFactory` (Advanced Q3)
 **Problem**: Implement a thread-safe, periodically-refreshed in-memory cache (`Singleton`) that reads from a `Scoped` repository without violating the captive-dependency rule.
 ```csharp
 public interface IProductCatalogCache
@@ -403,7 +460,7 @@ public sealed class ProductCatalogCache: IProductCatalogCache, IHostedService, I
 ```
 **Discussion points**: `_products` is `volatile` and updated via a single atomic reference reassignment (never mutated in place) — this is precisely the "immutable snapshot swap" pattern from the system-design section (the RTB ad-service example), now applied concretely at the DI/background-service level: readers (`GetAll`, called from any concurrently-handled request) never observe a partially-updated or torn state, since they only ever read a complete, fully-constructed `IReadOnlyList<Product>` reference at a time, and the swap itself is atomic at the CLR level for reference-type assignments. The registration's slightly awkward-looking `services.AddHostedService(sp => (ProductCatalogCache)sp.GetRequiredService<IProductCatalogCache>)` line deliberately ensures the **same** `Singleton` instance serves both roles (the cache interface consumers depend on, and the `IHostedService` the framework drives) — a common, useful trick for a `Singleton` that needs to be both an injectable service and a framework-managed hosted lifecycle participant simultaneously, worth explicitly explaining in an interview since it's a genuinely non-obvious registration pattern.
 
-### Expert — Implement a generic, DI-friendly decorator pattern for cross-cutting concerns (caching, retry) without modifying existing registrations
+#### Expert — Implement a generic, DI-friendly decorator pattern for cross-cutting concerns (caching, retry) without modifying existing registrations
 **Problem**: Implement a generic caching decorator for any `IRepository<T>`-shaped service, layered on top of an existing registration via the **Scrutor**-style decoration pattern (implemented by hand here, for understanding), demonstrating advanced DI composition.
 ```csharp
 public interface IRepository<T> where T: class
@@ -452,9 +509,7 @@ services.AddScoped(typeof(IRepository<>), sp =>
 ```
 **Discussion points**: This exercise deliberately surfaces a genuine limitation: `Microsoft.Extensions.DependencyInjection`'s built-in container has **no native "decorate an existing open-generic registration" primitive** — achieving true open-generic decoration (working for `IRepository<Order>`, `IRepository<Customer>`, etc. uniformly, without one explicit registration per concrete `T`) in practice requires either the popular third-party **Scrutor** library (`services.Decorate<IRepository<object>>(...)`-style, which uses reflection/assembly-scanning tricks to make this work generically) or falling back to explicit, per-concrete-type registrations (losing the open-generic conciseness). This is an important, honest "here's a real gap in the built-in container" point to raise in an Advanced/Expert interview — demonstrating awareness that `Microsoft.Extensions.DependencyInjection` is a deliberately minimal, "good enough for 90% of cases" container (unlike more feature-rich third-party containers such as Autofac, which natively support decoration, property injection, and more advanced registration modules) rather than presenting it as universally capable of every DI pattern without qualification.
 
----
-
-## 12. System Design
+### 12. System Design
 
 *(Narrow application — full System Design has its own module.)*
 
@@ -467,13 +522,11 @@ services.AddScoped(typeof(IRepository<>), sp =>
 - **Monitoring**: The tenant-ID consistency assertion's exception type is monitored/alerted on as a **critical-severity, page-immediately** signal (directly reusing the expected-vs-unexpected exception-severity-differentiation principle) — a fired assertion here indicates a genuine, severe, likely-compliance-relevant bug, warranting the highest possible response urgency.
 - **Trade-offs**: The tenant-ID consistency assertion adds a small, per-query runtime check across the entire application — an acceptable, deliberate cost given the catastrophic severity of what it guards against, directly mirroring this course's recurring theme of accepting a small guaranteed cost in exchange for closing a severe, low-probability-but-high-impact risk.
 
----
-
-## 13. Low-Level Design
+### 13. Low-Level Design
 
 **Scenario**: Design and implement (by hand, demonstrating the underlying mechanism) a minimal Roslyn analyzer sketch for the "Singleton depends on Scoped" static-detection concept — showing how this kind of custom, project-specific DI-safety tooling could actually be built, even if a real implementation would be more involved.
 
-### Class Diagram
+#### Class Diagram
 ```mermaid
 classDiagram
  class DiagnosticAnalyzer {
@@ -527,7 +580,7 @@ public static class CaptiveDependencyDetectionLogic
 }
 ```
 
-### Sequence Diagram
+#### Sequence Diagram
 ```mermaid
 sequenceDiagram
  participant Dev as Developer (writes code)
@@ -544,18 +597,16 @@ sequenceDiagram
  Build-->>Dev: Build FAILS -- second, independent layer of defense
 ```
 
-### Design Patterns / SOLID
+#### Design Patterns / SOLID
 - **Defense in depth**, applied to tooling layers rather than runtime security controls — this LLD, combined with the system design, demonstrates three independent, complementary detection layers (IDE-time analyzer, CI-time container validation test, and framework's own `ValidateOnBuild`) each catching the same bug class at a different, progressively-later point, exactly the "don't rely on a single layer of defense" principle applied to a correctness/tooling concern rather than a security one.
 - **S**: `ServiceLifetimeRegistry` only knows how to parse and answer "what lifetime is type X registered with" — it has no opinion about what constitutes a violation; `SingletonScopedDependencyAnalyzer`/`CaptiveDependencyDetectionLogic` owns the actual violation-detection policy, cleanly separated from the lifetime-lookup mechanism.
 
-### Extensibility
+#### Extensibility
 - The detection logic sketch explicitly notes the need to **recurse** through `Transient` dependencies (a `Transient` type that itself captures something `Scoped` in its own field is an equally real captive-dependency risk, just one level removed) — a genuinely more complete implementation would need a full transitive-closure graph walk, not just a one-hop parameter check, directly illustrating that even this "simple" static-analysis idea has real depth/complexity once pursued fully, a good honest point to raise if asked to extend this LLD further in an interview.
 
----
+### 14. Production Debugging
 
-## 14. Production Debugging
-
-### Incident: Multi-tenant cross-tenant data leakage from a captive-dependency bug (full deep dive)
+#### Incident: Multi-tenant cross-tenant data leakage from a captive-dependency bug (full deep dive)
 - **Symptoms**: Intermittent, severe cross-tenant data leakage.
 - **Investigation**: Enabling `ValidateOnBuild` in staging immediately surfaced the exact offending registration.
 - **Tools**: `ValidateOnBuild`/`ValidateScopes` container validation, dependency-graph tracing.
@@ -563,30 +614,28 @@ sequenceDiagram
 - **Fix**: Removed the direct dependency; passed tenant ID explicitly as a method parameter instead.
 - **Prevention**: Universal (all-environment) validation enablement; full audit of all other `Singleton` registrations.
 
-### Incident: Startup latency spike traced to eager `Singleton` construction with expensive constructor work
+#### Incident: Startup latency spike traced to eager `Singleton` construction with expensive constructor work
 - **Symptoms**: The very first request handled after a fresh deployment consistently took several seconds longer than every subsequent request.
 - **Investigation**: `dotnet-trace` during a deployment's first request showed significant time spent inside a `Singleton` service's constructor, which performed a synchronous, blocking network call to warm up a connection to an external service.
 - **Root cause**: A `Singleton` lazily constructed on first use (the default behavior for interface-based registrations) whose constructor happened to be expensive — exactly the anti-pattern flagged in the final point, with the cost landing entirely and unpredictably on whichever request happened to trigger construction first.
 - **Fix**: Explicitly forced eager construction of this specific `Singleton` during a controlled startup phase (resolving it once explicitly right after `app.Build`, before the application starts accepting traffic), converting the cost from "an unpredictable tax on one unlucky live request" into "a predictable, bounded part of the deployment's startup sequence" (measured and accounted for in health-check/readiness-probe timing).
 - **Prevention**: A team convention flagging any `Singleton` with non-trivial constructor-time work as needing an explicit decision: eager-construct at startup (predictable, delays readiness) or accept the "first unlucky request pays the cost" trade-off deliberately (only acceptable if that cost is genuinely small/tolerable) — never leave this as an accidental, undiscussed side effect of lazy construction's default behavior.
 
-### Incident: `HttpClient` socket exhaustion from bypassing `IHttpClientFactory`
+#### Incident: `HttpClient` socket exhaustion from bypassing `IHttpClientFactory`
 - **Symptoms**: A service making frequent outbound calls to a partner API began failing with `SocketException`s under moderate load, specifically correlated with sustained traffic rather than traffic spikes.
 - **Investigation**: Code review found a `Transient`-lifetime service directly instantiating `new HttpClient` in its constructor — since the service itself was `Transient` (a new instance per resolution, potentially many times per request across different call sites), a fresh `HttpClient` (and its underlying socket/connection-pool resources) was being created and subsequently garbage-collected at a high rate, exhausting available ephemeral ports faster than the OS could reclaim them from the `TIME_WAIT` state.
 - **Root cause**: Bypassing `IHttpClientFactory`'s connection-pool management by directly constructing `HttpClient` inside a frequently-resolved `Transient` service.
 - **Fix**: Switched to `services.AddHttpClient<IMyApiClient, MyApiClient>`, letting `IHttpClientFactory` manage the underlying handler/connection-pool lifetime correctly regardless of how frequently `MyApiClient` itself is resolved.
 - **Prevention**: Static-analysis/code-review rule banning direct `new HttpClient` construction anywhere in application code, requiring `IHttpClientFactory`-based registration exclusively.
 
-### Incident: Ambiguous-constructor resolution failure after a refactor
+#### Incident: Ambiguous-constructor resolution failure after a refactor
 - **Symptoms**: A deployment failed immediately at application startup with `InvalidOperationException: Unable to resolve service for type 'X'... Multiple constructors accepting all given argument types have been found`.
 - **Investigation**: A recent refactor had added a second, overloaded constructor to a service class (for a specific unit-testing convenience, allowing an optional test-only parameter) without realizing both constructors were now simultaneously fully resolvable given the currently-registered services, triggering the ambiguous-constructor failure described.
 - **Root cause**: An unintentional second, fully-DI-resolvable constructor introduced without awareness of the container's ambiguous-resolution behavior.
 - **Fix**: Marked the test-convenience constructor with `[ActivatorUtilitiesConstructor]` (an attribute that explicitly tells the container which constructor to prefer when ambiguity would otherwise occur) or, more simply, made the test-only constructor `internal`/require a parameter type not registered in the container (so it's no longer "fully resolvable," removing the ambiguity naturally).
 - **Prevention**: Team guideline preferring exactly one DI-facing public constructor per service class, with any test-specific construction needs handled via a separate factory method or test-only helper rather than an additional public constructor that inadvertently becomes DI-ambiguous.
 
----
-
-## 15. Architecture Decision
+### 15. Architecture Decision
 
 **Decision**: Choosing a dependency injection container strategy — the built-in `Microsoft.Extensions.DependencyInjection` versus a more feature-rich third-party container (Autofac, Simple Injector).
 
@@ -598,9 +647,7 @@ sequenceDiagram
 
 **Recommendation**: **Option A** as the default for the large majority of ASP.NET Core applications — the built-in container, combined with the disciplined lifetime-management practices this entire module covers (universal `ValidateOnBuild`/`ValidateScopes`, `IServiceScopeFactory` for `Singleton`-needs-`Scoped` scenarios), is sufficient for nearly all real-world needs without adding a dependency. **Option B** is a reasonable, low-cost upgrade specifically when the team hits the decoration gap repeatedly enough that manual workarounds become genuinely burdensome. **Option C** is worth the larger investment specifically for teams with advanced DI needs the built-in container structurally can't satisfy (rich convention-based auto-registration across large codebases, more sophisticated lifetime-validation diagnostics than `ValidateOnBuild` provides) — not a default choice, but a legitimate one once a specific, demonstrated need justifies the added complexity, exactly the same "don't adopt complexity speculatively" discipline recurring throughout this course.
 
----
-
-## 16. Enterprise Case Study
+### 16. Enterprise Case Study
 
 **Inspired by**: Microsoft's own well-documented history of the built-in DI container's design philosophy (extensively discussed in ASP.NET Core design-team blog posts and GitHub issue discussions) — a deliberate choice to ship a **minimal, "good enough for the framework's own needs" container** as a first-class, zero-additional-dependency part of the framework, rather than mandating or deeply favoring any specific full-featured third-party container, explicitly leaving room for teams with more advanced needs to bring their own (Autofac, Simple Injector, etc., all of which provide official ASP.NET Core integration packages specifically because Microsoft designed the DI abstraction layer to be swappable).
 
@@ -609,9 +656,7 @@ sequenceDiagram
 - **Scaling lesson**: This is a recurring architectural pattern worth recognizing generally (not unique to DI containers): **"ship a minimal, good-enough default; design clean extension points for advanced needs"** rather than either "ship the most powerful thing for everyone" (unnecessary complexity cost for the common case) or "ship only the minimal thing, with no path forward" (blocks legitimate advanced use cases entirely) — the same design philosophy recurs across many parts of ASP.NET Core (Minimal APIs vs. the full MVC filter pipeline) and is worth explicitly naming as a design principle when evaluating any platform/framework's own architecture, not just when using it.
 - **Lesson for principal engineers**: When your own team builds internal platform/shared-library abstractions, apply this same "minimal good-enough default + clean extension point for advanced needs" principle deliberately, rather than either over-engineering a fully-featured internal framework from day one or building something so minimal that legitimate future advanced needs have no supported path forward — Microsoft's own DI-container design is a directly citable, well-documented precedent for this architectural philosophy when advocating for it internally.
 
----
-
-## 17. Principal Engineer Perspective
+### 17. Principal Engineer Perspective
 
 - **Business impact**: The captive-dependency bug class has demonstrated real, severe business impact (a multi-tenant data-leakage incident) — a Principal Engineer's highest-leverage action here is institutionalizing the multi-layered defense (/: universal container validation, CI-level testing, IDE-level static analysis) so this specific, well-understood risk category becomes structurally difficult to reintroduce, rather than depending on every engineer's individual vigilance indefinitely.
 - **Engineering trade-offs**: `Scoped` (correct per-request consistency, but must never be captured by longer-lived services) vs. `Singleton` (efficient, shared, but must be thread-safe and must never directly depend on `Scoped`) vs. `Transient` (safest from a lifetime-mismatch perspective, but potentially wasteful if genuinely expensive to construct repeatedly) — the Principal Engineer's role is ensuring the team has a clear, simple decision heuristic rather than treating lifetime selection as an ad-hoc, per-registration guess.
@@ -622,11 +667,9 @@ sequenceDiagram
 - **Risk analysis**: Treat any `Singleton`-lifetime service in a multi-tenant or otherwise security/compliance-sensitive system as warranting explicit, extra scrutiny of its full dependency graph (not just its direct constructor parameters, per Advanced Q1's transitive-dependency nuance) — the severity multiplier in a multi-tenant context (/) makes this a disproportionately high-value area for focused review attention, exactly mirroring the similar guidance for authentication/forwarded-headers middleware.
 - **Long-term maintainability**: Keep service-registration logic in an explicitly callable, separately-testable method (`Startup.ConfigureServices`-style, per the discussion) rather than inextricably embedded in top-level `Program.cs` statements — a small structural choice that directly enables the CI-level validation test this module recommends as a standard safeguard, illustrating how a seemingly-minor code-organization decision can be a prerequisite for a much more valuable testing/governance capability.
 
----
+### 18. Revision
 
-## 18. Revision
-
-### Key Takeaways
+#### Key Takeaways
 - Three lifetimes: `Transient` (new every time), `Scoped` (one per request/scope), `Singleton` (one for the app's entire lifetime) — the hard rule is a longer-lived service must never capture a shorter-lived one.
 - The captive-dependency bug: a `Singleton` capturing a `Scoped` dependency locks in one specific instance forever, reused incorrectly across every subsequent request — in a multi-tenant system, this can mean severe cross-tenant data leakage.
 - `ValidateOnBuild`/`ValidateScopes` catch this at startup/resolution time but default to enabled only in Development — always explicitly enable them for every environment.
@@ -634,29 +677,29 @@ sequenceDiagram
 - The Service Locator anti-pattern (injecting `IServiceProvider`, resolving dynamically) hides a class's true dependencies from both human reviewers and the container's own static validation — prefer declared constructor dependencies.
 - `IHttpClientFactory` (not raw `new HttpClient`) correctly manages connection-pool lifetime, avoiding both socket exhaustion and DNS-blindness.
 
-### Interview Cheatsheet
+#### Interview Cheatsheet
 - `Transient` = every resolution; `Scoped` = per request; `Singleton` = per application lifetime.
 - Captive dependency = longer-lived service holding a reference to a shorter-lived one — the `Singleton`-captures-`Scoped` case is the classic, most-tested example.
 - `ValidateScopes` throws when a `Scoped` service is resolved from the root provider (exactly what happens when a `Singleton` tries to inject one).
 - `IServiceScopeFactory` = safe to hold long-term (it's a factory, not a scope itself); use it to create fresh scopes on demand.
 - Ambiguous multi-constructor resolution is a hard runtime failure, not a silent fallback — prefer one DI-facing constructor per class.
 
-### Things Interviewers Love
+#### Things Interviewers Love
 - Explaining precisely *why* the captive-dependency bug causes silent corruption rather than a clean exception, not just naming the pattern.
 - Immediately citing the `ValidateOnBuild`/environment-gating gap as a common, easily-overlooked hardening step.
 - Correctly distinguishing "Transient wrapping Scoped, consumed by a Scoped parent" (safe) from "Singleton capturing Scoped" (unsafe) — a nuance many candidates miss.
 
-### Things Interviewers Hate
+#### Things Interviewers Hate
 - Treating all three lifetimes as interchangeable "just pick one" choices without articulating the hard capture rule.
 - Assuming `ValidateOnBuild`/`ValidateScopes` are enabled by default in all environments.
 - Recommending the Service Locator pattern as a reasonable way to "simplify" dependency management.
 
-### Common Traps
+#### Common Traps
 - Injecting a `Scoped` service directly into a `Singleton`'s constructor, especially via an innocuous-looking refactor.
 - Assuming `IHttpClientFactory` is only about avoiding socket exhaustion — it also solves DNS-blindness, a distinct, equally important concern.
 - Adding a second, unintentionally-DI-ambiguous constructor to a service class without realizing the container's resolution behavior differs from ordinary C# overload resolution.
 
-### Revision Notes
+#### Revision Notes
 Cross-reference [[01-Middleware-Pipeline-Request-Internals]]/ (where the captive-dependency problem was first introduced as a request-scoping concern) and [[../01-CSharp/06-Generics-Variance]] (JIT specialization per closed generic type — directly mirrored by open-generic DI registration's per-closed-type independent lifetime management) before an interview. This module completes the foundational request/DI-lifecycle pairing for the ASP.NET Core domain — expect subsequent modules (Minimal APIs vs Controllers, Authentication/Authorization deep-dive) to assume both this module's and the content as established background.
 
 ---
