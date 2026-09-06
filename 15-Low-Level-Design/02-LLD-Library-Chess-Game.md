@@ -1,6 +1,6 @@
 # Module 46 — Low-Level Design: Library Management System & Chess Game Engine
 
-> Domain: Low-Level Design | Level: Beginner → Expert | Prerequisite: [[01-LLD-Fundamentals-Parking-Elevator]], [[../11-Design-Patterns/02-Behavioral-Patterns]] (Command pattern for move history/undo)
+> Domain: Low-Level Design | Level: Beginner → Expert | Prerequisite: [[01-LLD-Fundamentals-Parking-Elevator]], [[../11-Design-Patterns/00-Design-Patterns-Interview-Master-Guide-DotNet-TechLead]] (Command pattern for move history/undo)
 
 ---
 

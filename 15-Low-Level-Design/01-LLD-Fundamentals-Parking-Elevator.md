@@ -1,6 +1,6 @@
 # Module 45 — Low-Level Design: Object-Oriented Design Interviews (Parking Lot & Elevator System)
 
-> Domain: Low-Level Design | Level: Beginner → Expert | Prerequisite: [[../09-OOP/01-OOP-Fundamentals-Advanced]], [[../10-SOLID/01-SOLID-Principles-Deep-Dive]], [[../11-Design-Patterns/01-Creational-Structural-Patterns]], [[../11-Design-Patterns/02-Behavioral-Patterns]] — LLD interviews are precisely where Modules 29-32's OOP/SOLID/pattern content gets applied to concrete, buildable class designs.
+> Domain: Low-Level Design | Level: Beginner → Expert | Prerequisite: [[../09-OOP/01-OOP-Fundamentals-Advanced]], [[../10-SOLID/01-SOLID-Principles-Deep-Dive]], [[../11-Design-Patterns/00-Design-Patterns-Interview-Master-Guide-DotNet-TechLead]] — LLD interviews are precisely where Modules 29-32's OOP/SOLID/pattern content gets applied to concrete, buildable class designs.
 
 ---
 
