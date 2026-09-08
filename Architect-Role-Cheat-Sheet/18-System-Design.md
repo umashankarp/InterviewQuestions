@@ -1,14 +1,46 @@
 # 18. System Design — 25 Questions (Answered)
 
-> **Method:** every design below follows the same spine an interviewer expects — **clarify and scope → requirements and back-of-the-envelope numbers → high-level architecture → data model and core flows → failure handling → explicit trade-offs**. Patterns and mechanics are cross-referenced to the modules that cover them in depth (Microservices **04**, Distributed Systems **05**, EDA **07**, Kafka **08**, AWS **09**, Kubernetes **10**, Performance **11**, Architecture Patterns **12**, Event Sourcing **13**, CQRS/Saga/Outbox **14**, Security **15–17**), so this module is about *composition and judgement*, not re-deriving each pattern. Service behaviour and limits are taken from **AWS documentation**, **Microsoft Learn**, the **Kafka** and **Kubernetes** docs, and the relevant **IETF RFCs**; card-scheme and settlement mechanics reflect **PCI DSS** and scheme/ISO 20022 conventions. Links in **References**.
+> **Method:** every design below follows the same spine an interviewer expects — **clarify and scope → requirements and back-of-the-envelope numbers → high-level architecture → data model and core flows → failure handling → explicit trade-offs and wrap-up**. Patterns and mechanics are cross-referenced to the modules that cover them in depth (Microservices **04**, Distributed Systems **05**, EDA **07**, Kafka **08**, AWS **09**, Kubernetes **10**, Performance **11**, Architecture Patterns **12**, Event Sourcing **13**, CQRS/Saga/Outbox **14**, Security **15–17**), so this module is about *composition and judgement*, not re-deriving each pattern. Service behaviour and limits are taken from **AWS documentation**, **Microsoft Learn**, the **Kafka** and **Kubernetes** docs, and the relevant **IETF RFCs**; card-scheme and settlement mechanics reflect **PCI DSS** and scheme/ISO 20022 conventions. Links in **References**.
 >
 > **How to use this module:** the numbers are illustrative but arithmetically consistent — the point is the *method* of deriving load from business volume, and then letting that number decide the architecture. In an interview, always state the number before you draw the box.
+
+## The interview framework this module follows
+
+Three widely used references converge on essentially the same shape for a system design interview, and each answer below is structured to make that shape explicit rather than leaving it implicit:
+
+| Source | Framework |
+|---|---|
+| **ByteByteGo** / Alex Xu, *System Design Interview — An Insider's Guide* | **(1) Understand the Problem and Establish Design Scope → (2) Propose High-Level Design and Get Buy-In → (3) Design Deep Dive → (4) Wrap-Up** — the canonical four-step process the book applies to every chapter and recommends using verbatim in a real interview |
+| **GeeksforGeeks**, *System Design Tutorial* / *How to Answer a System Design Interview Problem* | A finer-grained seven-part breakdown: understand the goal and gather requirements → estimation and constraints → high-level component design → detailed/low-level design → data model design → API design → identify and resolve bottlenecks |
+| **System Design School**, *What Is a System Design Interview* | Requirements gathering (functional + non-functional) → capacity estimation → high-level architecture → deep dive → trade-off analysis — explicitly warning against **"memorisation and buzzword stacking"** in place of reasoning from first principles, and against skipping capacity estimation |
+
+**These are the same framework at different resolutions**, and this module reconciles them into one consistent spine used in every question:
+
+```text
+Step 1 — Understand the Problem & Establish Design Scope   (ByteByteGo Step 1 / GFG steps 1–2 / SDS step 1)
+   clarifying Q&A · functional & non-functional requirements · back-of-the-envelope estimation
+   → an explicit statement of what the numbers imply is the actual hard problem
+
+Step 2 — Propose High-Level Design & Get Buy-In             (ByteByteGo Step 2 / GFG step 3)
+   component diagram · end-to-end flow
+
+Step 3 — Design Deep Dive                                   (ByteByteGo Step 3 / GFG steps 4–6)
+   data model · API design · the specific mechanism the question is really testing ·
+   failure handling and bottleneck resolution
+
+Wrap-Up                                                      (ByteByteGo Step 4 / GFG step 7 / SDS step 5)
+   explicit trade-off table · what was deliberately left out of scope ·
+   the monitoring signals that would tell you the design is wrong ·
+   the natural follow-up question an interviewer would ask next
+```
+
+Below, **"Step 1"** and **"Step 2"** headers are labelled with their canonical name so the mapping is unmistakable; the numbered steps that follow constitute the **Design Deep Dive** (their content varies by question, exactly as intended — deep dive means "whichever mechanism this specific system actually turns on"); and every **Trade-offs** table closes with a **Wrap-Up** covering the three GFG/ByteByteGo elements most often skipped under interview time pressure: explicit scope boundaries, monitoring signals, and the next question.
 
 ---
 
 ## Q1. Design an Order Management System.
 
-### Step 1 — Scope it before you draw anything
+### Step 1 (Understand the Problem & Establish Design Scope) — Scope it before you draw anything
 
 **Q:** Retail e-commerce orders, or capital-markets orders?
 **A:** Take e-commerce/enterprise fulfilment here; the trading variant is Q14.
@@ -33,7 +65,7 @@ each order ~2 KB + 5 events × 1 KB ≈ 7 KB → 5M × 7 KB ≈ 35 GB/day ≈ 12
 
 **What the numbers imply:** 580 writes/s is *not* a throughput problem — a single well-indexed relational primary handles it. **The hard problem is correctness across services**: money and inventory must not diverge when a step fails. That is the design driver, and saying so is what separates a Staff-level framing from a Senior one.
 
-### Step 2 — High-level design
+### Step 2 (Propose High-Level Design & Get Buy-In) — High-level design
 
 | Component | Responsibility |
 |---|---|
@@ -136,11 +168,19 @@ The conditional `WHERE` makes overselling impossible under concurrency without a
 | CQRS read model for history | Query the primary | Read:write is 20:1 and support queries are ad-hoc; isolating them protects the write path |
 | Inventory reservations with TTL | Decrement at checkout | Avoids permanently losing stock to abandoned carts |
 
+### Wrap-Up
+
+**Out of scope, and worth saying so explicitly:** the returns/refunds workflow in depth, multi-warehouse allocation logic, and how promotions/pricing interact with the saga — each is a design question in its own right.
+
+**Monitoring that would tell you this design is wrong:** count of orders stuck in `PENDING_PAYMENT` past a threshold; expired-reservation sweep rate (a sustained spike means checkout abandonment is up, not a bug); oversell incidents, which should be structurally zero given the conditional `UPDATE`; saga steps stuck longer than their timeout.
+
+**The natural next question:** "how do you handle a partial shipment when only some order lines are in stock?" — worth having a one-line answer ready (split the order into child shipments, each with its own tracking, while the parent order stays the unit of customer-facing status).
+
 ---
 
 ## Q2. Design a Payment System.
 
-### Step 1 — Scope
+### Step 1 (Understand the Problem & Establish Design Scope) — Scope
 
 **Q:** Are we the merchant taking card payments, or building a PSP?
 **A:** Merchant-side pay-in, with pay-out (refunds, disbursements) treated as a separate flow.
@@ -163,7 +203,7 @@ peak 5×                          ≈  50 TPS
 
 **What the number implies — and this is the whole point of the estimation:** **10 TPS is trivially small.** No sharding, no exotic datastore, no cache tier is required. **The hard problem is correctness, not throughput**: every payment must be exactly-once, fully auditable, and reconcilable against a third party you do not control. A candidate who responds to 10 TPS by proposing Cassandra and a Redis cluster has misread the problem.
 
-### Step 2 — High-level design
+### Step 2 (Propose High-Level Design & Get Buy-In) — High-level design
 
 | Component | Responsibility |
 |---|---|
@@ -281,11 +321,19 @@ Every night the acquirer publishes a settlement file. Ingest it and compare, lin
 | Async executor via Kafka | Synchronous call to the PSP | Decouples our availability from theirs; retries and DLQ become infrastructure, not code |
 | Double-entry ledger | Balance column with updates | An updated balance loses its explanation; double-entry makes corruption detectable |
 
+### Wrap-Up
+
+**Out of scope:** multi-currency FX conversion, the dispute/chargeback workflow, subscription/recurring billing, and payout to merchants — pay-out is a genuinely separate flow from the pay-in covered here.
+
+**Monitoring that matters:** authorisation success rate by PSP and by card scheme; reconciliation-break count and, more importantly, break *age* (a break open more than 24 hours is an escalation, not a metric); PSP p99 latency; webhook-delivery lag against the async executor.
+
+**The natural next question:** "how do you handle a chargeback?" — the short answer is that it is a new saga triggered by an external event (the scheme's chargeback notification), not a reversal of the original one, because the funds movement and the liability decision are genuinely new facts requiring their own ledger entries.
+
 ---
 
 ## Q3. Design a Fund / Investment platform.
 
-### Step 1 — Scope
+### Step 1 (Understand the Problem & Establish Design Scope) — Scope
 
 **Q:** What instruments?
 **A:** Mutual funds and ETFs — not derivatives; the settlement model is materially different.
@@ -307,7 +355,7 @@ NAV-day batch: 500,000 portfolios × 12 holdings = 6M valuations, nightly
 
 **Implication:** the online path is trivially small; **the engineering weight is in the nightly batch, the cut-off correctness and the ledger.**
 
-### Step 2 — High-level design
+### Step 2 (Propose High-Level Design & Get Buy-In) — High-level design
 
 ```text
  Client ──▶ API GW ──▶ Order Capture ──▶ Order DB (PENDING, priced_nav_date)
@@ -379,11 +427,19 @@ CREATE TABLE holdings (
 | Double-entry cash *and* unit ledger | Balance columns | Reconciliation with the transfer agent requires an explainable trail |
 | Reserve cash at order time | Check at settlement | Prevents a subscription failing after pricing, which would need an unwind with the administrator |
 
+### Wrap-Up
+
+**Out of scope:** corporate actions (mergers, share-class conversions) in depth, tax-lot accounting, and adviser/discretionary trading on behalf of a client — each is a materially different workflow layered on top of this one.
+
+**Monitoring that matters:** NAV-file lateness against the expected publication time (this is the single most important alert in the whole platform); count of orders still `PENDING` past the cut-off; unit-allocation rounding discrepancies versus the transfer agent's own calculation; cash-ledger-to-unit-ledger reconciliation breaks.
+
+**The natural next question:** "how do you handle a fund merger or a share-class conversion?" — both are bulk corporate-action events that must reprice existing holdings atomically across every affected investor in one batch run, which is why the batch orchestrator (not the online order path) is where that logic belongs.
+
 ---
 
 ## Q4. Design a high-volume transaction-processing system.
 
-### Step 1 — Scope and the number that decides everything
+### Step 1 (Understand the Problem & Establish Design Scope) — Scope and the number that decides everything
 
 **Q:** What is "high volume", and what is the durability requirement?
 **A:** 500 million transactions/day, every one durable and exactly-once, ordered per account.
@@ -396,7 +452,7 @@ each txn ~500 B       →  250 GB/day  →  ~90 TB/year
 
 **Implication:** at 23,000 TPS *this is genuinely a throughput problem* — the opposite conclusion from Q2, and drawing that contrast explicitly is a strong move in an interview. A single relational primary will not absorb 23,000 durable writes/s. **Partitioning, batching and asynchronous processing are now mandatory rather than optional.**
 
-### Step 2 — Architecture: accept fast, process asynchronously
+### Step 2 (Propose High-Level Design & Get Buy-In) — Architecture: accept fast, process asynchronously
 
 ```text
 Clients ─▶ ALB ─▶ Ingest API (stateless, autoscaled)
@@ -464,11 +520,19 @@ ON CONFLICT (txn_id) DO NOTHING;      -- 0 rows = already processed, skip
 | Idempotent consumer | Kafka transactions | Simpler, faster, and works across the Kafka/DB boundary that Kafka transactions do not span |
 | Partition by account | Round-robin | Ordering guarantee is per-account; round-robin would destroy it |
 
+### Wrap-Up
+
+**Out of scope:** cross-partition transactions and joins, event-schema evolution at this volume, and GDPR erasure of a record that has been fanned out across 120 partitions and several downstream consumers — each deserves its own design pass.
+
+**Monitoring that matters:** consumer lag **per partition**, not just the aggregate (an aggregate can look healthy while one hot partition is badly behind); DLQ depth and age; batch-insert latency at the database; duplicate-detection hit rate on the idempotency table (a sustained rise usually means a retry storm upstream, not normal behaviour).
+
+**The natural next question:** "how do you rebalance a hot partition without downtime?" — the honest answer is you generally can't rebalance in place; you widen the partition count (which only ever goes up and rehashes keys) or split the offending key with a composite partition key, and both require a planned migration window, not a live fix.
+
 ---
 
 ## Q5. Design a 10K+ RPS API.
 
-### Step 1 — Establish what 10,000 RPS actually demands
+### Step 1 (Understand the Problem & Establish Design Scope) — Establish what 10,000 RPS actually demands
 
 **Ask first: read-heavy or write-heavy, and what is the latency SLO?** Assume 10,000 RPS with a 95:5 read:write split and a p99 < 100 ms target.
 
@@ -482,7 +546,7 @@ concurrency = arrival rate × service time
 
 **The insight:** if you reduce service time from 200 ms to 50 ms you need **a quarter of the concurrency** — and therefore a quarter of the threads, connections and instances. **Optimising latency is capacity planning.** Doubling instance count is the expensive way to get what a fixed N+1 query gives for free.
 
-### Step 2 — Layered architecture, cheapest layer first
+### Step 2 (Propose High-Level Design & Get Buy-In) — Layered architecture, cheapest layer first
 
 ```text
                  ┌── CDN (CloudFront) ────────────┐  absorbs 60-80% of reads
@@ -535,17 +599,25 @@ Load test at 1.5× peak; measure **p95/p99, not the average** (Module 11 — the
 | Async writes via Kafka | Synchronous writes | Bounded p99 for clients; cost is eventual consistency the client must understand |
 | Horizontal stateless scaling | Bigger instances | Elastic, fault-tolerant; requires no session affinity and externalised state |
 
+### Wrap-Up
+
+**Out of scope:** a multi-region deployment of this same API (that is Q12), streaming/WebSocket variants, and a GraphQL or BFF layer in front of it.
+
+**Monitoring that matters:** p50/p95/**p99** latency broken down per route, not just overall (Module 11 — the average hides exactly the tail users experience); cache hit ratio at each layer (CDN, Redis); connection-pool saturation; error-budget burn rate against the stated SLO, which is what turns "latency crept up" into an actionable page before it becomes an incident.
+
+**The natural next question:** "what changes at 100K RPS?" — the honest answer is that caching stops being sufficient on its own and the database write path itself needs sharding, which is a materially different design (closer to Q4's shape than Q5's).
+
 ---
 
 ## Q6. Design an event-driven microservices architecture.
 
-### Step 1 — Decide whether EDA is warranted at all
+### Step 1 (Understand the Problem & Establish Design Scope) — Decide whether EDA is warranted at all
 
 **Start by saying when *not* to use it** — it is the strongest opening because most candidates only argue for it. EDA is the wrong choice when the workflow needs an immediate synchronous answer, when the team is small enough that a modular monolith would ship faster, when strong consistency is required across the operation, or when the organisation lacks the observability maturity to debug an asynchronous system. **Eventual consistency is a business decision, not a technical preference** — someone must accept that the customer may see a stale balance for two seconds.
 
 Where it *is* warranted: many consumers of the same fact, wildly different scaling profiles per consumer, long-running workflows, and a requirement that the producer not know or care who reacts.
 
-### Step 2 — Event taxonomy, which is where most designs go wrong
+### Step 2 (Propose High-Level Design & Get Buy-In) — Event taxonomy, which is where most designs go wrong
 
 | Type | Semantics | Example |
 |---|---|---|
@@ -609,11 +681,19 @@ Asynchronous systems are hard to debug precisely because there is no stack trace
 | Easy to add consumers with no producer change | Much harder debugging; observability becomes mandatory, not optional |
 | Natural buffering and resilience | Duplicate handling, ordering and schema evolution are now *your* problems |
 
+### Wrap-Up
+
+**Out of scope:** the schema-registry governance process (who approves a breaking change), event replay/backfill tooling for a new consumer joining late, and cross-region event mirroring.
+
+**Monitoring that matters:** consumer lag per group; DLQ depth and, critically, DLQ *age* (a growing backlog nobody is triaging is a silent failure); schema-compatibility rejection rate at the registry; outbox-relay lag, which is the leading indicator that the whole pipeline is falling behind the source of truth.
+
+**The natural next question:** "a projection is found to be wrong three weeks after the fact — how do you fix it?" — replay from the retained event log from `global_seq = 0` (or from the last known-good snapshot) rather than patching the projection table directly, which is exactly the payoff event-driven design is bought for (Q15).
+
 ---
 
 ## Q7. Design a scalable notification system.
 
-### Step 1 — Scope
+### Step 1 (Understand the Problem & Establish Design Scope) — Scope
 
 **Functional:** send email, SMS, push and in-app messages; support transactional (a payment receipt) and bulk (a marketing campaign); templating and localisation; user preferences and opt-out; delivery tracking; scheduling.
 **Non-functional:** transactional notifications delivered within seconds; **no duplicate sends** (a duplicate "you have been charged £500" is a support incident and, for marketing, a regulatory one); vendor failures must not lose messages; 10 million notifications/day with campaign spikes of 5 million in ten minutes.
@@ -625,7 +705,7 @@ campaign burst 5M in 600 s       ≈  8,300/s
 
 **Implication:** the burst is 70× the baseline. **The architecture must absorb a spike that the downstream vendors will not accept** — SendGrid, Twilio and APNs all rate-limit. So the design centre is a queue with controlled drain, not a bigger fleet.
 
-### Step 2 — Architecture
+### Step 2 (Propose High-Level Design & Get Buy-In) — Architecture
 
 ```text
 Producers (any service) ──▶ Notification API ──▶ Kafka notifications.requested
@@ -693,11 +773,19 @@ CREATE TABLE preferences (
 | Multi-provider with failover | Single provider | Email/SMS vendors do have outages; the abstraction cost is small |
 | DB unique constraint for dedupe | Redis set | Durable, survives restarts, and is transactional with the state change |
 
+### Wrap-Up
+
+**Out of scope:** an in-app notification centre with read receipts, A/B testing of templates, and deliverability/sender-reputation management in depth (bounce handling was covered; IP warm-up and domain reputation were not).
+
+**Monitoring that matters:** send-success rate per channel; bounce and spam-complaint rate (a rising complaint rate is a sender-reputation emergency, not a background metric); queue depth during a campaign, watched against the token-bucket drain rate; time-to-delivery p95 for transactional sends specifically, isolated from bulk.
+
+**The natural next question:** "how do you throttle a runaway campaign that's about to exceed a provider's daily quota?" — the bulk consumer group's fixed concurrency and per-provider token bucket already cap the drain rate; the addition needed is a campaign-level budget the orchestrator checks before queuing the next batch, so the campaign pauses gracefully rather than the provider rate-limiting you mid-send.
+
 ---
 
 ## Q8. Design an audit logging system.
 
-### Step 1 — Scope and the property that defines it
+### Step 1 (Understand the Problem & Establish Design Scope) — Scope and the property that defines it
 
 **Non-functional first, because they are the design:** **immutable** (append-only, tamper-evident), **complete** (a lost record is a control failure, not a dropped metric), **retained for years** (SOX ~7, PCI ≥1 year with 3 months hot), **queryable** ("who accessed customer 914's record in March 2024?" answered in seconds), and **isolated** (an attacker who owns production must not be able to erase the evidence).
 
@@ -707,7 +795,7 @@ CREATE TABLE preferences (
 
 **Implication:** volume forces tiering — you cannot keep 150 TB hot, and you cannot keep it in the transactional database.
 
-### Step 2 — Architecture
+### Step 2 (Propose High-Level Design & Get Buy-In) — Architecture
 
 ```text
 Services ──write audit row in the SAME DB txn as the business change
@@ -767,17 +855,25 @@ Partition by date and index by `actor`, `resource.id` and `action` — those thr
 | Hash chain | Trust the storage layer | Provides *proof* of integrity, which is what an auditor asks for |
 | Tiered S3/Glacier | Everything in OpenSearch | 150 TB hot is unaffordable and unnecessary |
 
+### Wrap-Up
+
+**Out of scope:** cross-region replication of the audit store itself, the legal-hold workflow for litigation, and the search UI/RBAC model for the investigators who query it.
+
+**Monitoring that matters:** ingestion lag from the outbox to the durable store (should be seconds, alerted in minutes); hash-chain verification failures, which page immediately rather than waiting for the next scheduled check; any DLQ activity on the audit-event path, since a dropped audit record is a control failure, not a retryable error; storage cost per tier, since this is usually the largest line item on a mature platform.
+
+**The natural next question:** "how do you actually prove to an auditor the log wasn't tampered with?" — walk the hash chain from the daily digest published to S3 Object Lock backward to the record in question; any break in the chain is detectable, and the Object Lock digest is what an attacker with full production access still cannot alter.
+
 ---
 
 ## Q9. Design a distributed payment workflow.
 
 This is Q2's flow viewed as a **coordination problem** — the interviewer wants the saga, the compensations and the failure semantics.
 
-### Step 1 — Why there is no distributed transaction
+### Step 1 (Understand the Problem & Establish Design Scope) — Why there is no distributed transaction
 
 Payment spans Order, Payment, Ledger, Wallet and an external PSP. **2PC is not available**: the external PSP will not enrol in your transaction coordinator, and a blocking two-phase lock across services with network partitions is an availability disaster. So the workflow is a **saga** — a sequence of local transactions, each with a compensating action (Module 14).
 
-### Step 2 — The workflow, with compensations
+### Step 2 (Propose High-Level Design & Get Buy-In) — The workflow, with compensations
 
 ```text
 Step                          Compensation                    Retryable?
@@ -838,13 +934,21 @@ public async Task Handle(PaymentRequested e, CancellationToken ct)
 | Durable orchestrator (Temporal/Step Functions/custom + DB) | In-memory state machine | Must survive crashes; the whole value is durability |
 | Irreversible steps last | Any order | Minimises the number of failures that need manual repair |
 
+### Wrap-Up
+
+**Out of scope:** a multi-leg FX payment workflow, partial refunds initiated mid-saga, and how a saga's step sequence is versioned safely across a deployment (an in-flight saga instance and a newly deployed orchestrator must agree on what "step 3" means).
+
+**Monitoring that matters:** per-step duration histograms (a step that used to take 200ms and now takes 4s is the earliest signal something downstream degraded); compensation-failure rate, which should be near-zero and paged immediately when it isn't; count and age of sagas sitting in the manual-intervention queue.
+
+**The natural next question:** "what happens if a compensation itself fails permanently?" — it lands in the manual-intervention queue with full context (which step, which compensation, how many attempts) rather than retrying forever, because at that point the correct action is a human decision, not another automated retry.
+
 ---
 
 ## Q10. Design a secure fintech platform.
 
 The synthesis of Modules 15–17 applied to a whole platform. Answer it as **concentric layers around classified data**, and lead with the decision that removes risk rather than manages it.
 
-### Step 1 — Start by reducing what you must protect
+### Step 1 (Understand the Problem & Establish Design Scope) — Start by reducing what you must protect
 
 **The highest-leverage security decisions are architectural, and they all take the form "do not hold it":**
 
@@ -857,7 +961,7 @@ The synthesis of Modules 15–17 applied to a whole platform. Answer it as **con
 
 State this first. A candidate who opens with "WAF and TLS" is describing hygiene; a candidate who opens with scope reduction is describing architecture.
 
-### Step 2 — The layers, each with a distinct threat model
+### Step 2 (Propose High-Level Design & Get Buy-In) — The layers, each with a distinct threat model
 
 ```text
             Internet
@@ -930,13 +1034,21 @@ Design so that **any single compromised component does not yield the whole datas
 | Service mesh mTLS | Latency, operational complexity, sidecar cost | Multi-team clusters handling regulated data |
 | Immutable backups (compliance mode) | Storage cost; cannot undo a mistake for the locked period | Ransomware resilience — effectively always, in a bank |
 
+### Wrap-Up
+
+**Out of scope:** the SOC 2/PCI DSS audit-evidence pipeline in depth, third-party vendor risk assessment, and physical HSM/key-ceremony operations.
+
+**Monitoring that matters:** GuardDuty findings by severity; authorization-denial rate by service (a spike is either a misconfiguration or an attack, and both deserve immediate attention); secret-rotation failure count; anomalous KMS-decrypt volume against a rolling baseline, which is usually the earliest sign of a compromised credential being used to exfiltrate data.
+
+**The natural next question:** "walk me through your incident response for a suspected breach in the first hour" — revoke the suspected identity's IAM role or mesh certificate immediately (this is why short-lived, per-service identity matters, Q20), scope the blast radius from the audit log's query-by-actor capability (Q8), and only then begin root-cause analysis — containment before investigation.
+
 **Close honestly:** applying maximum protection uniformly gets rejected on cost or quietly bypassed in delivery. You buy each control for the data classes that justify it, and you write that justification down.
 
 ---
 
 ## Q11. Design a highly available AWS application.
 
-### Step 1 — Define the availability target, because it decides the spend
+### Step 1 (Understand the Problem & Establish Design Scope) — Define the availability target, because it decides the spend
 
 ```text
 99.9%   =  43.8 min/month downtime   — single region, multi-AZ, standard
@@ -947,7 +1059,7 @@ Design so that **any single compromised component does not yield the whole datas
 
 **Ask what the business actually needs before designing.** Each additional nine roughly multiplies cost and operational complexity. And note the compounding trap: **serial dependencies multiply** — a request touching five components each at 99.9% is `0.999^5 = 99.5%`, which is 3.6 hours/month. **Availability is a property of the whole path, not of any one component**, which is why removing dependencies from the critical path is often cheaper than making each one more reliable.
 
-### Step 2 — Multi-AZ architecture
+### Step 2 (Propose High-Level Design & Get Buy-In) — Multi-AZ architecture
 
 ```text
 Route 53 (health-checked)
@@ -1004,11 +1116,19 @@ Rank features by criticality and shed the non-essential under stress: if the rec
 | NAT per AZ | Single NAT | Removes an AZ-level SPOF and avoids cross-AZ data charges |
 | Stateless + external session | Sticky sessions | Sticky sessions defeat the point of load balancing and break on instance loss |
 
+### Wrap-Up
+
+**Out of scope:** multi-region deployment (that is Q12), a full cost breakdown of the multi-AZ design, and a chaos-engineering practice for continuously validating it.
+
+**Monitoring that matters:** error rate **per AZ**, not just aggregate — an aggregate can look fine while one AZ is silently degraded and the load balancer just isn't routing much traffic there; actual observed failover time during a real Aurora promotion, not the documented figure; PodDisruptionBudget violations during node drains; connection-pool reconnect rate immediately after a failover, which is where an application that doesn't handle a changed writer endpoint shows itself.
+
+**The natural next question:** "how do you actually test that this fails over correctly?" — a scheduled game day that kills an AZ's worth of capacity for real and measures the actual RTO against the target, because a failover mechanism nobody has triggered on purpose is a hypothesis, not a capability (Q13).
+
 ---
 
 ## Q12. Design a multi-region application.
 
-### Step 1 — Establish *why*, because the answer changes the design
+### Step 1 (Understand the Problem & Establish Design Scope) — Establish *why*, because the answer changes the design
 
 | Driver | Implication |
 |---|---|
@@ -1019,7 +1139,7 @@ Rank features by criticality and shed the non-essential under stress: if the rec
 
 **These are different systems.** Answering "multi-region" without asking which driver applies is the mistake.
 
-### Step 2 — The three topologies
+### Step 2 (Propose High-Level Design & Get Buy-In) — The three topologies
 
 | Topology | Description | RTO/RPO | Cost | Hard part |
 |---|---|---|---|---|
@@ -1087,11 +1207,19 @@ This gives regional write availability, no conflicts, and local reads — at the
 | Consistency for money, availability for everything else | One uniform policy | The correct choice differs by data class, and saying so is the answer |
 | Route 53 health-check failover | Manual DNS change | Automation bounds RTO; manual steps do not survive a 3 a.m. incident |
 
+### Wrap-Up
+
+**Out of scope:** a detailed multi-region cost model, data-residency/regulatory partitioning where the law (not just latency) dictates the region boundary, and a genuinely shared-write active-active design for a specific hard case like inventory.
+
+**Monitoring that matters:** cross-region replication lag, alerted *before* it becomes an RPO problem rather than discovered during an incident; read-after-write anomaly rate (users hitting a region that hasn't caught up yet); per-region error-rate divergence, which is often the first sign one region's dependency graph is unhealthy while the other looks fine.
+
+**The natural next question:** "a user's home region just went down — what do they experience?" — Route 53 health-check failover routes them to the surviving region, which holds a read replica of their partition; **writes for that user are unavailable until either the partition's primary is promoted in the surviving region or the home region recovers** — say that limitation out loud rather than implying seamless failover for a partitioned design.
+
 ---
 
 ## Q13. Design a disaster recovery architecture.
 
-### Step 1 — RPO and RTO drive every decision
+### Step 1 (Understand the Problem & Establish Design Scope) — RPO and RTO drive every decision
 
 - **RPO (Recovery Point Objective)** — how much *data* you can afford to lose, measured backwards from the failure. RPO = 15 min means losing up to 15 minutes of transactions.
 - **RTO (Recovery Time Objective)** — how long until service is restored.
@@ -1107,7 +1235,7 @@ This gives regional write availability, no conflicts, and local reads — at the
 
 **For a payments platform, RPO is usually near-zero and non-negotiable** — you cannot lose committed money movements — which forces synchronous or sub-second replication and rules out backup-and-restore for the transactional core. It is entirely legitimate to apply **different strategies to different components**: warm standby for the payment path, backup-and-restore for the reporting warehouse. Say so; uniform DR is usually over-spend.
 
-### Step 2 — Warm standby, concretely
+### Step 2 (Propose High-Level Design & Get Buy-In) — Warm standby, concretely
 
 ```text
 Primary: eu-west-1                      DR: eu-central-1
@@ -1159,11 +1287,19 @@ Route 53 health check ─────────────────▶ fai
 | Automated failover | Manual runbook | Bounds RTO and removes 3 a.m. human error; requires solid health checks to avoid flapping |
 | Multi-Region KMS keys | Per-region keys | Without it, DR data is unreadable — a correctness issue, not an optimisation |
 
+### Wrap-Up
+
+**Out of scope:** DR for the CI/CD pipeline and secrets-management plane that would be needed to actually execute the runbook, a full game-day process write-up, and a detailed cost comparison of the four strategies for this specific workload's numbers.
+
+**Monitoring that matters:** replication lag measured continuously against the stated RPO target, not assumed from the vendor's headline figure; days since the last successful DR drill (a number that should never be allowed to grow past the drill cadence); quota headroom in the DR region, checked *before* it's needed.
+
+**The natural next question:** "your primary region is degraded and so is your DR region — what now?" — this is the scenario that exposes whether backups are genuinely independent of both regions (a third, cold copy with Vault Lock in compliance mode) or whether the "DR" region was quietly a second dependency on the same blast radius.
+
 ---
 
 ## Q14. Design a real-time transaction system.
 
-### Step 1 — Define "real-time", because it is ambiguous
+### Step 1 (Understand the Problem & Establish Design Scope) — Define "real-time", because it is ambiguous
 
 | Meaning | Latency budget | Example |
 |---|---|---|
@@ -1185,7 +1321,7 @@ Budget breakdown (p99, 500 ms total):
 
 **Deriving the budget per hop, before designing anything, is the move that separates a strong answer.** Every component now has a number it must meet, and any design that cannot fit is rejected immediately rather than discovered in load testing.
 
-### Step 2 — Architecture optimised for tail latency
+### Step 2 (Propose High-Level Design & Get Buy-In) — Architecture optimised for tail latency
 
 ```text
 Terminal ─▶ Edge (NLB, TLS, keep-alive) ─▶ Auth Service ─┬─▶ Redis: balance/limits (1-2 ms)
@@ -1245,15 +1381,23 @@ Redis is the **authorisation-time** view; the **durable ledger** is written asyn
 | Async everything non-decisional | Do it all synchronously | Protects the hard SLA; cost is eventual consistency downstream |
 | Load shedding | Queue everything | Under overload, a fast rejection beats a universal timeout |
 
+### Wrap-Up
+
+**Out of scope:** card-network-specific protocol details (ISO 8583 message formats), the 3-D Secure step-up challenge flow, and offline/store-and-forward terminal behaviour when connectivity is lost.
+
+**Monitoring that matters:** p99 against the 500ms budget, broken down **per hop** (network/auth/risk/balance/scheme) so a budget breach is immediately attributable rather than requiring a live investigation; decline rate by reason code, watched for an unexplained shift; risk-model latency specifically, since it carries the largest budget share; rate of falling back to the conservative rules-based decision, which should be rare and is itself a leading indicator of risk-service degradation.
+
+**The natural next question:** "your risk service is healthy but running at 150ms instead of 80ms — walk me through exactly what happens" — the 80ms budget is exceeded, the timeout fires, and the transaction proceeds on the conservative fallback policy rather than waiting; the customer sees a normal-speed decision, and the risk-service degradation is visible only in the fallback-rate metric, not in customer-facing latency.
+
 ---
 
 ## Q15. Design an event-sourced banking / account system.
 
-### Step 1 — Why event sourcing genuinely fits banking
+### Step 1 (Understand the Problem & Establish Design Scope) — Why event sourcing genuinely fits banking
 
 Most systems do not need event sourcing. Banking is one of the few where it is the **natural** model rather than an imposition: an account balance *is* the fold of its transaction history, regulators require the full history anyway, corrections must be visible rather than silent, and "what was this balance on 3 March at 14:00?" is a routine question. **The domain already thinks in immutable events; event sourcing simply stops fighting that.**
 
-### Step 2 — The model
+### Step 2 (Propose High-Level Design & Get Buy-In) — The model
 
 ```text
 Aggregate: Account (the consistency boundary)
@@ -1339,11 +1483,19 @@ Projections are **rebuildable by definition**: drop the table, replay from `glob
 | Projections are disposable and rebuildable | Storage grows forever; needs snapshots and archiving |
 | Corrections are explicit and visible | Schema evolution and upcasting are permanent obligations |
 
+### Wrap-Up
+
+**Out of scope:** a transfer that touches two account aggregates atomically, event-schema versioning at real scale, and the operational detail of per-subject key management for crypto-shredding under GDPR (Module 17 named the mechanism; the key-rotation runbook for millions of subjects is its own design).
+
+**Monitoring that matters:** projection lag per read model, which is the customer-visible symptom of any problem in this design; snapshot-rebuild duration, which bounds how bad rehydration gets if snapshots are ever disabled or corrupted; event-store write latency; upcaster error rate when reading old-format events.
+
+**The natural next question:** "how do you implement a transfer that touches two account aggregates atomically?" — you don't get one ACID transaction across two aggregates in an event-sourced model; the honest answer is a saga (Q9) with the first account's debit event as step one and the second account's credit event as step two, with a compensating credit if the second write fails.
+
 ---
 
 ## Q16. Design a CQRS system.
 
-### Step 1 — Be clear what CQRS is, and is not
+### Step 1 (Understand the Problem & Establish Design Scope) — Be clear what CQRS is, and is not
 
 **CQRS = separating the model that writes from the model that reads.** It does **not** require event sourcing, separate databases, or eventual consistency — those are options along a spectrum:
 
@@ -1358,7 +1510,7 @@ Projections are **rebuildable by definition**: drop the table, replay from `glob
 
 **The pressures that justify it:** a 20:1 or 100:1 read:write ratio; reads and writes needing genuinely different shapes (normalised for integrity, denormalised for display); different scaling profiles; complex domain logic on writes but simple projections on reads; or a search/reporting requirement the transactional schema serves badly.
 
-### Step 2 — Architecture at level 3
+### Step 2 (Propose High-Level Design & Get Buy-In) — Architecture at level 3
 
 ```text
                     ┌── Commands ──▶ Command Handler ──▶ Write DB (normalised, ACID)
@@ -1417,11 +1569,19 @@ The read model lags the write model by milliseconds to seconds. Users notice whe
 | Write model stays clean and domain-focused | Projection code, replay tooling and lag monitoring to own |
 | Read store technology chosen per need (search, cache, graph) | Operational surface grows with each store |
 
+### Wrap-Up
+
+**Out of scope:** full event sourcing as the write model (that's Q15's harder commitment), multi-region read replicas of the projection store, and a GraphQL federation layer over the read side.
+
+**Monitoring that matters:** projection lag as a genuine customer-facing SLO, not an internal metric — "the order view is at most 2 seconds behind" is a number the business can reason about; read-model rebuild duration; command-to-query staleness p99, sampled from real user sessions rather than synthetic checks.
+
+**The natural next question:** "a user says the number is wrong immediately after they changed it — walk me through debugging that" — check whether the response returned the new state directly (in which case the UI has a stale-render bug, not a data bug) or re-queried the read model before the projection caught up (in which case it's the classic eventual-consistency UX gap from Q24, and the fix is one of that question's techniques, not a database investigation).
+
 ---
 
 ## Q17. Design a Kafka-based transaction platform.
 
-### Step 1 — Requirements and topology sizing
+### Step 1 (Understand the Problem & Establish Design Scope) — Requirements and topology sizing
 
 **Requirements:** ingest transaction events from many producers; guarantee per-account ordering; support multiple independent consumers (ledger, fraud, analytics, notifications); replayable for 7 days; no message loss; 20,000 events/s peak.
 
@@ -1433,7 +1593,7 @@ The read model lags the write model by milliseconds to seconds. Users notice whe
 
 **Sizing the cluster from that:** brokers sized so no single broker holds more than ~70% disk; a starting point of 6 brokers across 3 AZs, RF=3, `min.insync.replicas=2` — which tolerates one broker (or one AZ) loss while still accepting writes.
 
-### Step 2 — Topic and partition design
+### Step 2 (Propose High-Level Design & Get Buy-In) — Topic and partition design
 
 | Topic | Partitions | Key | Retention |
 |---|---|---|---|
@@ -1500,11 +1660,19 @@ session.timeout.ms=45000
 | Idempotent consumers | Kafka transactions | Simpler, faster, and spans the DB boundary that Kafka transactions cannot |
 | 120 partitions up front | Start at 12 and grow | Increasing partitions rehashes keys and disturbs ordering — size ahead |
 
+### Wrap-Up
+
+**Out of scope:** full Kafka-transaction exactly-once semantics as an alternative to the idempotent-consumer pattern, tiered storage economics at multi-year retention, and cross-cluster disaster recovery for the Kafka layer itself.
+
+**Monitoring that matters:** consumer lag **per partition**, since an aggregate figure hides a single hot or stuck partition; under-replicated-partition count, which is the earliest warning of a broker or AZ problem; rebalance frequency (frequent rebalances usually mean slow processing, not membership churn); DLQ growth rate with an alert on age, not just depth.
+
+**The natural next question:** "how would you migrate this topic from 120 to 240 partitions with zero downtime?" — increasing partitions is safe to do live, but it rehashes keys going forward, so existing per-account ordering briefly spans two partition assignments during the transition; the mitigation is to schedule the change for a low-traffic window and accept a short ordering-guarantee gap rather than promise a seamless one.
+
 ---
 
 ## Q18. Design an API Gateway architecture.
 
-### Step 1 — What belongs in the gateway, and what emphatically does not
+### Step 1 (Understand the Problem & Establish Design Scope) — What belongs in the gateway, and what emphatically does not
 
 This is the whole question, and the second column is where candidates fail.
 
@@ -1522,7 +1690,7 @@ This is the whole question, and the second column is where candidates fail.
 
 **The failure mode to name explicitly: the gateway becoming a distributed monolith.** Once teams start adding routing conditionals, response mangling and "just this one" business rule, the gateway becomes a shared component every team must change and nobody may break — the exact coupling microservices were meant to remove. **The rule: the gateway handles cross-cutting concerns that are identical for every service; anything service-specific belongs in the service.**
 
-### Step 2 — Architecture, including the BFF layer
+### Step 2 (Propose High-Level Design & Get Buy-In) — Architecture, including the BFF layer
 
 ```text
    Web        Mobile        Partner API
@@ -1580,13 +1748,21 @@ This is the whole question, and the second column is where candidates fail.
 | Self-hosted gateway at high volume | Managed API Gateway | Per-request pricing dominates above a few thousand RPS |
 | Coarse authz at the edge, fine-grained in the service | All authz at the edge | The gateway cannot know object ownership; that check needs domain data |
 
+### Wrap-Up
+
+**Out of scope:** a GraphQL gateway variant, the gateway's own response-caching strategy in depth, and a multi-cluster/multi-region gateway topology.
+
+**Monitoring that matters:** p99 measured **at the gateway** versus **at the origin service** for the same route, which isolates latency the gateway itself is adding from latency the backend is adding; 429/503 rate, which is the rate-limiting and circuit-breaker configuration made visible; JWKS fetch failures, since a JWKS outage silently fails every authentication check behind it.
+
+**The natural next question:** "how do you roll out a breaking change to a public partner API?" — the expand/contract discipline from Q19 applies at the gateway too: publish `/v2` alongside `/v1`, give partners a measured deprecation window with `Sunset` headers (RFC 8594/9745), and retire `/v1` only once telemetry shows zero traffic against it.
+
 ---
 
 ## Q19. Design microservices for independent deployment.
 
 **Independent deployability is the *only* reason to accept the cost of microservices.** If services must be released together, you have a distributed monolith — all the operational cost of microservices and none of the benefit. So the design question is: what must be true for team A to deploy on Tuesday afternoon without asking anyone?
 
-### Step 1 — The four prerequisites
+### Step 1 (Understand the Problem & Establish Design Scope) — The four prerequisites
 
 | Prerequisite | What breaks without it |
 |---|---|
@@ -1597,7 +1773,7 @@ This is the whole question, and the second column is where candidates fail.
 
 **Database per service is the non-negotiable one.** A shared database means every service's release is gated by every other service's schema expectations, and no amount of API discipline fixes it. Where a service needs another's data, it gets a **replica maintained by events** (Q6), not a foreign key.
 
-### Step 2 — Contract evolution: expand/contract
+### Step 2 (Propose High-Level Design & Get Buy-In) — Contract evolution: expand/contract
 
 The discipline that makes independent deployment possible:
 
@@ -1658,11 +1834,19 @@ Since deployment is gradual, **N and N−1 always run simultaneously**. That mus
 | Teams scale independently | Duplicated data via events, and the eventual consistency that follows |
 | Fast rollback | Real investment in contract testing, flags and pipeline automation |
 
+### Wrap-Up
+
+**Out of scope:** the monorepo-vs-polyrepo trade-off, choosing a specific feature-flag platform, and a cross-team API-ownership/governance model in depth.
+
+**Monitoring that matters:** contract-test pass rate in CI, which is the *leading* indicator — a break caught here never reaches production; change-failure rate and deploy frequency per service (the DORA metrics this whole design exists to earn); rollback frequency, which should trend down as expand/contract discipline matures, not up.
+
+**The natural next question:** "two teams both need to change the same shared event — how do you sequence that?" — the event's owning team runs expand/contract on the schema (Q19's own pattern, applied recursively): add the new field, let both consuming teams migrate on their own schedule, then remove the old field once telemetry shows zero consumers still reading it.
+
 ---
 
 ## Q20. Design service-to-service security.
 
-### Step 1 — The premise: the network is not a trust boundary
+### Step 1 (Understand the Problem & Establish Design Scope) — The premise: the network is not a trust boundary
 
 The traditional model — a hard perimeter and a trusted internal network — fails because one compromised pod, one SSRF, one leaked credential puts an attacker *inside*. **Zero Trust**: every call is authenticated, authorised and encrypted, including calls between two pods in the same namespace.
 
@@ -1672,7 +1856,7 @@ The traditional model — a hard perimeter and a trusted internal network — fa
 2. **May they do this?** (authorisation — per-service, per-operation)
 3. **Is anyone listening?** (encryption in transit)
 
-### Step 2 — mTLS for identity and encryption
+### Step 2 (Propose High-Level Design & Get Buy-In) — mTLS for identity and encryption
 
 ```text
 Service A                                Service B
@@ -1746,11 +1930,19 @@ Take one pod as fully compromised and trace what the attacker reaches: they hold
 | Default-deny network + authz policy | Flat network, perimeter security | Stops lateral movement, which is how breaches actually spread |
 | Short-lived workload identity | Static service accounts and API keys | Removes the credential-theft class of attack almost entirely |
 
+### Wrap-Up
+
+**Out of scope:** operating the mesh's internal certificate authority at scale, a break-glass emergency-access procedure, and multi-cluster mesh federation.
+
+**Monitoring that matters:** mTLS handshake failure rate; `AuthorizationPolicy` denial rate, which should sit near zero — a spike means either a misconfiguration just shipped or an attack is in progress, and those are indistinguishable without further investigation, which is exactly why the alert exists; token-exchange failure rate; certificate expiry lead time, so rotation failures are caught days before they become an outage.
+
+**The natural next question:** "a service's mesh identity is compromised — walk me through containment in the first five minutes" — revoke that specific SPIFFE identity or delete its IAM role immediately (Q10's incident-response answer, applied here), which the short-lived-certificate design makes both fast and low-blast-radius, since every other service's identity is unaffected.
+
 ---
 
 ## Q21. Design a Kubernetes-based microservices platform.
 
-### Step 1 — Cluster topology
+### Step 1 (Understand the Problem & Establish Design Scope) — Cluster topology
 
 ```text
 AWS account (workload)                 Separate accounts: shared services, audit, backup
@@ -1768,7 +1960,7 @@ AWS account (workload)                 Separate accounts: shared services, audit
 1. **Stateful data services live outside the cluster.** Running Postgres or Kafka on Kubernetes is possible, but you inherit storage, failover and backup operations that Aurora and MSK already solve. The value of Kubernetes is in orchestrating *stateless* workloads.
 2. **Multiple clusters or one?** One cluster per environment (dev/staging/prod), with namespaces per team, is the usual right answer — a cluster per team multiplies operational cost and upgrade burden. Split clusters only for a genuine hard boundary: regulatory isolation, a separate region, or radically different upgrade cadences.
 
-### Step 2 — Workload configuration that actually matters
+### Step 2 (Propose High-Level Design & Get Buy-In) — Workload configuration that actually matters
 
 ```yaml
 resources:
@@ -1842,15 +2034,23 @@ DNS timeouts     → CoreDNS under-scaled, ndots search-domain amplification,
 | No CPU limits | Limits everywhere | Avoids throttling-induced tail latency; requests already provide fair share |
 | Mesh mTLS | Application TLS | Rotation and policy without code changes; cost is sidecar overhead and complexity |
 
+### Wrap-Up
+
+**Out of scope:** multi-cluster/multi-region Kubernetes, cost optimisation in depth (Spot mix, bin-packing), and a full GitOps rollback strategy.
+
+**Monitoring that matters:** `OOMKilled` rate (a rising trend means limits are set too tight or there's a real leak, and the two look identical from this metric alone — `container_memory_working_set_bytes` trend is what disambiguates them); pod restart rate; node-level disk and memory pressure; HPA scaling events correlated against actual load, to catch a scaling policy reacting to the wrong signal; PodDisruptionBudget-blocked drains, which show up as a stuck node upgrade.
+
+**The natural next question:** "walk me through debugging a pod that's `CrashLoopBackOff` in production right now" — `kubectl logs --previous` for the last crash's output, most commonly a missing config/secret, a failed startup probe, or an unhandled exception during startup; that's Module 10's own debugging table, applied live under interview pressure.
+
 ---
 
 ## Q22. Design a resilient external API integration.
 
-### Step 1 — The premise: the third party *will* fail
+### Step 1 (Understand the Problem & Establish Design Scope) — The premise: the third party *will* fail
 
 Every external dependency — a PSP, a KYC provider, a market-data feed, a carrier — is outside your control. Assume slow responses, 5xx bursts, rate limits, breaking changes shipped without notice, and multi-hour outages. **The design goal is that their bad day is not your bad day.**
 
-### Step 2 — The layered defence, in the order it applies
+### Step 2 (Propose High-Level Design & Get Buy-In) — The layered defence, in the order it applies
 
 ```text
 Your service
@@ -1921,13 +2121,21 @@ services.AddHttpClient<IPspClient, PspClient>(c =>
 | Multi-provider abstraction | Single provider | Real outage mitigation; cost is an abstraction that must fit two very different APIs |
 | Reconciliation process | Trust their idempotency | The only way to *prove* your records match; cost is a batch pipeline to build and run |
 
+### Wrap-Up
+
+**Out of scope:** contract-testing this integration against the vendor's sandbox in CI, negotiating the vendor's SLA, and the live migration procedure for cutting over from one provider to a second.
+
+**Monitoring that matters:** circuit-breaker state transitions (open/half-open/closed), which turn "the provider is degraded" into a graphable signal rather than a support ticket; per-provider success rate and latency, tracked separately so one degraded provider doesn't hide in a blended average; reconciliation-break rate against the provider's own records; idempotency-key collision rate, which is the direct measurement of how often retries are actually happening.
+
+**The natural next question:** "the provider changed their API without notice — how does that surface, and how fast do you know?" — the anti-corruption-layer adapter starts throwing deserialisation or validation errors, the circuit breaker opens on the resulting failure rate, and the alert fires within the breaker's sampling window — typically under a minute, versus discovering it from a customer complaint with no adapter layer at all.
+
 ---
 
 ## Q23. Design a platform with strict RPO/RTO requirements.
 
 Q13 chose a DR strategy. This question is about **achieving near-zero RPO and single-digit-minute RTO across a whole platform, and being able to evidence it** — which is a different, harder problem, because the weakest component sets the number.
 
-### Step 1 — Decompose the targets per component
+### Step 1 (Understand the Problem & Establish Design Scope) — Decompose the targets per component
 
 **The platform's RPO/RTO is the worst of its components, not the average.** So start by tabulating them, which is also what an auditor will ask for:
 
@@ -1943,7 +2151,7 @@ Q13 chose a DR strategy. This question is about **achieving near-zero RPO and si
 
 **The two typical gaps are worth naming because they are where real designs fail:** S3 cross-region replication is asynchronous, so recently uploaded documents can be lost; and **Kafka offsets are not portable between clusters**, so after failover consumers may re-process or, worse, skip. The mitigations are to store the consumer position in your own database alongside the processed data (making position recovery a business-data problem you control), and to accept and document the S3 replication window for non-critical artefacts while writing critical documents synchronously to both regions.
 
-### Step 2 — Achieving near-zero RPO on the transactional core
+### Step 2 (Propose High-Level Design & Get Buy-In) — Achieving near-zero RPO on the transactional core
 
 RPO is a **data-replication** property, so it is decided at the storage layer:
 
@@ -1994,11 +2202,19 @@ Total          ~5.5 min
 | Warm standby always running | Pilot light | Removes cold-start minutes from RTO, at a continuous cost |
 | Per-component RPO/RTO table | One platform-wide number | Exposes the weakest link, which is where the real gap always is |
 
+### Wrap-Up
+
+**Out of scope:** RPO/RTO for the CI/CD and secrets-management control plane that the failover automation itself depends on, formal negotiation of third-party dependency RTOs, and the full cost model of the sub-second-RPO design.
+
+**Monitoring that matters:** the live RPO gap, measured continuously as `max(committed_at)` on primary minus the same on the replica — not assumed from a vendor's headline number; days since the last successful, *timed* failover drill; quota headroom in the DR region, verified before it's needed rather than discovered during the incident.
+
+**The natural next question:** "your RPO target for one specific data type is zero seconds — is that achievable, and what does it cost?" — genuinely zero cross-region RPO requires synchronous cross-region commit, which means every write waits on a transatlantic round trip; the honest answer is to instead make that residual sub-second window *recoverable* via idempotent replay (as this question's own design does), because engineering the window itself to zero is usually the wrong trade for the latency it costs.
+
 ---
 
 ## Q24. Design a system with eventual consistency.
 
-### Step 1 — Decide *where* eventual consistency is acceptable — that is the design
+### Step 1 (Understand the Problem & Establish Design Scope) — Decide *where* eventual consistency is acceptable — that is the design
 
 Eventual consistency is not a property you apply uniformly; it is a **per-operation decision**, and the strong answer classifies the operations before designing anything:
 
@@ -2013,7 +2229,7 @@ Eventual consistency is not a property you apply uniformly; it is a **per-operat
 
 **Rule of thumb: strong consistency inside an aggregate boundary, eventual consistency between aggregates.** A single account's balance is transactionally consistent; the *view* of that balance elsewhere is eventually consistent. Getting that line in the right place is most of the design.
 
-### Step 2 — Mechanisms
+### Step 2 (Propose High-Level Design & Get Buy-In) — Mechanisms
 
 ```text
 Write (strongly consistent within the aggregate)
@@ -2075,11 +2291,19 @@ The technical mechanism is easy; the **user experience of staleness** is where s
 | Read models tuned per use case | Divergence is possible and must be monitored and repairable |
 | Write path stays fast and simple | "When is it consistent?" becomes a question the business must answer per operation |
 
+### Wrap-Up
+
+**Out of scope:** CRDTs as an alternative convergence mechanism to last-writer-wins, the added complexity of eventual consistency layered under multi-region deployment (Q12's problem, on top of this one), and read-repair strategies for the divergence case.
+
+**Monitoring that matters:** projection/replica lag as a first-class SLO with an alerting threshold, not an internal detail; scheduled divergence-detection job results (periodic checksum or count comparisons between the write store and its projections); stale-read rate as *reported by clients*, which is what actually correlates with the user-visible complaint.
+
+**The natural next question:** "how do you explain to a user why their own change disappeared for two seconds?" — it didn't disappear; they wrote to the strongly consistent primary and then read from a read model that hadn't caught up yet, and the fix is one of this question's own techniques — return the result directly from the command, or pin that user's reads to the primary for a short window after a write — rather than a database investigation.
+
 ---
 
 ## Q25. Explain the trade-offs in your architecture.
 
-This is usually the closing question, and it is the one that most distinguishes a Principal-level candidate. The interviewer is not testing recall — **they are testing whether you know the cost of your own decisions**, and whether you can defend them without either dogmatism or hedging.
+This is usually the closing question, and it is the one that most distinguishes a Principal-level candidate. The interviewer is not testing recall — **they are testing whether you know the cost of your own decisions**, and whether you can defend them without either dogmatism or hedging. *(This question is deliberately not walked through the scope→design→deep-dive spine used elsewhere in this module — it **is** the wrap-up step of that framework, asked as a question in its own right, so its steps below are its own structure rather than another pass through Steps 1–4.)*
 
 ### Step 1 — The failure modes to avoid
 
@@ -2143,6 +2367,9 @@ The final mark of seniority: **name the signal that would tell you the decision 
 
 | Topic | Source |
 |---|---|
+| **ByteByteGo / Alex Xu — *System Design Interview* (the canonical 4-step interview framework this module follows)** | https://bytebytego.com/ |
+| **GeeksforGeeks — System Design Tutorial** (the 7-part breakdown reconciled into the spine above) | https://www.geeksforgeeks.org/system-design/system-design-tutorial/ |
+| **System Design School — What Is a System Design Interview** (requirements → estimation → architecture → deep dive → trade-offs) | https://systemdesignschool.io/fundamentals/what-is-system-design-interview |
 | **AWS Well-Architected Framework (all six pillars)** | https://docs.aws.amazon.com/wellarchitected/latest/framework/welcome.html |
 | AWS Well-Architected — Reliability pillar (availability targets, dependency math) | https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/welcome.html |
 | AWS — Disaster recovery options in the cloud (the four strategies) | https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html |

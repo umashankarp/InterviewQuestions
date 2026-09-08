@@ -1,8 +1,8 @@
-# 19. AI / RAG — 20 Questions (Answered)
+# 19. AI / RAG — 25 Questions (Answered)
 
-> **Method:** retrieval, chunking and evaluation guidance from **AWS** (Bedrock Knowledge Bases, OpenSearch Serverless vector engine, Kendra, Bedrock Guardrails) and **Microsoft Learn** (Azure AI Search — vector, hybrid and semantic ranking; `Microsoft.Extensions.AI`; Semantic Kernel); model behaviour, context windows, prompt caching and pricing from the **Anthropic Claude API documentation**; evaluation metrics from the **RAGAS** project and the original **RAG paper** (Lewis et al., 2020); security framing from the **OWASP Top 10 for LLM Applications** and **NIST AI RMF**. Data-protection controls carry over from **Module 17**. Links in **References**.
+> **Method:** retrieval, chunking and evaluation guidance from **AWS** (Bedrock Knowledge Bases, OpenSearch Serverless vector engine, Kendra, Bedrock Guardrails) and **Microsoft Learn** (Azure AI Search — vector, hybrid and semantic ranking; `Microsoft.Extensions.AI`; Semantic Kernel); model behaviour, context windows, prompt engineering and pricing from the **Anthropic Claude API documentation**; evaluation metrics from the **RAGAS** project and the original **RAG paper** (Lewis et al., 2020); security framing from the **OWASP Top 10 for LLM Applications** and **NIST AI RMF**; agentic-tooling questions (Q22–Q25) from the **official Claude Code documentation** (memory, skills, hooks, context-window management). Data-protection controls carry over from **Module 17**. Links in **References**.
 >
-> **Interview note:** at Principal/Architect level the AI questions are not about knowing the vocabulary — they are about whether you treat a RAG system as *a search system with a language model attached*. Most production RAG failures are retrieval failures, and saying so early reframes the whole conversation.
+> **Interview note:** at Principal/Architect level the AI questions are not about knowing the vocabulary — they are about whether you treat a RAG system as *a search system with a language model attached*. Most production RAG failures are retrieval failures, and saying so early reframes the whole conversation. The agentic-tooling questions (Q21–Q25) reflect where a growing share of real interviews now go: not just "how does RAG work" but "how do you actually configure and operate an agent day to day."
 
 ---
 
@@ -18,6 +18,19 @@
 | **Training objective** | Minimise classification error | Model the data distribution (e.g. next-token prediction) |
 
 **The mechanism, in one sentence:** a transformer-based LLM is trained to predict the next token given all preceding tokens; at inference it samples repeatedly from that predicted distribution, feeding each output back as input. Everything else — instruction following, reasoning, tool use — is behaviour that emerges from that objective plus post-training (instruction tuning, RLHF, and similar alignment techniques).
+
+**How it actually gets built — the pipeline worth being able to name, because "it's just autocomplete" is the wrong mental model and interviewers probe for the distinction:**
+
+| Stage | What happens | What it produces |
+|---|---|---|
+| **1. Tokenisation** | Text is split into subword units (a byte-pair-encoding-style vocabulary) — roughly ¾ of an English word per token. Everything downstream operates on token ids, never on characters directly | The vocabulary the model reasons in |
+| **2. Pretraining** | A transformer (stacked self-attention + feed-forward layers) is trained on a very large text/code corpus with one objective: predict the next token. No labels, no human review — just statistical pattern-matching at enormous scale | A **base model** — fluent, but not obedient. It completes text; it does not follow instructions or refuse anything |
+| **3. Supervised fine-tuning (SFT)** | The base model is further trained on curated (prompt, ideal-response) pairs written or selected by humans | A model that follows instructions in the expected format |
+| **4. Preference-based alignment (RLHF / Constitutional AI-style methods)** | Human or model-generated preference judgements (*"response A is better than response B"*) train a reward signal, which is used to further tune the model toward helpful, honest, harmless behaviour | The assistant behaviour — refusals, tone, calibration — layered on top of raw next-token prediction |
+
+**What self-attention actually buys you, in one sentence:** for every token, the model computes a weighted combination of *every other token in the context*, so it can relate "it" on page 3 to the noun it refers to on page 1 — this is why context window size (Q2) and prompt structure (Q21) matter so much: everything the model can use to produce the next token has to be visible in that attention computation, nothing is looked up externally unless you build retrieval (Q3) or tool use around it.
+
+**Generation, mechanically:** the model outputs a probability distribution over the entire vocabulary for the next token, a token is sampled from that distribution, appended to the sequence, and the whole forward pass repeats — one token at a time. This is why output tokens are slower and more expensive than input tokens (the whole sequence is reprocessed on every step in the naive view, though production serving uses KV-caching to avoid literally redoing the earlier computation), and why longer requested outputs are the primary latency lever in a chat UI.
 
 **What an architect must take from this, and what interviewers are really testing:**
 
@@ -879,6 +892,214 @@ Not one application — **a shared platform serving many use cases across many t
 
 ---
 
+## Q21. How do you craft an effective prompt?
+
+**Prompt engineering is not wordsmithing — it is closing the gap between what you actually want and what the model can infer from the text you gave it.** Anthropic's own guidance frames it as a discipline with a precondition: *define success criteria and a way to test against them first*, then iterate the prompt against that evaluation (Q15) — tuning a prompt with no way to measure whether a change helped is guesswork, not engineering.
+
+**The golden rule, which is the single most useful sentence in this entire topic:** *show your prompt to a colleague with minimal context on the task and ask them to follow it. If they'd be confused, Claude will be too.* Treat the model as a brilliant, capable new hire with no institutional knowledge — precise instructions produce precise results; vague ones produce a plausible guess.
+
+**The techniques, in the order they actually pay off:**
+
+| Technique | What it means | Why it works |
+|---|---|---|
+| **Be clear and direct** | State the desired output format and constraints explicitly; give sequential steps as a numbered list when order matters | Removes the need for the model to infer intent — "create an analytics dashboard" gets a generic result; "create an analytics dashboard; include as many relevant features and interactions as possible; go beyond the basics" gets a fully-featured one |
+| **Add context, not just instructions** | Explain *why* a rule matters, not only what it is | *"NEVER use ellipses"* is a rule the model might not generalise correctly; *"your response will be read aloud by a text-to-speech engine, so never use ellipses since it won't know how to pronounce them"* lets the model apply the underlying reason to cases you didn't enumerate |
+| **Use examples (multishot/few-shot)** | 3–5 well-chosen examples, wrapped in `<example>`/`<examples>` tags, relevant to the real use case and diverse enough to cover edge cases | The single most reliable lever for steering output format, tone and structure — more reliable than describing the format in prose |
+| **Structure with XML tags** | Wrap distinct kinds of content — `<instructions>`, `<context>`, `<examples>`, `<document>` — in their own tags, nested where content has a natural hierarchy | Removes ambiguity about where one part of the prompt ends and another begins, especially once a prompt mixes instructions, reference material and variable input |
+| **Give Claude a role** | A one-sentence system prompt (`"You are a helpful coding assistant specialising in Python"`) | Focuses tone and behaviour for the use case; costs nothing and measurably shifts output style |
+| **Tell it what *to* do, not what *not* to do** | *"Write flowing prose paragraphs"* rather than *"don't use markdown"* | Positive instructions are easier for the model to act on than a list of prohibitions |
+| **Match your prompt's own formatting to the desired output** | If your prompt is written in heavy markdown, expect markdown back; strip formatting from the prompt to reduce formatting in the response | The model mirrors the register of what it's shown |
+| **For long-context tasks, put documents first** | Long documents go **above** the query/instructions, wrapped in `<document>`/`<document_content>`/`<source>` tags; the actual question goes last | Anthropic's own testing shows this can improve response quality by up to 30% on complex multi-document inputs — queries at the end orient the model's attention correctly |
+| **Ground long-document answers in quotes** | Ask the model to extract and quote the relevant passages into `<quotes>` tags *before* answering | Forces the model to locate the relevant material explicitly rather than skimming; the same principle that makes citations reduce hallucination in RAG (Q14) |
+| **Be explicit about tool use** | *"Change this function"* rather than *"can you suggest some changes"* — vague phrasing gets a suggestion, not an action | Current models follow instructions very literally; ambiguity about whether an action is wanted resolves to the more conservative reading |
+| **Let it think, and steer how much** | Adaptive thinking scales reasoning effort to problem complexity automatically; steer it explicitly only when the default over- or under-thinks for your workload | *"Thinking adds latency and should only be used when it will meaningfully improve answer quality... when in doubt, respond directly"* dials it back; *"after receiving tool results, carefully reflect on their quality before proceeding"* dials it up |
+| **Ask for self-verification, selectively** | *"Before you finish, verify your answer against \[test criteria]"* catches errors reliably in coding and math tasks | Not universal — some current models already verify their own work well by default, and adding explicit verification instructions on top just adds tokens and latency. Tune this against your own evals rather than applying it as a blanket rule |
+| **Chain prompts for inspectable pipelines** | Break a task into sequential calls — draft → critique against criteria → refine — only when you need to log, evaluate or branch at an intermediate step | Modern models handle most multi-step reasoning internally; explicit chaining is now a deliberate architectural choice for observability, not a default requirement |
+
+**Two mistakes worth naming because they're the ones that show up in production:**
+
+- **Prefilling the assistant's response is no longer the answer to "force a specific output format."** Current-generation models reject prefilled last-turn assistant messages outright. Use **structured outputs** (a schema the API enforces) for format control, and explicit system-prompt instructions (*"respond directly without preamble"*) to eliminate unwanted lead-in text instead.
+- **Aggressive, all-caps imperatives ("CRITICAL: You MUST...") tend to overtrigger on current models** where they used to be needed to overcome undertriggering on older ones. If a tool or skill is firing more often than intended, the fix is usually to dial the language back to something closer to normal prose, not to add more emphasis.
+
+**For agentic workloads specifically** (an agent operating tools across many turns, not a single Q&A call), three additional patterns matter: ask explicitly for **parallel tool calls** when actions are independent (*"if there are no dependencies between the tool calls, make all of the independent tool calls in parallel"*); give the agent a **structured state file** (`tests.json`, `progress.txt`) for work that spans multiple context windows, since freeform memory degrades over long sessions while a structured file survives compaction and hand-off cleanly; and **set an explicit policy on autonomy versus confirmation** — which actions the agent may take unilaterally (local, reversible: editing a file, running a test) versus which require a human check first (destructive, hard-to-reverse, or externally visible: `git push --force`, dropping a table, messaging a customer). None of this is optional in a production agent — an agent with no stated policy on irreversible actions will eventually take one it shouldn't.
+
+---
+
+## Q22. What is a context window, and how do you manage it in a real agentic session?
+
+Q2 covered the context window as an API property — a token ceiling per request. **In an agentic tool like Claude Code, the context window is also an operational resource that fills up during a live session and has to be actively managed**, and that distinction is what this question is really probing.
+
+**What's already in context before you type your first prompt** — a surprising amount, and worth being able to enumerate:
+
+| Loaded at startup | Roughly | Why it's there |
+|---|---|---|
+| System prompt | ~4K tokens | Core behaviour, tool-use and formatting instructions — never shown to you |
+| Auto memory (`MEMORY.md`) | up to 200 lines / 25 KB | The agent's own notes to itself from previous sessions |
+| Environment info | small | Working directory, platform, git status |
+| MCP tool names (schemas deferred) | small | So the agent knows what's callable without paying for full schemas up front |
+| Skill descriptions | small, one line each | So the agent knows what it *could* invoke; full skill bodies load only on use |
+| User-level and project-level `CLAUDE.md` | varies, target < 200 lines each | Persistent instructions (Q23) |
+
+**What grows as the agent works:** every file read, every tool result, every hook's injected context. **File reads dominate context usage in practice** — a single large file read can cost more tokens than an entire multi-turn conversation, which is the concrete reason for two of the biggest levers below.
+
+**The two structural techniques for keeping a long-running session viable:**
+
+1. **Delegate large reads to a subagent.** A subagent runs in its own, separate context window — it loads its own copy of `CLAUDE.md` and tools, does its research (which can be tens of thousands of tokens of file reads), and only its **final summary** returns to the parent conversation. This is a context-budget technique as much as a task-decomposition one: research that would blow the main session's budget costs only the size of the returned summary there.
+2. **Compaction (`/compact`), automatic or manual.** When context approaches its limit, the conversation history is replaced with a structured summary — kept: requests and intent, key technical concepts, files examined with important snippets, errors and fixes, pending and current work; **discarded**: verbatim tool output and intermediate reasoning. Critically, **not everything reloads the same way**:
+
+| What | After compaction |
+|---|---|
+| System prompt | Unchanged — it isn't part of message history |
+| Project-root `CLAUDE.md` and unscoped rules | Re-read from disk |
+| Auto memory | Re-read from disk |
+| Path-scoped rules / nested `CLAUDE.md` | Reload only as matching files are read again |
+| Files read or edited during the session | The **5 most recently modified** are re-read; the rest are gone |
+| Invoked skill bodies | Re-injected, capped at 5,000 tokens/skill and 25,000 tokens total, oldest dropped first |
+| Skill *descriptions* (the startup index) | **Do not reload** — only skills actually invoked come back |
+
+That table is the answer to "what should I worry about losing after a long session compacts?" — a rule with `paths:` frontmatter that hasn't matched a file recently, or a skill you haven't invoked yet, is genuinely gone until re-triggered.
+
+**The levers available before an automatic compaction forces the issue:**
+
+- **`/compact focus on X`** — steer what the summary keeps rather than accepting the default heuristic.
+- **`/clear`** between unrelated tasks — stale conversation crowds out the files the next task actually needs, and every stale token is a token you pay for on every subsequent turn.
+- **`/autocompact <threshold>`** — set how full the window gets before automatic compaction fires, if you want more headroom before it kicks in.
+- **`/context`** — a live breakdown of exactly what's currently loaded and how much each category costs, which is the debugging tool for "why is this session behaving like it's forgotten something."
+
+**The architectural point for an interview, since this is where the question is really going:** context window management in an agent is a cost-and-reliability problem with the same shape as RAG's (Q3–Q12) — you have a large body of potentially relevant material (the codebase, the conversation history) and a bounded, expensive window to put the *relevant* part of it in. Subagents are effectively RAG's "retrieve narrowly" applied to file reads; compaction is RAG's "summarise and cite" applied to conversation history. Recognising that the two problems are the same shape, at different layers, is a stronger answer than describing either mechanism in isolation.
+
+---
+
+## Q23. What is CLAUDE.md, and what other memory/markdown files does Claude Code use?
+
+**`CLAUDE.md` is a plain-markdown file of persistent, human-written instructions that Claude Code loads into every session** — the equivalent of onboarding documentation for a new team member, except it's re-read at the start of every conversation rather than read once. It sits alongside a second, complementary mechanism — **auto memory**, which the agent writes to *itself*.
+
+| | `CLAUDE.md` | Auto memory |
+|---|---|---|
+| **Who writes it** | You | The agent |
+| **Contains** | Instructions and rules | Learnings, corrections, project context the agent can't derive from code |
+| **Use for** | Coding standards, build commands, architecture, workflows | Your preferences, corrections you've given, facts not visible in the codebase |
+| **Enforcement** | **Context, not a hard rule** — the agent tries to follow it but isn't guaranteed to. Loaded as a user message after the system prompt, not inside it | Same — context, not enforcement |
+
+**The enforcement distinction is the one interviewers actually want:** neither file can *block* an action. To hard-enforce a rule regardless of what the model decides — "never run `rm -rf`", "always require confirmation before a force-push" — that belongs in a **hook** (Q25), not in `CLAUDE.md`. `CLAUDE.md` shapes behaviour; hooks enforce it.
+
+**Where `CLAUDE.md` files can live, in load order (broadest scope first, most specific loaded last so it has the final word):**
+
+| Scope | Location | Purpose |
+|---|---|---|
+| **Managed policy** | e.g. `/etc/claude-code/CLAUDE.md` (Linux) | Org-wide, IT/DevOps-deployed, cannot be excluded by individual settings |
+| **User** | `~/.claude/CLAUDE.md` | Personal preferences across every project |
+| **Project** | `./CLAUDE.md` or `./.claude/CLAUDE.md` | Team-shared, committed to source control |
+| **Local** | `./CLAUDE.local.md` | Personal, project-specific, gitignored — your sandbox URLs, test data |
+
+All discovered files are **concatenated**, not overridden — a project instruction can still contradict a user instruction, in which case the model may pick one arbitrarily, which is why keeping instructions consistent across files (and periodically pruning stale ones) is an explicit maintenance task, not a one-off.
+
+**How to write instructions that actually get followed** — the guidance is concrete and worth quoting directly, because it applies to prompt engineering generally (Q21): **specific and verifiable beats vague** ("use 2-space indentation" over "format code properly"; "run `npm test` before committing" over "test your changes"); **keep it under ~200 lines** — longer files consume more context and measurably reduce how reliably instructions are followed; and **use headers and bullets** so the structure is scannable the same way a human reader scans it.
+
+**Two mechanisms that keep a large project's instructions from becoming one giant unmanageable file:**
+
+- **`@path/to/file` imports** — pull in a README, a package manifest, or a separate workflow doc by reference. Imports still load fully into context at launch (they don't reduce token cost, only improve organisation), and recurse up to four hops deep.
+- **`.claude/rules/*.md`** — topic-scoped instruction files (`testing.md`, `security.md`, `api-design.md`), optionally restricted to specific file patterns via `paths:` YAML frontmatter so a rule about API conventions only loads into context when the agent is actually touching API files. This is the direct answer to "how do you keep CLAUDE.md from growing forever": move anything that doesn't need to be in *every* session into a path-scoped rule instead.
+
+**Interop with other agents' config files:** Claude Code reads `CLAUDE.md`, not the increasingly common cross-tool `AGENTS.md` convention — but a `CLAUDE.md` that is just `@AGENTS.md` (an import) with Claude-specific additions below it lets one canonical instruction file serve multiple agent tools without duplication.
+
+---
+
+## Q24. What are Agent Skills, and how does a `SKILL.md` file differ from `CLAUDE.md`?
+
+**A Skill is a packaged, reusable procedure — instructions, and optionally a runnable command — that loads into context only when it's actually needed, rather than sitting in every conversation from the start.** Where `CLAUDE.md` is standing knowledge the agent always has, a skill is a capability the agent reaches for.
+
+| | Skill | `CLAUDE.md` |
+|---|---|---|
+| **Purpose** | Executable, often multi-step procedures | Standing project facts and conventions |
+| **Loading** | Only when invoked | Every conversation, unconditionally |
+| **Token cost** | Paid only when used | Paid on every single turn, whether relevant or not |
+| **Good for** | A deploy script, a commit-and-push workflow, a document-generation procedure | API conventions, project structure, "always do X" rules |
+
+**That cost asymmetry is the practical decision rule:** if you find yourself pasting the same multi-step instructions into chat repeatedly, that's a skill; if it's a fact or convention that should silently shape *every* response, that's `CLAUDE.md`.
+
+**The required file shape** — YAML frontmatter, then markdown instructions:
+
+```yaml
+---
+description: Summarizes uncommitted changes and flags anything risky. Use when asking what changed.
+---
+
+## Current changes
+!`git diff HEAD`
+
+## Instructions
+Summarize the changes in 2-3 bullets, then list risks like missing error handling,
+hardcoded values, or untested code.
+```
+
+The `!`command`` syntax runs a shell command *before* the content reaches the model — the placeholder is replaced with real output, so the model receives actual `git diff` results rather than an instruction to go run one itself.
+
+**Key frontmatter fields, because this is where the practical control lives:**
+
+| Field | Effect |
+|---|---|
+| `description` | What tells the agent **when** to invoke this automatically — the single most important field, since it's the only thing the model sees before deciding to load the skill |
+| `disable-model-invocation: true` | The agent can never auto-invoke it — only a human typing `/skill-name` can trigger it. **Use this for anything with a side effect**: deploying, committing, sending a message. Auto-invocation is right for read-only, informational skills; it is the wrong default for anything that changes external state |
+| `user-invocable: false` | The inverse — hidden from the `/` menu, only the model can reach for it |
+| `allowed-tools` | Pre-approves specific tools for this skill so it doesn't trigger a permission prompt every time |
+| `context: fork` | Runs the skill in an isolated subagent context rather than inline — the same context-budget technique as Q22's subagent delegation |
+| `paths` | Glob patterns restricting when the skill can auto-activate, e.g. only when working under `src/api/**` |
+
+**Discovery order** mirrors `CLAUDE.md`'s scoping: personal (`~/.claude/skills/`), project (`.claude/skills/`), and plugin-namespaced (`<plugin>:skill-name`) — the project copy wins if names collide, so a team can override a personal default per-repo.
+
+**How skill content behaves across compaction, which is the operational detail worth knowing:** an invoked skill's body is re-injected after `/compact`, but capped at 5,000 tokens per skill and 25,000 total, with the **oldest invoked skill dropped first** and truncation keeping the **start** of the file. The practical consequence: put the most important instructions at the top of a `SKILL.md`, because that's the part guaranteed to survive truncation.
+
+---
+
+## Q25. What are Claude Code hooks, and what types exist?
+
+**A hook is a shell command (or HTTP call, MCP tool call, or model prompt) that Claude Code runs automatically at a specific point in a session's lifecycle — and, unlike `CLAUDE.md` or a skill, a hook can actually *block* an action, deterministically, regardless of what the model decided to do.** This is the enforcement layer Q23 pointed to: instructions shape behaviour; hooks constrain it.
+
+**Configuration shape**, in `settings.json` at the user, project, local, or managed-policy layer:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "./scripts/check-command.sh", "timeout": 30 }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`matcher` filters which events trigger the hook (a tool name, an event reason, a regex); `type` selects the handler (`command`, `http`, `mcp_tool`, `prompt`, or `agent`); exit code carries the decision — **exit 0** succeeds (and any JSON on stdout is parsed as a structured decision), **exit 2** is a **blocking** error that stops the action, any other non-zero code is a non-blocking error that still lets the action proceed. A hook can also return JSON with `permissionDecision`, `additionalContext` (text injected into the model's context), or `updatedInput` (modifying the tool call before it runs).
+
+**The hook events, organised by where in the lifecycle they sit** — there are around 30; the ones worth knowing cold are marked, the rest are worth knowing *exist* so you reach for the reference rather than reinventing the mechanism:
+
+| Category | Key events | What they're for |
+|---|---|---|
+| **Session lifecycle** | **`SessionStart`**, `SessionEnd`, `Setup` | Inject context or run setup when a session begins/resumes; cleanup on exit; one-time CI preparation |
+| **Per-turn** | **`UserPromptSubmit`** (can block), **`Stop`** (can block), `StopFailure` | Validate/modify/block a submitted prompt before the model sees it; prevent the agent from ending its turn (e.g. force it to keep going until a real completion condition is met) |
+| **Tool execution (the agentic loop)** | **`PreToolUse`** (can block, can modify input), **`PostToolUse`** (cannot block — the tool already ran), `PermissionRequest`, `PostToolBatch` | The most commonly used category: a `PreToolUse` hook is how you enforce "never run `rm -rf`" or "always lint before this edit is allowed to proceed," deterministically, independent of the prompt |
+| **Subagents** | **`SubagentStart`**, **`SubagentStop`** (can block) | Initialise or prevent a delegated subagent (Q22) from finishing prematurely |
+| **Tasks** | `TaskCreated`, `TaskCompleted` (both can block) | Validate or gate task-tracking state changes |
+| **Context & state** | `InstructionsLoaded`, `ConfigChange` (can block), `CwdChanged`, `FileChanged` | React to or block configuration changes; useful for auditing exactly which `CLAUDE.md`/rule files loaded and when |
+| **Context management** | **`PreCompact`**, `PostCompact` | Run logic immediately before/after compaction (Q22) — e.g. persisting state that would otherwise only survive as a lossy summary |
+| **Notification & display** | **`Notification`**, `MessageDisplay` | Route a permission prompt or completion event to an external channel (Slack, a desktop notification) |
+| **Model switch** | `PreModelSwitch` (can block), `PostModelSwitch` | Prevent or react to a mid-session model change |
+| **Worktree** | `WorktreeCreate` (can block), `WorktreeRemove` | Customise or block git worktree lifecycle actions |
+| **MCP elicitation** | `Elicitation`, `ElicitationResult` | Supply or validate user input an MCP server requests mid-tool-call |
+
+**The two events that come up most in an interview, because they're the ones that map directly to real governance requirements, are `PreToolUse` and `Stop`:**
+
+- **`PreToolUse`** is how you implement a hard policy — "no destructive Bash commands," "require a lint pass before any `Edit` on `*.ts` is allowed to complete," "block writes outside the project directory" — as a **deterministic gate** rather than a prompt instruction the model might not always follow. This is the direct, concrete answer to "how would you stop an AI coding agent from running a dangerous command in production," and giving that answer (rather than "write a strong system prompt") is what shows the enforcement-vs-guidance distinction has actually landed.
+- **`Stop`** is the mechanism behind "keep working until this is genuinely done" — a hook can inspect whether the actual completion criteria are met and, if not, block the stop and force another turn, which is how long-horizon autonomous behaviour is kept honest rather than trusting the model's own judgement about when to give up.
+
+**The architectural framing worth closing on:** hooks, skills, and `CLAUDE.md`/rules are three different points on the same spectrum — **always-on context** (`CLAUDE.md`) → **on-demand context** (skills) → **deterministic enforcement outside the model's control entirely** (hooks). A well-designed agent configuration uses each for what it's actually good at rather than trying to get a system prompt to do a hook's job.
+
+---
+
 ## References — official documentation and standards
 
 | Topic | Source |
@@ -916,6 +1137,16 @@ Not one application — **a shared platform serving many use cases across many t
 | Cormack et al. — Reciprocal Rank Fusion | https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf |
 | Liu et al., 2023 — *Lost in the Middle: How Language Models Use Long Contexts* | https://arxiv.org/abs/2307.03172 |
 | pgvector — PostgreSQL vector extension | https://github.com/pgvector/pgvector |
+| **Anthropic — Prompting best practices (current models)** | https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices |
+| Anthropic — Prompt engineering overview | https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/overview |
+| Anthropic — Extended/adaptive thinking | https://platform.claude.com/docs/en/build-with-claude/thinking |
+| **Claude Code docs — How Claude remembers your project (`CLAUDE.md`, auto memory, `.claude/rules/`)** | https://code.claude.com/docs/en/memory |
+| Claude Code docs — Agent Skills (`SKILL.md`) | https://code.claude.com/docs/en/skills |
+| Claude Code docs — Hooks reference | https://code.claude.com/docs/en/hooks |
+| Claude Code docs — Hooks guide | https://code.claude.com/docs/en/hooks-guide |
+| Claude Code docs — Explore the context window | https://code.claude.com/docs/en/context-window |
+| Claude Code docs — How Claude Code works | https://code.claude.com/docs/en/how-claude-code-works |
+| Claude Code docs — Subagents | https://code.claude.com/docs/en/sub-agents |
 
 ---
 
