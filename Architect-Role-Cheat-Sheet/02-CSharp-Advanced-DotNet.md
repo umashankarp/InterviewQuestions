@@ -1,6 +1,8 @@
 # 2. C# / Advanced .NET — 20 Questions (Answered)
 
 > Role lens: **Solution / Technical Architect**. Language questions at this level are really questions about *memory, lifetime, correctness under concurrency, and API design*. Answer them that way.
+>
+> **Version baseline:** **.NET 10 (LTS)** / **C# 14**, with each feature attributed to the release it arrived in (`C# 11`, `C# 12`…) so you can date your own knowledge in an interview. Support boundaries and the LTS-governance argument are in **Module 1**'s baseline note and Q20.
 
 ---
 
@@ -539,6 +541,8 @@ Maintainability is a property of *change cost*. Answer it as a set of deliberate
 **9. Observability built in, not bolted on.** Structured logs, traces, business metrics from day one. Code you cannot observe is code you cannot safely change.
 
 **10. Documentation that stays true.** ADRs (Architecture Decision Records) for the *why*, a README that gets you running in one command, and XML docs only on public contracts. Anything else rots.
+
+**11. Keep the language and runtime baseline current — and know what it actually bought you.** The baseline today is **.NET 10 (LTS, November 2025)** with **C# 14**. Two C# 14 features matter to the code above rather than being syntax trivia: the **`field` keyword** lets a property with light validation reach its compiler-generated backing field directly, removing the hand-written backing field that made encapsulated entities (item 3) verbose enough that people skipped the validation; and **extension members** widen extensions beyond methods to properties and static members, which makes a `Money`/`Iban` style value-type API materially cleaner. The governance point to raise unprompted: **pin `<LangVersion>` explicitly rather than using `latest`** — `latest` makes the build depend on whichever SDK patch the agent happens to have, which is exactly the non-reproducibility a regulated build pipeline is supposed to eliminate.
 
 **Closing framing:** *"Maintainable code is code where the cost of the tenth change is not higher than the cost of the first. Everything above is in service of keeping that curve flat — and the two biggest levers are clear boundaries and a fast, trustworthy test suite."*
 

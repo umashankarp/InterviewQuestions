@@ -1065,7 +1065,7 @@ if (!allowed.Contains(sortColumn)) throw new ArgumentException();
 
 ## Q30. What is SSRF?
 
-**Server-Side Request Forgery** (OWASP Top 10 A10): an attacker induces the **server** to make an HTTP (or other protocol) request to a destination of the attacker's choosing. The server becomes a proxy into networks the attacker cannot reach directly.
+**Server-Side Request Forgery** (**A10 in the OWASP Top 10:2021**; the category numbering shifts between editions, so cite the edition — see Module 16 Q1): an attacker induces the **server** to make an HTTP (or other protocol) request to a destination of the attacker's choosing. The server becomes a proxy into networks the attacker cannot reach directly.
 
 ```
 POST /import   { "url": "https://attacker-controlled/data.csv" }

@@ -23,6 +23,8 @@ The **Open Worldwide Application Security Project** is a non-profit foundation t
 
 **The distinction worth making in an interview:** the **Top 10 is an awareness document**, not a standard — it lists common risk categories, and passing it does not mean an application is secure. **ASVS is the standard**: it enumerates verifiable requirements at three levels, so you can state "this system meets ASVS Level 2" and have that mean something testable. Saying that shows you have used OWASP as an engineering input rather than a poster on the wall.
 
+**Always cite the edition — this is a small habit that reads as real practitioner experience.** The lists are periodically re-issued and the categories are **renamed, merged and renumbered** between editions: the web Top 10 has run **2017 → 2021 → 2025**, and the API list's current edition is **2023** (it ran 2019 → 2023). So "A10 is SSRF" is only true of a specific edition, and an answer that says "SSRF — A10 in the 2021 list, re-categorised since" is strictly better than one that quotes a bare number. The operational consequence matters more than the interview point: if your secure-coding training, your pen-test scope and your control mappings are all pinned to an edition, **a new edition is a re-baselining exercise with a named owner**, not a document you quietly swap in.
+
 **Why it matters commercially:** PCI DSS requires developers to be trained in secure coding covering, at minimum, the OWASP Top 10; penetration-test reports are structured around it; and in a bank, "we follow OWASP guidance" is a claim you will be asked to evidence.
 
 ---

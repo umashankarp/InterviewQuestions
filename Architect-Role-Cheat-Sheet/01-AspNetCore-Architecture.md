@@ -1,6 +1,8 @@
 # 1. ASP.NET Core Architecture — 20 Questions (Answered)
 
 > Role lens: **Solution / Technical Architect**. Every answer is written the way you would answer it to a hiring panel at a bank or payments firm: mechanism first, then trade-offs, then what you would actually do in production.
+>
+> **Version baseline:** answers target **.NET 10 (LTS, November 2025)** and **C# 14**, while naming the release a feature actually arrived in (`.NET 8+`, `C# 12`…) so the history stays clear. Support dates you should have at hand, because they are governance facts rather than trivia: **.NET 9 (STS) ends May 2026**, **.NET 8 (LTS) ends November 2026**, **.NET 10 (LTS) runs to November 2028**. In a regulated shop, knowing which LTS you are on and when you move off it is itself an architect-level answer.
 
 ---
 
@@ -27,7 +29,7 @@
 - **Composition over inheritance.** Middleware is `Func<RequestDelegate, RequestDelegate>`. Filters, model binders, formatters, auth handlers are all interfaces registered in DI. You extend by adding a component, not by subclassing a framework base class.
 - **Feature collection as the seam.** Kestrel, IIS in-process, HTTP.sys and `TestServer` all implement the same features. That is why the identical app runs unchanged under all four.
 
-**Startup sequence (production `Program.cs`, .NET 8/9):**
+**Startup sequence (production `Program.cs`, .NET 8–10):**
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);   // 1. config + logging + DI container builder
@@ -719,6 +721,8 @@ This is the synthesis question. Answer it as a checklist with reasons, organised
 **9. Delivery.** Trunk-based development, PR + automated checks, containerised, IaC (Terraform/CDK), blue-green or canary deploys, database migrations decoupled and backward-compatible (expand/contract), feature flags for risky changes, automated rollback.
 
 **10. Operability.** Runbooks, dashboards linked from alerts, chaos/failure testing, documented RPO/RTO, DR tested (not just documented), capacity plan, and an on-call rotation that owns the service.
+
+**11. Runtime currency** — the item most checklists omit and every bank audits. Pin to the current **LTS** (.NET 10 since November 2025) rather than riding STS releases, and treat the upgrade as scheduled work with a named owner: .NET 9 (STS) goes out of support in **May 2026**, .NET 8 (LTS) in **November 2026**. Running an unsupported runtime in a regulated environment is a finding whether or not anything is broken, and the predictable November cadence means it can be planned rather than discovered. The corollary teams miss: your **base container image and the CVE gate in the pipeline** are part of the same control — an app on a supported runtime sitting on an unpatched base image fails it just the same.
 
 **Closing line that scores well:** *"The code is maybe 20 % of a production-grade API. The other 80 % is contract discipline, resilience, observability and deployment safety — and those are the parts that decide whether you can change it on a Friday."*
 
