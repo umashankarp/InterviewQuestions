@@ -28,40 +28,204 @@ Intraday: incremental — only what changed, or what depends on what changed PM 
 
 ## 2. Deep Dive
 
-### 2.1 The Core Computation — Revaluation and Why It Dominates Everything
-Every risk measure ultimately reduces to **repricing the portfolio under a perturbed market state**. A delta (sensitivity to a 1-unit move in an underlying) is computed by pricing the instrument at the current market state, pricing it again with that one factor bumped, and differencing. Historical-simulation VaR reprices the entire portfolio under each of (typically) 250–1,000 historical market scenarios and reads a percentile off the resulting P&L distribution. Monte Carlo VaR does the same under thousands of simulated scenarios.
+This section is written to be **complete on its own** — every mechanism, the reasoning that selects it, the failure mode it introduces, and the push-back a Principal/Staff interviewer will raise, answered inline.
 
-The consequence that shapes the entire architecture: **the unit of work is a pricing call, and the number of pricing calls is a product, not a sum** — `positions × scenarios × (1 + risk factors bumped)`. A 2-million-position book under 1,000 scenarios is 2 billion pricing calls per full run. Everything in the design exists to make that number tractable: reduce it (caching), parallelize it (grid), or avoid recomputing it (incremental).
+### 2.1 What a Risk Engine Actually Produces
 
-### 2.2 Risk Factors, the Dependency Graph, and Why Naive Parallelism Fails
-Positions do not depend on all risk factors — a US-equity position depends on that equity's price, its sector factor, and USD rates; it is genuinely independent of JPY vol surfaces. This sparsity is exploitable: build a **dependency graph** from risk factor → dependent positions, and an intraday move in one factor triggers recomputation only of the subgraph it reaches.
+Three outputs, answering three different questions — conflating them is the first mistake:
 
-The trap: this graph is *not* static and *not* obviously correct. Instrument-to-factor dependencies come from pricing-model metadata that changes when a model changes, and a missing edge means a position silently fails to recompute when it should have — producing a stale risk number that looks fresh (it has a current timestamp) but wasn't actually recalculated. This is the domain-specific instance of this course's recurring "declared ≠ actual" theme, and the incident is a variant of exactly it.
+| Output | The question it answers |
+|---|---|
+| **Sensitivities** (delta, gamma, vega, DV01) | How does portfolio value move per unit move in a risk factor? |
+| **VaR** | What loss threshold will not be exceeded, at a confidence level, over a horizon? |
+| **Stress tests** | What is the portfolio worth under this *specified* adverse scenario? |
 
-### 2.3 Compute Grid Mechanics — Task Granularity and the Straggler Problem
-The grid is a fan-out/fan-in: a coordinator partitions work into tasks, workers pull and execute, results are aggregated. Two design parameters dominate:
+VaR is not "the" risk number. Its defining limitation, which an interviewer will ask for: **VaR says nothing about the magnitude of losses beyond the threshold.** A 99% 1-day VaR of £10m tells you nothing about whether the 1% tail is £11m or £400m — which is exactly the motivation for **Expected Shortfall (CVaR)**, the average loss conditional on being in the tail, and why post-crisis regulation (FRTB) moved toward it.
 
-**Task granularity.** Too coarse (one task per portfolio) and a single large portfolio becomes a straggler holding up the entire run while other workers idle. Too fine (one task per position-scenario pair) and coordination/serialization overhead swamps the actual pricing work. The workable middle is typically *position-block × scenario-block*, sized so a task runs on the order of hundreds of milliseconds to low seconds — long enough to amortize dispatch cost, short enough that no single task defines the run's tail latency.
+### 2.2 The Core Computation — Why the Work Is a Product
 
-**Straggler mitigation.** Because run completion is `max(task duration)`, not `mean`, the tail dominates. Standard mitigations: speculative re-execution of tasks running beyond a percentile threshold (hedged execution), and pre-partitioning known-heavy portfolios more finely than the default. Note this makes the grid's own workload non-deterministic in *scheduling* while requiring determinism in *results* — the concern.
+Every risk measure reduces to **repricing the portfolio under a perturbed market state**. A delta is: price at current market state, price again with one factor bumped, difference. Historical-simulation VaR reprices the whole book under each of ~250–1,000 historical scenarios and reads a percentile off the P&L distribution. Monte Carlo does the same under thousands of simulated scenarios.
 
-### 2.4 Caching and Revaluation Avoidance
-Two caches carry most of the load reduction:
-- **Sensitivity cache.** If a position's sensitivities were computed against market state `S` and nothing that position depends on has changed since, reuse them. Requires the dependency graph to be *correct* — an incorrect graph makes this cache silently serve stale results, which is strictly worse than not caching.
-- **Pricing-result memoization.** Identical instrument + identical market state = identical price. Fungible instruments held across many portfolios (the same bond in 400 funds) collapse to one pricing call.
+The structural consequence that shapes everything:
 
-Both are instances of the caching discipline, with one domain-specific escalation: a wrong cached risk number does not merely degrade performance, it produces an incorrect number that a human will act on. Cache-key construction must therefore include *every* input that can affect the result — market state version, model version, instrument-terms version — and this course's §Advanced Q5 "the cache is working" decomposition applies with unusual force.
+```
+pricing calls = positions × scenarios × (1 + factors bumped)
 
-### 2.5 Batch/Intraday Hybrid and Reconciliation
-The overnight batch does a full, unconditional revaluation of everything; intraday runs do incremental updates against that baseline. This is efficient but introduces **drift**: incremental deltas accumulate small approximation and ordering differences, so intraday risk can diverge from what a full recomputation would produce.
+2,000,000 positions × 1,000 scenarios ≈ 2 × 10^9 pricing calls per full run
+```
 
-The mitigation is a periodic *reconciliation run* — recompute a sample (or, overnight, everything) fully, and compare against the incrementally-maintained state, alerting on divergence beyond tolerance. This is directly the read-model reconciliation and the migration reconciliation, recurring here as a permanent, ongoing correctness control rather than a migration-time one.
+**The work is a product, not a sum.** Estimating effort as proportional to position count alone understates it by three or more orders of magnitude. Everything in the design exists to make that number tractable: **reduce** it (caching, §2.7), **parallelise** it (the grid, §2.5), or **avoid** it (incremental recomputation, §2.9).
+
+### 2.3 Historical Simulation versus Monte Carlo — as Workloads
+
+Compare them on the dimensions this architecture cares about, not on statistical merit:
+
+| | Historical simulation | Monte Carlo |
+|---|---|---|
+| Scenarios | ~250–1,000 fixed, actual history | Thousands, model-generated |
+| Work volume | Bounded, predictable | Far heavier |
+| Reproducibility | **Deterministic by construction** | Only if the seed *and* the generator are pinned |
+| Grid implication | Easier capacity planning | Strictly more capacity, plus seed management |
+
+**The subtle Monte Carlo trap worth knowing:** the same seed on different CPU architectures or math-library versions can yield different sequences. So the generator *implementation and version* must be pinned alongside the seed — otherwise reproducibility fails silently, and only on heterogeneous grids, which is the hardest kind of bug to find.
+
+### 2.4 The Risk-Factor Dependency Graph — and Its Silent Failure Mode
+
+Positions do not depend on all factors. A US-equity position depends on that equity's price, its sector factor and USD rates; it is genuinely independent of JPY vol surfaces. That **sparsity** is what makes intraday viable: build a graph from risk factor → dependent positions, and a move in one factor triggers recomputation only of the subgraph it reaches.
+
+**The trap: the graph is neither static nor obviously correct.** Instrument-to-factor dependencies come from pricing-model metadata that changes when a model changes. A **missing edge** means a position silently fails to recompute when it should have — producing a stale number that *looks* fresh, because it carries a current timestamp. This is the domain-specific form of the recurring "declared ≠ actual" theme.
+
+**The graph cannot validate itself.** Inspecting the graph can never reveal an edge that was never added. The only reliable detection is an **independent path**: periodically run a full unconditional revaluation and compare it against what the graph-driven incremental path produced. A position whose value differs is one the graph failed to trigger.
+
+**Couple graph regeneration to model deployment mechanically.** In practice edges go missing when a pricing-model change introduces a new factor dependency without the metadata being updated in lockstep. A checklist item asking engineers to regenerate the graph reliably fails. Instead: a fitness function that **fails the model-deployment pipeline** if a model version is registered without a corresponding regenerated graph version, plus a **post-deployment reconciliation** scoped to portfolios touching the changed model. Regeneration proves the step ran; it does not prove the resulting graph is correct — the model's own metadata could still be incomplete, which was the original failure mode — so the verification is not redundant.
+
+### 2.5 Compute Grid Mechanics
+
+The grid is a fan-out/fan-in: a coordinator partitions work into tasks, workers pull and execute, results aggregate.
+
+**Task granularity has two failure directions.** Too coarse (one task per portfolio) and one large portfolio becomes a straggler defining the run while other workers idle. Too fine (one task per position-scenario pair) and coordination overhead swamps the pricing. The workable middle is *position-block × scenario-block*, sized so a task runs in **hundreds of milliseconds to low seconds** — long enough to amortise dispatch, short enough that no single task defines the tail.
+
+**Run completion is `max(task)`, not `mean(task)`.** The run is not done until every task finishes, so the tail dominates and mean task duration is nearly uninformative for both capacity planning and monitoring.
+
+**Pull-based distribution, not push.** Task durations are heterogeneous and not predictable in advance. Pull self-balances — a fast worker simply takes more — where push-based round-robin strands fast workers idle while slow workers queue. Push would be preferable only if tasks had to be routed to specific workers for data locality, which is not the case here because market-data slices are small enough to replicate.
+
+**Straggler mitigation:** speculative re-execution of tasks exceeding a percentile threshold, plus pre-partitioning known-heavy portfolios more finely than the default. See §2.6 for why speculative execution is dangerous here without a prerequisite.
+
+**Load each worker only the slice it needs.** A design where every worker loads the complete market-data snapshot multiplies snapshot memory by worker count, and at large worker counts that dominates cluster memory for data the task never touches. Loading only the slice the task's dependency subgraph requires cuts it by orders of magnitude — and note the pleasant side effect: a missing graph edge now causes a **task failure on a missing slice** rather than silent staleness, which is a strictly safer failure mode.
+
+**Capacity planning by Little's Law**, with a domain caveat: `workers ≈ task arrival rate × mean task duration`, sized against **volatile-session** rates rather than calm-session averages. Under-provisioning is more dangerous here than for a typical service, because slow risk during volatility is precisely when the numbers are most decision-critical — **degradation correlates with need.**
 
 ### 2.6 Determinism and Reproducibility — the Non-Negotiable Constraint
-A risk number that cannot be reproduced cannot be defended to a regulator, an auditor, or a portfolio manager disputing it. This imposes constraints most compute-grid designs don't carry:
-- **Fixed inputs must be addressable.** Every run records the exact market-data snapshot ID, model version, and position snapshot it used — so the run can be replayed years later and produce byte-identical output.
-- **Floating-point determinism.** Summation order affects floating-point results. If aggregation order varies with grid scheduling (which it does, given the stragglers and speculative execution), the same inputs yield slightly different outputs run-to-run. The fix is deterministic aggregation order (sort by a stable key before summing, or use compensated/pairwise summation) — *not* accepting "it's only 1e-12" as immaterial, because a reproducibility claim that is 99.999% true is not a reproducibility claim.
-- **No wall-clock or random seeds without capture.** Monte Carlo seeds must be recorded and replayable, exactly as §Intermediate Q2 required `Apply` methods be free of non-captured non-determinism.
+
+A risk number that cannot be reproduced cannot be defended to a regulator, an auditor, or a PM disputing it. That imposes constraints most grid designs never carry.
+
+**Inputs must be addressable.** Every stored number records `(snapshotId, modelVersion, positionSnapshotId, seed, runId)`. Storing only the number and a timestamp makes it permanently indefensible.
+
+**Floating-point summation order matters.** FP addition is not associative, so different summation order yields different results — and grid scheduling varies order run to run. The fix is deterministic aggregation: **stable sort by task key before summing**, or compensated/pairwise summation. Do not dismiss 1e-12 differences as immaterial while claiming byte-reproducibility to an auditor; **the two claims are incompatible**, and a reproducibility claim that is 99.999% true is not a reproducibility claim.
+
+**Speculative execution and determinism are individually reasonable and jointly hazardous.** Speculative re-execution means the same task may complete twice and whichever result arrives first is used — so the *set* of contributing computations differs run to run even for identical inputs. If aggregation is order-dependent, results become irreproducible in exactly the system where reproducibility is a regulatory requirement. They are compatible, but **only if aggregation is made order-independent first.** Adopting straggler mitigation as a "pure performance" change silently breaks reproducibility.
+
+**Reproducing a three-year-old number requires four independently necessary things**, and an interviewer will ask you to enumerate them:
+
+1. The stored input metadata.
+2. The immutable snapshot and position archive.
+3. **The recorded pricing-model version, re-instantiable** — which requires a model registry retaining historical versions.
+4. Deterministic aggregation.
+
+Any one missing makes the request unanswerable. The hardest to sustain over years is (3): code and dependencies rot, which is why model versions should be retained as **executable containerised artifacts**, not source references.
+
+**Store results bitemporally, never overwriting.** Recording every computed number with both its `asOf` market time and its `computedAt` system time answers *"what did we believe our exposure was at 14:32, as we believed it then?"* — which is distinct from *"what was our actual exposure at 14:32, as we now know it."* Regulatory and dispute contexts require the former, and a mutable current-value store can only answer the latter. Treating a restated number as simply replacing the original destroys the record of what was actually acted upon.
+
+### 2.7 Caching and Revaluation Avoidance
+
+**Sensitivity cache.** If a position's sensitivities were computed against market state `S` and nothing it depends on has changed, reuse them. This depends entirely on the dependency graph being *correct* — an incorrect graph makes this cache silently serve stale results, which is strictly worse than not caching at all.
+
+**Pricing-result memoization.** Identical instrument + identical market state = identical price. The same bond held in 400 funds collapses to one pricing call.
+
+Its benefit is **superlinear in portfolio count**, and the reason is worth stating: as portfolio count grows, the number of *distinct instruments* grows far more slowly than total position count, so the hit rate rises with scale. Modelling cache benefit as a fixed percentage independent of scale understates it.
+
+**Cache keys must include every input that can affect the result** — market state version, model version, instrument-terms version — not just the position identifier. Keying on position + date means a model-version change silently serves pre-change sensitivities. The domain-specific escalation: a wrong cached risk number does not merely degrade performance, **it produces an incorrect number a human will act on.** A miss costs time; a wrong hit costs a trading decision.
+
+### 2.8 Snapshot Pinning — Making the Failure Inexpressible
+
+§4's incident: tasks resolved "latest snapshot" at their own dispatch moment. Snapshot publication (~20s) became faster than run duration (~110s under contention), so early tasks priced against `S41` and late tasks against `S43`. The aggregator summed both into one portfolio number **representing no market state that ever existed.**
+
+Every task individually succeeded against a valid snapshot. The inconsistency existed only *across* tasks, where nothing looked. Characterising this as "stale data" misses it: it was **fresh data, inconsistently combined** — a distinct and much harder-to-detect failure.
+
+The complete structural fix has three parts, and implementing only the first is the common mistake:
+
+1. **Make `snapshotId` a required run parameter**, threaded to every task, with **no API path that resolves latest per task.** As a configuration option it can be misconfigured, and the failure is silent. As a required parameter the bad behaviour is not expressible. The freshness cost — the run uses run-start data rather than per-task-latest — is bounded, known, and vastly preferable to an unbounded correctness risk.
+2. **Have the aggregator verify** every incoming partial result carries the run's expected `snapshotId`, rejecting the run outright on mismatch. A positive consistency check, not an assumption — otherwise a future code path can reintroduce the inconsistency with nothing watching.
+3. **Alert when run duration exceeds snapshot publication cadence.** That ratio crossing 1.0 is the precondition that made the bug reachable at all, so this catches a whole *class* of future cross-task assumptions rather than this one instance.
+
+**The load test that would have caught it** tests the **ratio**, not either variable: drive publication at volatile-session cadence (~20s) *while* loading the grid enough to stretch run duration past it, then assert every partial result in a run carries an identical `snapshotId`. Testing each variable independently, each within normal parameters, never produces the condition — exactly as production didn't for eighteen months. And note the assertion is not run success (the run succeeded), it is **input consistency**.
+
+### 2.9 Batch/Intraday Hybrid, Drift, and Reconciliation
+
+The overnight batch does a full unconditional revaluation; intraday runs update incrementally against that baseline. Efficient, and it introduces **drift**: incremental deltas accumulate approximation and ordering differences, so intraday risk diverges from what a full recomputation would produce.
+
+**The overnight full run's primary value is verification, not computation.** A proposal to eliminate it and run purely incrementally deletes the only independent check on both incremental drift *and* dependency-graph completeness (§2.4). The compute saving is real; it purchases efficiency by removing the system's correctness control, which for risk numbers is not defensible. The legitimate middle ground is reducing full-run **frequency** (weekly full, nightly sampled) rather than eliminating it — provided the sample is representative rather than convenient.
+
+**Stratify the reconciliation sample; do not sample uniformly.** Always include:
+
+- the **largest-notional and highest-complexity** portfolios, where an error has greatest consequence;
+- portfolios containing **recently changed pricing models**, where graph edges are most likely missing;
+- a random tail sample for baseline coverage.
+
+Uniform random sampling is statistically defensible and **consequence-blind** — it under-weights exactly the portfolios where errors matter most, the same structural blind spot as percentage-based canary sampling that misses a low-volume but critical partner.
+
+Reconciliation here is a **permanent** control, not a migration-time one: incremental updating never ends, so drift accumulation never ends.
+
+### 2.10 The Incremental Trigger Policy
+
+Not every tick — at institutional market-data rates, tick-triggered recomputation keeps the grid permanently saturated recomputing negligible moves. Three triggers, deliberately:
+
+1. **Materiality**, with a threshold calibrated **per factor's own volatility** — a 1bp rates move and a 1% equity move are not comparable, and a single uniform threshold is either too sensitive for volatile factors or too insensitive for stable ones.
+2. **A floor cadence** — recompute at least every N minutes regardless. This bounds the *age* of the number, so a quiet market cannot silently produce an arbitrarily stale figure that appears current.
+3. **Position change** — a new trade must be reflected without waiting for a market move.
+
+### 2.11 Bad Ticks — Reject at Ingestion, Never at Consumption
+
+A plausibility check belongs at **snapshot-construction time**: a move exceeding a multiple of the factor's own recent volatility, or crossing a hard sanity bound, quarantines the suspect value and either falls back to the prior value or refuses to publish the snapshot.
+
+**Consumption-time filtering is far worse**, because different consumers apply different filters, so the same "snapshot" yields different risk depending on who read it — destroying the single-market-state property §2.8 exists to establish.
+
+Rejection must also be **recorded**, because a quarantined tick that was a real market move is itself a serious error. And the danger of an over-aggressive filter is specific and severe: during genuine market dislocation — exactly when risk numbers matter most — real extreme moves get quarantined as implausible, and **the engine reports calm during a crisis.**
+
+### 2.12 Consumers, CAP Posture, and Multi-Tenancy
+
+**The same store serves consumers with opposite postures, and that is correct.** A slightly stale number on a dashboard is acceptable (AP). Authorising a trade against a known-stale number is not, so the **limits engine must fail closed (CP)** — querying the risk store directly rather than the dashboard's cached view, and detecting staleness from the stored `asOf` and run identifiers, the same metadata reproducibility requires. CAP posture follows from the *consumer's* consequence-of-staleness, never from the store.
+
+**Multi-tenancy needs isolated capacity, not just isolated configuration.** Serving several independently managed fund families from one shared worker pool lets one tenant's backlog starve another's run — and here that is not merely a latency regression but a **mandate-monitoring gap** with regulatory consequence. Shared *code*, isolated *capacity*, per-tenant SLA. The efficiency cost is idle capacity in quiet tenants' pools; the middle ground is a quota-bounded shared pool, viable only with tested quota enforcement.
+
+### 2.13 Latency Versus Accuracy — Answering "We Want Sub-Second Risk"
+
+Sub-second is achievable only for a **restricted question**. Full incremental recomputation across an affected subgraph involves dispatch, pricing and hierarchical aggregation — realistically seconds to tens of seconds. Sub-second is attainable for **sensitivity-based approximations** (delta/gamma-approximated P&L under a factor move, evaluated in memory without repricing), which is a genuinely different and less accurate computation.
+
+The correct answer offers **both, explicitly labelled**: a sub-second approximate figure for immediate feedback, superseded by the accurate repriced number seconds later. What must never happen is meeting the latency target by silently substituting an approximation users believe is exact. The risk of showing both — users reconciling two numbers for one question — is mitigated by labelling and by showing the approximation *only* until the exact figure replaces it.
+
+### 2.14 Disaster Recovery — Inputs Outrank Outputs
+
+**Losing the market-data snapshot archive is worse than losing the risk-result store**, and the reason is directional: results are reproducible from inputs, so a lost result store can be rebuilt by re-running. Inputs cannot be reconstructed from outputs, so a lost snapshot archive **permanently destroys** the ability to reproduce or defend any historical number.
+
+Applying uniform DR rigour to both over-invests in the recoverable store and under-protects the irreplaceable one. Snapshot-archive retention must cover at minimum the regulatory record-retention period of the numbers derived from it — typically multi-year, which is what drives the envelope-encryption and immutability requirements.
+
+### 2.15 Observability — "Slow" and "Wrong" Need Different Signal Sets
+
+**Slow is self-signalling:** run duration, task-duration p99, queue depth, worker utilisation. Standard.
+
+**Wrong has no natural signal and must be constructed:**
+
+- **Per-run input-consistency verification** (§2.8) — the fastest detector, catching the condition *at run time* rather than four hours later.
+- **Reconciliation divergence magnitude and trend** (§2.9).
+- **Dependency-graph coverage** — the proportion of positions actually triggered by a known factor move, versus expected.
+- **Spot-reproduction success rate** (§2.6) — periodically re-derive a stored number and assert it matches.
+
+Investing monitoring effort proportionally across both is the mistake: incorrectness needs disproportionately more, because unlike slowness it produces no natural symptom. §4 ran wrong for hours with every conventional signal green.
+
+### 2.16 Principal-Level Judgements
+
+**Investigating a PM's dispute.** First reproduce the engine's number from recorded inputs (§2.6) to establish self-consistency. Then **diff inputs, not outputs**: does the PM's position set match the engine's `positionSnapshotId` (often a trade booked after the snapshot); does the market data match (often a different pricing source); does the model match (often a simpler approximation). The majority of disputes resolve to an input difference, not a computational error — which is why reproducibility metadata is the primary investigative tool, and why an engine that cannot state its inputs cannot resolve disputes at all. Auditing pricing logic first is the least likely cause and the most expensive to investigate. If inputs match and outputs differ, escalate to model validation and treat it as a potential correctness incident.
+
+**Evaluating serverless/elastic compute.** The workload fits unusually well: bursty, embarrassingly parallel, stateless per task — so elastic capacity avoids provisioning for a peak that idles most of the day. Three specific countervailing factors: cold-start latency matters when run completion *is* the SLA; pricing libraries are often large native dependencies that inflate cold start; and **market-data licensing sometimes contractually restricts where data may be processed**, which can rule out regions or providers outright. That last one is invisible in the architecture and frequently decides the question in practice, typically discovered when legal reviews a migration already deep in design. Recommendation: elastic burst capacity above a fixed baseline, not either extreme.
+
+**The governance program required before intraday numbers may gate live trading:**
+
+1. Structural input-consistency enforcement with aggregator-side verification (§2.8).
+2. Stratified, consequence-weighted reconciliation on a defined cadence with divergence alerting (§2.9).
+3. Complete reproducibility metadata plus retained, re-instantiable model versions, **proven by periodic spot-reproduction rather than assumed** (§2.6).
+4. Mechanically enforced dependency-graph regeneration coupled to model deployment, with post-deployment verification (§2.4).
+5. Deterministic aggregation as a **precondition** for any straggler-mitigation optimisation (§2.6).
+6. CP-postured consumption for the limits engine, failing closed on staleness (§2.12).
+7. An explicit, documented statement of the **residual unverified window**, reviewed whenever the reconciliation cadence changes.
+
+If you inherit an ungoverned engine and can implement only one of these first, implement **reconciliation against full recomputation** — it is the only control that detects errors whose shape you do not yet know, including the graph gaps and drift every other control assumes away.
+
+**Answering a regulator honestly.** Cite the controls concretely (1, 2, 3 above), then state the residual plainly: reconciliation is sampled between full runs, so the guarantee is *"verified within the reconciliation window and sampling scope"* — not *"continuously proven for every number."* A bounded, stated claim is more credible than an unqualified assurance, and the concrete improvement lever is increasing full-reconciliation frequency, which narrows the unverified window and can be costed.
+
+**The closing synthesis — why this is harder than the consumer-scale systems.** Not scale; a news feed handles more requests. The difference is that **correctness is unobservable and consequential at the same time.** A broken feed is visibly broken. A wrong risk number is indistinguishable from a right one at the point of consumption, and is converted into a market position within seconds.
+
+That inverts the usual priority. Almost all of this design's complexity — snapshot pinning, deterministic aggregation, reproducibility metadata, reconciliation, graph verification — exists not to make the system fast or scalable, both of which are comparatively solved, but to make its output **trustworthy and defensible**. The compute grid is the easy part. Every senior-level decision here is ultimately about establishing *evidence* for a number's correctness rather than about producing the number.
 
 ---
 
@@ -132,258 +296,6 @@ graph LR
 **Lessons learned:** During a volatile session, market-data snapshots began publishing every ~20 seconds while grid contention stretched one run to ~110 seconds. Tasks dispatched early in that run priced against snapshot `S41`; tasks dispatched late priced against `S43`. The aggregator summed both into one portfolio-level number. Nothing errored. Every task succeeded. The resulting risk figure was **internally inconsistent** — it represented no actual market state that had ever existed, and a hedge sized against it was wrong in a way that could not be reproduced afterward, because replaying the run pinned to either `S41` or `S43` produced a different answer than the one acted upon.
 
 It was caught by the reconciliation job flagging divergence — 4 hours later. The fix: **pin one immutable snapshot ID at run start and pass it to every task**, accepting the marginal freshness cost. The deeper lesson, and the one that generalizes: the run "succeeded" by every signal the system emitted (zero task failures, complete aggregation, fresh timestamp) while being wrong, because *no signal existed for input consistency across the fan-out*. Success of the parts was being treated as evidence of correctness of the whole — this course's "declared ≠ actual" theme in its risk-engine-specific form, and the reason the design makes snapshot pinning a structural property rather than a configuration option.
-## 10. Interview Questions
-
-### Basic (10)
-
-1. **Q: What are the three main outputs of a risk engine, and what does each answer?**
- **A:** Sensitivities (how portfolio value moves per unit move in a risk factor), VaR (a loss threshold at a confidence level over a horizon), and stress-test results (portfolio value under specified adverse scenarios).
- **Why correct:** Names all three with their distinct questions rather than conflating them.
- **Common mistakes:** Treating VaR as "the" risk number; it answers only one narrow question and is famously blind to tail behaviour beyond its confidence level.
- **Follow-ups:** "What does VaR specifically *not* tell you?" (The magnitude of losses beyond the threshold — the motivation for Expected Shortfall/CVaR.)
-
-2. **Q: Why is the volume of pricing calls a product rather than a sum?**
- **A:** It is `positions × scenarios × (1 + factors bumped)` — each position must be repriced under each scenario, and each sensitivity requires an additional bumped repricing.
- **Why correct:** States the multiplicative structure that drives every subsequent design decision.
- **Common mistakes:** Estimating work as proportional to position count alone, understating it by three-plus orders of magnitude.
- **Follow-ups:** "What's the scale for 2M positions and 1,000 scenarios?" (~2 billion pricing calls per full run,.)
-
-3. **Q: What is a risk-factor dependency graph and what does it enable?**
- **A:** A mapping from risk factor to the positions that depend on it, enabling intraday recomputation of only the affected subgraph rather than the whole book.
- **Why correct:** States both the structure and the specific optimization it enables.
- **Common mistakes:** Assuming every position depends on every factor, forfeiting the sparsity that makes intraday viable.
- **Follow-ups:** "What's the failure mode if an edge is missing?" (A position silently fails to recompute and serves a stale number that looks fresh,.)
-
-4. **Q: Why does task granularity matter on the compute grid?**
- **A:** Too coarse and a single large portfolio becomes a straggler defining run completion; too fine and coordination overhead swamps useful work.
- **Why correct:** States both failure directions, not just one.
- **Common mistakes:** Optimizing only for reducing overhead, producing coarse tasks with severe tail latency.
- **Follow-ups:** "What's a workable target task duration?" (Hundreds of ms to low seconds,.)
-
-5. **Q: Why is run completion time governed by `max(task)` rather than `mean(task)`?**
- **A:** A run isn't complete until every task finishes; the slowest task defines the user-visible latency regardless of how fast the others were.
- **Why correct:** States the specific reason fan-out latency is tail-dominated.
- **Common mistakes:** Capacity-planning and monitoring on mean task duration, which is nearly uninformative for this workload.
- **Follow-ups:** "Name a standard straggler mitigation." (Speculative re-execution of tasks exceeding a percentile threshold,.)
-
-6. **Q: What must a cached sensitivity be keyed on?**
- **A:** Every input that can change the result — market state version, pricing-model version, and instrument-terms version, not just the position identifier.
- **Why correct:** Names the specific, easily-omitted key components.
- **Common mistakes:** Keying on position + date only, so a model-version change silently serves pre-change sensitivities.
- **Follow-ups:** "Why is a wrong cached risk number worse than a cache miss?" (A human acts on it; a miss merely costs time,.)
-
-7. **Q: What is the overnight/intraday hybrid, and what problem does it introduce?**
- **A:** Overnight does a full unconditional revaluation establishing a baseline; intraday updates incrementally against it. It introduces drift — accumulated approximation and ordering differences between incremental state and what a full recompute would produce.
- **Why correct:** States both the mechanism and its specific cost.
- **Common mistakes:** Assuming incremental updates are exactly equivalent to full recomputation.
- **Follow-ups:** "What controls drift?" (Periodic sampled reconciliation against full recomputation,.)
-
-8. **Q: Why must every stored risk number record its input identifiers?**
- **A:** Without `(snapshotId, modelVersion, positionSnapshotId, seed)` the number cannot be reproduced, and an irreproducible risk number cannot be defended to an auditor, regulator, or a PM disputing it.
- **Why correct:** Ties reproducibility to its concrete business consequence rather than treating it as engineering hygiene.
- **Common mistakes:** Storing only the number and a timestamp.
- **Follow-ups:** "Which prior module established this same pattern?" (the Event Sourcing — inputs recorded such that state is reconstructable,.)
-
-9. **Q: Why does floating-point summation order matter here?**
- **A:** Floating-point addition is not associative, so a different summation order yields a slightly different result — and grid scheduling varies order run-to-run, breaking reproducibility.
- **Why correct:** Names the specific mathematical property and its interaction with non-deterministic scheduling.
- **Common mistakes:** Dismissing 1e-12 differences as immaterial while claiming byte-reproducibility to auditors — the two claims are incompatible.
- **Follow-ups:** "How is this fixed?" (Deterministic aggregation order via stable sort, or compensated/pairwise summation,.)
-
-10. **Q: Why do the risk dashboard and the limits engine take opposite CAP postures against the same store?**
- **A:** A slightly stale number on a dashboard is acceptable (AP); authorizing a trade against a known-stale number is not, so the limits engine must refuse rather than approve optimistically (CP).
- **Why correct:** Correctly identifies that CAP posture follows from the *consumer's* consequence-of-staleness, not from the store.
- **Common mistakes:** Applying one uniform consistency posture to every consumer of a shared store.
- **Follow-ups:** "Which prior module established this per-consumer pattern?" (read models choosing independent CAP postures.)
-
-### Intermediate (10)
-
-1. **Q: Walk through exactly how the incident produced an internally inconsistent number despite zero task failures.**
- **A:** Tasks resolved "latest snapshot" at their own dispatch moment. Snapshot publication (~20s) became faster than run duration (~110s under contention), so early tasks priced against `S41` and late tasks against `S43`. The aggregator summed both into one portfolio number representing no market state that ever existed. Every task individually succeeded against a valid snapshot; the inconsistency existed only *across* tasks, where no check looked.
- **Why correct:** Traces the precise interaction (publication cadence overtaking run duration) rather than describing it as a generic race.
- **Common mistakes:** Characterizing it as "stale data" — it was fresh data, inconsistently combined, which is a distinct and harder-to-detect failure.
- **Follow-ups:** "Why didn't monitoring catch it?" (Every emitted signal — task success, completion, freshness timestamp — was genuinely green; no signal existed for cross-task input consistency,.)
-
-2. **Q: Why is pinning a snapshot per run a structural property rather than a configuration option?**
- **A:** If it is configurable, it can be misconfigured, and the failure is silent (produced no error). Making the run's snapshot ID a required parameter threaded through every task means "resolve latest per task" is not expressible in the API at all — the class of bug is designed out rather than guarded against.
- **Why correct:** States the specific design principle (make the failure inexpressible) rather than merely "pin the snapshot."
- **Common mistakes:** Fixing this with a config flag defaulting to the correct behaviour, leaving the incorrect behaviour reachable.
- **Follow-ups:** "What's the freshness cost?" (The run uses run-start data rather than per-task-latest — a bounded, known, and acceptable cost versus an unbounded correctness risk.)
-
-3. **Q: How would you validate that the dependency graph is actually correct, given a missing edge fails silently?**
- **A:** Periodically run a full unconditional revaluation and compare against what the graph-driven incremental path produced (the reconciliation) — a position whose value differs is one the graph failed to trigger. This is the only reliable detection, because the graph cannot validate itself.
- **Why correct:** Identifies that detection must come from an independent, non-graph-dependent path.
- **Common mistakes:** Attempting to validate the graph by inspecting the graph, which cannot reveal an edge that was never added.
- **Follow-ups:** "What causes edges to go missing in practice?" (A pricing-model change introducing a new factor dependency without the metadata being updated in lockstep,.)
-
-4. **Q: Why is pull-based work distribution preferred over push-based assignment for this grid?**
- **A:** Task durations are heterogeneous and not predictable in advance; pull-based distribution self-balances (a fast worker simply takes more tasks), whereas push-based round-robin strands fast workers idle while slow workers queue.
- **Why correct:** Ties the choice to the specific workload property (unpredictable heterogeneous durations) driving it.
- **Common mistakes:** Choosing push-based assignment for its apparent scheduling control, then needing complex rebalancing logic to recover what pull provides natively.
- **Follow-ups:** "When would push-based be preferable?" (When tasks must be routed to specific workers for data-locality reasons — not the case here, since market-data slices are small enough to replicate.)
-
-5. **Q: Why is losing the market-data snapshot archive worse than losing the risk-result store?**
- **A:** Results are reproducible from inputs, so a lost result store can be rebuilt by re-running; but inputs cannot be reconstructed from outputs, so a lost snapshot archive permanently destroys the ability to reproduce or defend any historical risk number.
- **Why correct:** Correctly derives DR priority from reproducibility direction rather than treating both stores as equally critical.
- **Common mistakes:** Applying uniform DR rigor to both, over-investing in result-store DR while under-protecting the genuinely irreplaceable input archive.
- **Follow-ups:** "What retention does the snapshot archive need?" (At minimum the regulatory record-retention period for the risk numbers derived from it — typically multi-year, driving the envelope-encryption requirement.)
-
-6. **Q: Why does memoizing fungible-instrument pricing produce superlinear benefit relative to portfolio count?**
- **A:** The same instrument frequently appears across many portfolios; as portfolio count grows, the number of *distinct* instruments grows far more slowly than total position count, so the memoization hit rate rises with scale.
- **Why correct:** Explains the specific structural reason the benefit compounds rather than remaining proportional.
- **Common mistakes:** Modelling cache benefit as a fixed percentage independent of scale.
- **Follow-ups:** "What must the memoization key include?" (Instrument terms version + market state version + model version — the full key, since a fungible instrument is only fungible under identical pricing inputs.)
-
-7. **Q: Critique a design where grid workers each load the complete market-data snapshot.**
- **A:** Snapshot memory is multiplied by worker count, and at large worker counts this dominates cluster memory for data the task never touches — a task pricing US equities does not need JPY vol surfaces. Loading only the slice the task's dependency subgraph requires cuts this by orders of magnitude.
- **Why correct:** Identifies the specific multiplication and the available sparsity.
- **Common mistakes:** Treating snapshot loading as a fixed startup cost rather than a per-worker memory multiplier.
- **Follow-ups:** "What does slice-loading depend on being correct?" (The same dependency graph, — a missing edge now causes a *task failure* on a missing slice rather than a silent staleness, which is arguably a safer failure mode.)
-
-8. **Q: Why must the limits engine query the risk store directly rather than reading the dashboard's cached view?**
- **A:** The dashboard's view is deliberately AP-postured and may be stale; the limits engine's decision has direct financial and regulatory consequence and must fail closed on staleness rather than approve against an unverified number.
- **Why correct:** Correctly separates the two consumers' consequence-of-staleness.
- **Common mistakes:** Reusing the dashboard read path for the limits engine because "it's the same data," silently inheriting the wrong consistency posture.
- **Follow-ups:** "How does the limits engine detect staleness?" (The stored `asOf` and run identifiers on every number, — the same metadata reproducibility requires.)
-
-9. **Q: How would you capacity-plan grid worker count?**
- **A:** Little's Law: required workers ≈ task arrival rate × mean task duration, sized against *volatile-session* task rates rather than calm-session averages — the incident occurred specifically because run duration stretched under a load profile the plan hadn't anticipated.
- **Why correct:** Applies the established capacity-planning technique with the domain-specific caveat that drove a real incident.
- **Common mistakes:** Sizing against average daily load, leaving no headroom for exactly the volatile sessions when risk numbers matter most.
- **Follow-ups:** "Why is under-provisioning here more dangerous than for a typical service?" (Slow risk during volatility is precisely when the numbers are most decision-critical — degradation correlates with need.)
-
-10. **Q: Synthesize how this design's reconciliation control relates to Modules 120 and 122.**
- **A:** All three are the same mechanism: independently recompute from source and compare against incrementally-maintained state. applied it to CQRS read-model drift, to migration-backfill accuracy, and this module to incremental-risk drift — confirming reconciliation as a general control wherever derived state is maintained incrementally rather than recomputed, not a technique specific to any one of those contexts.
- **Why correct:** Identifies the shared structure across three contexts rather than treating each as separate.
- **Common mistakes:** Treating reconciliation as a migration-only or CQRS-only technique.
- **Follow-ups:** "What makes it a permanent control here rather than a temporary one?" (Incremental intraday updating never ends, so drift accumulation never ends — unlike a migration, which completes.)
-
-### Advanced (10)
-
-1. **Q: Diagnose the incident from first principles and design the complete structural fix.**
- **A:** Root cause: no invariant enforced that all tasks in one run share one market state — "latest" was resolved independently per task, and the failure was invisible because it was an inconsistency *between* successful tasks, not a failure of any task. Fix: (1) make `snapshotId` a required parameter of the run, threaded to every task, with no API path that resolves latest per-task (Intermediate Q2); (2) have the aggregator *verify* every incoming partial result carries the run's expected `snapshotId` and reject the run outright on mismatch — a positive consistency check rather than an assumption; (3) alert on run duration exceeding snapshot publication cadence, since that ratio crossing 1.0 is the precondition that made the bug reachable at all.
- **Why correct:** Addresses the specific root cause plus a detection mechanism plus a leading indicator, rather than only the immediate fix.
- **Common mistakes:** Implementing only (1); without (2) a future code path could reintroduce the inconsistency with nothing checking for it.
- **Follow-ups:** "Why is (3) valuable given (1) and (2) already prevent the bug?" (It detects the *conditions* under which similar cross-task assumptions become unsafe, catching a whole class of future bugs rather than this one instance.)
-
-2. **Q: A team proposes eliminating the overnight full revaluation entirely, running purely incrementally. Evaluate.**
- **A:** This removes the only independent check on incremental drift (Intermediate Q3) — the full run is what validates both the dependency graph's completeness and the incremental path's accuracy. Without it, drift and missing-edge staleness accumulate with no detection mechanism whatsoever. The compute saving is real, but it purchases efficiency by deleting the system's correctness control, which for risk numbers is not a defensible trade.
- **Why correct:** Identifies that the overnight run's value is primarily *verification*, not primarily computation.
- **Common mistakes:** Evaluating the proposal purely on compute cost, missing that the full run is the reconciliation baseline.
- **Follow-ups:** "Is there a middle ground?" (Yes — reduce full-run *frequency* (e.g., weekly full, nightly sampled) rather than eliminating it, preserving the control at lower cost, provided the sample is representative rather than convenient.)
-
-3. **Q: Critique using speculative re-execution without addressing the determinism requirement.**
- **A:** Speculative execution means the same task may complete twice, and whichever result arrives first is used — so run-to-run the *set* of contributing computations differs even for identical inputs. If aggregation is order-dependent, results become irreproducible in exactly the system where reproducibility is a regulatory requirement. Speculative execution and determinism are compatible, but only if aggregation is made order-independent first; adopting the former without the latter silently breaks reproducibility.
- **Why correct:** Identifies the specific interaction between a performance optimization and a correctness requirement that are individually reasonable but jointly hazardous.
- **Common mistakes:** Treating straggler mitigation as a purely performance concern with no correctness implications.
- **Follow-ups:** "What's the ordering fix?" (Deterministic aggregation via stable sort on task key before summation, so contribution order is a function of task identity rather than arrival time,.)
-
-4. **Q: Design the reconciliation sampling strategy — which portfolios, how often, and why not uniformly random?**
- **A:** Stratify rather than sample uniformly: always include the largest-notional and highest-complexity portfolios (where an error has the greatest consequence), always include portfolios containing recently-changed pricing models (where dependency-graph edges are most likely missing), and sample the remaining tail randomly for baseline coverage. Uniform random sampling under-weights exactly the portfolios where errors matter most — the same structural blind spot demonstrated for percentage-based canary sampling missing a low-volume-but-critical partner.
- **Why correct:** Designs the sample around consequence and risk-of-error rather than statistical convenience, and correctly connects it to an already-established course finding.
- **Common mistakes:** Uniform random sampling, which is statistically defensible but consequence-blind.
- **Follow-ups:** "Which prior module established this exact sampling blind spot?" (aggregate/uniform sampling structurally under-representing the specific, high-consequence, low-volume case.)
-
-5. **Q: How would you support an auditor asking "reproduce the 14:32 risk number for Fund X from three years ago"?**
- **A:** Retrieve the stored `(snapshotId, modelVersion, positionSnapshotId, seed, runId)` for that number, fetch the immutable snapshot and position state from archive (the DR priority), instantiate the *recorded* model version — which requires the pricing-model registry to retain historical versions immutably — and re-run with deterministic aggregation, expecting byte-identical output. Any of these four missing (metadata, snapshot archive, model version, determinism) makes the request unanswerable.
- **Why correct:** Enumerates all four independently-necessary preconditions rather than only the metadata.
- **Common mistakes:** Assuming stored inputs suffice, forgetting the *pricing model itself* is an input that must be version-retained and re-instantiable years later.
- **Follow-ups:** "What's the hardest of the four to sustain over three years?" (Model re-instantiability — code and dependencies rot; this is why model versions should be retained as executable, containerized artifacts rather than source references, the reproducible-build discipline.)
-
-6. **Q: A regulator asks how the firm knows its intraday risk numbers are correct, not merely fresh. Answer honestly.**
- **A:** Cite the layered controls concretely: run-level input-consistency enforcement making the cross-snapshot class of error structurally inexpressible (Advanced Q1); periodic stratified reconciliation against independent full recomputation detecting both incremental drift and dependency-graph gaps (Advanced Q4, Intermediate Q3); full reproducibility metadata enabling any specific number to be independently re-derived on demand (Advanced Q5); and honestly note the residual: reconciliation is sampled between full runs, so the guarantee is "verified within the reconciliation window and sampling scope," not "continuously proven for every number" — a bounded, stated claim rather than an overclaim.
- **Why correct:** Gives specific mechanisms plus an honest statement of the residual limitation, the posture §Expert Q7 established as more credible than an unqualified assurance.
- **Common mistakes:** Answering "we validate our numbers" without the specific controls, or overclaiming continuous proof that the sampled design doesn't actually deliver.
- **Follow-ups:** "What would strengthen the claim most?" (Increasing full-reconciliation frequency, which directly narrows the unverified window — a concrete, costable improvement rather than a vague assurance.)
-
-7. **Q: Design a load test that would have caught the incident before production.**
- **A:** Test the *ratio* rather than either variable alone: drive market-data publication at volatile-session cadence (~20s) while simultaneously loading the grid to stretch run duration past that cadence, then assert every partial result within a run carries an identical `snapshotId`. Testing publication cadence and grid load independently — each within normal parameters — would never produce the condition, exactly as production didn't for eighteen months. This is the "test the actual constrained condition" applied to a condition defined by the interaction of two variables.
- **Why correct:** Identifies that the bug lives in a variable *ratio*, so the test must vary both simultaneously.
- **Common mistakes:** Load-testing the grid at peak task volume with a static or slow-publishing snapshot feed, which never creates the overlap.
- **Follow-ups:** "What assertion is the actual test?" (Not run success — the run succeeded — but input-consistency: all partial results share one `snapshotId`.)
-
-8. **Q: How does bitemporal storage of risk results (never overwriting) change the design, and why is it worth the storage cost?**
- **A:** Storing every computed number with both its `asOf` market time and its `computedAt` system time — rather than overwriting a portfolio's "current" risk — enables answering "what did we believe our exposure was at 14:32, as we believed it then?" which is distinct from "what was our actual exposure at 14:32, as we now know it." Regulatory and dispute contexts require the former; a mutable current-value store can only answer the latter. The storage cost is real but bounded and far cheaper than the inability to reconstruct decision-time state.
- **Why correct:** Names the specific distinction (belief-at-time vs. truth-as-now-known) that motivates bitemporality rather than describing it as generic versioning.
- **Common mistakes:** Treating a corrected/restated risk number as simply replacing the original, destroying the record of what was actually acted upon.
- **Follow-ups:** "Which prior module establishes this same append-only philosophy?" (the Event Sourcing — history as immutable record rather than mutable current state.)
-
-9. **Q: The dependency graph is derived from pricing-model metadata. Design the control preventing a model change from silently invalidating it.**
- **A:** Make graph regeneration a mandatory, mechanically-enforced step of model deployment — a fitness function failing the model-deployment pipeline if a model version is registered without a corresponding regenerated dependency-graph version, plus a post-deployment reconciliation run scoped to portfolios touching the changed model (Advanced Q4's stratification) verifying the regenerated graph actually triggers the positions it should. Documentation-and-discipline alone reliably fails here, exactly as demonstrated for saga-state monitoring not updated alongside a new saga step.
- **Why correct:** Mechanically couples the two artifacts that must change together and adds verification, rather than relying on process memory.
- **Common mistakes:** A checklist item asking engineers to regenerate the graph — the identical failure mode already demonstrated.
- **Follow-ups:** "Why is post-deployment verification needed if regeneration is enforced?" (Regeneration proves the step ran, not that the resulting graph is *correct* — the model's own metadata could be incomplete, the original failure mode.)
-
-10. **Q: As a Principal Engineer, synthesize the governance program required before intraday risk numbers may be used to gate live trading decisions.**
- **A:** (1) Structural input-consistency enforcement with aggregator-side verification (Advanced Q1). (2) Stratified, consequence-weighted reconciliation against full recomputation, run on a defined cadence with divergence alerting (Advanced Q4). (3) Complete reproducibility metadata plus retained, re-instantiable model versions, proven by periodic spot-reproduction rather than assumed (Advanced Q5). (4) Mechanically-enforced dependency-graph regeneration coupled to model deployment, with post-deployment verification (Advanced Q9). (5) Deterministic aggregation as a precondition for any straggler-mitigation optimization (Advanced Q3). (6) CP-postured consumption for the limits engine specifically, failing closed on staleness. (7) An explicit, documented statement of the residual unverified window (Advanced Q6), reviewed as the reconciliation cadence changes.
- **Why correct:** Assembles every specific control into a coherent, gate-able program, including the honest residual statement rather than an implied completeness claim.
- **Common mistakes:** Presenting the compute architecture without the verification, reproducibility, and residual-disclosure controls that make the numbers defensible rather than merely fast.
- **Follow-ups:** "Which single control would you implement first on an ungoverned existing engine?" (Reconciliation against full recomputation — it is the only control that detects errors you don't yet know the shape of, including the dependency-graph gaps and drift the others assume away.)
-
-### Expert (10)
-
-1. **Q: The business asks for sub-second intraday risk. Evaluate feasibility against this architecture.**
- **A:** Sub-second is achievable only for a *restricted* question, not the full one. Full incremental recomputation across an affected subgraph involves grid dispatch, pricing, and hierarchical aggregation — realistically seconds-to-tens-of-seconds. Sub-second is attainable for pre-computed sensitivity-based *approximations* (delta/gamma-approximated P&L under a factor move, evaluated in-memory without repricing), which is a genuinely different and less accurate computation. The correct answer is to offer both, explicitly labelled: a sub-second approximate number for immediate feedback and the accurate repriced number seconds later — never to present the approximation as if it were the repriced figure.
- **Why correct:** Distinguishes what is achievable from what was asked, and proposes a design that serves the need honestly rather than either refusing or silently degrading accuracy.
- **Common mistakes:** Committing to sub-second full revaluation, then meeting the latency target by silently substituting approximations users believe are exact.
- **Follow-ups:** "What's the risk of showing both?" (Users reconciling two different numbers for the same question — mitigated by labelling and by showing the approximation *only* until the exact figure supersedes it.)
-
-2. **Q: Compare historical-simulation VaR and Monte Carlo VaR as workloads, and their differing implications for this architecture.**
- **A:** Historical simulation replays a fixed set of ~250–1,000 actual historical scenarios: deterministic by construction, bounded and predictable work, trivially reproducible. Monte Carlo generates thousands of simulated scenarios from a model: far heavier, and reproducible *only* if the seed is captured and the generator is deterministic across platforms. Architecturally, historical simulation is the easier workload and the easier reproducibility story; Monte Carlo demands strictly more grid capacity and adds seed-management and cross-platform-generator-determinism as first-class concerns.
- **Why correct:** Compares them on the dimensions this architecture actually cares about (work volume, reproducibility mechanics) rather than on statistical merits alone.
- **Common mistakes:** Comparing only statistical properties, missing that reproducibility difficulty differs sharply between them.
- **Follow-ups:** "What's the subtle cross-platform Monte Carlo trap?" (The same seed on different CPU architectures or math-library versions can yield different sequences — so the generator implementation and version must be pinned alongside the seed, or reproducibility silently fails only on heterogeneous grids.)
-
-3. **Q: Design the grid's multi-tenancy if this engine serves several independently-managed fund families with different SLAs.**
- **A:** Dedicated worker pools per tenant class rather than one shared pool — directly the finding, where a shared pool let one tenant's backlog degrade unrelated tenants' latency. Here the stakes are higher: a fund family's risk run being starved by another's is not merely a latency regression but a mandate-monitoring gap. Shared *code*, isolated *capacity*, per-tenant configuration and SLA — the model, transplanted directly.
- **Why correct:** Reapplies an established finding to a context with strictly higher consequence, rather than re-deriving it.
- **Common mistakes:** Sharing one grid pool for efficiency, reproducing the exact incident in a domain where the consequence is regulatory rather than operational.
- **Follow-ups:** "What's the efficiency cost, and is there a middle ground?" (Idle capacity in quiet tenants' pools; the quota-bounded shared pool is the middle ground, viable only with tested quota enforcement.)
-
-4. **Q: Apply this course's "declared ≠ actual" theme to this system's central claim.**
- **A:** The claim is "this is the portfolio's current risk." Its declared basis is that a run completed successfully with a recent timestamp. Earlier analysis demonstrated that basis is insufficient — a run can complete, with every task succeeding, and produce a number corresponding to no real market state. The actual basis requires four independent verifications the declared basis doesn't provide: input consistency across the fan-out (Advanced Q1), dependency-graph completeness (Intermediate Q3), incremental-drift bounds (Advanced Q4), and reproducibility (Advanced Q5). This is the theme's sharpest form in the course so far, because unlike a stale cache or an unenforced policy, the artifact here is a *number a human acts on immediately*, and it carries no visible marker of its own unreliability.
- **Why correct:** Identifies the specific declared-vs-actual gap and enumerates exactly what closes it, while articulating why this instance is sharper than prior ones.
- **Common mistakes:** Treating freshness and success as jointly sufficient evidence of correctness — precisely the reasoning the system embodied for eighteen months.
- **Follow-ups:** "Why is a wrong risk number more dangerous than a wrong read model?" (A stale read model degrades a view; a wrong risk number is consumed by a decision process that immediately converts it into a market position.)
-
-5. **Q: Design the incremental-recomputation trigger policy — every tick, or something else?**
- **A:** Not every tick: at institutional market-data rates, tick-triggered recomputation would keep the grid permanently saturated recomputing negligible moves. Trigger on *materiality* — a factor move exceeding a threshold calibrated per factor's own volatility (a 1bp rates move and a 1% equity move are not comparable), plus a mandatory floor cadence ensuring recomputation at least every N minutes regardless of quiet markets, plus immediate triggering on position changes (a new trade must be reflected without waiting for a market move). Three triggers, deliberately: materiality, floor cadence, and position change.
- **Why correct:** Designs a policy from the actual triggering causes rather than defaulting to either extreme, and calibrates materiality per-factor rather than uniformly.
- **Common mistakes:** A single uniform move threshold across all factor types, which is either too sensitive for volatile factors or too insensitive for stable ones.
- **Follow-ups:** "Why is the floor cadence necessary if nothing material moved?" (It bounds the age of the number, so a quiet market cannot silently produce an arbitrarily stale figure that appears current.)
-
-6. **Q: A PM disputes a risk number, claiming their own spreadsheet shows different exposure. Walk through the investigation.**
- **A:** Reproduce the engine's number from its recorded inputs (Advanced Q5) to establish it is at least self-consistent. Then diff *inputs* rather than outputs: does the PM's position set match the engine's `positionSnapshotId` (often the discrepancy — a trade booked after the snapshot); does the market data match (often a different pricing source); does the model match (often the PM uses a simpler approximation). In practice the majority of such disputes resolve to an input difference, not a computational error — which is why the reproducibility metadata is the primary investigative tool, and why an engine that cannot state its inputs cannot resolve disputes at all.
- **Why correct:** Structures the investigation to isolate the common cause (input mismatch) first, and ties the investigation's feasibility directly to the metadata.
- **Common mistakes:** Immediately auditing pricing logic, which is the least likely cause and the most expensive to investigate.
- **Follow-ups:** "What if inputs match and outputs differ?" (Then it's genuinely a model or aggregation difference — escalate to model validation, and treat it as a potential correctness incident rather than a support query.)
-
-7. **Q: Evaluate moving this workload to serverless/elastic cloud compute rather than a fixed grid.**
- **A:** The workload profile is unusually well-suited: bursty (concentrated at market events and end-of-day), embarrassingly parallel, and stateless per task. Elastic compute avoids provisioning for peak that idles most of the day — a genuine, large cost saving. The countervailing factors are specific: cold-start latency matters when run completion is the SLA (the Lambda cold-start material); pricing libraries are often large native dependencies that inflate cold start; and market-data licensing sometimes contractually restricts where data may be processed, which can rule out certain regions or providers outright. The recommendation is workload-split: elastic capacity for burst above a fixed baseline, rather than either extreme.
- **Why correct:** Weighs genuine fit against three specific, non-obvious constraints including a non-technical (licensing) one that frequently decides this question in practice.
- **Common mistakes:** Evaluating purely on compute economics, missing that market-data licensing terms can constrain the deployment topology.
- **Follow-ups:** "Why does the licensing constraint surprise engineering teams?" (It is a contractual property of the data, invisible in the architecture, and typically discovered only when legal reviews a cloud-migration proposal already deep in design.)
-
-8. **Q: How should the engine handle a market-data feed publishing a bad tick (an obviously erroneous price)?**
- **A:** Reject at ingestion, not at consumption — a plausibility check (move exceeding a multiple of the factor's own recent volatility, or crossing a hard sanity bound) at snapshot-construction time, quarantining the suspect value and either falling back to the prior value or refusing to publish the snapshot. Consumption-time filtering is far worse: different consumers apply different filters, so the same "snapshot" yields different risk depending on who read it, destroying the single-market-state property the fix established. Rejection must also be *recorded*, because a quarantined tick that was actually a real market move is itself a serious error requiring detection.
- **Why correct:** Places the control at the point that preserves the architecture's core invariant, and notes the false-positive risk rather than treating rejection as free.
- **Common mistakes:** Filtering at consumption for flexibility, silently reintroducing cross-consumer inconsistency.
- **Follow-ups:** "What's the danger of an over-aggressive plausibility filter?" (During genuine market dislocation — exactly when risk numbers matter most — real extreme moves get quarantined as implausible, so the engine reports calm during a crisis.)
-
-9. **Q: Design the monitoring that distinguishes "the engine is slow" from "the engine is wrong."**
- **A:** They require entirely separate signal sets. *Slow* is run duration, task-duration P99, queue depth, worker utilization — standard and well-covered by the SLO discipline. *Wrong* has no natural signal and must be constructed: input-consistency verification per run (Advanced Q1), reconciliation divergence magnitude and trend (Advanced Q4), dependency-graph coverage (proportion of positions triggered by a known factor move versus expected), and spot-reproduction success rate (Advanced Q5). The critical insight is that every *wrong* signal must be actively built, because unlike slowness, incorrectness produces no natural symptom — ran wrong for hours while every conventional signal was green.
- **Why correct:** Identifies the asymmetry — slowness is self-signalling, incorrectness is not — and specifies the constructed signals required.
- **Common mistakes:** Investing monitoring effort proportionally across both, when incorrectness needs disproportionately more because it has no natural telemetry.
- **Follow-ups:** "Which signal would have caught fastest?" (Per-run input-consistency verification — it detects the condition at run time, versus reconciliation which caught it four hours later.)
-
-10. **Q: Deliver the closing synthesis: what makes a risk engine a genuinely harder system-design problem than the consumer-scale systems in Modules 38–44?**
- **A:** Not scale — a news feed handles more requests. The difference is that **correctness is unobservable and consequential simultaneously**. A broken news feed is visibly broken; a wrong risk number is indistinguishable from a right one at the point of consumption, and is converted into a market position within seconds. This inverts the usual engineering priority: the majority of this design's complexity — snapshot pinning, deterministic aggregation, reproducibility metadata, reconciliation, dependency-graph verification — exists not to make the system fast or scalable, both of which are comparatively solved, but to make its output *trustworthy and defensible*. A Principal Engineer evaluating this domain should recognize that the compute grid is the easy part, and that every senior-level design decision here is ultimately about establishing evidence for a number's correctness rather than about producing the number.
- **Why correct:** Identifies the genuinely distinguishing property (unobservable-yet-consequential correctness) and correctly locates where the design's difficulty actually sits, rather than defaulting to scale.
- **Common mistakes:** Framing this as a scale problem and designing accordingly, producing a fast engine whose numbers cannot be defended.
- **Follow-ups:** "Which upcoming module in this run shares this property most closely?" (the regulatory reporting pipeline — also unobservably wrong, also consequential, but with a deadline rather than a latency SLA as the additional constraint.)
-
----
-
 ## 11. Coding Exercises
 
 ### Easy — Deterministic Aggregation
@@ -399,7 +311,7 @@ public decimal AggregateDeterministically(IEnumerable<PartialResult> partials) =
 **Space complexity:** O(n) to materialize the ordering.
 **Optimized solution:** Use `decimal` (exact base-10) where the domain permits, avoiding floating-point associativity entirely; where `double` is required for performance, apply Kahan/Neumaier compensated summation, which bounds error independent of order rather than merely fixing order.
 
-### Medium — Run-Scoped Snapshot Enforcement (Advanced Q1)
+### Medium — Run-Scoped Snapshot Enforcement (§2.8)
 **Problem:** Make per-task snapshot resolution structurally inexpressible.
 **Solution:**
 ```csharp
@@ -419,7 +331,7 @@ public sealed class RiskTask
 ```
 **Time complexity:** O(1).
 **Space complexity:** O(1) per task beyond its position block.
-**Optimized solution:** Add aggregator-side verification rejecting any partial result whose `Run.Snapshot` differs from the run's expected value — defence in depth, so a future refactor cannot silently reintroduce the inconsistency (Advanced Q1's point 2).
+**Optimized solution:** Add aggregator-side verification rejecting any partial result whose `Run.Snapshot` differs from the run's expected value — defence in depth, so a future refactor cannot silently reintroduce the inconsistency (§2.8's point 2).
 
 ### Hard — Dependency-Graph Subgraph Resolution
 **Problem:** Given a moved risk factor, resolve the affected position set for incremental recomputation.
@@ -444,9 +356,9 @@ public IReadOnlySet<PositionId> ResolveAffected(RiskFactorId moved, DependencyGr
 ```
 **Time complexity:** O(V + E) over the reachable subgraph, not the whole graph.
 **Space complexity:** O(V) for the visited sets.
-**Optimized solution:** Precompute and cache transitive closures for frequently-moved factors, invalidated on graph regeneration (Advanced Q9) — trading memory for avoiding repeated traversal on every tick.
+**Optimized solution:** Precompute and cache transitive closures for frequently-moved factors, invalidated on graph regeneration (§2.4) — trading memory for avoiding repeated traversal on every tick.
 
-### Expert — Reconciliation with Stratified Sampling (Advanced Q4)
+### Expert — Reconciliation with Stratified Sampling (§2.9)
 **Problem:** Compare incremental state against full recomputation, sampling by consequence rather than uniformly.
 **Solution:**
 ```csharp
@@ -819,15 +731,15 @@ classDiagram
  IRiskStore --> RiskRun: provenance
 ```
 
-**Sequence diagram:** the second diagram, with the aggregator's snapshot-verification step (Advanced Q1) preceding summation.
+**Sequence diagram:** the second diagram, with the aggregator's snapshot-verification step (§2.8) preceding summation.
 
-**Design patterns used:** Fork-Join (grid fan-out/fan-in); Memento (immutable snapshots as captured state); Strategy (interchangeable VaR methodologies — historical simulation vs. Monte Carlo, Expert Q2); Specification (materiality trigger rules, Expert Q5); Bulkhead (per-tenant grid pools, Expert Q3).
+**Design patterns used:** Fork-Join (grid fan-out/fan-in); Memento (immutable snapshots as captured state); Strategy (interchangeable VaR methodologies — historical simulation vs. Monte Carlo, §2.3); Specification (materiality trigger rules, §2.10); Bulkhead (per-tenant grid pools, §2.12).
 
 **SOLID mapping:** Single Responsibility (task executes, aggregator combines, store persists — none overlap); Open/Closed (a new VaR methodology adds a Strategy implementation without touching grid or aggregation); Liskov (every VaR strategy must satisfy the same determinism and provenance contract — verified by contract test, the discipline); Interface Segregation (`IRiskStore` read and append paths separated, since the limits engine needs only reads with staleness metadata); Dependency Inversion (task depends on an `IMarketDataAccessor` requiring a `SnapshotId`, never a concrete "latest" resolver — the structural fix).
 
 **Extensibility:** A new instrument type adds a pricing model to the registry plus dependency-graph metadata; a new risk measure adds a Strategy. Neither touches the grid, aggregator, or store.
 
-**Concurrency/thread safety:** Tasks are pure and share nothing — the grid requires no locking. The aggregator's ordering is the sole point where concurrency meets correctness, and is resolved by making order a function of task identity rather than arrival. The risk store is append-only (Advanced Q8), eliminating write-write conflicts entirely.
+**Concurrency/thread safety:** Tasks are pure and share nothing — the grid requires no locking. The aggregator's ordering is the sole point where concurrency meets correctness, and is resolved by making order a function of task identity rather than arrival. The risk store is append-only (§2.6), eliminating write-write conflicts entirely.
 
 ---
 
@@ -843,7 +755,7 @@ classDiagram
 
 **Fix:** Cost-based partitioning — the task generator estimates per-position pricing cost from instrument type and model, then partitions to equalize estimated *cost* per task rather than position count, splitting expensive positions into their own fine-grained tasks. Overrun eliminated; total grid work unchanged, merely distributed to eliminate the tail.
 
-**Prevention:** (1) Alert on task-duration distribution skew (ratio of P99 to median) rather than on mean or total duration — the signal that was flat while the problem was severe. (2) Require new instrument types to register an estimated pricing-cost class at model-registration time, feeding the partitioner — mechanically coupling the two, exactly as Advanced Q9 coupled graph regeneration to model deployment. (3) Load-test with the *real* instrument mix including exotics (the benchmarking note), which a uniform synthetic book would never have surfaced.
+**Prevention:** (1) Alert on task-duration distribution skew (ratio of P99 to median) rather than on mean or total duration — the signal that was flat while the problem was severe. (2) Require new instrument types to register an estimated pricing-cost class at model-registration time, feeding the partitioner — mechanically coupling the two, exactly as §2.4 coupled graph regeneration to model deployment. (3) Load-test with the *real* instrument mix including exotics (the benchmarking note), which a uniform synthetic book would never have surfaced.
 
 ---
 
@@ -861,14 +773,14 @@ classDiagram
 *Advantages:* Compute proportional to what actually changed; sub-minute freshness on material moves; scales with change rate rather than book size.
 *Disadvantages:* Correctness depends on dependency-graph completeness, whose failure mode is silent; introduces drift requiring reconciliation; substantially more engineering machinery.
 *Cost:* Moderate compute; high engineering complexity.
-*Complexity:* High. *Maintainability:* Moderate, contingent on Advanced Q9's graph-regeneration coupling being genuinely enforced. *Scalability:* Excellent.
+*Complexity:* High. *Maintainability:* Moderate, contingent on §2.4's graph-regeneration coupling being genuinely enforced. *Scalability:* Excellent.
 
 **Option C — Sensitivity-based approximation only (no intraday repricing):**
-*Advantages:* Near-instant — approximate P&L from pre-computed Greeks evaluated in-memory; negligible compute; sub-second achievable (Expert Q1).
+*Advantages:* Near-instant — approximate P&L from pre-computed Greeks evaluated in-memory; negligible compute; sub-second achievable (§2.13).
 *Disadvantages:* Accurate only for small moves in factors where the approximation holds; systematically wrong for large moves and for instruments with significant convexity — i.e., wrong precisely during market dislocation when risk matters most.
 *Cost:* Very low. *Complexity:* Low. *Maintainability:* High. *Scalability:* Excellent. *Accuracy:* Unacceptable as a sole basis for risk decisions.
 
-**Recommendation: Option B, with Option C as an explicitly-labelled complement.** Option A's correctness simplicity is genuinely attractive and should not be dismissed — for a firm whose book is small enough that full 15-minute revaluation fits its compute budget, A is the *better* choice, because it eliminates an entire class of silent failure for a cost it can afford. That is a real threshold, not a rhetorical concession. At the scale estimates, however, A's cost is prohibitive, making B necessary — and B's silent-failure risk is then acceptable only because reconciliation and graph-regeneration enforcement (Advanced Q9) convert it into a detected failure. Option C is added on top of B, clearly labelled as approximate and superseded within seconds by B's exact figure (Expert Q1), never presented as equivalent. The decision hinges on one question a candidate should ask before answering: *is full periodic revaluation within this firm's compute budget?* — because if it is, the simpler correctness story wins.
+**Recommendation: Option B, with Option C as an explicitly-labelled complement.** Option A's correctness simplicity is genuinely attractive and should not be dismissed — for a firm whose book is small enough that full 15-minute revaluation fits its compute budget, A is the *better* choice, because it eliminates an entire class of silent failure for a cost it can afford. That is a real threshold, not a rhetorical concession. At the scale estimates, however, A's cost is prohibitive, making B necessary — and B's silent-failure risk is then acceptable only because reconciliation and graph-regeneration enforcement (§2.4) convert it into a detected failure. Option C is added on top of B, clearly labelled as approximate and superseded within seconds by B's exact figure (§2.13), never presented as equivalent. The decision hinges on one question a candidate should ask before answering: *is full periodic revaluation within this firm's compute budget?* — because if it is, the simpler correctness story wins.
 
 ---
 
@@ -878,13 +790,13 @@ classDiagram
 
 **Engineering trade-offs:** The defining trade-off is the — computational simplicity versus correctness simplicity. Option A buys an airtight correctness story with compute; Option B buys compute efficiency by taking on a silent-failure class that must then be actively mitigated. Recognizing that these are the two currencies, and that the exchange rate depends on book size and compute budget, is the senior insight; jumping straight to incremental because it is more sophisticated is the junior one.
 
-**Technical leadership:** The controls that matter most here (reconciliation, graph-regeneration coupling, input-consistency verification) all share a property that makes them organizationally fragile: they cost effort continuously and produce nothing visible when working. A Principal Engineer's specific job is ensuring these survive budget pressure and team turnover — which means making them mechanically enforced (Advanced Q9) rather than process-dependent, because a control that requires remembering will eventually be forgotten.
+**Technical leadership:** The controls that matter most here (reconciliation, graph-regeneration coupling, input-consistency verification) all share a property that makes them organizationally fragile: they cost effort continuously and produce nothing visible when working. A Principal Engineer's specific job is ensuring these survive budget pressure and team turnover — which means making them mechanically enforced (§2.4) rather than process-dependent, because a control that requires remembering will eventually be forgotten.
 
-**Cross-team communication:** Risk numbers are consumed by PMs, risk officers, compliance, and regulators — four audiences with genuinely different definitions of "correct." A PM wants the number to reflect their intended position; compliance wants it to reflect the booked position; a regulator wants it reproducible. These conflict (Expert Q6's dispute is exactly this), and a Principal Engineer must surface the conflict explicitly rather than let each audience assume the system serves their definition.
+**Cross-team communication:** Risk numbers are consumed by PMs, risk officers, compliance, and regulators — four audiences with genuinely different definitions of "correct." A PM wants the number to reflect their intended position; compliance wants it to reflect the booked position; a regulator wants it reproducible. These conflict (§2.16's dispute walkthrough is exactly this), and a Principal Engineer must surface the conflict explicitly rather than let each audience assume the system serves their definition.
 
 **Architecture governance:** the design decisions — snapshot pinning, determinism, bitemporality, reconciliation cadence — should be ADRs with their rationale recorded, specifically because each will look like unnecessary overhead to a future engineer who has not experienced the incident. The ADR's job here is to preserve the reasoning, not merely the decision.
 
-**Cost optimization:** Grid compute is typically among the largest infrastructure line items at a buy-side firm. The highest-leverage optimizations are not infrastructure but modelling: memoization of fungible instruments, cost-based partitioning, and materiality-triggered recomputation (Expert Q5) each cut work substantially without touching hardware. Expert Q7's elastic-burst split is the infrastructure lever, subject to its licensing constraint.
+**Cost optimization:** Grid compute is typically among the largest infrastructure line items at a buy-side firm. The highest-leverage optimizations are not infrastructure but modelling: memoization of fungible instruments, cost-based partitioning, and materiality-triggered recomputation (§2.10) each cut work substantially without touching hardware. §2.16's elastic-burst split is the infrastructure lever, subject to its licensing constraint.
 
 **Risk analysis:** The dominant risk is not outage but *undetected incorrectness* — ran wrong for hours, ran slow for weeks, and the wrong one was far harder to see. A Principal Engineer's risk register for this system should therefore weight correctness-verification gaps above availability gaps, which inverts the usual ordering and will need explicit justification to stakeholders accustomed to uptime-centric risk framing.
 

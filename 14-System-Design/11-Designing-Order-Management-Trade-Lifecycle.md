@@ -27,44 +27,231 @@ PM Intent ──► Order (Aggregate) ──► Compliance/Risk checks ──►
 
 ## 2. Deep Dive
 
-### 2.1 The Order State Machine and Why It Is Not a Simple One
-An order's states — `New`, `PendingNew`, `Working`, `PartiallyFilled`, `Filled`, `PendingCancel`, `Cancelled`, `Rejected`, `Expired` — look like a textbook state machine until three realities intrude:
+This section is written to be **complete on its own** — every mechanism, the reasoning that selects it, the failure mode it introduces, and the push-back a Principal/Staff interviewer will raise, answered inline.
 
-- **Pending states are real states, not transient.** `PendingCancel` means "we have asked the venue to cancel and do not yet know whether it will." During that window the order may still fill. A design treating cancel as synchronous is wrong in a way that produces unintended positions.
-- **Transitions are driven by an external party.** The venue, not the firm, decides whether a cancel succeeds or a fill occurs. The OMS does not *effect* transitions; it *learns of* them.
-- **Terminal is not always terminal.** A `Filled` order can be busted (the venue cancels an executed trade, sometimes hours later), returning it to an amended state — the same correction problem established for prices, now applied to executions.
+### 2.1 What an OMS Owns — and How It Differs From an EMS
 
-### 2.2 FIX Semantics: Execution Reports, ClOrdID Chains, and Ordering
-FIX (Financial Information eXchange) is the dominant venue protocol, and three of its properties shape the design:
+The OMS owns the **authoritative current state and full history of every order**: the answer to *"what is this order's state, and how did it get there."* No other system owns that.
 
-- **Execution reports are the sole state-transition mechanism.** Every fill, reject, cancel acknowledgment, and status change arrives as an `ExecutionReport` message. The OMS's state is a fold over these reports, which is precisely why argues the order should be event-sourced — the domain hands you an event stream whether or not you model it as one.
-- **ClOrdID chaining.** An amendment does not mutate an order in place; it creates a new client order ID referencing the original via `OrigClOrdID`. The "order" a user sees is therefore a *chain* of ClOrdIDs, and the OMS must maintain that chain to answer "what happened to my order" across amendments.
-- **Sequence numbers and gap-fill.** FIX sessions have their own sequence numbering with resend semantics. A gap must trigger a resend request; a missed execution report means the firm's state diverges from the venue's silently — the same unrecoverable-gap property established for market data, with the added consequence that here the missing message may be a fill representing real money.
+An **EMS** (Execution Management System) is a different optimisation target, which is why firms run both:
 
-### 2.3 Idempotency Under Retransmission
-FIX resend, network retry, and OMS restart all mean the same execution report can arrive more than once. Applying a fill twice double-counts the position — a direct, immediate financial error.
+| | OMS | EMS |
+|---|---|---|
+| Optimised for | Correctness, completeness, auditability | Trader workflow, low-latency market access |
+| Owns | Order lifecycle, compliance, allocation, settlement handoff | Algorithmic strategies, real-time market data, venue microstructure |
+| Failure posture | Refuse rather than proceed uncertainly | Speed |
 
-The mechanism is deduplication on the venue's own execution identifier (`ExecID`), which is unique per execution and stable across resends. Critically, this must be checked *inside* the same transaction that applies the fill, not as a pre-check followed by a separate write — the pre-check-then-write pattern has a race window that concurrent processing will eventually hit. This is the idempotency discipline in its highest-consequence form: a duplicated saga step here is a duplicated position.
+They coexist because the targets genuinely conflict: an OMS that optimised for latency would drop the controls that make it the system of record.
 
-### 2.4 Pre-Trade Checks: The Latency/Correctness Bind
-Before routing, the OMS must check compliance (mandate restrictions, restricted lists) and risk (limits). These checks are on the critical path — every millisecond delays execution and, in fast markets, costs money through worse fills.
+### 2.2 The Order State Machine — and Why It Is Not a Textbook One
 
-This creates a genuine bind: the checks need current data (a limit check against stale exposure is worthless), but fetching current data adds latency. The resolutions available are all imperfect: cache limits locally and accept bounded staleness; check asynchronously and cancel after the fact (unacceptable for hard mandate limits); or accept the latency. works this decision, and the honest answer differs by check type — a hard regulatory restriction must be synchronous and correct; a soft internal threshold can tolerate bounded staleness.
+The states — `New`, `PendingNew`, `Working`, `PartiallyFilled`, `Filled`, `PendingCancel`, `Cancelled`, `Rejected`, `Expired` — look ordinary until three realities intrude.
 
-### 2.5 Allocation: One Order, Many Accounts
-Institutional orders are frequently placed in aggregate ("buy 500,000 shares") and then allocated across many underlying client accounts after execution. Allocation carries its own correctness requirements: fills must be distributed by a documented, fair, and reproducible rule (typically pro-rata by intended allocation, with defined rounding treatment), because unfair allocation between clients is a regulatory violation, not merely an operational error.
+**Pending states are real states, not transient ones.** `PendingCancel` means "we have asked the venue to cancel and do not yet know whether it will." **During that window the order can still fill.** A design treating cancel as synchronous is wrong in a way that produces unintended positions.
 
-The subtle constraint: **rounding must be deterministic and must reconcile exactly.** Allocating 500,000 shares pro-rata across 37 accounts produces fractional shares; the rounding rule must be specified such that allocated quantities sum exactly to the filled quantity — an off-by-one from independent rounding is a real break requiring manual intervention.
+**Transitions are driven by an external party.** The venue decides whether a cancel succeeds or a fill occurs. The OMS does not *effect* transitions; it **learns of** them. Every design decision downstream follows from this.
 
-### 2.6 Why the Order Should Be Event-Sourced
-Earlier analysis established that Event Sourcing is justified where an entity's full history has genuine, ongoing business value — and warned against adopting it by default. The order is the clearest positive case in this course:
+**Terminal is not always terminal.** A `Filled` order can be **busted** — the venue cancels an executed trade, sometimes hours later — returning it to an amended state. Handle a bust as a **new event appended to the order's stream reversing the execution's effect**, never by deleting the original fill: the original execution genuinely happened and was acted upon; the bust is a subsequent fact. Reverse forward, never erase.
 
-- The domain *is* an event stream (execution reports arrive as events regardless of internal modelling).
-- Regulatory reconstruction demands the full sequence, not the final state ("show every state this order passed through and when").
-- Busts and amendments are corrections to history, which an event log handles naturally and a mutable current-state row handles badly.
-- Best-execution analysis requires knowing exactly what was known at each decision point.
+**Rejected orders must be recorded, not discarded.** The rejection is regulatory evidence that a control functioned. Discarding it destroys the record that the firm's compliance checks were operating.
 
-Where counselled caution, this is the case that satisfies its test unambiguously.
+### 2.3 FIX Semantics — Execution Reports, ClOrdID Chains, Sessions
+
+**Execution reports are the sole state-transition mechanism.** Every fill, reject, cancel acknowledgement and status change arrives as an `ExecutionReport`. The OMS's state is a **fold over these reports** — which is precisely why the order should be event-sourced (§2.9): the domain hands you an event stream whether or not you model it as one.
+
+**ClOrdID chaining.** An amendment does not mutate an order in place; it creates a new client order ID referencing the original via `OrigClOrdID`. The "order" a user sees is a **chain** of ClOrdIDs, and the OMS must maintain that chain to answer "what happened to my order" across amendments.
+
+**Sequence numbers and gap-fill.** FIX sessions carry their own sequence numbering with resend semantics. A gap must trigger a resend request. A missed execution report means the firm's state diverges from the venue's **silently** — the same unrecoverable-gap property as market data, with the added consequence that the missing message may be a fill representing real money and a real position.
+
+**FIX sessions cannot be arbitrarily load-balanced.** A session is a stateful connection with its own sequence numbering; migrating mid-session breaks sequence continuity and triggers gap-fill or session-reset handling. Sessions are **pinned to instances**, not balanced — which constrains the whole deployment model.
+
+### 2.4 Idempotency Under Retransmission — and the Scope Trap
+
+FIX resend, network retry and OMS restart all mean the same execution report can arrive more than once. Applying a fill twice double-counts the position: a direct, immediate financial error.
+
+The mechanism is deduplication on the venue's own execution identifier (`ExecID`). Two requirements:
+
+**Deduplicate inside the same transaction that applies the fill.** A pre-check followed by a separate write has a race window that concurrent processing will eventually hit. This is the idempotency discipline in its highest-consequence form — a duplicated step here is a duplicated position.
+
+**Verify the identifier's actual uniqueness scope, per venue.** §4's incident: the venue's `ExecID` uniqueness was scoped **per session**, not globally. After a session restart the sequence reset, and a genuinely new fill bearing a previously-seen `ExecID` was **silently discarded as a duplicate**.
+
+What makes that incident instructive is its undetectability: the system's behaviour when discarding a real fill was **byte-identical** to its behaviour when correctly rejecting a duplicate — no error, no warning, a normal deduplication path. There is no signal distinguishing "correctly rejected a duplicate" from "incorrectly rejected a genuine execution," because the distinction lives in information the OMS did not have.
+
+The structural fix:
+
+1. A **composite key** `(VenueId, SessionId, ExecID)` matching the actual uniqueness scope.
+2. Treat every venue's identifier-uniqueness scope as an **explicitly documented, verified-at-onboarding property**, never inferred from the protocol specification's stated guarantee.
+3. **Count and alert on deduplication rate** per venue, so a spike in "duplicates" — which is what a scope mismatch looks like — becomes visible.
+4. Rely on daily reconciliation (§2.11) as the external detector, because no internal signal exists.
+
+### 2.5 The Amendment Race — and Why Optimistic Application Is Wrong
+
+A cancel/replace and a fill can cross: the firm believes it has amended, while the venue fills the original. If the OMS optimistically applies the amendment to its own state, it now believes it has a working amended order when it actually has a fill on the original — an unintended position and an incorrect view of remaining exposure.
+
+A proposal to apply amendments optimistically "to reduce perceived latency" should be rejected: it converts an edge case into **designed behaviour**. The OMS's state would routinely reflect amendments the venue has not accepted, so the firm's authoritative record becomes speculative during every amendment's flight time. The latency it saves is *display* latency; the correctness it costs is in the system of record. Show "pending" in the UI; keep the state honest.
+
+### 2.6 Pre-Trade Checks — the Latency/Correctness Bind
+
+Before routing, the OMS must check compliance (mandate restrictions, restricted lists) and risk (limits). These sit on the critical path, where every millisecond delays execution and, in fast markets, costs money through worse fills.
+
+**Order the checks by cost × rejection probability:**
+
+1. **Authorization** — fast, local, definitively rejects an unauthorised trader.
+2. **Restricted list / compliance** — fast, cached lookup.
+3. **Risk limits** — slowest, requires current exposure.
+
+Putting the definitive local checks first means an unauthorised or restricted order never incurs the expensive risk call at all.
+
+**The bind itself has no clean resolution, and the honest answer differs by check type.** The checks need current data (a limit check against stale exposure is worthless), but fetching current data adds latency. Options: cache locally and accept bounded staleness; check asynchronously and cancel after the fact (unacceptable for hard mandate limits); or accept the latency.
+
+**Note the error direction when caching position data**, because it is what decides the question: stale data **understates** exposure when positions have grown — so the check most likely to be wrong is precisely the one guarding against over-exposure. Bounded staleness is acceptable for soft internal thresholds; a hard regulatory limit must be checked against current state.
+
+### 2.7 Parent and Child Orders — the Algorithmic Model
+
+A **parent** order holds the PM's intent (quantity, limit, strategy, constraints). **Child** orders are the algorithm's slices routed to venues. The parent's state aggregates children's fills; compliance and allocation operate on the parent, while children carry venue-level execution detail.
+
+**The subtlety that causes real bugs: fills are recorded against children, but positions accrue to the parent.** Double-counting is possible if both levels are summed, and under-counting is possible if a child's fill is not rolled up. Define the aggregation direction once, and make it the only path.
+
+**Algorithms change the capacity profile.** A slicing algorithm working one large parent emits many children, so order rate becomes a function of *algorithmic behaviour* rather than human trading — bursts can be orders of magnitude above human-driven rates, and capacity must be sized for that.
+
+### 2.8 Allocation — Fairness as a Correctness Requirement
+
+Institutional orders are placed in aggregate ("buy 500,000 shares") and allocated across many client accounts after execution. **Unfair allocation between clients is a regulatory violation, not an operational error**, so the rule must be documented, fair, and reproducible.
+
+**Rounding must be deterministic and must reconcile exactly.** Allocating 500,000 shares pro-rata across 37 accounts produces fractional shares; independent rounding produces an off-by-one that is a real break requiring manual intervention. The correct algorithm:
+
+```
+1. Compute each account's exact pro-rata share.
+2. Floor each to whole units.
+3. Distribute the remaining units by largest fractional remainder first,
+   with account ID as a stable secondary tie-break.
+```
+
+The sum equals the fill **by construction**, and determinism means re-running produces identical allocations — required for reproducibility and dispute resolution.
+
+### 2.9 Why the Order Should Be Event-Sourced
+
+Event sourcing is justified where an entity's full history has genuine ongoing business value, and should not be adopted by default. The order is the clearest positive case in this course:
+
+- The domain **is** an event stream — execution reports arrive as events regardless of internal modelling.
+- **Regulatory reconstruction demands the full sequence**, not the final state: "show every state this order passed through and when."
+- **Busts and amendments are corrections to history**, which a log handles naturally and a mutable current-state row handles badly.
+- **Best-execution analysis** requires knowing what was known at each decision point.
+
+**Storing only current state with a separate audit log is the wrong alternative**, and worth being able to argue against: it creates **two sources of truth that can diverge**, and divergence is undetectable without reconciling them against each other. Event sourcing makes the log *be* the state, so divergence is structurally impossible rather than merely monitored. Given that regulatory reconstruction reads the history while trading reads the current state, an architecture where those two can disagree is exactly the wrong one.
+
+### 2.10 Failover, Re-Synchronisation, and the Unresponsive Venue
+
+**The OMS is strongly CP, not AP.** Accepting orders without confidence in current state creates positions the firm cannot account for — an unbounded failure. The correct degradation is **refusing new orders while continuing to process inbound reports**.
+
+**Re-synchronise with venues after failover, before accepting new orders.** The OMS's state may be stale by exactly the messages missed during failover; resuming blind risks double-sending orders or acting on an incorrect view of working orders. Issue order-status requests and reconcile before reopening.
+
+**A venue that becomes unresponsive with orders working is among the most dangerous states in the system** — the firm has live orders it cannot see or cancel. Correct handling:
+
+1. **Assume nothing** about those orders' state; they may be filling.
+2. **Route no further orders** to that venue.
+3. Attempt session re-establishment with **order-status requests**.
+4. If the outage persists, **escalate to manual intervention**, including direct contact with the venue — because the exposure is unbounded and no automated recovery can bound it.
+
+### 2.11 Daily Reconciliation Against the Venue — the Only Ground Truth
+
+Compare the OMS's executions against the venue's official trade file across **three dimensions**: presence, quantity/price agreement, and state agreement for working orders. Categorise breaks, because each implies a different cause and urgency:
+
+| Break | Meaning | Urgency |
+|---|---|---|
+| **Missing in OMS** | The firm has an **unknown position** | Highest — this is §4's incident |
+| **Missing at venue** | The OMS recorded something the venue did not | High — possible duplicate application |
+| **Mismatched quantity/price** | Partial application, or a correction not yet processed | Medium |
+| **State disagreement on working orders** | Divergent view of live exposure | High |
+
+This reconciliation is the **only** external check on the entire system, which is why §2.4's incident was detectable nowhere else.
+
+### 2.12 Corporate Actions Across Working Orders
+
+Splits, mergers and ticker changes can invalidate a working order mid-life: the instrument it references may no longer exist in its prior form, and quantities or prices may need adjustment. Venues typically cancel working orders across such events — but **the firm cannot rely on that uniformly across venues**, which is exactly the kind of per-venue behavioural assumption §2.4 warns about.
+
+The OMS must detect affected working orders from the corporate-actions feed, decide per event whether to cancel, adjust or hold, and record the decision. Treating corporate actions as a reference-data concern that stops at the instrument master misses that it reaches into live order state.
+
+### 2.13 Best Execution — Record the Counterfactual, Not Just the Outcome
+
+Best execution requires demonstrating that routing decisions served the client's interest. So the OMS must record not just **where** an order was routed but **why**:
+
+- the market state at decision time (the pinned snapshot),
+- the venues considered and their quotes at that moment,
+- the routing logic's version.
+
+Without the counterfactual — what the alternatives looked like — the record shows what happened but **cannot demonstrate it was the right choice**. This is the same pattern as reproducibility metadata for a risk number: the output alone is not evidence.
+
+### 2.14 Controlling a Runaway Algorithm
+
+Layered limits, because any single one can be defeated:
+
+- Per-algorithm **order-rate limits** at the OMS.
+- Per-instrument and per-account **notional limits**.
+- A **global kill switch** operable without a deployment.
+- A **circuit breaker on anomalous order-to-fill ratio** — an algorithm sending many orders and getting few fills is frequently malfunctioning, and that ratio detects it before the notional limits do.
+
+**Enforce these at the OMS, not within the algorithm.** A malfunctioning algorithm cannot be trusted to enforce its own limits, and that is the entire point of putting the control in the layer the algorithm must pass through.
+
+### 2.15 Recovery Priority — Order State Is Authoritative
+
+Risk results and latest-value caches are *derived* and rebuildable from retained inputs. **Order state is authoritative**: it is the firm's record of its own obligations, recoverable only by reconciliation against venue records — which is slow, partial, and not always possible.
+
+That makes the order event store the highest-value store in this domain for DR purposes, with synchronous replication and tested recovery, and it is why §2.10's posture is to refuse rather than proceed on an uncertain view.
+
+### 2.16 Observability — Attribution, and the Claim That Needs Checking
+
+**Distinguishing a venue problem from an OMS problem** works by comparison:
+
+| Observation | Conclusion |
+|---|---|
+| Elevated rejects at **one** venue, others normal | That venue, or that session's configuration |
+| Elevated rejects **across all** venues | OMS-side — bad reference data, a failing pre-trade check |
+| Execution-report latency rising at one venue | Venue-side |
+| Order-submission latency rising across all | OMS-side |
+
+Attribution requires more than one independent path to compare against, exactly as it does for market-data handlers.
+
+**Applying "declared ≠ actual" to this system.** The claim is *"the OMS reflects the firm's true order state."* Its declared basis is that every execution report received was applied correctly. The gap is that reports can be:
+
+- **not received** (a sequence gap, §2.3),
+- **incorrectly discarded** (scope-mismatched dedup, §2.4),
+- **superseded by events the firm has not yet learned of** (a fill in flight during a cancel, §2.5).
+
+Each leaves the OMS *confidently* wrong, with no internal signal. Which is why the actual basis requires gap detection, verified dedup scope, honest pending-state modelling, and — above all — external reconciliation.
+
+### 2.17 Build versus Buy, Cloud, and Migration
+
+**Build versus buy.** The build case is weak for the general OMS and strong for specific differentiating logic. Vendor platforms carry pre-built connectivity across dozens of venues — the single largest and most tedious cost, requiring ongoing maintenance as venues change protocols — plus regulatory-reporting integrations and a certification history. Building means owning all of that permanently. The genuine build case is a firm whose *strategy* is the order-handling logic itself; for everyone else, buy the platform and build the differentiator on top.
+
+**Cloud** is more viable here than for feed handlers, with real constraints. Venue connectivity often needs specific network paths or colocation, though many venues now offer cloud-accessible endpoints. The stronger constraints are regulatory: **data-residency requirements on order records** in some jurisdictions, and operational-resilience regulation increasingly requiring firms to demonstrate control over critical systems including exit plans from a provider.
+
+**Migration from a legacy OMS must be a drain, not a cutover.** Working orders cannot be migrated mid-life safely — their state is **co-owned by venues** that know them under the legacy system's sessions and identifiers. The workable approach: stop routing new orders through the legacy system, let existing working orders complete or be cancelled naturally, route all new orders through the new system, and run both in parallel until the legacy working-order count reaches zero. Slower than a cutover, and the only approach that does not risk orphaning a live obligation.
+
+### 2.18 Principal-Level Judgements
+
+**Investigating a PM's claim of mishandled execution.** Reconstruct from the event stream: confirm the order's **actual parameters as received** (frequently the discrepancy is intent-versus-entry), then the routing decision and market state at that moment (§2.13's recorded counterfactual), then the execution sequence, then compare against a benchmark (arrival price, VWAP) for the period. Most disputes resolve to either an entry difference or genuine market movement — and the investigation is only possible because the counterfactual was recorded at the time.
+
+**The governance program required before an OMS may route live orders:**
+
+1. **Per-venue documented identifier-uniqueness scope**, verified at onboarding, feeding dedup key construction (§2.4).
+2. **Transactional deduplication**, never check-then-write (§2.4).
+3. **Pending states modelled as genuinely non-terminal**, with fills-during-cancel handled (§2.2, §2.5).
+4. **FIX gap detection** with resend and escalation (§2.3).
+5. **Failover re-synchronisation** before accepting new orders (§2.10).
+6. **Daily reconciliation** against venue trade files, with categorised breaks and owned resolution (§2.11).
+7. **Layered algorithmic controls** including a deployment-free kill switch (§2.14).
+
+**Answering a regulator on "how do you ensure you have no unknown positions"**: state the layered controls above, then the residual honestly — reconciliation is daily, so the detection window for an unknown position is bounded by that cadence rather than continuous. That is a statable, improvable number, and far more credible than an unqualified assurance.
+
+**The trade lifecycle is a long-running saga in the strict sense** — route → execute → allocate → settle, spanning services and days, with steps that can fail and require compensation (a bust reverses an execution; a failed settlement requires unwinding). What distinguishes it from textbook sagas is **duration and external control**: the steps are driven by a venue and a settlement system the firm does not own, so the orchestrator cannot command the process, only observe and react.
+
+**The closing synthesis — what makes an OMS distinctively hard.** Not throughput; order rates are trivial next to market-data ticks. Two properties define it:
+
+1. **The authoritative truth is externally held.** The venue, not the firm, knows what actually happened — so no amount of internal consistency proves correctness, and reconciliation against an external party is the only ground truth.
+2. **State is long-lived, mutable and consequential throughout.** An order is not a request that succeeds or fails in milliseconds; it is an obligation that lives for hours or days, changes under external control, and can be corrected after it looked finished.
+
+Together they mean the OMS's hardest engineering is not processing orders — it is maintaining a defensible belief about state that something else owns.
 
 ---
 
@@ -139,258 +326,6 @@ sequenceDiagram
 The firm's position was understated by that fill for the remainder of the session. It was caught by end-of-day reconciliation against the venue's own trade file — but only because that reconciliation existed; nothing in the real-time path signalled anything, because the system's behaviour was indistinguishable from correctly rejecting a duplicate.
 
 The fix: composite deduplication key of `(VenueId, SessionId, ExecID)`, restoring genuine uniqueness. The generalizable lesson is sharper than the fix: **the deduplication key must be scoped to whatever the uniqueness guarantee is actually scoped to, and that scope is a property of the counterparty's implementation, not of the specification.** A specification's guarantee is a claim about intent; the venue's actual behaviour is the reality, and the two diverged silently. This is the course's "declared ≠ actual" theme applied to an external party's contract — a variant the prior modules had not encountered, since Modules 129 and 130 dealt with internally-controlled invariants.
-## 10. Interview Questions
-
-### Basic (10)
-
-1. **Q: What does an OMS own that no other system does?**
- **A:** The authoritative current state and full history of every order — the answer to "what is this order's state and how did it get there".
- **Why correct:** Identifies the system-of-record role, which is its defining responsibility.
- **Common mistakes:** Describing it as an order-routing system; routing is one function, not the core responsibility.
- **Follow-ups:** "Why can't each trading channel keep its own order state?" (Then no single answer to current exposure exists,.)
-
-2. **Q: Why is `PendingCancel` a genuine state rather than a transient one?**
- **A:** The venue, not the firm, decides whether a cancel succeeds; during that window the order can still fill, so treating cancel as synchronous produces unintended positions.
- **Why correct:** Identifies external control as the reason the pending state is real.
- **Common mistakes:** Modelling cancel as an immediate transition to `Cancelled`.
- **Follow-ups:** "What transition from `PendingCancel` surprises people?" (`Filled` — the fill landed before the cancel took effect, the state diagram.)
-
-3. **Q: What is a ClOrdID chain and why must it be retained?**
- **A:** An amendment creates a new client order ID referencing the original via `OrigClOrdID`; the user-visible "order" is a chain of these, and the chain is what answers "what happened to my order" across amendments.
- **Why correct:** States both the mechanism and what is lost without it.
- **Common mistakes:** Overwriting the original order's identifier on amendment, losing the history.
- **Follow-ups:** "What happens if an amendment is rejected?" (The chain records that the new ClOrdID never became live while the original remained working, the third diagram.)
-
-4. **Q: Why must fill deduplication happen inside the applying transaction?**
- **A:** A pre-check followed by a separate write has a race window that concurrent processing will eventually hit, applying a fill twice.
- **Why correct:** Names the specific concurrency flaw in the pre-check pattern.
- **Common mistakes:** Check-then-write, which passes testing and fails under production concurrency.
- **Follow-ups:** "What is the consequence of a double-applied fill?" (A double-counted position — immediate, direct financial error,.)
-
-5. **Q: What went wrong in the incident?**
- **A:** The venue's `ExecID` uniqueness was scoped per session, not globally; after a session restart the sequence reset, and a genuinely new fill bearing a previously-seen `ExecID` was silently discarded as a duplicate.
- **Why correct:** States the precise mechanism.
- **Common mistakes:** Characterizing it as a duplicate-detection bug; deduplication worked exactly as designed against a wrongly-scoped key.
- **Follow-ups:** "What was the fix?" (Composite key `(VenueId, SessionId, ExecID)`,.)
-
-6. **Q: Why is order allocation a correctness concern rather than an operational one?**
- **A:** Unfair allocation between client accounts is a regulatory violation; the rule must be documented, fair, and reproducible.
- **Why correct:** Identifies the regulatory character rather than treating allocation as bookkeeping.
- **Common mistakes:** Treating allocation as a post-trade formality.
- **Follow-ups:** "What must rounding guarantee?" (That allocated quantities sum exactly to the filled quantity, deterministically,.)
-
-7. **Q: Why is the order the clearest Event Sourcing candidate in this course?**
- **A:** The domain already is an event stream (execution reports), regulatory reconstruction demands full history, corrections/busts are natural in a log and awkward in a mutable row, and best-execution analysis needs decision-time state — satisfying the adoption test unambiguously.
- **Why correct:** Applies the established test and shows all four conditions met.
- **Common mistakes:** Adopting Event Sourcing here for its own sake rather than because this case actually satisfies the test set.
- **Follow-ups:** "Where did counsel against it?" (As a default for entities whose history has no ongoing business value,.)
-
-8. **Q: Why must the OMS re-synchronize with venues after failover?**
- **A:** Its state may be stale by exactly the messages missed during failover; resuming blind risks double-sending orders or acting on an incorrect view of working orders.
- **Why correct:** Identifies the specific gap failover creates and its consequence.
- **Common mistakes:** Resuming order entry immediately on failover.
- **Follow-ups:** "What does re-synchronization involve?" (FIX session recovery plus order-status requests for all working orders,.)
-
-9. **Q: Why is the OMS strongly CP rather than AP?**
- **A:** Accepting orders without confidence in current state creates positions the firm cannot account for — an unbounded failure — so refusing new orders while continuing to process inbound reports is the correct degradation.
- **Why correct:** Derives the posture from the asymmetry of the two failure modes.
- **Common mistakes:** Prioritizing order-entry availability, which optimizes for the less severe failure.
- **Follow-ups:** "Why continue processing inbound reports while refusing new orders?" (Inbound reports reduce divergence; new orders increase it.)
-
-10. **Q: Why must rejected orders be recorded rather than discarded?**
- **A:** The rejection is regulatory evidence that a control functioned — discarding it destroys the record that the firm's compliance checks were operating.
- **Why correct:** Identifies the rejection as an audit artifact, not merely a failed operation.
- **Common mistakes:** Treating rejections as errors to log and forget.
- **Follow-ups:** "What would an auditor ask about rejections?" (Evidence that restricted-list checks blocked what they should have — which requires the rejections themselves.)
-
-### Intermediate (10)
-
-1. **Q: Walk through why the incident was undetectable in the real-time path.**
- **A:** The system's behaviour when discarding the real fill was byte-identical to its behaviour when correctly rejecting a duplicate: no error, no warning, a normal deduplication path. There is no signal distinguishing "correctly rejected a duplicate" from "incorrectly rejected a genuine execution," because the distinction exists only in information the OMS did not have (that the venue had reset its sequence). Only external reconciliation against the venue's trade file could surface it.
- **Why correct:** Explains why the failure is structurally invisible internally, not merely unmonitored.
- **Common mistakes:** Proposing better internal monitoring, which cannot detect a failure whose internal signature is identical to correct behaviour.
- **Follow-ups:** "What is the general principle?" (Where a failure is internally indistinguishable from correct behaviour, only an external comparison can detect it — which is why the daily venue reconciliation is not optional.)
-
-2. **Q: Design the pre-trade check ordering and justify it.**
- **A:** Cheapest and most-likely-to-reject first: authorization (fast, local, definitively rejects unauthorized traders), then restricted-list/compliance (fast, cached lookup), then risk limits (slowest, requires current exposure). Ordering by cost × rejection-probability minimizes mean latency, and putting the definitive local checks first means an unauthorized or restricted order never incurs the expensive risk call at all.
- **Why correct:** Optimizes the actual objective (mean critical-path latency) using both cost and selectivity.
- **Common mistakes:** Running checks in parallel for speed, which incurs every check's cost on every order including ones a cheap check would have rejected immediately.
- **Follow-ups:** "When is parallel evaluation right?" (When all checks are comparably cheap and rejection is rare — not the case here, where risk is materially the most expensive.)
-
-3. **Q: Why does an algorithmic strategy change the OMS's capacity profile?**
- **A:** A slicing algorithm working one large parent order emits many child orders, so order rate becomes a function of algorithmic behaviour rather than human trading — bursts can be orders of magnitude above human-driven rates.
- **Why correct:** Identifies the specific mechanism that decouples order rate from trader count.
- **Common mistakes:** Sizing from trader headcount, which is uncorrelated with actual peak.
- **Follow-ups:** "What else does child-order generation complicate?" (Parent/child relationships must be modelled, so a parent's state aggregates its children's fills.)
-
-4. **Q: Critique caching live position data for the risk limit check.**
- **A:** It reduces critical-path latency but means the limit is checked against stale exposure — and the error direction matters: stale data understates exposure when positions have grown, so the check most likely to be wrong is precisely the one guarding against over-exposure. Bounded staleness may be acceptable for soft internal thresholds, but for hard regulatory limits the check must be current, because the failure mode is a breach the firm cannot defend.
- **Why correct:** Analyses the direction of the error, not merely its existence — which is what makes the check-type distinction necessary.
- **Common mistakes:** Treating staleness as symmetric noise rather than a directional risk that correlates with the condition being guarded.
- **Follow-ups:** "Which checks tolerate staleness?" (Soft internal thresholds where a breach is reviewed rather than prohibited,.)
-
-5. **Q: How should a bust (venue cancelling an executed trade hours later) be handled?**
- **A:** As a new event appended to the order's stream reversing the execution's effect — never by deleting the original fill. The original execution genuinely happened and was acted upon; the bust is a subsequent fact. This is exactly the correction handling and the compensating-transaction semantics: reverse forward, never erase.
- **Why correct:** Applies the established compensation-not-erasure principle, and notes the reason (the original was acted upon).
- **Common mistakes:** Deleting or amending the original fill, destroying the record of what the firm believed and did.
- **Follow-ups:** "What downstream systems must be notified?" (Everything that consumed the fill — position, risk, allocation, settlement — via the same event stream, which is why event-sourcing makes this tractable.)
-
-6. **Q: Design allocation rounding so quantities reconcile exactly.**
- **A:** Compute each account's exact pro-rata share, floor each to whole units, then distribute the remaining units by a deterministic tie-break (typically largest fractional remainder first, with account ID as a stable secondary key). The sum equals the fill by construction, and determinism means re-running produces identical allocations — required for reproducibility and dispute resolution.
- **Why correct:** Gives an algorithm that both reconciles exactly and is deterministic, the two requirements together.
- **Common mistakes:** Independent rounding per account, which does not sum correctly; or a non-deterministic tie-break, which makes allocations irreproducible.
- **Follow-ups:** "Why does the secondary key matter?" (Two accounts with identical fractional remainders would otherwise be ordered non-deterministically,.)
-
-7. **Q: What is the risk of the amendment race in the third diagram?**
- **A:** A cancel/replace and a fill can cross: the firm believes it has amended, while the venue fills the original. If the OMS optimistically applies the amendment to its own state, it now believes it has a working amended order when it actually has a fill on the original — a divergence producing an unintended position and an incorrect view of remaining exposure.
- **Why correct:** Identifies the specific state divergence rather than describing the race abstractly.
- **Common mistakes:** Applying amendments optimistically before venue acknowledgment.
- **Follow-ups:** "What is the correct handling?" (Treat the amendment as pending until acknowledged; the venue's response determines which of the two outcomes occurred.)
-
-8. **Q: Why can FIX sessions not be arbitrarily load-balanced?**
- **A:** A FIX session is a stateful connection with its own sequence numbering; migrating mid-session breaks sequence continuity and triggers gap-fill or session-reset handling — so sessions are pinned to instances rather than balanced.
- **Why correct:** Identifies session statefulness as the constraint.
- **Common mistakes:** Treating FIX connections as stateless HTTP-like connections.
- **Follow-ups:** "What does this imply for failover?" (Session recovery with sequence negotiation, plus order-status re-synchronization,.)
-
-9. **Q: Why is order state harder to recover than the risk results or the latest-value cache?**
- **A:** Those were derived and rebuildable from retained inputs; order state is authoritative — it is the firm's record of its own obligations, recoverable only by reconciliation against venue records, which is slow, partial, and not always possible.
- **Why correct:** Contrasts derived versus authoritative state and its recovery consequence.
- **Common mistakes:** Applying the same DR posture as the previous two modules, which under-protects the one case where state is genuinely irreplaceable.
- **Follow-ups:** "What is the DR implication?" (Synchronous replication — losing acknowledged order state is not survivable,.)
-
-10. **Q: Synthesize how the trade lifecycle relates to the saga pattern.**
- **A:** It is a long-running saga in the strict sense: a multi-step process (route → execute → allocate → settle) spanning services and days, where steps can fail and require compensation (a bust reverses an execution; a failed settlement requires unwinding). What distinguishes it from the examples is duration and external control — the saga's steps are driven by a venue and a settlement system the firm does not own, so "compensating" is often a request to an external party rather than a local action.
- **Why correct:** Applies the saga framing accurately and identifies what is genuinely different here.
- **Common mistakes:** Treating the lifecycle as a simple sequential workflow, missing the compensation semantics.
- **Follow-ups:** "What does external control change about compensation?" (It can be refused — the firm can request a bust but cannot unilaterally effect one, so compensation must handle its own failure.)
-
-### Advanced (10)
-
-1. **Q: Diagnose the incident and design the complete structural fix.**
- **A:** Root cause: the deduplication key's scope was inferred from the FIX specification's stated guarantee rather than verified against the venue's actual implementation, and the failure was internally indistinguishable from correct behaviour (Intermediate Q1). Fix: (1) composite key `(VenueId, SessionId, ExecID)` matching the actual uniqueness scope; (2) treat every venue's identifier-uniqueness scope as an explicitly-documented, per-venue integration property, verified at onboarding rather than assumed — because the scope differs by venue and the specification does not bind them; (3) daily reconciliation against the venue trade file elevated from a back-office control to a monitored engineering signal with alerting, since it is the only detection path for this failure class; (4) alert on venue session restarts, since that event is the precondition that makes scope-mismatch bugs reachable.
- **Why correct:** Addresses the specific key, the general assumption that produced it, the only viable detection path, and the triggering precondition.
- **Common mistakes:** Fixing only the key, leaving the same assumption to fail differently at the next venue.
- **Follow-ups:** "Why is (2) the most important?" (It converts a one-venue fix into a class-of-bug fix, since the next venue's guarantee may be scoped differently again.)
-
-2. **Q: A team proposes optimistic amendment application to reduce perceived latency. Evaluate.**
- **A:** It creates Intermediate Q7's divergence as a *designed* behaviour rather than an edge case: the OMS's state would routinely reflect amendments the venue has not accepted, so its view of working orders and remaining exposure is systematically wrong during every amendment's flight time. Since the OMS is the system of record, this makes the firm's authoritative state speculative. The latency it saves is display latency; the correctness it costs is real. Show the pending state in the UI rather than lying about the confirmed state.
- **Why correct:** Identifies that the optimization trades authoritative-state correctness for display latency, an unfavourable trade for a system of record.
- **Common mistakes:** Accepting the UI-responsiveness argument without noticing the system of record is what would be made speculative.
- **Follow-ups:** "How do you satisfy the UI concern legitimately?" (Display the pending state explicitly — users understand "cancel requested" and are far better served by accuracy than by an optimistic guess that sometimes reverses.)
-
-3. **Q: Critique storing only current order state with a separate audit log.**
- **A:** It creates two sources of truth that can diverge — the state row and the log — and divergence is undetectable without reconciling them against each other. Event sourcing makes the log *be* the state, so divergence is structurally impossible rather than merely monitored. Given that regulatory reconstruction reads the history and trading reads the current state, an architecture where those can disagree is precisely the wrong shape for this domain.
- **Why correct:** Identifies dual-source divergence as the structural flaw and contrasts with the single-source alternative.
- **Common mistakes:** Treating the audit log as sufficient because it contains the same information — it does, until they disagree, and then there is no way to know which is right.
- **Follow-ups:** "How would divergence arise in practice?" (A state update succeeding while its log write fails, or an application code path updating state without logging — both routine bugs that event sourcing makes unrepresentable.)
-
-4. **Q: Design the daily venue reconciliation.**
- **A:** Compare the OMS's executions against the venue's official trade file across three dimensions: presence (a fill in one and not the other — the failure), quantity/price agreement, and state agreement for working orders. Breaks must be categorized (missing-in-OMS, missing-at-venue, mismatched) since each implies a different cause and urgency: missing-in-OMS means the firm has an unknown position and is most urgent; missing-at-venue may indicate a duplicate the firm sent. Reconciliation must run against the venue's authoritative file, not a stream the OMS itself received — otherwise it re-checks the same potentially-lossy path.
- **Why correct:** Specifies dimensions, categorization by cause, and the critical requirement of an independent source.
- **Common mistakes:** Reconciling against a stream the OMS consumed, which cannot detect a failure in that consumption path.
- **Follow-ups:** "Which break category is most urgent?" (Missing-in-OMS — the firm holds a position it does not know about, and every downstream system is consequently wrong.)
-
-5. **Q: How would you support "reconstruct the order's full state timeline for a regulator"?**
- **A:** Replay the order's event stream with each event's arrival timestamp, producing the sequence of states and when the firm knew of each — including rejected amendments, pending windows, and the ClOrdID chain. The knowledge-time dimension matters as much as event time, since the regulator's question is often about what the firm knew when it acted, not merely what was true.
- **Why correct:** Uses the event stream directly and identifies the knowledge-time dimension as the non-obvious requirement.
- **Common mistakes:** Reconstructing only the state sequence, omitting when each became known — which cannot answer questions about the firm's decisions.
- **Follow-ups:** "Which prior modules required this same distinction?" (Modules 129 §Advanced Q8 and 130 — the pattern is now consistent across all three.)
-
-6. **Q: A regulator asks how the firm ensures it has no unknown positions. Answer honestly.**
- **A:** State the layered controls: `ExecID`-scoped deduplication preventing both duplicate application and — post- — incorrect rejection; FIX sequence-gap detection with resend, so no execution report is silently missed; failover re-synchronization via order-status requests; and daily reconciliation against venue trade files (Advanced Q4) as the independent external check. Then state the residual honestly: the reconciliation is daily, so intraday the firm's assurance rests on the real-time controls alone — the window between a divergence occurring and reconciliation detecting it is real and bounded by that cadence.
- **Why correct:** Gives specific mechanisms and states the residual window rather than implying continuous certainty.
- **Common mistakes:** Claiming complete assurance while the actual detection cadence is daily.
- **Follow-ups:** "How would you narrow the residual?" (Intraday reconciliation against venue drop-copy feeds, where available — a concrete, costable improvement.)
-
-7. **Q: Design the OMS's handling of a venue that becomes unresponsive with orders working.**
- **A:** This is among the most dangerous states in the system: the firm has live orders it cannot see or cancel. Correct handling is (1) do not assume anything about those orders' state — they may be filling; (2) do not route further orders to that venue; (3) attempt session re-establishment with order-status requests; (4) if the outage persists, escalate to manual intervention including direct contact with the venue, since some venues will cancel a firm's working orders on request. Critically, the firm's risk and position systems must treat those orders as *potentially filled* rather than as their last-known state — the conservative assumption is the safe one.
- **Why correct:** Specifies the actions and, more importantly, the conservative treatment of unknown state downstream.
- **Common mistakes:** Continuing to report last-known state as current, understating potential exposure exactly when the firm has least visibility.
- **Follow-ups:** "Why is the conservative assumption right here?" (The asymmetry: assuming filled and being wrong overstates exposure conservatively; assuming unfilled and being wrong understates it and may cause a limit breach.)
-
-8. **Q: Apply this course's "declared ≠ actual" theme to this system.**
- **A:** The claim is "the OMS reflects the firm's true order state." Its declared basis is that every execution report received was applied correctly. Earlier analysis showed the gap: reports can be *not received* (gaps), *incorrectly discarded* (scope-mismatched dedup), or *superseded by events the firm has not yet learned of* (a fill in flight during a cancel). Each leaves the OMS confidently wrong. What distinguishes this module from 129 and 130 is that the authoritative truth lives **outside the firm** — so no internal verification is sufficient, and the only genuine check is reconciliation against the counterparty's own record (Advanced Q4).
- **Why correct:** Enumerates the three divergence mechanisms and identifies the externally-held-truth property that distinguishes this case.
- **Common mistakes:** Assuming internal consistency checks suffice, when the reference truth is not internally held.
- **Follow-ups:** "What follows from truth being externally held?" (Reconciliation is not a control that can be optimized away; it is the only source of ground truth.)
-
-9. **Q: Design the monitoring distinguishing a venue problem from an OMS problem.**
- **A:** Compare across venues and against expectations: elevated rejects at one venue while others are normal indicates a venue or that venue's session configuration; elevated rejects across all venues indicates an OMS-side issue (bad reference data, a failing pre-trade check); execution-report latency rising at one venue is venue-side; order-submission latency rising across all is OMS-side. As §Advanced Q9, attribution requires comparison — single-venue metrics reveal that something is wrong but not where.
- **Why correct:** Uses cross-venue comparison for attribution, consistent with the established diagnostic principle.
- **Common mistakes:** Per-venue dashboards without cross-venue comparison, which cannot localize.
- **Follow-ups:** "What is the highest-value single alert?" (Working-order count diverging from expectation, or any missing-in-OMS reconciliation break — both indicate unknown positions, the most severe condition.)
-
-10. **Q: Synthesize the governance program required before an OMS may route live orders.**
- **A:** (1) Per-venue documented identifier-uniqueness scope, verified at onboarding, feeding deduplication key construction (Advanced Q1). (2) Transactional deduplication, never check-then-write. (3) Pending states modelled as genuinely non-terminal, with fills-during-cancel handled. (4) FIX gap detection with resend and escalation. (5) Failover re-synchronization before accepting new orders. (6) Daily reconciliation against venue trade files, categorized by break type, monitored as an engineering signal (Advanced Q4). (7) Server-side per-trader authorization and size limits, never UI-enforced. (8) Deterministic, exactly-reconciling allocation rounding (Intermediate Q6). (9) Conservative treatment of orders at an unreachable venue as potentially filled (Advanced Q7).
- **Why correct:** Assembles the full program, each item traceable to a specific failure mode established in the module.
- **Common mistakes:** Presenting routing and state management without reconciliation and venue-integration verification, which are what actually prevent unknown positions.
- **Follow-ups:** "Which is most often missing in practice?" (Per-venue uniqueness-scope verification — teams inherit a deduplication key from their first venue integration and apply it universally, which is exactly.)
-
-### Expert (10)
-
-1. **Q: Compare building an OMS versus buying a vendor platform.**
- **A:** The build case is weak for the general OMS and strong for specific differentiating logic. Vendor platforms carry pre-built venue connectivity across dozens of venues — the single largest and most tedious cost, and one requiring ongoing maintenance as venues change protocols — plus regulatory-reporting integrations and a certification history. Building means owning all of that permanently. The genuine build case is where a firm's *strategy* is the differentiator: custom smart-order-routing logic, proprietary algorithmic execution, or an unusual asset-class workflow no vendor supports. The mature pattern is buy the OMS core, build the differentiating logic against its extension points — the build-vs-buy reasoning, with venue connectivity as the specific non-differentiating cost that decides it.
- **Why correct:** Identifies venue connectivity as the cost that dominates the decision and correctly locates where custom build pays.
- **Common mistakes:** Building for control, then discovering the recurring cost is not the OMS but the dozen venue integrations and their perpetual maintenance.
- **Follow-ups:** "What makes venue connectivity so costly?" (Each venue has protocol quirks, certification requirements, and its own change cadence — and showed even documented guarantees vary in practice.)
-
-2. **Q: How does an OMS differ from an EMS, and why do firms run both?**
- **A:** An OMS is the system of record for the order lifecycle including compliance, allocation, and settlement handoff — optimized for correctness, completeness, and auditability. An EMS (Execution Management System) is optimized for the trader's execution workflow: low-latency market access, algorithmic strategies, real-time market data integration. They coexist because the optimization targets genuinely conflict — the OMS's audit and compliance obligations impose overhead an EMS's latency requirements cannot absorb, which is exactly §Expert Q1's platform-versus-direct-feed split, recurring at the order layer.
- **Why correct:** Distinguishes them by optimization target and identifies the conflict as the reason for coexistence.
- **Common mistakes:** Treating the split as historical accident rather than a genuine conflict of requirements.
- **Follow-ups:** "What is the integration risk?" (State divergence between OMS and EMS — the same divergence risk §Expert Q6 identified for dual data paths, requiring the same reconciliation control.)
-
-3. **Q: Design the OMS's role in best-execution obligations.**
- **A:** Best execution requires demonstrating that routing decisions served the client's interest. The OMS must therefore record not just where an order was routed, but **why**: the market state at decision time (the snapshot), the venues considered and their quotes, and the routing logic's version. Without the counterfactual — what the alternatives looked like — the record shows what happened but cannot demonstrate it was reasonable, which is the actual obligation.
- **Why correct:** Identifies that the obligation requires recording the decision inputs and alternatives, not merely the outcome.
- **Common mistakes:** Recording only the execution, which cannot support the analysis regulators actually require.
- **Follow-ups:** "Why is routing-logic version needed?" (To reproduce the decision — the same reproducibility requirement established, applied to routing decisions.)
-
-4. **Q: How should the OMS handle an order spanning a corporate action?**
- **A:** Corporate actions (splits, mergers, ticker changes) can invalidate a working order mid-life — the instrument it references may no longer exist in its prior form, and quantities/prices may need adjustment. Venues typically cancel working orders across such events, but the firm cannot rely on that uniformly. The OMS must detect affected working orders from the corporate-actions feed (§Expert Q4's reference-data subsystem), and the correct default is to cancel and require re-entry rather than to auto-adjust — because auto-adjustment guesses at PM intent, and a wrong guess places an order the PM did not intend.
- **Why correct:** Identifies the risk and argues for the conservative default with a reason grounded in intent rather than mechanics.
- **Common mistakes:** Auto-adjusting quantity and price, which is convenient and occasionally places unintended orders.
- **Follow-ups:** "Why is this the same principle as the fuzzy resolver?" (Both guess where they cannot know; a visible failure requiring human input is safer than a confident wrong action.)
-
-5. **Q: Evaluate cloud deployment for an OMS.**
- **A:** More viable than for the feed handlers but with real constraints. Venue connectivity often requires specific network paths or colocation, though many venues now offer cloud-accessible endpoints. The stronger constraints are regulatory: some jurisdictions impose data-residency requirements on order records, and operational-resilience regulation increasingly requires firms to demonstrate control over critical systems including exit plans from cloud providers. The OMS is also a system where a provider outage means inability to trade — a business-continuity exposure a firm must assess explicitly rather than inherit implicitly. Feasible, but the decision is dominated by regulatory and resilience factors rather than technical ones.
- **Why correct:** Correctly identifies that regulatory and resilience considerations, not technical ones, dominate this particular decision.
- **Common mistakes:** Evaluating on technical and cost grounds, missing the operational-resilience obligations that apply specifically to critical trading systems.
- **Follow-ups:** "What does an exit plan require?" (Demonstrable ability to migrate off a provider within a defined period — which constrains architecture toward portability.)
-
-6. **Q: Design the parent/child order model for algorithmic execution.**
- **A:** A parent order holds the PM's intent (quantity, limit, strategy, constraints); child orders are the algorithm's slices routed to venues. The parent's state aggregates children's fills, and the parent is what compliance and allocation operate on, while children carry venue-level execution detail. The important subtlety: **fills are recorded against children but positions accrue to the parent**, so double-counting is possible if both levels are naively summed — the aggregation direction must be explicit and single-directional.
- **Why correct:** Specifies the model and identifies the specific double-counting hazard the two-level structure creates.
- **Common mistakes:** Modelling children as independent orders, so the parent's remaining quantity and the children's fills can disagree.
- **Follow-ups:** "What happens when a child is busted?" (The bust reverses at the child level and must propagate to the parent's aggregate — testing whether the aggregation is genuinely single-directional.)
-
-7. **Q: How would you migrate from a legacy OMS with live orders?**
- **A:** Working orders cannot be migrated mid-life safely — their state is co-owned by venues that know them under the legacy system's session and identifiers. The workable approach is a **drain**: stop routing new orders through the legacy system, let existing working orders complete or be cancelled naturally, and route all new orders through the new system, running both in parallel until the legacy system's working-order count reaches zero. This is the in-flight-saga problem in its most literal form, and its resolution is the same — pin in-flight entities to the system that created them rather than migrating them.
- **Why correct:** Identifies the co-ownership constraint and applies the established in-flight-migration principle.
- **Common mistakes:** Attempting to transfer working orders, which requires the venue to recognize a new session's claim over orders it associates with the old one.
- **Follow-ups:** "How long does the drain take?" (Bounded by the longest-lived order type — day orders drain overnight; good-till-cancelled orders may take weeks, and typically must be cancelled and re-entered deliberately.)
-
-8. **Q: Design the control preventing a runaway algorithm from flooding a venue.**
- **A:** Layered limits, because any single one can be defeated: per-algorithm order-rate limits at the OMS; per-instrument and per-account notional limits; a global kill switch operable without a deployment; and a circuit breaker tripping on anomalous order-to-fill ratios (an algorithm sending many orders and getting few fills is often malfunctioning). Critically these are enforced at the OMS, not within the algorithm — an algorithm that has malfunctioned cannot be trusted to enforce its own limits, which is the entire point of external enforcement.
- **Why correct:** Specifies layered controls and articulates why enforcement must be external to the component being controlled.
- **Common mistakes:** Implementing limits inside the algorithm framework, where a malfunction can bypass them.
- **Follow-ups:** "Why the order-to-fill ratio specifically?" (It detects malfunction that volume limits miss — an algorithm can stay within rate limits while behaving nonsensically, and the ratio catches the nonsense.)
-
-9. **Q: A PM claims an order was mishandled and shows worse execution than expected. Walk through the investigation.**
- **A:** Reconstruct from the event stream (Advanced Q5): confirm the order's actual parameters as received (frequently the discrepancy is intent-versus-entry), then the routing decision and market state at that moment (Expert Q3's recorded counterfactual), then the execution sequence, then compare against a benchmark (arrival price, VWAP) for the period. Most such disputes resolve to either an entry difference or genuine market movement rather than mishandling — but the investigation is only possible with the decision-time market state recorded, which is why Expert Q3's requirement is not merely a compliance artifact but the primary diagnostic instrument, exactly as §Expert Q6 found for risk disputes.
- **Why correct:** Sequences the investigation to isolate common causes first and identifies the recorded decision context as what makes it possible.
- **Common mistakes:** Beginning with routing-logic review, the least likely cause and most expensive to investigate.
- **Follow-ups:** "What if the market state was not recorded?" (The dispute is unresolvable — the firm cannot demonstrate the routing was reasonable, which is a best-execution finding in itself.)
-
-10. **Q: Deliver the closing synthesis: what makes an OMS distinctively hard?**
- **A:** Not throughput — order rates are trivial next to the ticks. Two properties define it. First, **the authoritative truth is externally held**: the venue, not the firm, knows what actually happened, so no amount of internal consistency proves correctness, and reconciliation against an external party is the only ground truth (Advanced Q8). Second, **state is long-lived, mutable, and consequential throughout** — an order lives for hours or days, changes state driven by events the firm does not control, and at every moment represents real financial obligation. Modules 129 and 130 process units that are stateless (a task, a tick); an order is an entity with duration, and duration is where divergence accumulates. Together these mean the design's difficulty is in *maintaining agreement with an external party over time*, not in processing volume — and a candidate who designs this as a high-throughput order-routing pipeline has again solved the easy half.
- **Why correct:** Identifies both distinguishing properties, contrasts them explicitly with the prior two modules, and locates the difficulty correctly.
- **Common mistakes:** Framing it as a low-latency routing problem, producing a fast system that cannot prove its state is right.
- **Follow-ups:** "How does the next module differ again?" (the multi-tenant analytics has internally-held truth but adds tenant isolation — the difficulty moves from external agreement to preventing internal cross-contamination.)
-
----
-
 ## 11. Coding Exercises
 
 ### Easy — Transactional Fill Deduplication
@@ -419,7 +354,7 @@ public async Task ApplyFillAsync(ExecutionReport report)
 **Space complexity:** O(1) per execution recorded.
 **Optimized solution:** Enforce uniqueness via a database constraint rather than an application check, so concurrency correctness does not depend on isolation-level assumptions holding under every future query plan.
 
-### Medium — Deterministic Allocation with Exact Reconciliation (Intermediate Q6)
+### Medium — Deterministic Allocation with Exact Reconciliation (§2.8)
 **Problem:** Allocate a fill pro-rata across accounts so quantities sum exactly to the filled quantity.
 **Solution:**
 ```csharp
@@ -481,7 +416,7 @@ public sealed class Order
 **Space complexity:** O(1) per transition event appended.
 **Optimized solution:** Generate the transition table from a declarative specification shared with the venue-certification test suite, so the state machine and the tests proving venue compatibility cannot drift apart.
 
-### Expert — Venue Reconciliation with Break Categorization (Advanced Q4)
+### Expert — Venue Reconciliation with Break Categorization (§2.11)
 **Problem:** Compare OMS executions against the venue's authoritative trade file and categorize breaks by cause.
 **Solution:**
 ```csharp
@@ -507,7 +442,7 @@ public async Task<ReconciliationReport> ReconcileAsync(VenueId venue, DateOnly s
 ```
 **Time complexity:** O(n + m) for n our-side and m venue-side executions.
 **Space complexity:** O(n + m).
-**Optimized solution:** Run against intraday drop-copy feeds where the venue provides them, narrowing the detection window from daily to near-real-time — directly addressing Advanced Q6's stated residual.
+**Optimized solution:** Run against intraday drop-copy feeds where the venue provides them, narrowing the detection window from daily to near-real-time — directly addressing §2.18's stated residual.
 
 ---
 
@@ -741,7 +676,7 @@ The **pending states are the whole difficulty.** `PENDING_CANCEL` means we asked
 
 #### 3.1 Why event sourcing is right here, specifically
 
-This course is generally sceptical of event sourcing (Module 18 §E3 declines it for a ledger). The adoption test it fails there, it passes here, and the reasons are worth being precise about:
+This course is generally sceptical of event sourcing (Module 18 §2.21 declines it for a ledger). The adoption test it fails there, it passes here, and the reasons are worth being precise about:
 
 - **The aggregate boundary matches the transaction boundary.** An order is modified only by events about that order. A ledger transaction spans multiple accounts, which is why the ledger fails this test.
 - **History is the product, not a byproduct.** "Reconstruct why this order ended in this state" is a *regulatory obligation*, not a debugging convenience.
@@ -888,11 +823,11 @@ classDiagram
 
 **Sequence diagram:** the third diagram — the amendment race, which is the design's most subtle interaction.
 
-**Design patterns used:** State (guarded transitions); Event Sourcing; Chain of Responsibility (ordered pre-trade checks, Intermediate Q2); Saga (the lifecycle itself, Intermediate Q10); Strategy (routing algorithms); Circuit Breaker (Expert Q8's runaway-algorithm protection).
+**Design patterns used:** State (guarded transitions); Event Sourcing; Chain of Responsibility (ordered pre-trade checks, §2.6); Saga (the lifecycle itself, §2.18); Strategy (routing algorithms); Circuit Breaker (§2.14's runaway-algorithm protection).
 
 **SOLID mapping:** Single Responsibility (each `IPreTradeCheck` evaluates one concern); Open/Closed (a new check is added to the chain without modifying existing ones; a new venue adds a session without touching the aggregate); Liskov (every check must honour the same fail-closed contract — a check that errors must reject, not pass, and this is contract-tested); Interface Segregation (routing and allocation are separate interfaces, having no shared consumers); Dependency Inversion (the aggregate depends on check and router abstractions, never concrete venue clients).
 
-**Extensibility:** A new venue adds a FIX session and its documented uniqueness scope (Advanced Q1); a new compliance rule adds a check to the chain; a new asset class extends the state machine's transition table declaratively (the optimization).
+**Extensibility:** A new venue adds a FIX session and its documented uniqueness scope (§2.4); a new compliance rule adds a check to the chain; a new asset class extends the state machine's transition table declaratively (the optimization).
 
 **Concurrency/thread safety:** Per-order serialization via partitioning — an order's events are processed by one consumer at a time, so the aggregate needs no internal locking. The deduplication uniqueness constraint is the one point where concurrency correctness is enforced at the storage layer rather than by partitioning, deliberately, because retransmissions can arrive on different sessions and therefore different partitions.
 
@@ -925,7 +860,7 @@ classDiagram
 
 **Option B — Cached exposure with bounded staleness:** maintain a local exposure cache refreshed continuously; check against it.
 *Advantages:* Sub-millisecond checks; decouples order entry from risk-service availability.
-*Disadvantages:* Checks against exposure up to the staleness bound old, and the error is directional (Intermediate Q4) — staleness understates exposure precisely when positions are growing, which is exactly when the limit matters.
+*Disadvantages:* Checks against exposure up to the staleness bound old, and the error is directional (§2.6) — staleness understates exposure precisely when positions are growing, which is exactly when the limit matters.
 *Cost:* Low latency. *Complexity:* Moderate. *Correctness:* Bounded but directionally unfavourable.
 
 **Option C — Reserve-and-confirm:** the OMS locally reserves limit capacity when sending an order and confirms against the risk service asynchronously, releasing reservations on reject or expiry.
@@ -945,11 +880,11 @@ classDiagram
 
 **Technical leadership:** The controls that matter most (reconciliation, per-venue uniqueness verification, reject-reason granularity) are all unglamorous and produce nothing visible when working. and were both caught by controls that a cost-conscious team could plausibly have trimmed. A Principal Engineer's job is to defend them specifically because their value is invisible until the incident they prevent.
 
-**Cross-team communication:** The OMS sits between PMs, traders, compliance, operations, and technology, each with a different definition of a correct order. PMs care about intent fidelity, traders about execution quality, compliance about restriction enforcement, operations about clean settlement. These conflict — Expert Q4's corporate-action decision is exactly a conflict between operational convenience and intent fidelity — and surfacing the conflict explicitly rather than optimizing for whoever asks loudest is the leadership act.
+**Cross-team communication:** The OMS sits between PMs, traders, compliance, operations, and technology, each with a different definition of a correct order. PMs care about intent fidelity, traders about execution quality, compliance about restriction enforcement, operations about clean settlement. These conflict — §2.12's corporate-action decision is exactly a conflict between operational convenience and intent fidelity — and surfacing the conflict explicitly rather than optimizing for whoever asks loudest is the leadership act.
 
-**Architecture governance:** Per-venue integration properties (Advanced Q1's uniqueness scope, session behaviours, reject semantics) should be documented ADRs per venue, because they are counterparty-specific facts discovered painfully and forgotten easily — and demonstrates the cost of a team assuming the next venue behaves like the last.
+**Architecture governance:** Per-venue integration properties (§2.4's uniqueness scope, session behaviours, reject semantics) should be documented ADRs per venue, because they are counterparty-specific facts discovered painfully and forgotten easily — and demonstrates the cost of a team assuming the next venue behaves like the last.
 
-**Cost optimization:** Expert Q1's build-versus-buy is the dominant cost lever, and the recurring cost that decides it — venue connectivity maintenance — is systematically underestimated at decision time because it is invisible until venues start changing protocols. A Principal Engineer's contribution is making that recurring cost explicit in the original analysis.
+**Cost optimization:** §2.17's build-versus-buy is the dominant cost lever, and the recurring cost that decides it — venue connectivity maintenance — is systematically underestimated at decision time because it is invisible until venues start changing protocols. A Principal Engineer's contribution is making that recurring cost explicit in the original analysis.
 
 **Risk analysis:** The dominant risk is the unknown position: an execution the firm does not know about, which makes every downstream system — position, risk, P&L, settlement, regulatory reporting — silently wrong simultaneously. Risk registers should weight this above availability, since an OMS outage is loud and bounded while an unknown position is silent and compounds through every dependent system.
 

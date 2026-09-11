@@ -77,7 +77,6 @@ This is the live template as of the 2026-08-31 retrofit. It supersedes every ear
 | 2 | Deep Dive | Internal implementation, runtime behavior, memory usage, threading model, compiler behavior, performance implications, hidden costs, framework internals (§2.1–2.6+ subsections) |
 | 3 | Visual Architecture | Mermaid/ASCII diagrams: sequence, flow, component, deployment as applicable |
 | 4 | Production Example | Problem / Architecture / Implementation / Trade-offs / Lessons learned (Scenario/Investigation/Root cause/Fix/Lesson framing is fine as the concrete vehicle) |
-| 10 | Interview Questions | 40 total: 10 Basic / 10 Intermediate / 10 Advanced / 10 Expert. Each: Question, Ideal Answer, Why this answer is correct, Common mistakes, Possible follow-up questions. No answer-less question lists. |
 | 11 | Coding Exercises | Easy / Medium / Hard / Expert. Each: Problem, Solution, Time complexity, Space complexity, Optimized solution |
 | 12 | System Design | Own, fully-authored section — governed by the four-step spine in A7 |
 | 13 | Low-Level Design | Requirements, class diagram, sequence diagram, design patterns used, SOLID mapping, extensibility, concurrency/thread safety |
@@ -85,7 +84,25 @@ This is the live template as of the 2026-08-31 retrofit. It supersedes every ear
 | 15 | Architecture Decision | Multiple solutions compared on advantages/disadvantages/cost/complexity/maintainability/performance/scalability/operational overhead; recommend one and justify why |
 | 17 | Principal Engineer Perspective | Business impact, engineering trade-offs, technical leadership, cross-team communication, architecture governance, cost optimization, risk analysis, long-term maintainability |
 
-**Retired sections — do not author in new modules:** §5 Best Practices, §6 Anti-patterns, §7 Performance Engineering, §8 Security, §9 Scalability, §16 Enterprise Case Study, §18 Revision.
+**Retired sections — do not author in new modules:** §5 Best Practices, §6 Anti-patterns, §7 Performance Engineering, §8 Security, §9 Scalability, §16 Enterprise Case Study, §18 Revision, and — **from 2026-09-11 — §10 Interview Questions** (see A6a).
+
+### A6a. §10 Interview Questions — retired 2026-09-11, and what replaces it
+
+Direct instruction: *"Remove all Interview Questions including basic, intermediate etc. Rather than your explanations will cover everything so I cannot fail any interview."* The Q&A block is retired as a section, and the requirement it served is transferred to the explanatory prose.
+
+**The standing rule that replaces it:** §2 Deep Dive must be **complete on its own** — every mechanism, the reasoning that selects it, the number that justifies it, the failure mode it introduces, and the interviewer push-back it attracts, all written as explanation rather than as a question. A topic that would previously have appeared only as an Expert question becomes a named §2 subsection.
+
+**Concretely, what §2 must now absorb:**
+
+- **The push-backs**, answered inline at the point the claim is made — what used to be "Common mistakes" and "Follow-ups."
+- **The judgement questions**: build-versus-buy, when to refuse a request, evaluating a colleague's proposal, what to say to a regulator or an executive.
+- **The procedures**: migrations, incident investigations, rollout and rollback sequences.
+- **The module's own discriminating question** — the one that most reliably separates a Staff answer from a Senior one in that domain — stated explicitly, with both answers worked.
+- **An honest statement of what the design cannot do**, and which failures have no detector.
+
+**Scope of the retrofit.** Executed across all 21 files of `14-System-Design/` on 2026-09-11: ~4,500 lines of Q&A absorbed into §2, §10 deleted, and ~570 cross-references of the form `§A5` / `§E7` / `"Advanced Q2"` rehomed to the §2 subsections that now carry the material. This is an explicit, scoped exception to the no-retrofit default (A4), on the same footing as the 2026-08-31 §5/6/7/8/9 removal — the instruction named all files.
+
+**Forward from here:** §10 is not authored in any new module, in any domain. Other folders' existing §10 sections are **not** retrofitted unless separately instructed; a cross-module reference into another folder's Q&A therefore remains valid.
 
 **Numbering is deliberately non-contiguous** (jumps at §4→§10 and §15→§17) so that thousands of existing cross-module references (e.g., "Module 82 §2.2," "per §12") stay valid across every historical renumbering event. Do not compact the numbering.
 
@@ -171,5 +188,7 @@ Entries are dated and terse; see A-sections for the rules they produced. Each en
   - **Two never-logged files surfaced:** `02-DotNet-AspNetCore/07` and `/08` are A9 variant-2 gap-fill files with no Module number and no log entry. Logged as a dated unnumbered block, matching the `01-CSharp` precedent.
   - **Two named-but-unwritten modules surfaced:** 188 (Engineering Management) and 190 (EF Core in practice), each already forward-referenced by a published file. Recorded under "Open items" in the README rather than left as dangling pointers.
   - **Precedent set:** when a file's H1 module number and the README Progress Log disagree, the Progress Log wins and the *unlogged* file is renumbered — never the logged one, because cross-module references throughout the repo are written against logged numbers.
+
+- **2026-09-11 — §10 Interview Questions retired; `14-System-Design/` retrofitted — became A6a.** Direct instruction to remove every Basic/Intermediate/Advanced/Expert Q&A block and have the explanations carry the material instead, so that no interview question is left uncovered by the prose. Executed across all 21 System-Design files: the substance of ~840 questions was absorbed into §2 (which roughly doubled in most files and gained named subsections for topics that previously existed only as Expert questions), §10 was deleted, and every orphaned `§A5`/`§E7`/`"Advanced Q2"`-style pointer was rehomed. Two defects found and fixed during the same pass: five cross-references damaged by an earlier scripted edit, and a datastore contradiction in Module 177 where §3's AWS diagram specified DynamoDB while §12 recommended PostgreSQL. Module 177's §12 was also brought onto the A7 four-step standard, which — with 01–14 and 20–21 already on it — leaves 18 and 19 as the folder's only pre-standard §12 sections. Scoped to `14-System-Design/`; other folders keep their §10 until separately instructed.
 
 **Precedent this history establishes for future changes:** default to no-retrofit (apply forward from a named module); treat "for all files"/"repo-wide" phrasing as the explicit signal needed to retrofit; record any future format reversal or retrofit as a new dated §B entry rather than a silent assumption, and update the relevant A-section in the same edit so §A never goes stale again.

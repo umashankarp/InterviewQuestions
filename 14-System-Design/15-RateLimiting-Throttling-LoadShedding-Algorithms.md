@@ -2,7 +2,7 @@
 
 > Domain: System Design | Level: Beginner → Expert | Prerequisite: [[04-Designing-Rate-Limiter-API-Gateway]] (the system/topology view this module supplies the missing algorithmic core for), [[../03-REST-APIs/02-API-Security-Rate-Limiting]] §2.2 (the four-bullet algorithm summary this module derives properly), [[../07-Redis/01-Data-Structures-Caching-Patterns]] (sorted sets, hashes, Lua atomicity, Cluster slots), [[../38-API-Gateway/01-APIGatewayFundamentals-Routing-RateLimiting-AuthEnforcement-Transformation]], [[../18-Event-Driven-Architecture/04-Backpressure-Flow-Control-Consumer-Lag]] (backpressure as the async dual of rate limiting)
 
-**Why this module exists.** Module 40 (`04-Designing-Rate-Limiter-API-Gateway.md`) designs the *topology* of a rate-limited gateway — tiers, fleet scaling, Redis as shared state, failure modes — and names the four classic algorithms in a single sentence in §2.2. Module 12 (`03-REST-APIs/02`) gives them four bullet lines. Neither derives one. At a Staff/Principal panel the algorithm *is* the interview: you will be asked to pick one, defend the choice numerically, write it, and then explain what breaks when it runs on 40 gateway nodes against a sharded Redis with 3 ms of clock skew. This module is that missing layer. It also corrects three concrete defects in Module 40's Advanced Q2 Lua script (see §6.7).
+**Why this module exists.** Module 40 (`04-Designing-Rate-Limiter-API-Gateway.md`) designs the *topology* of a rate-limited gateway — tiers, fleet scaling, Redis as shared state, failure modes — and names the four classic algorithms in a single sentence in §2.2. Module 12 (`03-REST-APIs/02`) gives them four bullet lines. Neither derives one. At a Staff/Principal panel the algorithm *is* the interview: you will be asked to pick one, defend the choice numerically, write it, and then explain what breaks when it runs on 40 gateway nodes against a sharded Redis with 3 ms of clock skew. This module is that missing layer. It also corrects three concrete defects in Module 40 §2.4's multi-tier Lua script (see §2.7 and §2.14).
 
 ---
 
@@ -247,7 +247,7 @@ Caveat worth stating: in Redis **Cluster**, `TIME` is per-node, so different sha
 
 **(b) Atomicity.** Read-modify-write from the application (GET, compute, SET) is a lost-update race under concurrency — two gateway nodes both read 1 token and both allow. Options: Lua script (atomic, single round trip, the default answer), `WATCH`/`MULTI` optimistic transactions (retries under contention — worse at high traffic, which is precisely when it matters), or Redis Functions (Redis 7, same semantics, stored server-side). Always ship via `EVALSHA` with an `EVAL` fallback on `NOSCRIPT` so you are not pushing the script body on every call — that is real bandwidth at 50k rps.
 
-**(c) Redis Cluster slots — and a concrete bug in Module 40.** In Cluster mode, **every key touched by one script must hash to the same slot**, or Redis returns `CROSSSLOT Keys in request don't hash to the same slot`. Module 40's Advanced Q2 script takes `KEYS[1..4]` = global, tenant, user, endpoint keys. Those hash to four different slots. **That script cannot run on a Redis Cluster.** It works on a single node or a non-clustered primary/replica pair only.
+**(c) Redis Cluster slots — and a concrete bug in Module 40.** In Cluster mode, **every key touched by one script must hash to the same slot**, or Redis returns `CROSSSLOT Keys in request don't hash to the same slot`. Module 40 §2.4's multi-tier script takes `KEYS[1..4]` = global, tenant, user, endpoint keys. Those hash to four different slots. **That script cannot run on a Redis Cluster.** It works on a single node or a non-clustered primary/replica pair only.
 
 Three real fixes:
 1. **Hash-tag the tenant-scoped tiers together** — `rl:{t:42}:tenant`, `rl:{t:42}:user:99`, `rl:{t:42}:ep:/orders` all hash on `t:42` → one slot, one script. The **global** tier genuinely cannot join them (it is not tenant-scoped) → it needs its own call, or approach 2/3.
@@ -335,6 +335,154 @@ A limiter is half a protocol; the caller's behaviour is the other half.
 - **Headers.** Emit the IETF-draft `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` on *successful* responses too, so well-behaved clients self-pace before hitting the wall. Note the information-disclosure trade-off in §8.4.
 - **Jitter is mandatory.** `Retry-After: 60` returned to 10,000 throttled clients synchronises all of them into a thundering herd at exactly T+60. Return a jittered value per client, and have clients apply **decorrelated jitter**: `sleep = min(cap, random(base, previous × 3))`.
 - **Retry amplification.** Three layers each retrying 3× is **3³ = 27×** amplification in the worst case — your retry policy becomes a self-inflicted DDoS during a partial outage. The fix is a **retry budget**: allow retries only while they are under ~10% of total requests over a rolling window, tracked per client, and stop retrying entirely above that. Circuit breakers are the coarser backstop.
+
+### 2.14 Composing Tiers — Atomic Commit and the Silent Quota Corruption
+
+A four-tier check (global, tenant, user, endpoint) has a defect that is invisible until someone audits a tenant's quota.
+
+In a naive sequential implementation, a request that passes global, tenant and user but **fails** at endpoint has already **charged** the first three tiers for a request that was never served. Under sustained endpoint-level rejection, the tenant's quota is being consumed by traffic they never received — so the tenant's usage figure is silently wrong, and if that figure feeds billing or a contractual cap, it is wrong in a way that costs money.
+
+**The fix is free, because you already have the transaction.** The script is atomic, so evaluate all tiers first and commit the charges only if every tier passes:
+
+```lua
+-- Phase 1: evaluate every tier against current state, charging nothing
+-- Phase 2: if ALL passed, write the updated state for every tier
+-- Otherwise return the first failing tier and write nothing
+```
+
+Two things follow:
+
+- **Reordering tiers cheapest-first is an optimisation, not a fix.** It reduces the frequency of the over-charge; it does not eliminate it. With atomic commit you may then order freely — put the most-likely-to-reject tier first for latency.
+- **Detecting this in production if it is already happening**: compare charged units against served requests per tenant over a window. A persistent gap in the charged direction is this bug, and nothing else produces that signature.
+
+### 2.15 Failure Posture — Per Tier, and the Degraded Case Everyone Forgets
+
+"Redis is down — fail open or fail closed?" is a false binary, and a single global answer is the wrong answer. It is **one decision per tier**, taken from the consequence of being wrong in that direction:
+
+| Tier | Posture when the store is unavailable | Why |
+|---|---|---|
+| Protective per-tenant / per-user limits | **Fail open**, with a degraded per-node local ceiling | Refusing all traffic to enforce an approximate fairness control converts a limiter outage into a full outage |
+| Global capacity protection | **Fail open into local leases** (§2.8) | The leased budget is already the degraded mode |
+| Contractual / regulatory ceilings | **Fail closed** | Admitting beyond a mandated cap is worse than rejecting |
+| Abuse / credential-stuffing controls | **Fail closed** | Failing open here is a published bypass |
+
+**The degraded case is more dangerous than the dead case, and it is the one most designs miss.** Redis *slow* — not down — means every request pays the limiter's latency, so the protective mechanism becomes the platform's primary latency problem. Three requirements follow:
+
+1. **A timeout on the limiter's own calls**, short relative to the request budget. Without it, a degraded store silently becomes the system's latency.
+2. **A circuit breaker around the limiter**, tripping to the degraded local mode past a latency or error threshold.
+3. **Fail-open must be loud** — counted, alerted, and time-bounded — because a fail-open tier that stays open is an undocumented bypass. Rate-limit the fail-open itself: a local per-node ceiling still applies.
+
+**Testing the fail-closed path safely** is its own problem, and the answer is a scheduled game-day with the blast radius bounded to one tenant or one canary partition, not a production-wide store failure.
+
+### 2.16 One Global Limit Across Regions — and the Rate/Quota Asymmetry
+
+True global consistency requires cross-region coordination at 70–150 ms RTT, which is frequently **3× the entire request budget**. So the naive answer is ruled out by arithmetic before the design starts, and the real question is *which approximation you choose*:
+
+| Option | Mechanism | Cost |
+|---|---|---|
+| **Regional split** | Each region enforces `L / regions` | Wastes budget when traffic shifts (70% to APAC during Tokyo hours leaves EMEA's share idle while APAC rejects) |
+| **Weighted regional split, periodically rebalanced** | Shares track observed demand | Rebalance lag; still approximate |
+| **Leased global budget** (§2.8 across regions) | Regions lease from one authority asynchronously | Over-admission bounded by `regions × lease`; authority is a cross-region dependency |
+| **CRDT counter** | Regions increment locally, merge asynchronously | Bounded over-admission during the merge interval; partition-tolerant |
+
+**The asymmetry that decides it: rate and quota behave differently.** A **rate** limit is an instantaneous property — brief regional over-admission self-corrects and nobody can later prove it happened, so approximation is acceptable. A **quota** (requests this calendar month, used for billing) is **cumulative and auditable** — approximation accumulates permanently and shows up in an invoice dispute. So: approximate the rate globally; make the quota exact and eventually consistent, reconciled from a durable event log rather than from the limiter's counters.
+
+**Under a region partition**, a regional split degrades gracefully (each region keeps its own share), a leased design degrades to last-lease, and a globally consistent counter stops working entirely — which is the fourth reason not to build one.
+
+### 2.17 Rate, Quota and Entitlement Are Three Different Systems
+
+Conflating them is one of the most common design errors in a commercial API, because they all look like "counting requests."
+
+| | Question | Time basis | Correctness bar | Store |
+|---|---|---|---|---|
+| **Rate** | Are you going too fast *right now*? | Sliding seconds | Approximate is fine | The limiter |
+| **Quota** | How much have you used *this billing period*? | Calendar month | **Exact; auditable** | A durable, replayable event log |
+| **Entitlement** | Are you *allowed* to call this at all? | Contract lifetime | Exact; revocation must be prompt | The authorization store |
+
+Three consequences worth stating:
+
+- **Never bill from limiter counters.** They are approximate by design (sliding-window error, lease overshoot, fail-open periods), they expire by TTL, and they are rebuilt on failover. Bill from an independent usage event stream that can be recomputed.
+- **Entitlement is consistency-critical where rate is not** — a revoked entitlement must stop working promptly, so it takes a CP posture while rate limiting takes an AP one.
+- **A rate rejection and an entitlement rejection are different HTTP responses.** `429` for rate; `403` for entitlement. Returning `429` for an unentitled call tells the client to retry something that will never succeed.
+
+### 2.18 Where Enforcement Belongs, Cost Weighting, and Key Hygiene
+
+**Placement is layered, cheapest rejection outermost:**
+
+| Layer | Enforces | Why there |
+|---|---|---|
+| **Edge / CDN / WAF** | Crude IP and bot limits, volumetric defence | Rejects before compute is billed; the only layer that survives a volumetric flood |
+| **API gateway** | The tiered business limits (§2.14) | Has authenticated identity; one implementation for all services |
+| **Service mesh sidecar** | Service-to-service limits | Enforces between internal callers, where the gateway is not in the path |
+| **In the service** | Resource-specific concurrency limits (§2.10) | Only the service knows its own pool sizes |
+
+The common mistake is choosing *one* layer. They protect against different failures, and a request that passed the gateway can still overwhelm one service's connection pool.
+
+**Cost-weighted requests.** An endpoint costing 50× a normal request must consume 50 tokens, not one — otherwise the limit is denominated in the wrong unit and a caller can consume 50× the intended capacity while appearing compliant. Two refinements: charge a **provisional** cost up front and reconcile to actual afterwards where cost is data-dependent (a query returning 10,000 rows versus 10); and publish the cost of each endpoint so clients can budget rather than discover it by rejection.
+
+**Key TTLs matter more than they look.** Every limiter key needs a TTL, set to at least the window length plus a margin, and **refreshed on every write**. Too short and state is lost mid-window, silently resetting a client's consumption (a free bypass on every expiry boundary). Too long, or absent, and the keyspace grows without bound — a limiter keyed by `(tenant, user, endpoint)` across a large tenant base is millions of keys, and unbounded growth eventually evicts *live* keys under `maxmemory`, which is the same bypass arriving as a capacity incident.
+
+### 2.19 The Pre-Authentication Boundary
+
+Limiting before authentication is a genuinely different problem, because you do not yet know who the caller is — and the two obvious failure modes are in direct tension:
+
+- **Limit by account** and an attacker locks out legitimate users by deliberately exhausting *their* limit — an account-lockout DoS, where the security control becomes the attack.
+- **Limit by IP** and credential stuffing from a large proxy pool walks straight through, while a corporate NAT with thousands of legitimate users behind one address gets throttled as an attacker.
+
+The workable resolution is **multi-dimensional and asymmetric**:
+
+1. Limit on `(IP, account)` **pairs**, so an attacker must both hold many addresses and target many accounts.
+2. Limit **failures far more aggressively than attempts** — a successful login is cheap evidence of legitimacy; a run of failures is the signal.
+3. On a per-account failure threshold, **escalate friction rather than locking** — CAPTCHA, a second factor, a delay — so the account stays usable to its real owner.
+4. Track **global failure rate across all accounts** as a separate signal: credential stuffing is visible in aggregate even when no single account or address crosses its threshold. This is the one signal that catches a well-distributed attack, and it is the one most often missing.
+
+### 2.20 Setting Limits Automatically From Backend Health
+
+Static limits are a guess that is wrong at every traffic level, and stale the moment capacity changes. A control loop derives the limit from observed health — but a control loop with a feedback path into the thing it controls can oscillate, so stability is the design problem, not the control law.
+
+**Inputs:** downstream p99 latency against its no-load baseline, error rate, queue depth, and saturation signals (pool utilisation). **Output:** the admitted rate or concurrency.
+
+**Stability requirements, all four of which are needed:**
+
+- **Asymmetric response** — decrease fast, increase slowly (AIMD). Overload must be relieved immediately; recovery can be patient.
+- **A floor and a ceiling.** A loop that can drive the limit to zero will, during any sufficiently bad minute, and then have no traffic from which to observe recovery.
+- **A cooldown** between adjustments, longer than the time for an adjustment's effect to appear in the metrics. Without it, the loop reacts to its own previous action and oscillates.
+- **Damping / hysteresis** on the signal, so measurement noise does not drive the limit.
+
+And the operational requirement: **the loop's current limit must be visible and manually overridable.** An automatic limiter whose value nobody can see or pin is untriageable during an incident.
+
+### 2.21 Migrating a Live Platform Between Algorithms
+
+Moving 2,400 merchants from fixed-window to GCRA without breaking anyone is a four-phase exercise, and the order is the answer:
+
+1. **Shadow.** Run GCRA alongside the live limiter, enforcing nothing, and record for every request what each algorithm *would* have decided. This is the only way to discover the population of clients whose traffic shape relies on the old algorithm's boundary burst.
+2. **Analyse the divergence, per client.** The clients who will be affected are specifically those whose bursts exceeded the smooth rate and were absorbed by the fixed window's boundary. Quantify how many, and by how much.
+3. **Re-parameterise before switching, not after.** GCRA's burst tolerance must be set so that a client's *legitimate* observed burst still passes — otherwise the migration is a silent limit reduction dressed as a correctness improvement, which is how a technically-correct change produces a commercial incident.
+4. **Roll out per cohort** with the old algorithm still evaluated in shadow, so a regression is a divergence alert rather than a support call.
+
+The generalisable point: **changing a limiter algorithm changes the effective limit even when the nominal number is unchanged**, because the algorithms differ precisely in what burst they permit. Treat it as a limit change with commercial consequences, not as a refactor.
+
+### 2.22 Operating the Highest-Blast-Radius Component
+
+A bug in the limiter affects every request to every service — a blast radius nothing else in the platform has. Its change-management regime must be visibly stricter than an ordinary service's, and in a SOX/PCI environment that strictness must also be *evidenced*.
+
+**Change management.** Limit configuration is separated from limiter code and versioned independently, so a limit change is not a deploy. Every configuration change is reviewed, attributed and reversible without a release. **Shadow mode is a first-class feature**, not a debugging aid: any candidate configuration can be evaluated against live traffic while enforcing the current one.
+
+**Canary.** Roll changes by traffic percentage, not by instance count, and watch three signals together: `429` rate by tier, `503` rate, and downstream saturation. A limit set too *loose* shows up as a rising `503`:`429` ratio — the backend failing before the limiter rejects — which is the leading indicator that limits no longer match capacity.
+
+**Observability that is specific to this component:**
+
+- `429` and `503` rates **by tier and by tenant**, never aggregate — an aggregate cannot detect one tenant being fully throttled.
+- **Fail-open events**, counted and alerted (§2.15).
+- **Limiter latency as a share of request budget**, so the protection's own cost stays visible.
+- **A shadow-mode diff rate**, whenever a candidate configuration is being evaluated.
+- **Per-key saturation**, to catch a hot key (§2.9) before the aggregate moves.
+
+**Two Principal-level judgements this component attracts:**
+
+*"Delete the shared limiter; give every node a local one, for latency."* The latency argument is real (§2.8 quantifies it), but the proposal as stated multiplies the effective limit by node count and removes every contractual guarantee. The correct counter-proposal is the leased design: it delivers the same in-process latency, bounds the over-admission explicitly, and keeps the exact path for the tiers that need it. Accept the problem, reject the solution — and note that the proposal usually surfaces because the limiter's latency was never measured and published, which is a monitoring gap as much as a design disagreement.
+
+*A 200 µs budget with an auditable, licensing-derived limit* — as in market-data entitlement — rules out any network hop at all: even a 300 µs in-AZ Redis call exceeds the entire budget. The only workable shape is **in-process enforcement against a locally held entitlement**, with exactness provided not by the enforcement path but by an **independent, durable usage log reconciled afterwards**. This is the sharpest instance of §2.17's rule: enforce approximately in the hot path; account exactly out of band.
 
 ---
 
@@ -460,622 +608,6 @@ AFTER:   [gateway]
 2. **Per-tenant compliance is not aggregate compliance** — but the fix is not only "add a global tier," it is *sizing that tier from your downstream's real, measured ceiling minus your own algorithm's error bound.*
 3. **Your monitoring window must be finer than your failure window.** An 800 ms spike is invisible in 1-minute averages. If the limiter's decision horizon is sub-second, the dashboard must be too.
 4. **Retries are part of the load model.** The retry policy converted a 3× overshoot into a sustained event; no rate-limiting algorithm can compensate for an unbudgeted client retry loop.
-## 10. Interview Questions
-
-*Calibrated to the Elite FinTech panel: payments, capital markets, market data, core banking. Each answer states not only what is correct but what separates an excellent answer from an adequate one.*
-
-### Basic (10)
-
-**Q1. What is rate limiting, and why does a payments API need it?**
-
-**Ideal answer:** Rate limiting is admission control at a boundary — a decision function `allow(key, now, cost)` evaluated *before* a request consumes meaningful resources. A payments API needs it for four distinct reasons that are often collapsed into one: (1) **abuse prevention** — credential stuffing, card testing, enumeration; (2) **capacity protection** — keeping aggregate load under what the backend can actually serve; (3) **contractual enforcement** — the platform holds a hard TPS ceiling with the card network, and exceeding it gets the *whole institution* throttled, not just the offending merchant; (4) **fairness** — one merchant's runaway batch job must not consume another merchant's capacity. Those four have different keys, different limits, and sometimes different algorithms.
-
-**Why this answer is correct:** It defines the mechanism precisely (a decision function at a boundary, before resource consumption) rather than by example, and it separates the four *purposes*, which is what determines the design. A limit that exists for abuse prevention and a limit that exists for a contractual ceiling are sized from completely different inputs — one from threat modelling, one from a vendor agreement.
-
-**Common mistakes:** Saying only "to stop abuse" — that misses the contractual and capacity purposes entirely, which are the ones that cause outages. Describing rate limiting as "protecting the server from too much load" without noting that it does *not* protect against latency-driven pileup (Little's Law). Treating it as purely a defensive control rather than also a commercial/product construct (tiered plans are rate limits).
-
-**Follow-ups:** "Which of those four purposes should fail open when Redis is down, and which should fail closed?" · "If the card network's ceiling is 10,000 TPS, what do you set your global limit to, and why not 10,000?"
-
----
-
-**Q2. Distinguish rate limiting, throttling, concurrency limiting, load shedding, and backpressure.**
-
-**Ideal answer:** They control different quantities. **Rate limiting** bounds requests *per unit time* (req/s) and rejects excess. **Throttling/shaping** *delays* rather than rejects, dispatching at a constant rate. **Concurrency limiting** bounds requests *in flight simultaneously* — a count, not a rate. **Load shedding** drops requests *by priority* when capacity has already collapsed. **Backpressure** slows the *producer* at the source via credits or windowing, and is the async-pipeline dual of rate limiting. The key insight is that a rate limit cannot substitute for a concurrency limit: by Little's Law `L = λW`, a constant compliant arrival rate produces unbounded concurrency if latency rises, so a service can be destroyed by a pileup while its rate limiter reports 100% compliance.
-
-**Why this answer is correct:** It names the controlled quantity for each, which is the only unambiguous way to separate them, and it identifies the specific failure that motivates having more than one — the latency-driven pileup that rate limiting is structurally blind to.
-
-**Common mistakes:** Using "throttling" and "rate limiting" interchangeably (common, but it hides the reject-vs-delay decision, which has real client-visible consequences). Claiming concurrency limiting is "just rate limiting with a different unit." Forgetting backpressure entirely, which signals no exposure to streaming/async systems.
-
-**Follow-ups:** "Your p99 is fine and the rate limiter shows no rejections, but the service is falling over. What's happening?" · "Where would you shape rather than reject in a payments flow?"
-
----
-
-**Q3. Explain the fixed-window counter algorithm and its main flaw.**
-
-**Ideal answer:** Bucket the timeline into aligned windows of length `P`; key on `{id}:{floor(t/P)}`; `INCR` and allow while the counter ≤ `L`. State is one integer per key per window — the cheapest possible. The main flaw is the **boundary burst**: a client can send `L` requests just before a boundary and `L` more just after, achieving `2L` within a span of `P`. The bound is exactly 2× and it is not amortised — a client that knows the boundary (and boundaries are clock-aligned, so they're guessable) can pulse indefinitely. There's a second, less-discussed flaw: `INCR` followed by a separate `EXPIRE` is not atomic, so a crash between them leaves an immortal key that permanently limits that client.
-
-**Why this answer is correct:** It gives the mechanics, quantifies the flaw exactly (2L over a span of P, sustainable), and explains *why* it's exploitable rather than theoretical — clock alignment. The `INCR`/`EXPIRE` race is the detail that shows production experience.
-
-**Common mistakes:** Saying "it's not accurate at boundaries" without the 2× figure or the sustainability point. Missing the atomicity race. Dismissing fixed window entirely — it's still the right choice as a cheap outer tier or for advisory limits.
-
-**Follow-ups:** "Show me the Lua that fixes the atomicity problem." · "Give me a real scenario where the 2× burst causes an incident rather than just being untidy."
-
----
-
-**Q4. What HTTP status code and headers should a rate-limited response carry?**
-
-**Ideal answer:** `429 Too Many Requests` with `Retry-After` (delta-seconds or HTTP date). Also emit the IETF-draft `RateLimit-Limit`, `RateLimit-Remaining`, and `RateLimit-Reset` — importantly, on *successful* responses too, so well-behaved clients self-pace before they hit the wall, which reduces 429 volume outright. Critically, `429` means "*you* exceeded *your* limit" — caller-attributable. If you're shedding because *you* are overloaded, the honest code is `503 Service Unavailable` with `Retry-After`. And `Retry-After` must be **jittered per client**: returning the same value to 10,000 throttled clients synchronises all of them into a thundering herd at exactly that moment.
-
-**Why this answer is correct:** It gets the status code right, distinguishes 429 from 503 by *attribution* (which is what a client's dashboards and alerting depend on), and raises jitter — the detail that turns a correct answer into a production-aware one.
-
-**Common mistakes:** `503` for everything, or `403`. Omitting `Retry-After`, which forces every client to guess a backoff and reproduces exactly the retry storm you're trying to prevent. Returning an identical `Retry-After` to all clients. Emitting `RateLimit-Remaining` on the unauthenticated surface without considering that it tells an attacker precisely how much probing budget they have.
-
-**Follow-ups:** "You return `Retry-After: 60` to 10,000 clients. What happens at T+60?" · "When would you deliberately *not* emit `RateLimit-*` headers?"
-
----
-
-**Q5. Explain the token bucket. What do capacity and refill rate each control?**
-
-**Ideal answer:** A bucket of capacity `C` refills continuously at `r` tokens/second; a request costing `q` is admitted iff `tokens ≥ q` and consumes `q`. `tokens(t) = min(C, tokens(t₀) + r·(t − t₀))`. **`r` controls the sustained rate; `C` controls the burst.** They are two independent product decisions, and collapsing them into one number ("100 per minute") means the burst got chosen by accident. Implementation must use **lazy refill**: store `(tokens, last_ts)` and compute the refill at read time from elapsed interval — never a background timer, which is O(active keys) of work and doesn't survive a multi-node deployment.
-
-**Why this answer is correct:** It gives the state equation, and it separates the two parameters by what they *mean to the business* rather than just what they do mechanically. Lazy refill is the single most important implementation detail and distinguishes someone who has built one from someone who has read about one.
-
-**Common mistakes:** Describing a refiller thread/timer. Saying capacity and rate are "basically the same thing scaled." Not noticing that `C = L` and `r = L/P` (the naive translation of "100 per minute") permits all 100 instantaneously.
-
-**Follow-ups:** "Client sends at 500 rps against `C=100, r=100`. How long before it's throttled?" · "What TTL do you put on the bucket key, and why?"
-
----
-
-**Q6. What's the difference between a token bucket and a leaky bucket?**
-
-**Ideal answer:** It depends which leaky bucket, and naming that ambiguity is the real answer. **Leaky bucket as a *meter*** — water leaks at rate `r`, each request pours in, reject on overflow — is *mathematically the dual of the token bucket*: identical admission decisions, with `tokens = C − water`. **Leaky bucket as a *queue*** (traffic shaper) is genuinely different: requests enter a bounded FIFO and are dispatched at a strictly constant rate, so it *delays* rather than rejects and produces a perfectly smooth output. The popular claim "token bucket allows bursts, leaky bucket doesn't" is only true of the queue variant.
-
-**Why this answer is correct:** The meter/queue distinction is real, is the source of most confusion on this topic, and immediately shows the candidate has read past a blog summary. It also sets up the correct usage rule.
-
-**Common mistakes:** Asserting the two are fundamentally different without qualification. Proposing the queue variant on a synchronous HTTP path — by Little's Law, a 1,000-deep queue draining at 100/s adds 10 seconds to the last request, whose client has long since timed out.
-
-**Follow-ups:** "Where in a payments platform would you actually deploy the queue variant?" · "Why is a shaping queue worse than an immediate 429 on a synchronous API?"
-
----
-
-**Q7. Why can't each node just hold its rate-limit state in memory?**
-
-**Ideal answer:** Because each node only sees its own slice of the traffic. Across `N` load-balanced nodes, a client's effective limit becomes up to `N × L` — with 40 gateway nodes, a "100 per minute" limit is really "4,000 per minute" to anyone whose requests spread across the fleet, which round-robin load balancing guarantees. Genuine fleet-wide enforcement needs shared state (Redis + an atomic Lua script). The nuanced follow-on: you can *still* use in-process limiting deliberately, as a **leased slice** of the global budget (§ local leases) or as a per-node hard ceiling — the error is unshared state that *pretends* to be a global limit, not in-process state as such.
-
-**Why this answer is correct:** It quantifies the failure (`N × L`) rather than just asserting it, and then rescues the legitimate use of local state, which is where high-scale designs actually land.
-
-**Common mistakes:** Stopping at "it won't be accurate." Concluding that all limiting must therefore be centralised, which sacrifices a Redis round trip on 100% of traffic and makes Redis a hard availability dependency for every request.
-
-**Follow-ups:** "Sticky sessions would fix this — would you do that?" · "How would you get in-process latency *and* a global limit?"
-
----
-
-**Q8. What is a sliding-window log, and why is it rarely the right choice?**
-
-**Ideal answer:** Store every request timestamp in a sorted set scored by time; on each request, `ZREMRANGEBYSCORE` everything older than `t − P`, `ZCARD` the survivors, and `ZADD` if under the limit. It's **exact** — no boundary artefact — and yields a provably correct `Retry-After` (when the oldest survivor falls out). It's rarely right because memory is O(L) *per key*: a sorted set past the listpack threshold costs roughly 60–100 bytes per member, so 1M keys × a 100/min limit ≈ 100M members ≈ **8 GB** of Redis for rate-limit state alone. Worse, the cost concentrates on the *abusive* keys, whose sets stay full, and `ZREMRANGEBYSCORE` is O(expired entries), so p99 spikes exactly when a key is busiest.
-
-**Why this answer is correct:** It states the guarantee, then kills it with arithmetic — the 8 GB figure and the "cost correlates with abuse" observation are what make the trade-off concrete rather than hand-waved.
-
-**Common mistakes:** Recommending it as the default because "it's the accurate one." Not knowing the per-member overhead, so being unable to answer "how much RAM?" Missing that its worst-case latency correlates with the worst-case client.
-
-**Follow-ups:** "Where *would* you use it?" · "How would you get exactness without the memory?"
-
----
-
-**Q9. What identity should you key the rate limit on?**
-
-**Ideal answer:** In descending order of preference: **API key / client ID** (contractual, stable, the unit you actually bill), **authenticated user ID**, **session**, then **IP** as a last resort. IP is last because CGNAT and corporate egress put thousands of legitimate users behind one address — throttling it takes out a whole customer's office — and because `X-Forwarded-For` is client-controlled, so you must take the Nth-from-the-right entry at your trusted-proxy boundary rather than the leftmost. On IPv6, limit per **/64** (often /48), never per address: a single residential allocation is 2⁶⁴ addresses, so per-address limiting on IPv6 is equivalent to no limiting. In practice you key on several simultaneously, as separate tiers.
-
-**Why this answer is correct:** It ranks by *stability and attributability*, gives the specific reasons IP fails in both directions (false positives from NAT, bypass from spoofing), and includes the IPv6 point, which is frequently missed and completely defeats a naive design.
-
-**Common mistakes:** Defaulting to IP. Trusting the leftmost `X-Forwarded-For`. Treating IPv6 addresses like IPv4 addresses. Keying only on one thing rather than layering.
-
-**Follow-ups:** "You must limit an unauthenticated login endpoint. What's your key?" · "How does an attacker bypass your XFF-based limit?"
-
----
-
-**Q10. Why must the rate-limit check happen early in the request pipeline?**
-
-**Ideal answer:** Because the entire economic point is to reject a request *before* it consumes resources — if the limiter runs after routing, deserialization, authentication and a database call, you have already paid for everything the limit exists to protect. There's a specific trap: authentication is *deliberately* expensive (bcrypt/Argon2 verify is 50–250 ms by design; token introspection is a network hop), so a limiter placed strictly after auth is a **CPU-amplification DoS** — a few hundred rps of garbage credentials saturates you. The resolution is layered: an identity-agnostic tier (per-IP/ASN, microseconds) *before* auth, and the identity-aware tiers *after*.
-
-**Why this answer is correct:** It states the principle and then identifies the chicken-and-egg problem that makes "just put it first" insufficient, with the layered resolution.
-
-**Common mistakes:** Saying "put it first" without noticing you can't key on identity you haven't authenticated yet. Not recognising that password hashing cost is an attack surface. Placing the limiter inside individual backend services, which both duplicates the logic and lets rejected traffic consume backend capacity.
-
-**Follow-ups:** "Rejecting must be cheaper than allowing — why, and how would you verify it?" · "What do you key the pre-auth tier on for a login endpoint?"
-
----
-
-### Intermediate (10)
-
-**Q11. Derive the fixed-window boundary burst precisely. How bad is it in practice?**
-
-**Ideal answer:** With limit `L` over aligned windows of length `P`: a client sends `L` requests in `[P−ε, P)` and `L` more in `[P, P+ε)`. Both windows are compliant. Over the rolling interval `[P−ε, P+ε)` — length `2ε ≪ P` — the client achieved `2L`. The worst-case bound over *any* rolling window of length `P` is exactly `2L`, and it's sustainable: pulsing at every boundary yields a steady `2L/P`. In practice it's *worse than the theory suggests*, because windows are **clock-aligned** and clients are **cron-scheduled on NTP-synced hosts** — so it's not one adversary exploiting a boundary, it's every batch integration on your platform independently synchronising onto the same instant. That converts a per-client 2× into a fleet-wide correlated spike, which is how it actually causes incidents.
-
-**Why this answer is correct:** It does the derivation, states the tight bound, and then makes the crucial leap most candidates miss: the flaw's severity comes from *correlation across clients*, not from the 2× factor per client.
-
-**Common mistakes:** Getting the bound wrong (saying "up to 2× on average" — it's a worst case, not an average). Treating it as adversarial-only. Not connecting clock alignment to cron schedules.
-
-**Follow-ups:** "Would randomising each client's window offset fix it? What does that cost?" · "Which algorithms have no boundary at all, and why?"
-
----
-
-**Q12. Write the sliding-window-counter formula and analyse its error.**
-
-**Ideal answer:**
-```
-elapsed  = t mod P
-weight   = (P − elapsed) / P
-estimate = previous_count × weight + current_count
-```
-Example: `L=100`, `P=60s`, 15 s into the window, previous = 80, current = 30 → `80×(45/60) + 30 = 90` → allow. State is two integers, O(1), one round trip. The error comes from assuming the previous window's traffic was **uniformly distributed**. If it was back-loaded, the true rolling count exceeds the estimate and you **over-admit**; if front-loaded, you **under-admit** a compliant client. Worst-case error is bounded by `previous_count × weight`, but empirically it's tiny: Cloudflare's published measurement of this exact algorithm over ~400M requests found **0.003%** of requests incorrectly allowed or limited, with mean over-admission around 6% of the limit.
-
-**Why this answer is correct:** It gives the formula with a worked number, names the *assumption* that generates the error (uniformity), identifies both error directions, and quotes a real measured figure — which turns "approximate" from a hedge into a quantified engineering trade-off.
-
-**Common mistakes:** Getting the weight backwards (using `elapsed/P` instead of `(P−elapsed)/P`). Only mentioning over-admission and missing that it also falsely rejects compliant clients. Saying "it's approximate" without any bound, which makes it impossible to decide whether it's acceptable.
-
-**Follow-ups:** "For which limits is 0.003% error unacceptable?" · "How would you empirically measure your own error rate in production?"
-
----
-
-**Q13. Why lazy refill rather than a background refiller?**
-
-**Ideal answer:** Because refill is a pure function of elapsed time: `tokens = min(C, tokens + r·(now − last_ts))`. Computing it at read time makes the algorithm O(1) state and O(1) work with **zero background processes**. A refiller thread is O(active keys) of periodic work — with a million buckets that's a million writes per tick — it doesn't survive a multi-node deployment (which node refills? all of them, racing?), it drifts under GC pauses and scheduling jitter, and it forces you to materialise state for keys that may never be touched again. Lazy refill also composes naturally with TTL-based eviction: an untouched bucket simply expires.
-
-**Why this answer is correct:** It gives the mathematical reason (refill is a closed-form function of time, so it never needs to be *performed*), then enumerates the concrete operational failures of the alternative.
-
-**Common mistakes:** Describing the timer approach as the standard one. Not realising the closed form exists. Missing the multi-node race question entirely.
-
-**Follow-ups:** "What if the clock goes backwards between `last_ts` and `now`?" · "What TTL do you set so idle buckets evict correctly?"
-
----
-
-**Q14. Why must the check be atomic, and how do you achieve that in Redis?**
-
-**Ideal answer:** Application-side read-modify-write (GET → compute → SET) is a **lost update**: two gateway nodes both read "1 token remaining" and both allow, so the limit is breached by exactly the concurrency you were trying to control — the race gets *worse* precisely when the limit matters. Options in Redis: (1) **Lua script** — atomic, single round trip, the default answer; ship it with `EVALSHA` and an `EVAL` fallback on `NOSCRIPT` so you're not pushing the script body 50,000 times a second; (2) **`WATCH`/`MULTI`** optimistic transactions — correct, but retries under contention, i.e. it degrades exactly under load; (3) **Redis Functions** (Redis 7) — same semantics, stored server-side. Keep the script short: Lua CPU is charged to the single-threaded shard, so a 50 µs script at 100k rps needs five cores' worth of work on a one-core engine.
-
-**Why this answer is correct:** It names the specific concurrency bug, notes the perverse correlation (the race is worst under load), and ranks the mechanisms with the `EVALSHA` and script-CPU details that matter in production.
-
-**Common mistakes:** "Redis is single-threaded so it's already atomic" — true per *command*, false across a read-then-write from the client. Proposing `WATCH`/`MULTI` without noting its contention behaviour. Using `EVAL` with the full script body on every call.
-
-**Follow-ups:** "Your script takes 200 µs. What's your ceiling per shard?" · "Can you use `redis.call('TIME')` inside the script? Since when, and why was it once forbidden?"
-
----
-
-**Q15. A client sends at 500 rps against a token bucket with `C=100, r=100/s`. Walk through what happens.**
-
-**Ideal answer:** Starting from a full bucket, the client is admitted while tokens last. Tokens deplete at `A − r = 400/s` from a starting 100, so it is fully admitted for `T = C/(A − r) = 100/400 = 0.25 s` — about 125 requests (100 from the bucket plus ~25 refilled). After that the bucket is empty and the client is admitted at exactly `r = 100/s`, with 400/s rejected. Generally: `C + r·T = A·T ⟹ T = C/(A − r)` for `A > r`. The design implication is that `C` *is* the burst you have chosen to absorb — if `L = 100/min` is naively implemented as `C=100, r=1.667/s`, you have authorised 100 simultaneous requests, which for a fan-in of 500 merchants is 50,000 concurrent requests hitting a downstream that may cap at 10,000 TPS.
-
-**Why this answer is correct:** It does the arithmetic, gives the general formula, and immediately converts it into the design consequence — the fan-in multiplication that turns a per-client parameter into a platform-level incident.
-
-**Common mistakes:** Saying "it gets throttled" without the transient. Forgetting that tokens continue refilling during the burst (so it's ~125, not 100). Not connecting per-client burst to aggregate fan-in.
-
-**Follow-ups:** "You need 100/min but only 5 at once. What are `C` and `r`?" · "How do you express that limit to a merchant in their API docs?"
-
----
-
-**Q16. What TTL do you set on rate-limiter keys, and why does it matter?**
-
-**Ideal answer:** Every limiter key needs a TTL matched to when its state stops being meaningful: **fixed/sliding window** → the window length (plus a small margin for the sliding counter's previous-window read); **token bucket** → `C/r`, the time to refill from empty to full, after which the state is indistinguishable from "new"; **GCRA** → `new_tat − now`, which falls straight out of the algorithm. Without TTLs, any system with churning identities — per-user keys, per-session keys, per-IP keys on the open internet — grows unboundedly and eventually hits `maxmemory`. That failure mode is nasty: with `allkeys-lru` you start evicting *other people's* cache data; with `noeviction` writes start failing and, depending on your fail-open/fail-closed choice, either the limiter stops enforcing or the API stops serving.
-
-**Why this answer is correct:** It gives the per-algorithm TTL with the *reason* each is correct (the point at which state carries no information), and it traces the consequence of omission through to the two distinct outage shapes depending on eviction policy.
-
-**Common mistakes:** Setting a single arbitrary TTL for all algorithms. Missing that the sliding counter needs the previous window to survive slightly longer than one period. Not knowing that a shared Redis means limiter key growth evicts unrelated cache entries.
-
-**Follow-ups:** "Should limiter state share a Redis with your cache?" · "What happens to a token bucket whose key expired while it was half-empty — is that a correctness problem?"
-
----
-
-**Q17. When do you return 429 and when 503?**
-
-**Ideal answer:** `429` attributes the cause to the **caller**: they exceeded a limit that belongs to them. `503` (with `Retry-After`) attributes it to **you**: the service is overloaded or degraded and the caller did nothing wrong. The distinction is operationally load-bearing — a client's SDK, dashboards, retry policy, circuit breaker, and support escalation all branch on it. If you return 429 for global load shedding, every client's dashboard will show *them* as the problem, their engineers will hunt a non-existent bug in their own throttling, and your support queue fills with false reports. In a contractual/regulated setting it's worse: a 429 on a payment endpoint is evidence the merchant breached their agreed TPS, which is a commercial conversation you don't want to have when it was actually your capacity that failed.
-
-**Why this answer is correct:** It frames the choice as *attribution*, not severity, and explains the downstream consequences for the caller's own systems and for the commercial relationship — which is the part that matters at a bank.
-
-**Common mistakes:** Treating them as interchangeable "the request failed" codes. Using 429 for everything because it's "the rate limit code." Returning 503 without `Retry-After`.
-
-**Follow-ups:** "You shed a SHEDDABLE-class request during an overload. Which code?" · "Does the answer change if the caller is internal rather than a paying merchant?"
-
----
-
-**Q18. Why must `Retry-After` be jittered?**
-
-**Ideal answer:** Because an identical value synchronises every throttled client. Return `Retry-After: 60` to 10,000 clients at time T and you have *scheduled* a 10,000-request spike at T+60 — the limiter has manufactured the thundering herd it exists to prevent, and the resulting rejections schedule another one at T+120, producing a self-sustaining oscillation. Fix on both sides: the server returns a per-client jittered value (`base × uniform(0.5, 1.5)`), and clients apply **decorrelated jitter** on backoff: `sleep = min(cap, random(base, previous × 3))`. Layer on a **retry budget** — retries permitted only while they're under ~10% of total requests over a rolling window — because with three layers each retrying 3× the worst-case amplification is `3³ = 27×`, which turns a partial degradation into a self-inflicted DDoS.
-
-**Why this answer is correct:** It identifies the synchronisation mechanism, notes the *oscillation* (not just one spike), and gives both server-side and client-side fixes plus the amplification arithmetic that justifies retry budgets.
-
-**Common mistakes:** Mentioning jitter as a nice-to-have. Only jittering client-side, leaving the server broadcasting a synchronising signal. Not knowing the multiplicative amplification across retry layers.
-
-**Follow-ups:** "Why decorrelated jitter rather than plain exponential backoff with jitter?" · "How do you implement a retry budget across a fleet without shared state?"
-
----
-
-**Q19. How do you rate limit an endpoint that costs 50× a normal request?**
-
-**Ideal answer:** With **cost-weighted limiting** — the decision function takes a `quantity`, and the expensive endpoint consumes 50 tokens instead of 1. All the algorithms support this naturally: token bucket subtracts `q`; GCRA advances the TAT by `q·T`; window counters `INCRBY q`. Weight should be derived from the *actual* dominant resource (CPU seconds, rows scanned, bytes egressed, downstream calls fanned out), measured rather than guessed, and re-measured when the endpoint changes. Two refinements: for endpoints whose cost is only known *after* execution (a query returning an unknown number of rows), charge an estimate up front and **reconcile afterwards** by debiting the difference; and cap `q` at the bucket capacity, otherwise a request costing more than `C` can never be admitted and will retry forever.
-
-**Why this answer is correct:** It generalises to all the algorithms, insists the weight be measured against a real resource, and covers the two edge cases (post-hoc cost, `q > C`) that break naive implementations.
-
-**Common mistakes:** Creating a separate, unrelated limit per endpoint instead of a shared weighted budget — that lets a client max out every endpoint simultaneously. Guessing weights. The `q > C` permanent-rejection bug.
-
-**Follow-ups:** "A report endpoint's cost varies 100× by date range. How do you charge for it?" · "How do you stop a client from gaming the estimate?"
-
----
-
-**Q20. Where does rate limiting belong: edge/CDN, API gateway, service mesh, or in the service?**
-
-**Ideal answer:** At several places, for different purposes, because each tier sees different information and has different costs. **Edge/CDN (CloudFront, Cloudflare)** — volumetric and per-IP limits; the only tier that can reject before the request crosses into your network, and the only one that helps against L3/L4 floods. **API gateway** — the primary tier: it has authenticated identity, tenant context, and route information, so it can enforce contractual per-tenant/per-endpoint limits once, centrally, rather than N times inconsistently. **Service mesh (Envoy/Istio)** — good for *service-to-service* limits and for local per-instance ceilings, using Envoy's global rate-limit service or local token buckets. **In the service** — only for limits that require domain knowledge the gateway can't have ("no more than 3 open trades per account per second"). The rule: enforce as far out as the *required information* allows, since every tier inward has already spent resources.
-
-**Why this answer is correct:** It maps tiers to the information each possesses, which is what actually determines feasibility, and gives a single decision rule rather than a preference.
-
-**Common mistakes:** Picking one tier as *the* answer. Putting business-semantic limits at the gateway (it doesn't know what a trade is) or contractual limits in the service (duplicated N times, drifting). Assuming an application-layer limiter helps against volumetric DDoS — it must accept a connection to reject it, and connection capacity is what's being exhausted.
-
-**Follow-ups:** "Which limits *cannot* move to the edge, and why?" · "How do you keep the gateway's limit config in sync with what merchants were contractually sold?"
-
----
-
-### Advanced (10)
-
-**Q21. Explain GCRA. Write it. Why is it only 8 bytes of state?**
-
-**Ideal answer:** GCRA (Generic Cell Rate Algorithm, from ATM traffic policing; implemented by `redis-cell`) tracks a single value — the **Theoretical Arrival Time (TAT)**, the instant at which the *next* request would be perfectly conforming. Burst is expressed as tolerance for arriving *early*.
-
-```
-T = P / L                      -- emission interval (ideal spacing)
-τ = T × burst                  -- delay variation tolerance (how early you may arrive)
-
-tat      = max(stored_tat, now)
-new_tat  = tat + q·T
-allow_at = new_tat − τ
-if now < allow_at:  REJECT, retry_after = allow_at − now
-else:               store new_tat with TTL (new_tat − now); ALLOW
-```
-
-It's 8 bytes because it stores no counters and no history — the entire admission state is one future timestamp. Everything else (remaining burst, exact `Retry-After`, reset time) is *derived* arithmetically from `now`, `new_tat`, `T`, and `τ`. Properties: exact (no window, no approximation), no boundary to synchronise on, configurable burst independent of rate, one `GET` + one `SET`, no background work, and a correct `Retry-After` for free.
-
-Trace with `L=5/s` (`T=200 ms`), burst 3 (`τ=600 ms`), all at `now=1000`: req1 → tat 1000, new_tat 1200, allow_at 600 → allow; req2 → new_tat 1400, allow_at 800 → allow; req3 → new_tat 1600, allow_at 1000 → allow (exactly at the edge); req4 → new_tat 1800, allow_at 1200 > 1000 → **reject, retry_after 200 ms**.
-
-**Why this answer is correct:** It explains the *reframing* — from counting events to scheduling a virtual clock — which is the conceptual core, then shows the derived quantities that justify the tiny state, and validates with a trace.
-
-**Common mistakes:** Not knowing GCRA exists (the most common outcome, and the reason raising it is high-leverage). Describing it as "just a token bucket" — behaviourally equivalent for admission, but the state representation and the free exact `Retry-After` are genuinely different. Forgetting `max(stored_tat, now)`, without which an idle key's stale TAT lets a client accumulate unbounded credit.
-
-**Follow-ups:** "When would you *not* use GCRA?" · "GCRA gives rate; how do you also report 'requests used this calendar month' for billing?"
-
----
-
-**Q22. Your multi-tier Lua script takes four keys — global, tenant, user, endpoint. What breaks when you move to Redis Cluster, and how do you fix it?**
-
-**Ideal answer:** It stops working entirely. In Cluster mode every key touched by one script must hash to the **same slot**; four unrelated keys hash to four slots, and Redis returns `CROSSSLOT Keys in request don't hash to the same slot`. The script works on a single node or a non-clustered primary/replica pair, which is exactly why this is usually discovered during a scaling migration rather than in design review. Three fixes: (1) **hash-tag the tenant-scoped tiers** — `rl:{t:42}:tenant`, `rl:{t:42}:user:99`, `rl:{t:42}:ep:/orders` all hash on `t:42` into one slot, one script, one round trip. The **global** tier genuinely cannot join them, because it isn't tenant-scoped. (2) **Shard the global tier** into `N` sub-buckets of `L/N`, chosen by hash, each tagged into a tenant group — this removes the cross-slot problem *and* the hot-slot problem, at the cost of `1/N`-granularity unfairness. (3) **Enforce the global tier locally** with a leased budget and keep only the tenant-scoped tiers in Redis — usually the best answer, since it also removes a round trip.
-
-**Why this answer is correct:** It names the exact error, explains why it hides until migration, and gives three fixes ordered by how much else they solve — with the honest note that the global tier is structurally unable to share a tenant's hash tag.
-
-**Common mistakes:** Assuming Lua atomicity implies cross-key freedom in Cluster. "Just use one key for everything" — that recreates the hot slot at maximum severity. Hash-tagging *all four* including global, which puts 100% of platform traffic on one slot and is worse than the original bug.
-
-**Follow-ups:** "You chose sharded global sub-buckets. A client hashes to a saturated one while others have room — is that acceptable?" · "How do you migrate from single-node to Cluster without a flag day?"
-
----
-
-**Q23. How does clock skew break these algorithms, and what are your defences?**
-
-**Ideal answer:** Every algorithm above computes from an elapsed interval, so a bad clock corrupts state. NTP skew is typically 1–10 ms but can be seconds after a VM live-migration, and clocks can step *backwards*. Concretely: in a token bucket, `now < last_ts` makes `(now − last)` negative and **destroys tokens** — the client is throttled for no reason; in GCRA, a forward jump on one node writes a TAT far in the future and **locks the client out** until real time catches up; across nodes, a lagging clock under-refills while a leading one over-refills, so a client's effective limit depends on which node it lands on. Defences, in order: (1) **use the store's clock** — `redis.call('TIME')` gives one authoritative clock; legal inside scripts since Redis 5 by default (earlier via `redis.replicate_commands()`) because Redis replicates *effects*, not the script body, so non-determinism no longer breaks replication; (2) **clamp defensively** — `local elapsed = math.max(0, now − last)` is one line that eliminates the entire backwards-clock class; (3) **monotonic clocks** (`Stopwatch.GetTimestamp()`, `CLOCK_MONOTONIC`) for anything measured locally, wall clock only for cross-node coordination. Caveat: in Cluster, `TIME` is per-node, so a given limiter's keys must live on one shard for its clock to be consistent — which is another reason for the hash-tagging in Q22.
-
-**Why this answer is correct:** It gives a distinct, concrete failure per algorithm rather than a generic "clocks are hard," explains *why* `TIME` in Lua is safe now and wasn't always (effects replication), and includes the one-line clamp that most implementations omit.
-
-**Common mistakes:** "We use NTP so it's fine." Not knowing about effects replication and believing `TIME` is still forbidden in scripts. Omitting the clamp. Missing that `TIME` is per-node in Cluster, which quietly reintroduces skew across shards.
-
-**Follow-ups:** "Redis fails over to a replica with a 40 ms clock difference. What happens to in-flight buckets?" · "Would you ever prefer the client's clock?"
-
----
-
-**Q24. Design a local-token-lease limiter. Quantify what you give up.**
-
-**Ideal answer:** Each gateway node leases a slice of the global budget and spends it from an in-process bucket; a background task reconciles and re-leases. With 10,000 rps global across 40 nodes: each node leases ~250 rps worth every second, checks locally in ~50 ns with zero network, and Redis load drops from `O(requests)` — 50,000 ops/s — to `O(nodes / interval)` — about 40 ops/s. A Redis outage degrades to "each node enforces its last lease" rather than hitting a fail-open/fail-closed cliff.
-
-What you give up, quantified: (1) **Over-admission bound** — worst case every node holds a full unspent lease and spends simultaneously, so transient overshoot ≤ `nodes × lease_size` = 40 × 250 = **1,000 rps**. This is why, against a hard 10,000 TPS contractual ceiling, you set the global budget to **9,000** — sizing the margin from the algorithm's own error bound rather than a round number. (2) **Idle-node starvation** — a node with a 250 rps lease and 5 rps of traffic hoards 245 rps a hot node needs; fix with demand-weighted leases (share proportional to recently observed traffic), lease *return* on the reconciliation tick, and shorter intervals when traffic is skewed. (3) **Not suitable for hard caps** unless the total leased budget is set below the real ceiling by the overshoot bound. (4) **Node churn** — an autoscaling fleet changes the denominator, so leases must be demand-driven, not `total/N` with a hardcoded `N`.
-
-**Why this answer is correct:** It gives the mechanism with real numbers, derives the over-admission bound explicitly, and — critically — shows how that bound *feeds the configuration decision* rather than being an abstract caveat.
-
-**Common mistakes:** Proposing it without quantifying overshoot, which makes it unusable against a contractual ceiling. Equal-split leases in a fleet with skewed traffic. Ignoring autoscaling. Not noticing the availability *benefit* — graceful degradation instead of a cliff.
-
-**Follow-ups:** "Traffic is 80% on 3 of 40 nodes. What does your lease algorithm do?" · "How do you handle a node that dies holding a large unspent lease?"
-
----
-
-**Q25. One global counter key is saturating a Redis shard. Rank your fixes.**
-
-**Ideal answer:** The diagnosis first: Redis is single-threaded per shard (~100k simple ops/s, far less with a non-trivial script), and a single global key lives on **one** slot on **one** shard, so it absorbs 100% of platform traffic. Sharding the *cluster* doesn't help — the key doesn't move. Signature: one Redis node at 100% CPU while the rest idle, gateway p99 spiking, `redis-cli --hotkeys` naming the key, `SLOWLOG` filling.
-
-Ranked fixes: (1) **Local leases** — removes the per-request hop entirely; strictly the best where approximation is acceptable, and it improves availability too. (2) **Sharded sub-counters** — split into `global:0..N−1` at `L/N` each, pick by hash; linear headroom, cost is granularity unfairness (a client hashing into a saturated sub-bucket is rejected while another has room), mitigated by picking two at random and using the less loaded ("power of two choices"). (3) **Hierarchical filtering** — a cheap in-process per-node ceiling first, so Redis only sees what survives; helps proportionally to how much you reject. (4) **Move the tier out of Redis** — a gossiped CRDT counter with bounded staleness for the global tier specifically. I'd start with (1), fall back to (2) if the limit must remain exact-ish, and treat (3) as complementary to either.
-
-**Why this answer is correct:** It explains *why* clustering doesn't fix it (which is the non-obvious part), gives the observable signature, and ranks by how much each fix solves — with the power-of-two-choices refinement showing depth on the granularity trade-off.
-
-**Common mistakes:** "Add more Redis shards." Sharding the counter without noticing the fairness cost. Not recognising the single-threaded-per-shard constraint, which is the root of the whole problem.
-
-**Follow-ups:** "You shard into 16 sub-buckets. How much does the effective global limit deviate?" · "How would a CRDT counter behave during a network partition here?"
-
----
-
-**Q26. Your rate limiter reports 100% compliance and the service is still collapsing. Explain, and design the fix.**
-
-**Ideal answer:** Little's Law: `L = λW`. The limiter bounds `λ`; nothing bounds `W`. When a downstream dependency degrades from 20 ms to 2,000 ms, a perfectly compliant 500 rps produces `500 × 2.0 = 1,000` concurrent in-flight requests instead of 10 — exhausting the thread pool, connection pool, and socket budget — and **the limiter admitted every one of them as compliant**, because arrival rate never changed. Rate limiting protects against *volume*; it is structurally blind to *latency*.
-
-The fix is a **concurrency** limit, and a static one is a guess that's wrong at every traffic level, so make it adaptive: **AIMD** (additively increase on success, multiplicatively halve on timeout — TCP congestion control applied to your service; simple, robust, slow to converge), or better, a **gradient/Vegas-style** controller: `newLimit = currentLimit × (RTT_noload / RTT_actual) + queueSize`, smoothed — when actual RTT rises above the no-load baseline, the limit shrinks *before* queues build. That's Netflix's `concurrency-limits` approach. In .NET, `System.Threading.RateLimiting.ConcurrencyLimiter` provides the mechanism (bounded queue, `QueueProcessingOrder`); you write the controller around it. Then, beneath that, priority shedding for the case where even the adaptive limit can't keep up.
-
-**Why this answer is correct:** It identifies the exact law, does the arithmetic showing a 100× concurrency change at constant rate, and prescribes an adaptive rather than static control — plus the concrete .NET primitive.
-
-**Common mistakes:** Blaming the rate limit's configuration ("the limit was too high") rather than recognising it's the wrong control. Proposing a static concurrency cap. Not knowing gradient/AIMD approaches exist.
-
-**Follow-ups:** "How does the gradient controller avoid oscillating?" · "Where do you measure `RTT_noload`, and what if the service has never been unloaded?"
-
----
-
-**Q27. In a four-tier check, a request passes global/tenant/user but fails endpoint. What happened to the tokens?**
-
-**Ideal answer:** In a naive sequential implementation, the first three tiers were **charged** for a request that was never served — the tenant's quota is silently wrong, and under sustained endpoint-tier rejection a tenant can be throttled out of tiers they never actually consumed. Module 40's Advanced Q2 presents this as an acceptable trade-off against "the complexity of a multi-phase protocol," and that's a **false trade-off**: the script is *already atomic*, so there is no protocol to build. Do two passes inside the same `EVAL` — peek all four tiers (compute would-be state without writing), and only if all pass, commit all four writes:
-
-```lua
-local pending = {}
-for i = 1, 4 do
-  local ok, newstate = peek(KEYS[i], ARGV_for(i), now)
-  if not ok then return {0, retry_after} end          -- nothing written
-  pending[i] = newstate
-end
-for i = 1, 4 do commit(KEYS[i], pending[i]) end        -- all-or-nothing
-return {1, 0}
-```
-
-Two passes over four keys is a handful of microseconds. Accepting silent quota corruption to avoid a loop is the wrong call — and at a firm that *bills* on quota, or reports it to a client, it's a data-integrity defect, not an inefficiency.
-
-**Why this answer is correct:** It identifies the consequence precisely (quota corruption, not just waste), and recognises that atomicity already gives you the transaction — the "complexity" being avoided doesn't exist.
-
-**Common mistakes:** Accepting the over-charge as inherent. Proposing compensating "refunds" after the fact, which reintroduces a race. Reordering tiers cheapest-first as a *fix* — it reduces the frequency but doesn't eliminate the corruption.
-
-**Follow-ups:** "Order the tiers optimally, given you now commit atomically." · "How would you detect this corruption in production if it were already happening?"
-
----
-
-**Q28. Redis is down. Do you fail open or fail closed?**
-
-**Ideal answer:** It's not one decision — it's one per tier, and a blanket answer is the wrong answer. **Protective per-tenant API limits → fail open**, with a degraded per-node local ceiling as a backstop: availability outranks perfect enforcement for a few minutes, and the local ceiling bounds the blast radius. **Contractual downstream caps** (card network, market-data licence) **→ fail closed**: exceeding them is a commercial or regulatory event, so rejecting is strictly better than breaching. **Authentication brute-force counters → fail closed**: failing open converts a cache outage into an open credential-stuffing window, which is a security incident. **Global overload protection → degrade to local**: each node enforces `global / expected_nodes` from its last known lease. Mechanically, wrap the limiter's own Redis calls in a circuit breaker with a timeout longer than your p99 but far shorter than your request budget (50–100 ms) so a *degraded* — not just dead — Redis can't add latency to every request. And write the matrix into the design doc: at a bank's architecture review, "we fail open" as a blanket statement is a finding, because it means nobody asked the question per tier.
-
-**Why this answer is correct:** It refuses the false binary, justifies each choice from the *consequence of being wrong in that direction*, and adds the degraded-not-dead case, which is the more common and more damaging failure.
-
-**Common mistakes:** A single global answer. Only handling total unavailability and not slow-Redis. No timeout on the limiter's own calls, so a degraded Redis silently becomes the system's latency problem — the "who watches the watchmen" case.
-
-**Follow-ups:** "Fail-open on the tenant tier — how do you stop that becoming a known bypass?" · "How do you test the fail-closed path safely in production?"
-
----
-
-**Q29. Walk me through retry amplification and how you bound it.**
-
-**Ideal answer:** With `N` layers each retrying `k` times, worst-case amplification is `k^N` — three layers at 3 retries is **27×**. During a partial degradation this converts a small failure rate into a self-inflicted DDoS, and because retries fire on a timer they arrive *correlated*, so it's 27× as a spike, not spread out. Compounding it: an un-jittered `Retry-After` synchronises the herd, and each subsequent rejection reschedules it, producing sustained oscillation.
-
-Bounding it, layered: (1) **Retry at one layer only** — ideally the outermost that can meaningfully retry; inner layers propagate the failure. (2) **Retry budgets** — permit retries only while they're under ~10% of total requests over a rolling window, tracked client-side per target; above that, fail fast. This is the strongest single control because it bounds amplification at `1.1×` regardless of layer count. (3) **Decorrelated jitter** — `sleep = min(cap, random(base, previous × 3))`. (4) **Circuit breakers** as the coarse backstop when a dependency is clearly down. (5) **Retry only idempotent operations** — in payments, a blind retry of a non-idempotent authorization is a duplicate charge, so this is a correctness control before it's a load control; enforce with idempotency keys.
-
-**Why this answer is correct:** It gives the `k^N` arithmetic, notes the correlation that makes it a spike, and ranks the controls with the budget first — plus the payments-specific point that retries are a *correctness* hazard, which is exactly the lens a card-network panel applies.
-
-**Common mistakes:** "Use exponential backoff" as the whole answer — backoff spreads retries but doesn't bound their count. Retrying at every layer. Not connecting retries to idempotency in a financial context.
-
-**Follow-ups:** "Implement a retry budget without shared state across the fleet." · "Which payments operations are safe to retry, and what makes them safe?"
-
----
-
-**Q30. You need one global limit across three regions. Options?**
-
-**Ideal answer:** True global consistency needs cross-region coordination at 70–150 ms RTT, which is often 3× the entire request budget — so the real question is which approximation you can defend. Four options: (1) **Regional limits summing to the global** — zero latency, approximate, unused regional budget is wasted; split by observed regional traffic share and revisit quarterly. The default, and correct for most cases. (2) **Leased global budget with async cross-region reconciliation** — zero hot-path latency, bounded overshoot; right when the global ceiling is real but has headroom. (3) **CRDT G-Counters gossiped between regions** — eventually consistent, monotonic, converges in ~RTT; genuinely good for *quota accounting* (monthly usage) where monotonic counting suffices. (4) **One authoritative region** — strong consistency at full cross-region RTT per request; only defensible for very low-rate, very high-value limits.
-
-The key asymmetry: **rate** limits tolerate approximation (brief overshoot is absorbed by capacity margin) but not latency; **quota** limits (monthly billing) tolerate latency but need eventual exactness. Different problems, different tools — CRDTs for the latter, leases for the former. And in a data-residency-constrained setting, option 4 may be illegal outright if the limiter key derives from customer identity that can't leave a jurisdiction.
-
-**Why this answer is correct:** It leads with the latency budget that rules out the naive answer, gives four options with honest trade-offs, and identifies the rate-vs-quota asymmetry that determines the choice — plus the residency constraint a bank will care about.
-
-**Common mistakes:** Proposing a globally consistent counter without pricing the RTT. Not distinguishing rate from quota. Ignoring that regional splits waste budget when traffic shifts (e.g., follow-the-sun trading).
-
-**Follow-ups:** "Traffic shifts 70% to APAC during Tokyo hours. What does your regional split do?" · "A region is partitioned. What happens to the global limit?"
-
----
-
-### Expert (10)
-
-**Q31. A payments platform enforces 600 auth/min per merchant with a fixed window. Every day at the top of the hour, the card network throttles the whole institution. Diagnose from first principles and design the process that should have caught it pre-production.**
-
-**Ideal answer:** Three compounding causes. (1) **Boundary doubling with correlation** — fixed windows are clock-aligned, and merchant batch integrations are cron-scheduled on NTP-synced hosts, so every such merchant's window resets at the same instant and each can legitimately spend 600 at `:59.9` and 600 more at `:00.1`. The flaw's severity comes from *correlation across clients*, not the per-client 2×. (2) **No aggregate tier sized to the real downstream ceiling** — ~1,100 merchants pulsing simultaneously produced ~31,000 TPS for ~800 ms against a 10,000 TPS network ceiling. (3) **Monitoring blind spot** — dashboards averaged over 1-minute buckets and showed a comfortable 8,400 TPS; *the limiter window and the monitoring window shared the same blind spot*, so the system was structurally incapable of showing its own failure. Then retries (3×, fixed 1 s, no jitter) re-synchronised into a second spike.
-
-Fix: GCRA per merchant (same headline 600/min, expressed as `T=100 ms, burst 5` — **no clock-aligned boundary exists in GCRA**, which structurally removes the synchronisation); a global egress budget leased locally and set to **9,000, not 10,000** — below the contractual cap by the lease overshoot bound (`40 nodes × 25 rps = 1,000`); an adaptive concurrency limiter on the network client; criticality classes so reporting sheds before authorization; and 1-second-resolution egress monitoring with `max()` rollup, not `avg()`.
-
-The **process** that should have caught it: (a) a rule that any limiter design must document both the business-driven tiers *and* a capacity-driven tier sized from the downstream's measured ceiling minus the design's own error bound, with omission requiring written justification; (b) a load test with **many distinct identities** — a single-identity test structurally cannot exercise the aggregate tier, so it can never find this; (c) a monitoring review asserting that observation resolution is finer than the limiter's decision horizon; (d) a burst-profile question in design review: "what is the maximum instantaneous fan-in if every client is simultaneously compliant?"
-
-**Why this answer is correct:** It separates the three causes rather than blaming the algorithm alone, identifies the monitoring blind spot as *structural* rather than an oversight, and — most importantly — the fix sizes the safety margin *from the algorithm's own error bound*, which is the generalisable lesson. The process answer is testable, not aspirational.
-
-**Common mistakes:** Stopping at "add a global limit" without sizing it from anything. Blaming the merchants. Not noticing the monitoring resolution issue, which means the same class of failure stays invisible next time. Missing that switching algorithms removes the *synchronisation*, not merely the 2×.
-
-**Follow-ups:** "You've moved to GCRA. What new failure mode have you introduced?" · "How do you explain 'burst 5' to 2,400 merchants who were sold '600 per minute'?"
-
----
-
-**Q32. Design rate limiting for a market-data platform where the limit is a licensing/billing construct (exactness is auditable) and the latency budget is 200 µs.**
-
-**Ideal answer:** These two requirements pull opposite ways, and the resolution is to notice they apply to **different things**. A Redis round trip is 300–1,000 µs — it cannot appear on a 200 µs path at all. So: split *enforcement* from *accounting*.
-
-**Enforcement (hot path, must be sub-µs):** in-process only. A lock-free token bucket or GCRA in the subscriber process, using `Stopwatch.GetTimestamp()` (monotonic, ~20 ns) and `Interlocked.CompareExchange` on a packed 64-bit state word — no allocation, no lock, no syscall, ~50 ns. Entitlements (which symbols/depth a client may receive) are resolved once at subscription time and cached as a bitmap, not re-evaluated per message.
-
-**Accounting (off path, must be exact and auditable):** every admitted and rejected message increments a per-client counter that is batched and flushed asynchronously to a durable, append-only store — the *billing* record. Because vendors bill on message counts and audits reconcile them, this path needs exactness and durability, but it explicitly does **not** need to be synchronous. Use a per-thread counter array flushed on a timer to avoid cross-core contention.
-
-**Reconciling the two:** the in-process limiter's admission decisions *are* the truth; the async accounting records them faithfully. Loss on crash is bounded by the flush interval, so make the flush interval a documented, audited parameter and write a sequence number so gaps are detectable — a detectable gap is acceptable to an auditor, a silent one is not.
-
-**Distribution:** a client's entitlement spans multiple subscriber processes, so the per-client licence cap is a *leased* budget (§2.8), refreshed off-path, with the total leased below the licensed ceiling by the overshoot bound. Conflation (§ market-data modules) reduces message volume before the limiter even sees it, which is the cheapest limiter of all.
-
-**Why this answer is correct:** It refuses the premise that one mechanism must satisfy both requirements, and splits on the axis that actually matters — enforcement needs speed, accounting needs exactness, and they are separable because accounting is off the critical path. The concrete latency figures justify each choice.
-
-**Common mistakes:** Trying to make Redis fast enough (it isn't, by an order of magnitude). Making billing synchronous. Using wall-clock time (`DateTime.UtcNow` is ~20–30 ns but non-monotonic; a backwards step corrupts a licence-metered counter, which is now a *billing* defect). Allocating per message — at 2M msg/s any allocation is a GC problem.
-
-**Follow-ups:** "Your process crashes with 40 ms of unflushed counts. What do you tell the auditor?" · "A client claims they were over-billed. What evidence do you produce?"
-
----
-
-**Q33. Design priority load shedding for a payments platform. Justify LIFO under overload — it sounds wrong.**
-
-**Ideal answer:** Four components. (1) **Criticality classes** propagated through the *entire* call graph in the request context, never re-derived per hop: `CRITICAL_PLUS` = authorization (a decline is customer-visible and possibly a regulatory matter), `CRITICAL` = capture/settlement (must complete, but has a longer deadline), `SHEDDABLE_PLUS` = webhooks/notifications, `SHEDDABLE` = merchant analytics dashboards. Under stress, shed from the bottom. Propagation is the expensive part — it's a multi-team change — but re-deriving criticality per service produces inconsistent decisions at exactly the moment consistency matters. (2) **CoDel on the admission queue** rather than a fixed depth: track the *minimum* sojourn time over a sliding interval (target 5 ms, interval 100 ms) and start dropping only if the minimum stays above target for a full interval. This distinguishes a **standing** queue (real overload — shed) from a **transient** burst (absorb it); a depth-based limit cannot tell those apart and will shed during harmless bursts while tolerating slow persistent backlog. (3) **Deadline propagation** — pass the caller's remaining budget down the graph and drop work whose deadline already expired *before* executing it; this is free capacity recovery. (4) **LIFO under overload.**
-
-LIFO is counterintuitive but correct: when a queue is backed up, FIFO serves the **oldest** request first — the one most likely to have already timed out client-side. You spend full capacity producing a response nobody will read, then do it again for the next-oldest, so *every* request ends up slow and *none* succeed within deadline. LIFO serves the freshest, which is the one most likely to still have budget left, so some requests succeed. The system degrades from "100% slow failures" to "a served subset plus explicit rejections" — strictly better, because a fast rejection lets the client fail over. Serve FIFO when healthy (fairness), flip to LIFO when queue delay exceeds a threshold (goodput). Note the fairness cost honestly: LIFO can starve the oldest entries indefinitely, which is why it's a *stress* mode with deadline-based eviction, not a default.
-
-**Why this answer is correct:** It grounds LIFO in **goodput** — responses that are actually consumed — rather than throughput, explains why FIFO's fairness becomes worthless when everything misses its deadline, and states the starvation cost rather than selling LIFO as free.
-
-**Common mistakes:** Shedding by endpoint rather than by criticality (the same endpoint can be critical for one caller and sheddable for another). Fixed queue depths instead of CoDel. Proposing LIFO permanently. Not propagating criticality, so each service guesses.
-
-**Follow-ups:** "A merchant's dashboard is SHEDDABLE, but their ops team uses it during an incident. Reclassify?" · "How does deadline propagation interact with retries?"
-
----
-
-**Q34. Migrate a live platform from fixed-window to GCRA across 2,400 merchants without breaking anyone.**
-
-**Ideal answer:** The risk is that GCRA is *stricter in a way merchants can feel* — it removes the boundary burst they may have unknowingly depended on, so a batch integration that has worked for years starts getting 429s. Treat it as a behaviour-changing migration, not a refactor.
-
-**Phase 1 — shadow mode (2–4 weeks).** Run GCRA alongside the live fixed-window limiter; GCRA computes a decision, emits a metric, and **never rejects**. Now you have per-merchant data on exactly who *would* be affected and by how much. This is the whole migration: everything else follows from the data.
-
-**Phase 2 — config translation.** For each merchant, choose `T = P/L` and `τ = T × burst`, sizing `burst` from their *observed* p99 burst in shadow mode rather than a uniform default. Most merchants get a burst that makes GCRA a no-op for them. The tail — the batch integrations — get either a deliberately generous burst or an outreach conversation.
-
-**Phase 3 — targeted communication.** Only the merchants shadow mode flagged. Give them the concrete number ("your job sends 600 in ~2 seconds; the new limit permits 5 immediately then 10/second"), a date, and a sandbox with the new limiter enabled.
-
-**Phase 4 — progressive rollout.** By merchant cohort, smallest-impact first: 1% → 5% → 25% → 100%, each stage held long enough to cover a full daily cycle (batch jobs are diurnal, so a 2-hour soak proves nothing). Gate on per-merchant 429 rate versus the shadow-mode prediction — **divergence from prediction is the rollback trigger**, not an absolute threshold, because it means your model of the traffic is wrong.
-
-**Phase 5 — instant rollback.** Algorithm selection is a runtime config flag per merchant, not a deploy. Keep both implementations live for a full quarter-end (the highest-volume period) before deleting the old path.
-
-**Why this answer is correct:** Shadow mode converts an unknowable blast radius into a measured one before anything is at risk, config is derived from observed behaviour rather than a uniform guess, and the rollback trigger is *prediction divergence* — which catches model error, the thing that actually goes wrong.
-
-**Common mistakes:** Flag-day cutover. A uniform burst for all merchants. Announcing to everyone (generating 2,400 support conversations for the ~40 that matter). Rolling out over hours rather than across full daily/weekly cycles. Rollback requiring a deploy.
-
-**Follow-ups:** "Shadow mode says 3 merchants break, and they're your three largest. Now what?" · "A merchant's contract says '600 per minute.' Is 'burst 5' a contract change?"
-
----
-
-**Q35. A team proposes deleting the shared rate limiter and giving every node a local one, "for latency." Evaluate as a Principal.**
-
-**Ideal answer:** The instinct is right and the conclusion is wrong, and the useful response separates them rather than rejecting outright.
-
-**What's right:** a Redis hop on 100% of traffic is real cost — 0.3–1 ms in-AZ, and it makes Redis a hard availability dependency for every request. That deserves to be fixed.
-
-**What's wrong:** purely local limits mean each node sees only its slice, so the effective limit becomes `N × L` — with 40 nodes, "100/min" is really "4,000/min" to any client whose traffic spreads across the fleet, which round-robin balancing guarantees. Worse, the limit silently changes every time the fleet autoscales, so the enforced value becomes a function of *traffic volume itself* — the more load, the more nodes, the weaker the limit, which is precisely backwards. For a contractual downstream cap this isn't approximation, it's breach.
-
-**The synthesis:** you can have both, via **leased local enforcement** (§2.8) — the check is local (~50 ns, no network), correctness is bounded by an explicitly computed overshoot (`nodes × lease_size`), and Redis load drops from 50,000 ops/s to ~40 ops/s. That delivers the latency win the team wants *and* keeps a defensible global bound.
-
-**The framing I'd use with the team:** "Local isn't wrong — *unshared* is wrong. The question isn't local versus shared, it's how much overshoot you can defend, and against what ceiling." Then make it concrete: which of our limits are contractual (must stay exact or leased-with-margin) and which are protective (approximation is fine)? That converts an architectural argument into a per-limit classification exercise, which is tractable and produces a written artefact.
-
-**Why this answer is correct:** It validates the real problem, quantifies why the proposed fix breaks (including the autoscaling inversion, which is the argument that usually lands), offers a synthesis that satisfies the original motivation, and reframes the debate into a decidable per-limit question rather than a matter of taste.
-
-**Common mistakes:** Rejecting on authority ("we need a shared limiter") without engaging with the latency cost — this loses the team and the idea comes back worse. Accepting it because latency numbers are persuasive. Missing the autoscaling inversion. Not producing a durable artefact from the disagreement.
-
-**Follow-ups:** "The team says our limits are all 'protective anyway.' How do you check?" · "How do you make the overshoot bound visible in production so nobody has to trust the math?"
-
----
-
-**Q36. Rate, quota, and entitlement are different. Design a system that does all three for a multi-tenant financial-data product, with billing correctness.**
-
-**Ideal answer:** Three different constructs with three different consistency and durability requirements — conflating them is the usual design error.
-
-| | **Rate** | **Quota** | **Entitlement** |
-|---|---|---|---|
-| Question | "Too fast right now?" | "Used your monthly allowance?" | "Allowed to access this at all?" |
-| Horizon | Sub-second | Billing period | Contract term |
-| Consistency | Approximate OK | Eventually exact — **billing** | Strongly consistent |
-| Store | Redis GCRA / local lease | Durable counter + async aggregation | Config store + cached bitmap |
-| On breach | 429 | 402 / soft-cap / overage billing | **403** |
-| Failure mode | Fail open (protective) | Fail open, reconcile later | **Fail closed** — always |
-
-**Rate** is per §2 — GCRA in Redis or leased locally.
-
-**Quota** is a *billing* record, so the durable append-only usage event is the source of truth and the fast counter is a cache. Emit a usage event per billable unit (message, row, API call — whatever the contract names) to an append-only log, aggregate asynchronously, and reconcile the fast counter against the log daily. Key details: **idempotency** (a usage event needs a deterministic ID so a retried request isn't double-billed — in a financial product, double-billing is a client-trust and possibly regulatory event), and a **soft cap** (warn at 80%, notify at 100%, then either overage-bill or hard-stop per contract — never silently hard-stop a client mid-month without prior signal).
-
-**Entitlement** is authorization, not limiting: resolve at subscription/session establishment, cache as a bitmap or claim set, and re-evaluate on contract change — not per request. It must **fail closed**: serving unentitled market data is a licensing breach with the vendor, which is a commercially serious event, whereas serving one extra request over a rate limit is not.
-
-**The integration point:** entitlement first (cheapest, and a 403 short-circuits everything), then rate (hot path), then quota (recorded even for requests that rate-limiting rejected? — no: bill for *served* requests only, which is another reason the two-phase commit in Q27 matters).
-
-**Why this answer is correct:** It separates on consistency requirement and failure direction, which is what determines the storage and the fail-open/closed choice, and it treats quota as a *billing* system — with idempotency and reconciliation — rather than a bigger counter.
-
-**Common mistakes:** One Redis counter for all three. Making entitlement a per-request check (expensive and unnecessary). Billing on attempted rather than served requests. No idempotency on usage events. Hard-stopping at quota with no prior warning, which is a customer-relationship failure even when contractually permitted.
-
-**Follow-ups:** "Your fast counter and the durable log disagree by 0.4% at month end. What do you bill?" · "A client's entitlement is revoked mid-session. How fast must that take effect, and how do you achieve it?"
-
----
-
-**Q37. Design work-conserving weighted fair sharing across tenants. Why is max-min the target but not what you ship?**
-
-**Ideal answer:** **Max-min fairness** is the right *definition*: allocate so that increasing any tenant's share requires decreasing someone already at or below it — equivalently, iteratively give every contender an equal share of the bottleneck and redistribute what the under-consumers don't use. It's the target because it's the allocation nobody can call unfair.
-
-It's not what you ship because computing it exactly requires global knowledge of every contender's current demand at every instant — across 40 nodes, that's a distributed consensus problem on the hot path.
-
-**What you ship: Stochastic Fair Queuing with weights.** Hash tenants into `M` queues, service them in weighted round-robin, and rotate the hash salt periodically so a colliding pair doesn't stay collided (a persistent collision means two tenants permanently share one share, which is the only real unfairness SFQ introduces, and rotation bounds its duration). `M ≫ tenants_per_node` keeps collisions rare. Cost is O(1) per request.
-
-**Weights** come from the contract tier — a Platinum tenant gets 4× a Bronze tenant's share — which directly models the commercial reality rather than pretending all tenants are equal.
-
-**Work-conserving is the property to insist on:** if capacity is idle, admit traffic even from a tenant already over its nominal share. A non-work-conserving limiter throws away capacity you have already paid for, in order to enforce a fairness constraint that isn't binding when nobody is contending. Implementation: treat the per-tenant share as a *floor guarantee under contention*, not a ceiling — enforce shares only when the aggregate is saturated, and let anyone use the slack otherwise. The subtlety to name: this means a tenant's observed throughput varies with other tenants' behaviour, so you must be careful never to *market* the slack as guaranteed capacity — sell the floor, deliver the slack.
-
-**Why this answer is correct:** It states the theoretical target, gives the concrete reason it's not implementable on the hot path, ships the O(1) approximation with its specific weakness and mitigation, and — the part that separates senior answers — identifies that work-conserving behaviour creates a commercial hazard (customers observe the slack and expect it) that must be handled in how the product is sold.
-
-**Common mistakes:** Treating per-tenant limits as ceilings, which wastes idle capacity. Not knowing max-min fairness by name. Ignoring hash collisions in SFQ. Uniform weights in a tiered commercial product.
-
-**Follow-ups:** "One tenant is 90% of your traffic and pays 90% of revenue. Is equal-share fair?" · "A tenant complains their throughput halved with no change on their side. What do you tell them?"
-
----
-
-**Q38. Design rate limiting at the pre-authentication boundary. Resolve the credential-stuffing / account-lockout-DoS tension.**
-
-**Ideal answer:** The structural problem: you want to key on authenticated identity, but authentication is *deliberately* expensive — Argon2/bcrypt is 50–250 ms by design, token introspection is a network hop — so an attacker who forces you to authenticate before you limit has a CPU-amplification DoS at a few hundred rps.
-
-**Three tiers:**
-- **Tier 0 — pre-auth, identity-agnostic.** Per-IP (per /64 on IPv6), per-ASN, per-TLS-fingerprint (JA3/JA4). Microsecond cost, generous limits, tolerant of NAT false positives because the limits are set high enough that only automated traffic reaches them.
-- **Tier 1 — pre-auth, credential-shaped.** Count **failures**, not attempts, keyed on the *claimed* username **and separately** on source IP. Both keys are required: keying only on username lets a distributed attack spread across a million accounts undetected; keying only on IP lets a distributed botnet target one account. Cheap, because it runs before the hash.
-- **Tier 2 — post-auth, identity-aware.** The real per-tenant/user/endpoint tiers.
-
-**The lockout tension:** a hard per-username lockout hands an attacker a trivial DoS — they lock out any account by name, which for a banking customer is a serious harm and generates support load that is itself the attack. Resolution, in escalation order rather than a binary: (1) **exponential delay** on failures rather than lockout — cost grows for the attacker, a legitimate user retrying twice barely notices; (2) **proof-of-work or CAPTCHA** once the failure count crosses a threshold, which shifts cost to the client without denying access; (3) **risk-based step-up** — a failure from the user's habitual device/geo/ASN is treated far more leniently than one from a new context, so the legitimate user's path stays clean while the attacker's doesn't; (4) **notify-and-monitor rather than lock** — alert the account owner and raise scrutiny instead of denying, reserving hard lockout for cases with strong compromise signal. Never confirm *why* a request was rejected on an auth endpoint, and keep rejection timing constant-shape, or the limiter itself becomes a username-enumeration oracle.
-
-**Why this answer is correct:** It identifies the amplification problem that makes "limit before auth" non-trivial, gives the dual-keying requirement with the specific attack each key defends against, and resolves the lockout tension with an escalation ladder rather than a binary — plus the enumeration-oracle point, which is the failure mode a security review will find.
-
-**Common mistakes:** Limiting only after authentication. Single-keying Tier 1. Hard lockout as the default. Counting attempts rather than failures (which throttles legitimate users during a burst of normal logins). Leaking the rejection reason or timing.
-
-**Follow-ups:** "Password spraying: one attempt per account across 100,000 accounts from 10,000 IPs. Which tier catches it?" · "How do you rate limit the password-reset endpoint without letting an attacker deny resets to a target?"
-
----
-
-**Q39. The limiter has the highest blast radius in the platform. Design its change-management, canary, and observability regime for a SOX/PCI environment.**
-
-**Ideal answer:** A limiter change can cause an outage (too strict) or a compliance breach (too loose), so it needs a regime proportional to that, without making routine tuning impossible.
-
-**Change management.** Limiter configuration is **code**, versioned in Git, reviewed, and deployed through the pipeline — not a runtime value someone edits in a console at 2 a.m. Distinguish two change classes: *loosening* a limit (risk: capacity/compliance breach; requires capacity evidence and, for contractual limits, sign-off from whoever owns the vendor agreement) and *tightening* (risk: customer-visible rejections; requires shadow-mode evidence of who's affected). Emergency changes get a break-glass path that is **fully logged and auto-reverting** after a fixed window, forcing a follow-up decision rather than leaving an undocumented state.
-
-**Canary.** Never fleet-wide. Percentage of *traffic* via a flag, not percentage of *nodes* — node-based canaries misrepresent impact when traffic is skewed. Stages 1% → 5% → 25% → 100%, each held across a full daily cycle because batch traffic is diurnal. Automatic rollback on: 429 rate deviating from the shadow-mode prediction (not from an absolute threshold — divergence means the model is wrong), backend saturation, or downstream throttle responses appearing.
-
-**Observability — the specific requirement is that resolution must be finer than the decision horizon.** If the limiter decides sub-second, 1-minute averages are structurally blind (§4). So: per-tier, per-tenant rejection counters at **1-second** resolution with `max()` rollups; a distinct metric per *reason* (which tier rejected, and why) — an undifferentiated `rate_limited_total` cannot answer "is this the tenant tier or the global tier?" during an incident; effective-config-version emitted **alongside every decision**, so an audit can prove which limit was in force at a given instant; and the limiter's own dependency health (Redis latency percentiles, circuit-breaker state, lease age).
-
-**Audit.** Every 429/503 on a payment-affecting endpoint is an auditable event carrying tenant, tier, effective config version, and timestamp. Retain per your regulatory schedule. The evidentiary question you must be able to answer is *"prove the contractual limit was in force at 14:32:07 on the 3rd"* — which is only answerable if config version travels with the decision.
-
-**Why this answer is correct:** It scales ceremony to the two distinct risk directions rather than treating all changes alike, makes the canary trigger *prediction divergence*, and grounds the observability requirements in specific questions that must be answerable — including the audit question, which is what makes config-version-per-decision non-negotiable rather than nice-to-have.
-
-**Common mistakes:** Treating config as data exempt from review. Node-percentage canaries. A single undifferentiated rejection metric. Monitoring resolution coarser than the decision horizon. No break-glass path (so people bypass the process entirely under pressure) or an unlogged one.
-
-**Follow-ups:** "An auditor asks what limit applied to merchant X at a specific second three months ago. Can you answer?" · "Break-glass loosened a limit and nobody followed up. How does your design surface that?"
-
----
-
-**Q40. Design a control loop that sets limits automatically from observed backend health. Address stability.**
-
-**Ideal answer:** Static limits are provisioned for worst case, so they waste capacity normally and are still wrong when capacity actually changes (bad deploy, degraded AZ, cold cache). An adaptive loop sets the global tier from *observed* stress.
-
-**Signal.** Not CPU — it's lagging and confounded. Use **queueing-sensitive** signals: the gradient `RTT_noload / RTT_actual`, backend queue depth or CoDel sojourn time, and downstream saturation (connection-pool wait time, throttle responses from dependencies). The gradient is the strongest because it detects queue *formation* before latency becomes user-visible.
-
-**Controller.** `newLimit = currentLimit × gradient + allowedQueue`, smoothed with an EWMA, i.e. gradient/Vegas-style. Prefer it to a full PID: the integral term is what causes the worst production surprises (windup during a long degradation, then a violent correction on recovery), and the derivative term amplifies measurement noise. If you use PID, clamp the integral explicitly.
-
-**Stability — this is the substance of the question.** A feedback loop coupled to a system that *also* responds to the loop can oscillate. Five controls: (1) **Asymmetric rates** — decrease fast (multiplicative, on the order of a second), increase slowly (additive, tens of seconds). Overshooting downward costs some throughput; overshooting upward costs an outage. (2) **Hysteresis / deadband** — don't act until the signal moves outside a band, or you chatter on noise. (3) **Separate timescales** — the control interval must be several times the system's response time, or you're reacting to the effects of your own previous action; if backend latency responds in ~2 s, don't control at 200 ms. (4) **Hard bounds** — `min_limit` (never shed below a floor that keeps critical traffic flowing; a runaway controller driving the limit to zero is a self-inflicted outage, and it *has* happened to people) and `max_limit` (never exceed the contractual ceiling, whatever the controller thinks). (5) **Cross-region/cross-service decoupling** — independent controllers observing a shared dependency will all react to the same signal and collectively overshoot; either coordinate them or add jitter to their control intervals.
-
-**Operational requirements:** the controller's current limit and its inputs must be **observable in real time** (an invisible limit is undebuggable during an incident), it must be **overridable** to a static value with one flag, and it must **log every adjustment with the inputs that caused it** — during a postmortem, "why did the limit drop to 300 at 14:02?" has to be answerable.
-
-**Why this answer is correct:** It picks a leading rather than lagging signal, justifies gradient over PID by naming the specific failure of the integral term, and treats stability as the core of the design — with the asymmetric-rate principle grounded in the asymmetric *cost* of the two error directions, which is the reasoning that generalises.
-
-**Common mistakes:** CPU as the signal. Symmetric increase/decrease rates. No floor, allowing a runaway to zero. Control interval faster than system response time (guaranteed oscillation). No manual override, so an incident becomes a fight with the controller. Not logging inputs, making postmortems impossible.
-
-**Follow-ups:** "Your controller and a downstream team's controller both react to the same latency. What happens?" · "The controller drops the limit during a legitimate 3× marketing spike. Is that correct behaviour?"
-
----
-
 ## 11. Coding Exercises
 
 ### Easy — Fixed-window limiter, atomically (fixing the `INCR`/`EXPIRE` race)
@@ -1786,5 +1318,5 @@ Option E stays at the edge for volumetric and per-IP limits, where its fixed-win
 
 ---
 
-**Next**: This module supplies the algorithmic core that `04-Designing-Rate-Limiter-API-Gateway.md` (Module 40) referenced but did not derive, and corrects three defects in that module's Advanced Q2 script (§6.7). It pairs with `../18-Event-Driven-Architecture/04-Backpressure-Flow-Control-Consumer-Lag.md` for the asynchronous dual of the same problem, and with `../29-Performance-Engineering` for the Little's Law and adaptive-concurrency material applied outside the limiter context.
+**Next**: This module supplies the algorithmic core that `04-Designing-Rate-Limiter-API-Gateway.md` (Module 40) referenced but did not derive, and corrects three defects in that module's multi-tier script (§2.7, §2.14). It pairs with `../18-Event-Driven-Architecture/04-Backpressure-Flow-Control-Consumer-Lag.md` for the asynchronous dual of the same problem, and with `../29-Performance-Engineering` for the Little's Law and adaptive-concurrency material applied outside the limiter context.
 

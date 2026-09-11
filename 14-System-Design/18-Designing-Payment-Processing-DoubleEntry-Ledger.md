@@ -75,7 +75,7 @@ Steps 1–3 take seconds. Steps 4–6 take days. **That gap is the source of mos
 
 Four invariants, and the distinction between them is the substance of the design.
 
-**Invariant 1 — Every transaction's entries sum to zero.** *Enforceable at write time*, cheaply, inside the transaction. Non-negotiable, and should be enforced in the database itself (a constraint or trigger), not only in application code — because application code has more than one path to the table and the paths added later are the ones that miss it. This is Module 177 §E7's *make it unrepresentable* principle applied where it matters most.
+**Invariant 1 — Every transaction's entries sum to zero.** *Enforceable at write time*, cheaply, inside the transaction. Non-negotiable, and should be enforced in the database itself (a constraint or trigger), not only in application code — because application code has more than one path to the table and the paths added later are the ones that miss it. This is Module 177 §2.9's *make it unrepresentable* principle applied where it matters most.
 
 **Invariant 2 — Entries are immutable.** No `UPDATE`, no `DELETE`, ever. A mistake is corrected by posting a **reversing transaction**, not by editing history. This is not fastidiousness: the audit trail *is* the ledger, and an editable ledger has no evidentiary value. Enforce with table permissions that grant `INSERT` and `SELECT` only — revoking `UPDATE`/`DELETE` at the database role level, so it is structurally impossible rather than a code-review item.
 
@@ -127,7 +127,7 @@ Three approaches:
 
 **Snapshot plus delta.** The honest middle, and the recommended answer. Periodically write an immutable checkpoint (`account X, as of entry_id 9,000,000, balance €4,812.30`), then compute balance as `snapshot + SUM(entries after the snapshot)`. Reads sum thousands of rows, not millions. The snapshot is *derived from immutable history*, so it can always be recomputed and verified — which means a corrupted snapshot is detectable and repairable, unlike a drifted cache column.
 
-Whichever is chosen, the discipline is the same: **a continuous background job must recompute balances from entries and compare.** Any divergence is a P1, because it means one of the four invariants is broken and you do not yet know which. This job is the ledger's immune system, and per Module 176 §E7 it must derive its expected value **independently** — from the entries themselves, never from the cache it is checking.
+Whichever is chosen, the discipline is the same: **a continuous background job must recompute balances from entries and compare.** Any divergence is a P1, because it means one of the four invariants is broken and you do not yet know which. This job is the ledger's immune system, and per Module 176 §2.22 it must derive its expected value **independently** — from the entries themselves, never from the cache it is checking.
 
 ### 2.4 Concurrency — Where the Contention Actually Is
 
@@ -234,7 +234,7 @@ Three points that separate a real answer:
 
 1. **Reconciliation is not a batch job you run and eyeball.** It is a control with an owner, an SLA for break resolution, an aging report, and escalation. Unresolved breaks aging past a threshold is itself an alertable condition, because a growing break population means the ledger is drifting from reality.
 2. **Fee estimation is a prediction and will be wrong.** Interchange depends on card type, region, merchant category, and network rules that change. So the ledger must post *estimated* fees at capture and a *variance* at settlement, and the variance account's balance is a direct measure of estimation quality — another case of §2.2's principle that a well-chosen account *is* a detector.
-3. **The expected set must be independently derived** (Module 176 §E7). Reconciling our ledger against a file we generated from our own ledger proves nothing. The network's file is genuinely independent, which is exactly what makes it valuable — and exactly why Module 133's incident, where the reconciliation's expected set came from the logic being checked, was undetectable.
+3. **The expected set must be independently derived** (Module 176 §2.22). Reconciling our ledger against a file we generated from our own ledger proves nothing. The network's file is genuinely independent, which is exactly what makes it valuable — and exactly why Module 133's incident, where the reconciliation's expected set came from the logic being checked, was undetectable.
 
 ### 2.8 Chargebacks, Refunds, and Corrections — Always Forward, Never Backward
 
@@ -274,6 +274,266 @@ public readonly record struct Money(long MinorUnits, Currency Currency)
 **Rounding** is where money is actually lost. Splitting €10.00 three ways gives €3.333…; rounding each to €3.33 loses a cent, and the transaction no longer sums to zero — which the ledger will reject, correctly. The fix is **largest-remainder allocation**: compute the floor for each part, then distribute the remaining minor units one at a time by descending remainder, so the parts sum *exactly* to the original by construction. This is the same deterministic exactly-reconciling allocation problem Module 131 covers for trade allocations, and it is a favourite follow-up because the naive answer silently violates the ledger's core invariant.
 
 FX adds a further rule: a cross-currency transaction cannot balance in a single currency, so it is modelled as two balanced single-currency transactions linked through an **FX position account**, with the rate and its timestamp recorded on the transaction. Trying to make one transaction balance across currencies is a common and fundamental modelling error.
+
+### 2.10 Why Double-Entry Is the Correct Data Model, Derived Rather Than Inherited
+
+Do not accept double-entry as accounting convention. Derive it, because the derivation is what tells you when it applies.
+
+**Start from the requirement:** money moves between places, no money is created or destroyed by a movement, and every movement must be attributable and auditable afterwards.
+
+**The naive model** is a `balance` column per account, updated on each movement. It fails three ways, each independently fatal:
+
+1. **Conservation is unenforceable.** Nothing structurally links the debit to the credit. A bug that decrements one account without incrementing another produces a system where money has simply vanished, and no query can detect it because there is nothing to compare against.
+2. **History is destroyed.** The current balance does not say how it was reached, so "why is this number what it is" is unanswerable — and that question *is* the product in a financial system.
+3. **Concurrency is unsafe by default.** Read-modify-write on a shared column is a lost update waiting to happen (§2.4).
+
+**Double-entry fixes all three with one structural change:** record movements as immutable paired entries that must sum to zero, and derive balance from them.
+
+- Conservation becomes a **checkable invariant** — `SUM(amount) = 0` per transaction, and globally per currency (§2.1).
+- History is the primary artefact rather than a side effect.
+- Balance becomes a **derived** quantity, so there is nothing to race on (§2.3).
+
+**And the derivation tells you the boundary condition**: double-entry is correct wherever conservation is a real invariant. It is *not* automatically right for a metric that can legitimately be created or destroyed — a click count, a score. Applying it there is cargo-culting; the property it enforces is one the domain must actually have.
+
+### 2.11 Cross-Currency Payments
+
+A customer pays in GBP, the merchant settles in EUR. The wrong model puts both currencies in one transaction and lets the sum-to-zero constraint fail — or, worse, "fixes" the constraint by relaxing it.
+
+**The correct model treats an FX conversion as two transactions joined by a currency-pair account**, so each transaction balances within a single currency and the constraint holds unchanged:
+
+```
+Tx#1 (GBP)   customer_receivable_GBP   +100.00
+             fx_position_GBP           −100.00
+
+Tx#2 (EUR)   fx_position_EUR           +116.50
+             merchant_payable_EUR      −116.50
+```
+
+Three properties follow, and they are why this model is worth the extra transaction:
+
+- **The sum-to-zero invariant is enforced per currency**, never weakened. §2.1's global check becomes "zero for every currency," which is stronger and still simple.
+- **The FX position accounts carry the firm's actual currency exposure** — the residual in `fx_position_GBP` versus `fx_position_EUR` at the applied rate *is* the FX P&L, visible as an account balance rather than buried in a calculation. This is §2.2's principle again: a well-chosen account is a detector.
+- **The rate used is recorded as an attribute of the transaction pair**, so the conversion is reproducible. A conversion whose rate is not stored cannot be explained later, and it will be queried.
+
+And the discipline from §2.9 applies with extra force: never convert by multiplying a minor-unit integer by a float. Convert with explicit rounding and post any residual to a rounding account, so the books balance exactly.
+
+### 2.12 Why Event Publishing Must Use the Outbox
+
+Downstream consumers — notifications, analytics, the merchant dashboard — need to know a payment posted. The tempting implementation writes to the ledger and then publishes to the bus.
+
+**That is a dual write, and it has no correct failure behaviour.** If the ledger commits and the publish fails, downstream never learns of a real payment. If the publish succeeds and the ledger transaction rolls back, downstream has been told about a payment that did not happen — and in a payments system that means a customer receives a confirmation for money that never moved.
+
+**The outbox makes it one write.** The event row is inserted **in the same transaction as the ledger entries**, so it commits atomically with them or not at all. A separate relay reads the outbox and publishes, marking rows sent.
+
+Two consequences worth stating:
+
+- Delivery is **at-least-once**, so consumers must be idempotent on the event's identity. This is the same exactly-once identity as §2.5, on the consumption side.
+- **The ledger never depends on the bus.** The CP core's availability stays independent of the messaging tier — which is precisely what lets the ledger keep posting when Kafka is down.
+
+The monitoring that matters here is not queue depth but **oldest-unpublished-age**: a stalled relay is otherwise completely silent, because nothing errors.
+
+### 2.13 Scaling Past a Single Database
+
+**Stay single-primary as long as possible, and say why.** A ledger posting is a multi-row atomic write with a validating constraint, which is exactly what a single relational primary does well and what no distributed key-value store offers. At 2,000 payments/sec and ~8,000 entry writes/sec this is comfortably within reach of a well-provisioned primary — so the first answers are the boring ones: better indexing, connection pooling, snapshot-plus-delta to remove expensive balance reads from the write path (§2.3), and read replicas for reporting.
+
+**When it genuinely saturates, shard on a boundary no transaction crosses.** The candidates, in order of preference:
+
+1. **Legal entity** — the strongest boundary, because inter-entity movement is already a deliberate, separately booked transaction in the accounting model.
+2. **Currency** — a transaction balances within one currency (§2.11), so currency is a natural cut, provided FX is modelled as paired transactions rather than one cross-currency transaction.
+3. **Merchant / tenant** — workable, and weaker, because platform-level fee accounts are touched by every merchant and therefore cannot live on a merchant shard.
+
+**Choose the boundary before you need it.** If the model is designed so that no transaction spans entities or currencies, sharding later is a *deployment* change. If transactions routinely span the boundary, sharding is a re-modelling project plus a distributed-transaction problem, which is a different and far worse piece of work.
+
+### 2.14 The Integrity Verifier — and Verifying the Verifier
+
+The ledger's invariants (§2.1) are only worth having if something checks them continuously. The verifier has four layers, each catching what the others cannot:
+
+| Layer | Check | Catches |
+|---|---|---|
+| 1 | Every transaction's entries sum to zero, per currency | A posting bug that wrote one side |
+| 2 | Global sum per currency is zero | Anything layer 1 missed, including direct database writes |
+| 3 | Each account's snapshot + delta equals the full sum of its entries | A corrupted or stale snapshot (§2.3) |
+| 4 | Derived balances match independently recomputed balances for a sample | Drift between any cached view and the entries |
+
+**Frequency by consequence, not uniformly:** layers 1 and 2 are cheap and should run continuously; layer 3 hourly; layer 4 daily over a stratified sample weighted toward high-volume and high-value accounts, because a uniform sample is consequence-blind.
+
+**The verifier must itself be verifiable, and this is the part usually missing.** A verification job that silently stops running produces exactly the same output as a system with no problems: nothing. So:
+
+- **A dead-man's switch** — the verifier writes a heartbeat with its completion time and coverage, and an *independent* alert fires if that heartbeat ages past a threshold. Absence of failure is not evidence of success.
+- **Fault injection in a test environment** — deliberately post an unbalanced transaction and assert the verifier catches it, on a schedule. A verifier that has never caught anything has not been shown to work.
+- **Run it against a replica**, so verification load never competes with posting, and so a verifier bug cannot write to the primary.
+
+### 2.15 Investigating "This Balance Is €12.34 Wrong"
+
+The order matters, because it moves from cheapest and most likely to most expensive and least likely.
+
+1. **Establish which number is disputed.** Is the *derived* balance wrong, or the *displayed* one? A stale cache or a UI filtering by date range differently accounts for a large share of reports and costs nothing to check.
+2. **Recompute from entries.** `SUM(amount)` over the account, ignoring snapshots. If that matches the expected figure, the defect is in the snapshot or the cache (§2.3), not in the ledger.
+3. **Check the snapshot.** Snapshot value plus entries since the snapshot should equal the full sum. A mismatch localises the bug precisely.
+4. **Diff against the counterparty side.** Every entry has a paired entry; find the transactions where the merchant's side and its counterpart disagree in the expected way. €12.34 is a suspiciously specific number — look for a **fee** of that amount posted to the wrong account, which is the single most common cause.
+5. **Only then look at posting logic.** By this point the search space is one transaction, not a codebase.
+
+**And note the failure class that has no internal detector at all: misallocation.** If a fee was posted to the wrong account, the ledger still balances perfectly — sum-to-zero holds, the global invariant holds, every layer of §2.14 passes. Money went to the wrong place, correctly. Only reconciliation against **externally derived truth** (§2.7) or a complaint finds it, which is why §2.7 is not optional.
+
+### 2.16 The Indeterminate State — When You Do Not Know What Happened
+
+A network call to the card network times out. The authorisation may have succeeded, may have failed, and you cannot tell. This is the single most important state in a payments system, and the design error is not modelling it.
+
+**Make `INDETERMINATE` a first-class state**, not an error, and resolve it deliberately:
+
+1. **Retry with the network's own idempotency key**, where the network supports one — this makes the retry safe and frequently returns the original outcome.
+2. **Query the network for the transaction's status** by your reference. Slower, and authoritative.
+3. **Wait for settlement** (§2.7). The settlement file is the truth and arrives on a horizon of days.
+
+**Post nothing to the ledger while indeterminate.** The customer-facing behaviour is "pending," and the in-transit or pending-authorisation account carries the exposure so it is visible and ageable.
+
+**The one thing that must never happen** is treating indeterminate as failed and letting the customer retry, because a retry against a network that actually succeeded produces a genuine double charge — converting an ambiguity into a real financial error. Fail *toward pending*, never toward failed, and alert on **aged indeterminate** items, because they are the population most likely to be a real problem.
+
+### 2.17 Proving a Historical Balance to a Regulator
+
+*"Prove this customer's balance on 14 March last year was correct."* The design can answer it, and the reason it can is worth stating as a property rather than a query.
+
+Because entries are **immutable and append-only**, the balance as of any instant is `SUM(amount) WHERE account = ? AND created_at <= ?` — a deterministic function of history, computable today and identical every time. Nothing is overwritten, so there is no "as it was then" to reconstruct separately.
+
+What must also be retained for the proof to be complete: the **transaction-level provenance** (what caused each entry — payment, refund, fee, adjustment), the **corrections as forward entries** rather than edits (§2.8), so the timeline shows both the original and the correction with their timestamps, and the **snapshot lineage**, so a stated balance can be shown to have been derived from entries rather than asserted.
+
+**The contrast that makes the point:** a mutable `balance` column cannot answer this at all. It knows only the present. Any historical answer would be a reconstruction from logs that were never designed to be authoritative — which is the same argument as §2.10, arriving from the compliance side rather than the correctness side.
+
+### 2.18 The Fraud Check on the Critical Path
+
+*"Fraud screening adds 80 ms to authorisation. Product wants it removed."*
+
+**Do not accept or refuse; decompose.** The 80 ms is not one thing:
+
+- **Velocity and rules checks** — a few milliseconds, local, high value. Keep them synchronous.
+- **Model scoring** — the bulk of the latency. Ask what fraction of declines it actually contributes; if it is small, it may be movable.
+- **Third-party consortium lookups** — often the slowest and the most network-variable.
+
+**Then split by outcome value.** Keep the cheap decisive checks synchronous and gating. Move expensive scoring to a **near-real-time secondary check** that can still block within a small grace window before capture, or to post-hoc detection that flags for review and reversal. §2.6's authorisation/capture split is what makes this possible: the window between them is exactly where asynchronous fraud work fits.
+
+**And set the failure posture per tier, not globally.** If the fraud service is unavailable: low-value transactions **fail open** (approve, flag for review) because declining good customers has a real cost; high-value or high-risk-profile transactions **fail closed**. A single global default is wrong for one of the two by construction.
+
+The number that should end the conversation is not the latency but the **decline value**: what fraud loss does this check prevent per month, against what conversion loss do the 80 ms cost. If nobody can produce both figures, the discussion is aesthetic and the honest recommendation is to measure before changing.
+
+### 2.19 Payouts — Where Money Actually Leaves
+
+Paying a merchant their balance is the operation with the least margin for error, because it is irreversible in a way a ledger entry is not.
+
+**The sequence, and why each step exists:**
+
+1. **Freeze the payout amount** by posting from `merchant_payable` to `merchant_payable_in_transit` — an atomic ledger transaction. From this moment the amount cannot be double-paid, because it is no longer in the payable balance.
+2. **Submit the transfer** to the bank with an idempotency key derived deterministically from the payout ID, so a retry cannot double-send.
+3. **On confirmation**, post from `in_transit` to `cash_at_bank`.
+4. **On rejection**, post back from `in_transit` to `merchant_payable`, with the rejection reason recorded.
+
+**The failure cases that matter:**
+
+- **Indeterminate submission** (§2.16) — the amount stays in-transit and is resolved by querying the bank or by the next statement. It is never re-sent on a guess.
+- **Aged in-transit is the primary control.** An amount sitting in `in_transit` past the expected settlement window is the detector for every silent failure in this flow, and it is an account balance rather than a log line, so it is queryable and reportable.
+- **Partial or returned payments** (a closed account, a rejected IBAN) post back and re-enter the payable balance, which is only clean because the freeze was a ledger transaction rather than a status flag.
+
+**Never pay out from a computed balance without freezing it first.** The window between computing "they are owed €50,000" and the money leaving is exactly when a refund or chargeback can land.
+
+### 2.20 Adding Wallets — What Changes
+
+A wallet where users hold a balance looks like a small feature and changes the system's regulatory character.
+
+**In the ledger, very little changes**, which is the good news and a direct dividend of §2.2's account-type modelling: a wallet is a **liability** account (money owed to the user), and top-ups, spends and withdrawals are ordinary transactions. The invariant that a wallet must never go negative is §2.1's fourth invariant — a per-account-type policy checked at write time, and the system's main source of contention (§2.4).
+
+**Outside the ledger, a great deal changes:**
+
+- **Holding customer funds is frequently a regulated activity** — e-money or safeguarding obligations, depending on jurisdiction — which can require segregated accounts, specific capital treatment and licensing. This is a legal question that must be answered before the feature is built, not after.
+- **Abuse surface grows**: wallets are attractive for money laundering (load, transfer, withdraw), so transfer limits, source-of-funds checks and monitoring become requirements rather than enhancements.
+- **Dormancy and escheatment** — unclaimed balances have statutory treatment in many jurisdictions.
+
+The engineering answer is "this is a liability account and three transaction types." The Principal answer names the regulatory consequence first, because that is what determines whether the feature is viable at all.
+
+### 2.21 Two Proposals to Evaluate: Event Sourcing, and Kafka as the Ledger
+
+**"The ledger is already append-only — should it be event-sourced?"**
+
+*For:* the domain is already immutable history with derived state, which is exactly event sourcing's shape; temporal queries come naturally; and the audit trail is the primary artefact.
+
+*Against, and decisive here:* a double-entry ledger **already is** an event-sourced model, with entries as events and balance as the projection. Layering a generic event-sourcing framework on top adds an indirection without adding a property — and it risks *weakening* the one thing that matters, because the sum-to-zero constraint is enforceable as a **database constraint** over the entries table and is much harder to enforce over an opaque event stream. Use the ledger's own structure; do not wrap it.
+
+**"Replace the ledger with an append-only Kafka topic — it's already an immutable log."**
+
+Take it seriously: it is immutable, append-only, ordered, replayable and durable. Then name precisely what it cannot do, because these are exactly the properties the ledger exists for:
+
+- **No atomic multi-row write with a validating constraint.** Nothing can enforce that a transaction's entries sum to zero at write time. The invariant becomes a downstream check, which means invalid data is already durably committed by the time it is detected.
+- **No read-your-own-write balance guard.** §2.1's "never go negative" requires reading current state and writing atomically against it. A log offers no such primitive, so the guard becomes a consumer-side check with a race window.
+- **Retention and query.** A ledger must be queryable for seven years by account and date range. That is a database's job, and re-deriving a balance by replaying a topic is not an operational answer.
+
+**The synthesis:** Kafka is the right transport for ledger *events* to downstream consumers (§2.12) and the wrong system of record. The proposal confuses *a log* with *a ledger*: a ledger is a log **plus enforced invariants**, and the invariants are the entire value.
+
+### 2.22 Migrating a Live System From a `balance` Column to a Ledger
+
+Four phases, and the order is the answer.
+
+1. **Write both.** Every operation that mutates `balance` also writes ledger entries, in the same transaction. The column remains authoritative. Nothing reads the ledger yet.
+2. **Backfill history.** Reconstruct entries from whatever historical record exists — transaction logs, statements — and post an explicit **opening-balance transaction** per account for the unreconstructable remainder. That opening entry is honest: it says "history before this date is not derivable," which is far better than a ledger that silently implies completeness it does not have.
+3. **Reconcile continuously.** Derived balance versus the column, for every account, daily, with divergence alerting. Run this until the divergence is zero for a period covering the **episodic** events (month-end, refunds, chargebacks, corrections) — not merely for a fixed number of weeks, which is the same evidence-standard error as Module 134's capstone.
+4. **Flip the read path, keep writing both.** The ledger becomes authoritative; the column continues to be written and reconciled as a shadow, so a regression is a divergence alert rather than an incident. Retire the column only after a full cycle.
+
+**The irreversible moment is phase 4**, and the reason the column keeps being written afterwards is precisely that rollback must remain available.
+
+### 2.23 Observability — and the Failures With No Detector
+
+| Failure | Detector | Natural? |
+|---|---|---|
+| Posting error breaking sum-to-zero | Verifier layers 1–2 (§2.14) | Yes — the constraint rejects it |
+| Snapshot drift | Verifier layer 3 | Yes, once built |
+| Ledger unavailable | Error rate, queue depth at the AP edge | Yes |
+| Outbox relay stalled | **Oldest-unpublished-age** (§2.12) | **No** — nothing errors |
+| Indeterminate payments accumulating | **Aged in-transit / aged indeterminate** (§2.16, §2.19) | **No** — each one individually looks fine |
+| **Misallocation** — right amounts, wrong accounts | **External reconciliation only** (§2.7) | **No** — every internal invariant holds |
+| **Pre-ledger loss** — a payment that never reached the ledger | **External reconciliation only** | **No** — the ledger is self-consistent about what it received |
+| Verifier itself stopped | **Dead-man's switch** (§2.14) | **No** — silence is the same as success |
+
+**Where the "correctness is unobservable yet consequential" theme is sharpest in this design: misallocation and pre-ledger loss.** Both produce a ledger that passes every internal check while being wrong about the world. The design's answer is that **internal consistency is necessary and not sufficient**, and that the only ground truth is externally supplied — which is why reconciliation against the settlement file is a control with an owner and an SLA rather than a batch job someone eyeballs.
+
+**And the counter on every silent path.** A settlement row skipped, a message discarded, a retry abandoned — each must increment something. A dropped item is acceptable; an *uncounted* dropped item makes the data silently wrong rather than known-incomplete.
+
+### 2.24 Not Building Your Own Ledger
+
+The strongest argument against, which you should be able to make:
+
+A ledger is a **regulated, high-consequence, low-differentiation** system. Nobody chooses a payments platform because its ledger is elegant. Building one means owning double-entry correctness, settlement-file formats that change, chargeback lifecycles per scheme, multi-currency rounding, seven-year retention, audit support and a permanent on-call burden — none of which is a competitive advantage. Ledger-as-a-service products and core-banking platforms exist and are audited.
+
+**When building is nonetheless right:** the business model requires ledger semantics no vendor offers (unusual multi-party splits, marketplace flows with complex fee hierarchies); volume makes per-transaction pricing exceed build-and-operate cost; or the ledger is deeply coupled to proprietary product logic where the integration cost approaches the build cost.
+
+**The Principal framing:** the question is not "can we build it" — the engineering is well understood and this module documents it. The question is whether the organisation wants to own the **audit and regulatory surface** permanently, because that is the part that never ends.
+
+### 2.25 Concurrency on a Shared Account, Traced by Isolation Level
+
+Two customers pay simultaneously and both transactions touch the platform fee account. What actually happens depends entirely on isolation level, and being able to trace it is the difference between knowing the words and knowing the behaviour.
+
+**`READ COMMITTED` with a plain balance read:** both transactions read the fee account's balance, both compute a new value, both write. **Lost update** — one payment's fee vanishes. This is the default in PostgreSQL and the reason a derived balance (§2.3) is safer than a maintained one.
+
+**`READ COMMITTED` with `SELECT … FOR UPDATE`:** the first transaction locks the fee account row; the second blocks until commit, then reads the updated value. Correct, and **serialised on the fee account** — which is exactly §2.4's contention hot spot, because every payment touches it.
+
+**`SERIALIZABLE`:** PostgreSQL detects the read-write conflict and aborts one transaction with a serialisation failure. Correct, and requires the application to **retry**, which it must be written to do. Throughput under contention is worse than explicit locking because work is discarded rather than queued.
+
+**Appending entries without reading a balance** — the design this module recommends — has **no conflict at all.** Two inserts into the entries table do not contend; the balance is derived later. This is the key insight: **contention exists only where a running total is maintained.** Remove the running total and the concurrency problem largely disappears.
+
+**Where a balance guard is genuinely required** (a wallet that must not go negative, §2.20), the contention returns and the mitigations are: shard the hot account into N sub-accounts summed for reporting; batch fee postings rather than posting per payment; and keep the locked section as short as possible.
+
+### 2.26 The Separating Question, and the One Thing to Go Deep On
+
+**With twenty minutes and "go as deep as you can on one thing," pick idempotency and the indeterminate state** (§2.5, §2.16). It is where the real difficulty lives: it has a derivable structure (`exactly-once = at-least-once AND at-most-once`), worked failure scenarios, a database-level implementation with a genuine race if done as check-then-write, a distributed-systems core, and a direct, explicable financial consequence. The ledger's data model is elegant but largely a matter of knowing the convention; idempotency is where designs actually fail.
+
+**The single question that separates a Staff answer from a Senior one:**
+
+> **"How do you know your ledger is correct right now?"**
+
+A Senior answer describes the invariants — entries sum to zero, balance derives from entries. A Staff answer describes the **verification**: which invariants are enforced at write time versus checked continuously, at what frequency, by what job, with what alerting; which failure modes have **no internal detector** (misallocation, pre-ledger loss) and are therefore covered only by externally derived reconciliation; and how the verifier itself is known to be running (§2.14's dead-man's switch).
+
+The question separates so reliably because internal consistency is easy to describe and easy to achieve, and **it is not the same as being right about the world.** Recognising that gap — and building the evidence that closes it — is the whole of the Staff-level competency in this domain.
+
+**And the generalisation worth carrying out of this module.** §4's incident and the OMS's `ExecID` incident (Module 131 §2.4) are the same defect in different industries: **a uniqueness assumption about an external party's identifier, inferred rather than verified, whose violation is internally indistinguishable from correct behaviour.** The design rule follows directly — *for any external identifier you deduplicate on, document and verify its actual uniqueness scope with the issuing party, make the scope part of the key, and monitor the deduplication rate*, because a spike in "duplicates" is what a scope mismatch looks like from the inside.
+
+---
+
 
 ---
 
@@ -401,335 +661,9 @@ Three things made it invisible for eleven weeks:
 1. **A deduplication key must be scoped to the counterparty's actual behaviour, not the specification's stated guarantee.** This is Module 131 §4's finding arriving independently in the payments domain: there, a venue's `ExecID` uniqueness turned out to be per-session rather than global, and correctly-functioning deduplication silently discarded genuine fills. Two different industries, the same defect. The generalization is that **uniqueness is a property of a scope, and the scope is almost never documented correctly** — so the key must include everything that could vary (here, the processing centre), and the cost of over-scoping is nil while the cost of under-scoping is silent data loss.
 2. **Any silent-discard path must be counted, and the count must be alerted on rate-of-change.** "Duplicates discarded" was the single metric that would have caught this in week one — it went from near-zero to hundreds per day the moment the second centre came online. A discard is a decision to destroy information, and every such decision deserves a counter.
 3. **The in-transit account was the intended detector and it was read wrongly.** `card_receivable` growing was exactly the signal §2.2 says it should be — but only its *balance* was watched, which conflates legitimate in-flight volume with stuck items. The correct metric is **aged** in-transit: how much has been sitting in `card_receivable` for longer than the settlement window? That number should be near zero always, and it would have spiked immediately.
-4. **A variance in the "good" direction is not self-explaining.** Excess cash was tacitly treated as benign. It was evidence of a control failure, and had the collision run the other way — discarding lines that would have *reduced* cash — the platform would have overstated its position, which is a materially worse regulatory outcome. **The direction of a discrepancy is not evidence about its severity**, and classifying by direction rather than by cause is how this survived two investigations. (Module 177 §E2's premature-closure pattern, again.)
+4. **A variance in the "good" direction is not self-explaining.** Excess cash was tacitly treated as benign. It was evidence of a control failure, and had the collision run the other way — discarding lines that would have *reduced* cash — the platform would have overstated its position, which is a materially worse regulatory outcome. **The direction of a discrepancy is not evidence about its severity**, and classifying by direction rather than by cause is how this survived two investigations. (Module 177 §2.16's silent-path pattern, again.)
 
 **The fix.** Deduplication key changed to `(acquirer, processing_centre, reference, settlement_date)`, with a backfill identifying and posting all 1,847 discarded lines. A `settlement_lines_discarded_total` counter with an alert on any non-trivial rate. An **aged in-transit report** per in-transit account, alerting on anything older than the settlement window plus a buffer — which is now the primary settlement control, because it detects the general class ("money that should have cleared and hasn't") rather than the specific cause. And a standing rule added to the integration checklist: *for every external identifier we deduplicate on, document the counterparty's actual uniqueness scope, and test it.*
-## 10. Interview Questions
-
-### Basic (10)
-
-**B1. Q: What is double-entry bookkeeping and why use it for a software ledger?**
-**Ideal Answer:** Every financial event is recorded as a transaction of two or more signed entries against accounts, summing to exactly zero. It makes creating or destroying money structurally impossible rather than merely unlikely, gives one global invariant (all entries sum to zero) that acts as a whole-system integrity check, makes balance a derived value that cannot drift from history, and makes every balance explainable by reading entries — which is an audit requirement, not a convenience.
-**Why correct:** It gives the mechanism and the four distinct properties it buys, rather than describing debits and credits.
-**Common mistakes:** Explaining debit/credit vocabulary without the sum-to-zero invariant; treating it as an accounting convention rather than a correctness mechanism.
-**Follow-ups:** What's the single query that checks the whole ledger? (`SELECT SUM(amount) FROM entries GROUP BY currency` — must be zero for each.) Why not just a balance column? (It's a second source of truth that can drift, with nothing in the model objecting.)
-
-**B2. Q: How do you store monetary amounts, and why?**
-**Ideal Answer:** Scaled integers (minor units in a `bigint`) or `decimal`/`NUMERIC`. Never floating point — binary floats cannot represent 0.1 exactly, so errors accumulate across millions of operations into unexplainable discrepancies. Currency must be part of the amount type so that adding different currencies is impossible to express, and the minor-unit exponent varies by currency (JPY has 0, most have 2, KWD has 3), so hardcoding ×100 is a real bug.
-**Why correct:** It covers representation, the currency-typing point, and the minor-unit variation that catches people.
-**Common mistakes:** "Use decimal" without mentioning currency typing; assuming two decimal places universally.
-**Follow-ups:** What happens if you add EUR to USD? (In a well-designed type, it doesn't compile or it throws — it must not silently produce a number.) Why is scaled integer often preferred over decimal? (Exact by construction, no rounding-mode configuration, faster.)
-
-**B3. Q: What is an idempotency key and who generates it?**
-**Ideal Answer:** A client-supplied identifier for a logical operation, reused across all retries of that operation, letting the server recognize a retry and return the original result instead of performing the action twice. It must be client-generated *before* the first attempt, because the client's problem is precisely that it never received the response — a server-generated key can't help.
-**Why correct:** The client-generated-before-first-attempt point is the load-bearing part and the one most often missed.
-**Common mistakes:** Server-generated keys; generating a new key on retry, which defeats the purpose entirely.
-**Follow-ups:** What do you return on a duplicate? (The stored original response — not 409, which leaves the client where it started.) Where is the key stored? (Same database, same transaction as the money movement.)
-
-**B4. Q: Why is a refund a new transaction rather than a reversal of the original?**
-**Ideal Answer:** Because entries are immutable — the audit trail *is* the ledger, and an editable ledger has no evidentiary value. A refund posts a new balanced transaction moving money the other way, referencing the original as its reason. Both remain in history permanently; the accounts net to zero; the sequence of events stays readable.
-**Why correct:** It ties the practice to the immutability invariant and its audit purpose rather than treating it as convention.
-**Common mistakes:** Proposing to update or delete the original entries; treating "correction" and "reversal" as edits.
-**Follow-ups:** How do you enforce immutability? (Grant only `INSERT` and `SELECT` on the table — structural, not conventional.) What if the original was simply wrong? (Same answer: a reversing transaction, then the correct one. Corrections move forward.)
-
-**B5. Q: What's the difference between authorization and capture?**
-**Ideal Answer:** Authorization asks the issuer to reserve funds — no money moves, the hold expires (typically 7 days) if unused, and the cardholder sees "pending." Capture instructs the issuer to actually transfer the reserved funds. Only capture posts to the ledger's money-movement accounts, because only capture moves money.
-**Why correct:** It draws the correct ledger consequence from the distinction, which is the point of the question.
-**Common mistakes:** Posting authorizations to the ledger, which overstates every balance by the value of outstanding, possibly-never-captured auths.
-**Follow-ups:** Can one auth have multiple captures? (Yes — shipping items separately is the standard case; the sum must not exceed the auth plus any network-allowed tolerance.) Where does auth state live? (A payment-state store, separate from the ledger.)
-
-**B6. Q: Is a customer's wallet balance an asset or a liability to the platform?**
-**Ideal Answer:** A liability. Money held on behalf of a user is owed to that user. The platform's corresponding asset is the cash it actually holds at the bank. Getting this backwards inverts the sign convention across the entire ledger.
-**Why correct:** It's a small question that reliably separates people who have modelled a ledger from people who have read about one.
-**Common mistakes:** Calling it an asset because the platform holds the cash — conflating custody with ownership.
-**Follow-ups:** What are the four account types? (Asset, liability, revenue, expense.) What does the platform's own cash account represent? (An asset — cash at bank.)
-
-**B7. Q: How is an account's balance computed?**
-**Ideal Answer:** As the sum of its entries — derived, not stored, so it cannot drift from history. At scale that becomes expensive, so the practical answer is snapshot-plus-delta: an immutable periodic checkpoint plus the sum of entries after it. Because the snapshot derives from immutable history it can always be recomputed and verified, unlike a mutable cached balance.
-**Why correct:** It gives the correct model and the scale accommodation that preserves its properties.
-**Common mistakes:** A mutable `balance` column as the first answer; not mentioning verification.
-**Follow-ups:** What verifies the snapshot? (A background job recomputing from entries and comparing — a divergence is a P1.) When is pure derivation fine? (More often than people think — summing 50,000 indexed rows is milliseconds.)
-
-**B8. Q: What does settlement mean, and why doesn't it happen at capture?**
-**Ideal Answer:** Settlement is when funds actually arrive in your bank account, typically T+1 to T+3 after capture, delivered as a batch file from the network listing what it actually paid net of fees. Capture is an instruction; settlement is the money. The gap exists because card networks batch and net transactions between many parties.
-**Why correct:** It identifies that capture records a prediction and settlement is the truth.
-**Common mistakes:** Treating capture as the money arriving; not knowing settlement is a file-based batch process.
-**Follow-ups:** How does the ledger represent the gap? (An in-transit account like `card_receivable` — money the network owes us.) What's that account's balance mean? (Exactly how much the network is holding for us — a directly auditable number.)
-
-**B9. Q: What is a chargeback and how does it differ from a refund?**
-**Ideal Answer:** A refund is initiated by the merchant. A chargeback is initiated by the cardholder through their issuer, against you, with a formal dispute process, evidence deadlines, and fees. It has its own state machine (received → evidence submitted → won/lost), money movement at each stage, and a liability shift determining whether merchant or platform bears the loss. Missing the evidence deadline has a direct financial cost, making the deadline a functional requirement.
-**Why correct:** It captures the adversarial, time-bounded nature that distinguishes it, and the deadline-as-requirement consequence.
-**Common mistakes:** Treating it as a refund with extra steps; not modelling the deadline.
-**Follow-ups:** Why does the deadline need alerting? (Because missing it loses the dispute automatically — an architectural obligation, exactly like Module 133's regulatory deadline.) Who bears the loss? (Depends on liability shift — 3-D Secure typically shifts it to the issuer.)
-
-**B10. Q: What's the one global invariant that proves the ledger is internally consistent?**
-**Ideal Answer:** The sum of all entry amounts, per currency, is exactly zero. If it isn't, money has been created or destroyed and the ledger is broken. It's a single query and it validates the entire system.
-**Why correct:** Recognizing that one cheap query is a whole-system integrity proof is the essential property of the model.
-**Common mistakes:** Not knowing a global invariant exists; forgetting the per-currency qualifier, which matters because cross-currency transactions are modelled as linked single-currency pairs.
-**Follow-ups:** How often should it run? (Continuously — it's the ledger's immune system.) What if it fails? (P1: money has been created or destroyed and you don't yet know how.)
-
-### Intermediate (10)
-
-**I1. Q: Walk through exactly what happens when a client times out on a charge and retries.**
-**Ideal Answer:** The client retries with the *same* idempotency key it generated before the first attempt. The server attempts to insert the key with a unique constraint. If the insert succeeds, this is genuinely the first attempt — proceed with the charge and store the response, all in the same transaction. If it violates the constraint, the operation was already seen: compare the request fingerprint (a different body with the same key is a client bug — reject with 422, never silently treat as a duplicate); if the original is complete, replay the stored response; if it's still in flight, return 409 "retry shortly," because there is no response to replay yet.
-**Why correct:** It covers all three duplicate outcomes, including the in-flight case that most answers miss, and puts the key write inside the money transaction.
-**Common mistakes:** Key written in a separate transaction, so two concurrent retries both pass; returning 409 for completed duplicates; not comparing the fingerprint.
-**Follow-ups:** Why must the key write be in the same transaction? (Otherwise a crash between them leaves a claimed key with no charge, or a charge with no key — both wrong, and the second double-charges.) How long do you retain keys? (Longer than the longest realistic client retry window — check what mobile clients actually do on reinstall.)
-
-**I2. Q: Where is the concurrency contention in a ledger, and how do you resolve it?**
-**Ideal Answer:** Not between transactions on different accounts — the ledger is embarrassingly parallel across accounts. It concentrates on **hot accounts appearing in every transaction**, typically the platform's own fee and cash accounts. If those accounts have a cached balance on a row, that row serializes the entire system. Fixes in order: don't cache balances on hot accounts (free, and resolves most of it); shard the hot account into N sibling accounts summed logically (64× reduction, cheap); batch fee entries (breaks per-transaction traceability — usually unacceptable for audit).
-**Why correct:** It correctly locates the contention on shared accounts rather than on throughput, and orders the fixes by cost.
-**Common mistakes:** Assuming contention is general; reaching for distributed locks; batching without noting the audit cost.
-**Follow-ups:** What about the negative-balance check? (That genuinely needs read-then-write, resolved with a conditional insert or a row lock on that one account — but wallets aren't hot, so the contention is per-account and fine.) Why is a distributed lock wrong here? (The database already provides a stronger guarantee more cheaply.)
-
-**I3. Q: Split €10.00 three ways in a way the ledger will accept.**
-**Ideal Answer:** Not by rounding each to €3.33 — that sums to €9.99 and the transaction won't balance, correctly. Use largest-remainder allocation: floor each part (333, 333, 333 minor units = 999), then distribute the remaining 1 minor unit to the parts with the largest remainders, giving 334/333/333. The parts sum exactly to the original **by construction**, so the invariant holds without a fudge entry.
-**Why correct:** It produces an exactly-summing allocation deterministically, rather than patching a rounding difference afterwards.
-**Common mistakes:** Rounding independently and adding a "rounding adjustment" entry, which hides a systematic error in a plug account; using banker's rounding and assuming it sums.
-**Follow-ups:** Why must it be deterministic? (Recomputation must give the identical result, or reconciliation breaks — the same requirement as Module 131's trade allocations.) Who gets the extra cent? (A defined rule — largest remainder, then a tiebreak like lowest account ID; arbitrary is fine, undefined is not.)
-
-**I4. Q: How do you model a cross-currency payment?**
-**Ideal Answer:** Not as one transaction — the sum-to-zero invariant is per-currency, so a single transaction cannot balance across two. Model it as two balanced single-currency transactions linked through an FX position account: the EUR side balances in EUR, the USD side balances in USD, and the FX account absorbs the position. Record the rate and its timestamp on the transaction, because the rate is a fact about a moment and the transaction must be reproducible.
-**Why correct:** It identifies why the naive single-transaction model is impossible rather than merely awkward.
-**Common mistakes:** One transaction with mixed currencies "balancing" via the exchange rate — which makes the global invariant uncheckable; not storing the rate, making the transaction unreproducible.
-**Follow-ups:** What does the FX account's balance represent? (Your net open position in that pair — a real, monitorable risk number.) Where does FX profit or loss appear? (As revenue when the position is closed at a different rate — which is why the account must be watched, not just balanced.)
-
-**I5. Q: Why must event publishing use the Outbox pattern here?**
-**Ideal Answer:** The event must be atomic with the money movement. Publishing inside the transaction holds the database transaction open for a broker round trip, extending lock hold and coupling ledger throughput to broker latency. Publishing after commit is unsafe — a crash between commit and publish silently loses the event, and downstream systems never learn about money that moved. The outbox writes the event to a table in the same transaction, and a separate process publishes it, giving atomicity without the coupling.
-**Why correct:** It rules out both alternatives with their specific failure modes rather than just naming the pattern.
-**Common mistakes:** Publishing after commit and calling it "good enough"; not recognizing that the event and the money must be atomic.
-**Follow-ups:** What does the publisher guarantee? (At-least-once — so consumers must be idempotent, which is the standard trade.) How do you monitor it? (Outbox depth and oldest-unpublished age; a stalled publisher is silent otherwise — the same unmonitored-delivery-path failure as Module 125's dead-letter alert.)
-
-**I6. Q: Why should authorizations not post to the ledger, and where does their state live?**
-**Ideal Answer:** Because no money has moved. Posting them would overstate `card_receivable` and every downstream balance by the total of all outstanding authorizations, many of which will expire uncaptured. Auth state is a real business fact needing durable storage — it can be voided, expire, or be partially captured — so it lives in a payment-state store with its own state machine driven by an external authority (the issuer). Some designs also track auths in clearly-segregated memorandum accounts for exposure reporting, excluded from the global sum-to-zero check.
-**Why correct:** It separates "business fact needing state" from "money movement needing a ledger entry," which is the distinction being tested.
-**Common mistakes:** Posting auths as real entries; treating auth as ephemeral and not persisting it, so voids and expiries can't be handled.
-**Follow-ups:** What's a memorandum account? (An off-balance-sheet account tracking commitments rather than movements — legitimate, provided it's excluded from the real invariant.) What happens on expiry? (The state machine transitions; no ledger posting, because nothing moved.)
-
-**I7. Q: What is a reconciliation break and how should breaks be managed?**
-**Ideal Answer:** A break is an item that doesn't match between our ledger and the network's settlement file — in ledger but not file, in file but not ledger, or an amount mismatch. Management: each break needs an owner, a resolution SLA, and an aging report, with escalation. Unresolved breaks aging past a threshold is itself alertable, because a growing break population means the ledger is drifting from reality. "In file, not in ledger" is the most serious, because it means a capture was lost.
-**Why correct:** It treats reconciliation as an owned control with process, not a batch job producing a report nobody reads.
-**Common mistakes:** Describing the matching logic without the operational process; treating amount mismatches as errors when they're usually expected fee variance.
-**Follow-ups:** Why is the network's file a valid expected set? (Because it's *independently derived* — reconciling against something generated from our own ledger proves nothing, which is Module 133's exact failure.) What should fee mismatches post to? (A fee-variance account, whose balance measures estimation quality.)
-
-**I8. Q: The ledger is CP. What should the layer around it be, and why does that combination work?**
-**Ideal Answer:** The ledger is unambiguously CP — during a partition, refuse writes, because a failed payment is recoverable (the client retries with the same key) while an inconsistently-recorded one may be unrecoverable and is reportable. But the **orchestration layer should be AP**: accept the instruction, queue it, retry. That's safe precisely because idempotency makes retries harmless. So the system is AP at the edge and CP at the core, and idempotency is the mechanism that lets those coexist.
-**Why correct:** It gives a layered answer rather than one global CAP position, and identifies idempotency as what makes the layering safe.
-**Common mistakes:** Declaring the whole system CP and accepting unnecessary edge unavailability; making the ledger AP, which permits inconsistent books.
-**Follow-ups:** What does this buy for RTO? (A relaxed ledger RTO — payments queue at the edge during failover and drain after, so minutes of ledger downtime aren't customer-visible.) What's the RPO? (Zero — synchronous replication, since a lost committed transaction is lost money with no record.)
-
-**I9. Q: How would you scale a ledger past a single database?**
-**Ideal Answer:** First, question the premise — at 2,000 TPS a single well-tuned primary handles it, and one atomic database for money is operationally worth a lot. When it genuinely isn't enough, shard along a boundary **no transaction crosses**: currency or legal entity. A EUR transaction never touches a USD account (cross-currency being two linked single-currency transactions), and legal entities are separate books by regulation. That gives horizontal scale with zero cross-shard transactions. Sharding by account is the last resort, because a single ledger transaction touches multiple accounts and would become a 2PC.
-**Why correct:** It identifies that the shard boundary should be chosen to match the atomicity requirement rather than fight it.
-**Common mistakes:** Sharding by account immediately and importing 2PC; not considering that one database may be sufficient.
-**Follow-ups:** State the general principle. (Choose a boundary no transaction crosses and sharding is free; choose one they cross and you've bought distributed transactions.) How do inter-entity movements work? (Explicit transactions between the two books, exactly as between two real legal entities.)
-
-**I10. Q: What's the highest-value security decision in a payment system?**
-**Ideal Answer:** Keeping the card number out of your systems entirely — collect it via a hosted field or SDK posting directly to a vault/PSP that returns a token. Any component storing, processing, or transmitting a PAN is in PCI scope, with quarterly scans, annual assessment, segmentation, and substantial ongoing cost. Tokenization reduces that scope to one small isolated component and takes everything else out. Compliance scope is designed, not inherited.
-**Why correct:** It frames the decision as architectural scope reduction rather than as a control to add.
-**Common mistakes:** Listing controls (encryption, access control) without the scope argument; proposing to store encrypted PANs, which is still full PCI scope.
-**Follow-ups:** Why is "redact PANs in the logger" weaker than never having the PAN? (It's a check with exceptions, and the exceptions are where the leak happens — Module 177 §E7.) What else does this force? (Never logging request bodies on payment endpoints.)
-
-### Advanced (10)
-
-**A1. Q: Design the integrity verification system for a ledger. What does it check, how often, and how do you keep the check itself trustworthy?**
-**Ideal Answer:** Four layers with different cadences. (1) **Per-transaction**, synchronous, in the database: entries sum to zero per currency — a deferred constraint trigger, not application code, because the table has more write paths than anyone remembers. (2) **Continuous**, streaming: recompute cached/snapshot balances from entries for recently-touched accounts and compare; divergence is a P1 because it means an invariant broke and you don't yet know which. (3) **Daily**: the global sum across all entries per currency, which is a whole-system proof; plus aged in-transit per in-transit account, which detects money that should have cleared and hasn't (§4's real control). (4) **Periodic external**: reconcile against bank statements and network settlement files — the only genuinely independent authority.
-Keeping the check trustworthy is the harder half. It must **derive its expected value independently of what it checks** — recomputing a balance from the entries is valid; comparing a cached balance to itself is not, and this is precisely Module 133's failure, where the completeness reconciliation took the same identification logic as its input and matched perfectly every day while eleven months of trades went unreported. The check needs its own liveness signal (a dead-man's switch alerting on the *absence* of a recent run, since a check that stopped running emits no failures and is indistinguishable from passing), its runtime must be benchmarked against full production volume (a job that takes 30 hours cannot run daily and will quietly be disabled, which is how verification silently disappears), and its results need an owner.
-**Why correct:** It layers by cadence and cost, and it addresses the meta-problem — a verification system is itself a system that can fail silently — which is what makes it a Staff answer rather than a list of checks.
-**Common mistakes:** Only checking the global sum, which catches creation/destruction but not misallocation between accounts; comparing a cache against itself; no liveness monitoring for the checker; not benchmarking runtime, so the check dies of slowness.
-**Follow-ups:** What does the global sum *not* catch? (Money in the wrong account — the sum is still zero. That's why per-account recomputation and external reconciliation are separate layers.) How do you detect a checker that stopped? (Heartbeat with alerting on absence, per Module 177 §11.)
-
-**A2. Q: A merchant's balance is €12.34 lower than the sum of their transactions. Walk through the investigation.**
-**Ideal Answer:** First, establish which number is wrong. Recompute from entries — that is the authoritative value by definition, so if the cached balance disagrees, the cache is wrong and the entries are the truth. That immediately splits the problem: a cache-drift bug (a balance update that didn't happen, or happened twice) versus a genuine entry-level problem.
-If the entries themselves are inconsistent, check the global invariant for that currency. If the global sum is zero, money wasn't created or destroyed — it went to the *wrong account*, which points at a misrouted entry, likely a fee or FX posting. If the global sum is non-zero, an unbalanced transaction was written, which should be impossible if the constraint exists — so either the constraint is missing, or something wrote to the table bypassing it (a migration, a manual fix, a direct database change).
-Then bound it in time: find the earliest point where the discrepancy exists by recomputing balances at successive historical points, which narrows to a specific transaction or window. Then look at what changed then — a deploy, a new payment method, a new fee rule, a manual journal entry.
-Critically: **do not fix it by adjusting the balance.** Find the cause, then post a correcting transaction with a documented reason. Adjusting the balance hides the bug, which will continue.
-**Why correct:** It uses the invariants as a decision tree to partition the search space, rather than starting from "read the code."
-**Common mistakes:** Adjusting the balance to match and closing the ticket; not checking the global invariant, which is the single most informative branch; assuming the cache is right.
-**Follow-ups:** What if the global sum is non-zero? (Something bypassed the constraint — check for direct database access, migrations, and whether the constraint exists in every environment. Manual journal entries are the usual culprit and should be separately permissioned and alerted, per §8.) €12.34 is oddly specific — what does that suggest? (A specific transaction rather than systematic rounding; systematic rounding produces many tiny amounts, not one mid-sized one.)
-
-**A3. Q: Design the reconciliation engine, including how it handles the fact that fees are estimated.**
-**Ideal Answer:** Ingest the settlement file, normalize it (formats differ per acquirer and change without notice, so parsing must fail loudly on unrecognized structure rather than skipping rows), and match each line to a capture. Matching key: the acquirer's reference, **scoped correctly** — including acquirer, processing centre, and settlement date, per §4's incident where a per-centre-unique reference was treated as globally unique and collisions caused silent discards. Every discarded or unmatched line must be counted and, if unmatched, become a break with an owner.
-Fee variance is expected, not exceptional. Interchange depends on card type, region, merchant category, and rules that change, so the capture posts an *estimated* fee and settlement posts the *difference* to a `fee_variance` account. That account's balance is a direct measure of estimation quality: if it trends persistently in one direction or grows, the fee model is wrong and should be corrected — which turns an accounting artifact into a monitoring signal, exactly as §2.2 argues for in-transit accounts.
-Output: matched lines posted (clearing `card_receivable` against `cash_at_bank`), breaks queued with categories and owners, an aging report, and — the control that would have caught §4 — **aged in-transit**, flagging anything sitting in an in-transit account longer than its settlement window plus a buffer. That last one is the primary control precisely because it detects the general class ("money that should have cleared and hasn't") rather than any specific cause.
-**Why correct:** It handles the identifier-scoping trap, treats fee variance as a designed signal rather than an error, and centres the control on the general symptom rather than the known causes.
-**Common mistakes:** Treating fee mismatches as breaks, flooding the queue; deduplicating on an unverified identifier scope; monitoring in-transit *balance* instead of *aging*, which conflates legitimate volume with stuck items.
-**Follow-ups:** Why aging rather than balance? (Balance grows with legitimate in-flight volume, so an anomaly hides inside the noise — §4's exact failure.) What if the file format changes silently? (Fail loudly on unrecognized structure — silently skipping unparseable rows is the same silent-discard defect one layer up.)
-
-**A4. Q: How do you handle a payment where the network call times out and you don't know whether it succeeded?**
-**Ideal Answer:** You cannot know, so you must not guess. Record the attempt as **indeterminate** in the payment-state store — a real state, not an error — and do **not** post to the ledger, because posting a movement that may not have happened is worse than posting nothing (the ledger's job is to be right, and an entry you might reverse is a claim you couldn't support).
-Then resolve it, in order: (1) **query the network** — every card network provides a lookup by your reference, which is why you must send your own idempotent reference on the original request, and a design that doesn't is unrecoverable here; (2) if lookup is unavailable, **retry the original with the same network-level idempotency key**, so the network itself deduplicates and tells you the original outcome; (3) if neither resolves within the window, it becomes a break resolved at settlement — the file is authoritative and will tell you definitively.
-The customer-facing decision is separate and is a product choice, not an engineering one: show "processing" rather than success or failure, because both are potentially wrong and a wrong "failed" causes a duplicate attempt by the user, which is worse than a delay.
-**Why correct:** It treats indeterminate as a first-class state, refuses to post an unverified movement, and gives a resolution ladder ending in the authoritative source.
-**Common mistakes:** Assuming failure and retrying without the network's idempotency key, which double-charges; assuming success and posting; showing the customer a definitive outcome you don't have.
-**Follow-ups:** What makes this recoverable at all? (Sending your own reference on the original request — without it there is no way to ask "did this happen?") How long until it must be resolved? (Before settlement, ideally; settlement resolves it definitively but days later, and by then the customer has acted.)
-
-**A5. Q: Compare storing balances as a mutable column, pure derivation, and snapshot-plus-delta. Recommend one.**
-**Ideal Answer:** **Mutable column:** fastest reads, and it reintroduces the exact drift double-entry was chosen to prevent by creating a second source of truth. If used at all, the update must be in the same transaction as the entry insert; anything else leaves a permanent inconsistency after a crash with no signal. **Pure derivation:** correct by construction and impossible to drift, but degrades continuously with history — an active merchant's balance query gets slower every month, a bug that only manifests after months in production and so is rarely caught in testing. **Snapshot-plus-delta:** bounded read cost, and — the property that decides it — the snapshot is *derived from immutable history*, so it can always be recomputed and verified. A corrupted snapshot is detectable and repairable; a drifted mutable column is neither, because there's nothing to compare it to.
-**Recommend snapshot-plus-delta**, with pure derivation for low-volume accounts where the complexity isn't warranted. The decisive criterion is not performance — it's that the snapshot preserves a single source of truth while the mutable column creates a second one.
-**Why correct:** It decides on verifiability rather than speed, which is the property that matters for a ledger, and notes that pure derivation's failure is delayed and therefore insidious.
-**Common mistakes:** Choosing on read latency alone; not noticing that a mutable column has no independent thing to verify against; not recognizing that derivation's degradation escapes testing.
-**Follow-ups:** How often do you snapshot? (Volume-driven — every N entries per account rather than time-driven, so hot and cold accounts both get bounded read cost.) Can snapshots be wrong? (Yes, from a bug — but they're recomputable, which is the whole point.)
-
-**A6. Q: A regulator asks you to prove that a specific customer's balance on a date last year was correct. Can your design do it?**
-**Ideal Answer:** Yes, and the reason it can is entirely the immutability invariant. Balance as of a date is `SUM(entries WHERE account = X AND posted_at <= D)` — a direct query over unmodified history, reproducible today and in five years, because nothing was ever updated or deleted.
-The subtlety the question is really probing is **bitemporality**: there are two relevant times, when the event *occurred* and when we *learned* about it. A settlement correction posted in March for a February transaction means February's balance "as we knew it then" differs from "as we know it now." Both are legitimate answers to different questions, and a regulator usually wants "as known at the time" for a point-in-time report and "as now known" for a corrected restatement. That requires storing both `occurred_at` and `posted_at` on every transaction and being explicit about which the query uses — the same bitemporal event-versus-knowledge-time model Module 130 builds for market-data corrections.
-The remaining requirements: retention long enough (typically 7 years under SOX), which means archived entries must remain *queryable* rather than merely stored; and evidence that history wasn't altered — which is where append-only permissions, and optionally a hash chain over entries, provide the tamper-evidence.
-**Why correct:** It answers yes with the mechanism, then identifies bitemporality as the genuine complication rather than treating the query as trivial.
-**Common mistakes:** Answering "yes, just query by date" without distinguishing occurred-from-known; not considering retention and archived-but-queryable; no tamper-evidence story.
-**Follow-ups:** Which timestamp for a regulatory point-in-time report? (Usually knowledge time — what we knew then — because that's what was reported then; but ask, because it varies by regime.) How do you prove no tampering? (Append-only grants, plus a hash chain if the regime demands cryptographic evidence.)
-
-**A7. Q: The fraud check adds 80ms to authorization. The product wants it removed. Evaluate.**
-**Ideal Answer:** Reframe it as an expected-value question rather than a latency question, because that's what it is. The cost of the 80ms is measurable: conversion impact, which the product team can quantify. The benefit is fraud prevented, which is also measurable — fraud loss rate with and without, available from a holdout.
-Then avoid the binary. The check does not need to be uniform: **risk-tier it.** Low-risk transactions (known customer, known device, small amount, normal geography) can be scored from pre-computed features in single-digit milliseconds or skipped entirely; high-risk ones get the full check and can afford the latency because the alternative is loss. That converts "80ms on everything" into "80ms on the 5% that need it," which usually satisfies both parties and is a materially better answer than either extreme.
-Also examine *why* it's 80ms. If it's a synchronous call to a model service that could be pre-computed, or feature lookups that could be cached, the latency may be an implementation artifact rather than an inherent cost.
-Finally, the fail-open/fail-closed decision must be explicit and per-tier: if the fraud service is down, low-risk transactions proceed (fail open, accepting bounded loss) and high-risk ones are declined (fail closed) — the same per-tier matrix Module 175 §8 builds for rate limiting. A single global default here is wrong in one direction or the other.
-**Why correct:** It refuses the binary, quantifies both sides, and produces a tiered design that addresses the real constraint — plus it questions whether the 80ms is inherent.
-**Common mistakes:** Defending the check on principle without quantifying; removing it without a holdout to measure the consequence; not specifying fail-open versus fail-closed, which is a decision that will otherwise be made accidentally by a timeout.
-**Follow-ups:** How do you measure fraud prevented? (A holdout that skips the check — expensive but the only honest measurement.) What's the risk of tiering? (Attackers learn the tier boundaries and structure activity to stay in the low-risk lane — so tier rules must be adaptive and not externally inferable.)
-
-**A8. Q: Design payouts to merchants, including the failure cases.**
-**Ideal Answer:** A payout moves a merchant's `merchant_payable` balance out to their bank — another ledger transaction, plus an external transfer with the same indeterminacy problem as inbound payments (§A4).
-The design points that matter: (1) **Compute the payable amount at a point in time and freeze it**, because the balance keeps moving as new payments arrive; a payout against a moving balance is a race with real money in it. (2) **The ledger posting and the external transfer cannot be atomic** — different systems — so the correct order is post the ledger movement to a `payout_in_transit` account *first*, then initiate the transfer, then move from in-transit to settled on confirmation. If the transfer fails, reverse from in-transit back to payable. Reversing an in-transit position is clean; reversing a payment you already told the merchant was sent is not. (3) **Failures are common and varied**: closed accounts, wrong details, compliance holds, bank rejections days later — so `payout_in_transit` needs the same aged monitoring as `card_receivable` (§4). (4) **Negative balances** are the interesting case: if a chargeback arrives after payout, the merchant's balance goes negative and you must recover — netting against future payouts, direct debit, or write-off, each with different legal standing. This must be designed, because it happens routinely.
-**Why correct:** It handles the non-atomicity with the correct ordering and a specific in-transit account, and it raises post-payout chargebacks, which is the genuinely hard case.
-**Common mistakes:** Paying out against a live balance; initiating the transfer before the ledger posting, so a crash loses the record of money sent; no plan for negative balances after payout.
-**Follow-ups:** Why post to in-transit before initiating? (So a crash leaves a recoverable in-transit position rather than money sent with no record.) How do you limit post-payout chargeback exposure? (A rolling reserve — hold a percentage for a period — which is itself a ledger account and a standard industry control.)
-
-**A9. Q: You're asked to add a "wallet" feature where users hold a balance. What changes?**
-**Ideal Answer:** Mechanically little — a wallet is just an account of type liability (§B6), and top-ups, spends, and withdrawals are ordinary balanced transactions. The changes are regulatory and operational, and that's the answer.
-(1) **Holding customer funds may make you a regulated entity** — an e-money institution or money transmitter depending on jurisdiction — with licensing, capital requirements, and safeguarding obligations. That is a business decision with a long lead time, not an engineering one, and raising it is the most valuable thing you can say. (2) **Safeguarding** typically requires customer funds be held in a segregated account, not commingled with operating funds — which is a ledger *and* a banking arrangement, and the ledger must be able to prove segregation at any moment. (3) **The negative-balance invariant becomes load-bearing**: a wallet must never go negative, which is §2.1's Invariant 4 and the one that requires a read-then-write, making wallets the place where the conditional-write pattern (§2.4) actually gets used. (4) **Dormancy and escheatment** — unclaimed balances must eventually be handed to the state in many jurisdictions, on a schedule, which is a real feature nobody plans for. (5) **KYC/AML** obligations attach to holding funds in a way they don't to processing card payments on behalf of a merchant.
-**Why correct:** It correctly identifies that the engineering is nearly free and the obligations are the substance — which is exactly the judgment a Staff+ engineer is expected to supply before a team builds it.
-**Common mistakes:** Answering purely mechanically; not raising the licensing question, which can invalidate the whole feature; forgetting segregation, dormancy, and KYC.
-**Follow-ups:** How does the ledger prove segregation? (Safeguarded customer funds are a distinct asset account reconciled against a distinct bank account; their sum must always cover total wallet liabilities — a checkable invariant.) What's the engineering consequence of "must never go negative"? (The conditional insert of §2.4, and the acceptance that this one path serializes per account.)
-
-**A10. Q: 20 minutes left, "go as deep as you can on one thing." What do you pick?**
-**Ideal Answer:** **Idempotency and the exactly-once problem**, because it has the highest depth-per-minute and the most transferable content. Structure: the client-generated-before-first-attempt requirement and why a server-generated key cannot work — 3 minutes; the same-transaction requirement with the concrete two-concurrent-retries race it prevents — 4 minutes; the three duplicate outcomes including the in-flight 409 case most candidates miss, and why 409-on-complete is wrong — 4 minutes; the retention-window mismatch as a real shipped bug — 2 minutes; and then the generalization, that "exactly-once" doesn't exist as a distributed primitive and what we actually build is at-least-once delivery plus idempotent processing, with the network's own idempotency key making the *external* leg deduplicable too — 5 minutes; closing on §A4's indeterminate-state ladder, which is what you do when idempotency isn't enough because you don't know if the first attempt happened — 2 minutes.
-This beats going deep on double-entry, because double-entry has a well-known canonical explanation that reads as recall, while the idempotency material has a specific failure (the separate-transaction race) and a specific subtlety (in-flight versus complete) that distinguish reasoning from memorization. It also generalizes to any at-least-once system, so it demonstrates transferable depth rather than domain trivia.
-**Why correct:** It picks on differentiation-per-minute with a concrete time allocation, and justifies the choice against the alternative.
-**Common mistakes:** Picking double-entry because it's comfortable and canonical; going deep on one mechanism without reaching the generalization, which is where the Staff signal is.
-**Follow-ups:** What if they want the ledger instead? (Take the redirection — go deep on the four invariants, which are enforceable and which aren't, and the hot-account contention that follows from that split.)
-
-### Expert (10)
-
-**E1. Q: Derive from first principles why double-entry is the correct data model, rather than accepting it as accounting convention.**
-**Ideal Answer:** Start from the requirement: money must be conserved — the total across all accounts changes only through explicit, authorized interaction with the outside world, never through internal operations. Formally, internal operations must preserve a global sum.
-Now ask what data model makes that *structurally* true rather than merely intended. A model where the atomic write is "set account X's balance to V" cannot preserve any global invariant, because the write is unconstrained — nothing in the operation's shape relates it to any other account. So conservation can only be checked by an external process, after the fact, and a violation is unattributable once several have accumulated.
-A model where the atomic write is "a set of signed amounts summing to zero" makes conservation a *property of the write itself*. Every valid write preserves the global sum by construction; an invalid write is rejectable at the point of writing, with full context about what was attempted. Conservation moves from an emergent property that must be monitored to a syntactic property that can be enforced.
-That is the entire argument, and it yields three corollaries that are usually stated as separate rules but are really consequences: **balance must be derived**, because a stored balance is an unconstrained write and reintroduces the original problem; **entries must be immutable**, because mutation is also an unconstrained write — deleting one entry of a balanced pair breaks conservation with no record; and **corrections must be new transactions**, because that is the only operation the model permits.
-So double-entry is not an accounting convention that happens to suit software. It is *the* minimal data model in which conservation is syntactically enforceable, and accounting arrived at it five centuries earlier for the same reason. The transferable principle: **when a system has a global invariant, choose the atomic operation such that the invariant is a property of the operation** — which is why event sourcing suits state machines and why append-only logs suit ordering.
-**Why correct:** It derives the model from the conservation requirement and shows the three "rules" are consequences of one property, rather than listing them as best practices.
-**Common mistakes:** Justifying double-entry by tradition or auditability alone — auditability is a benefit, conservation-by-construction is the reason; not seeing that derived balance and immutability follow necessarily.
-**Follow-ups:** Where else does this principle apply? (Any conserved quantity — inventory, seat allocation, token supply. A warehouse system with a `quantity` column has the same defect as a `balance` column.) What's the cost? (Read amplification, which §2.3's snapshot addresses without abandoning the property.)
-
-**E2. Q: §4's incident and Module 131's ExecID incident are the same defect in different industries. Generalize it and give the design rule.**
-**Ideal Answer:** Both: a system deduplicated on an external counterparty's identifier, assuming a uniqueness scope broader than the counterparty actually provided. Module 131 — a venue's `ExecID` was unique *per session*, not globally, so after a restart a genuinely new fill bearing a previously-seen ExecID was silently discarded by correctly-functioning deduplication. §4 — an acquirer's settlement reference was unique *per processing centre*, and a migration to a second centre produced collisions whose lines were silently discarded.
-The generalization has three parts. (1) **Uniqueness is a property of a scope, and the scope is almost never documented correctly.** Specifications state guarantees the implementation doesn't hold, and the gap surfaces only when something changes — a session restart, a second data centre, a new region. (2) **Deduplication is a silent-discard mechanism, which makes it uniquely dangerous.** A discard is a *successful, expected* outcome producing no error, no break, no signal. It is the mirror image of a duplicate: a duplicate is loud and gets fixed, a wrongly-discarded item is silent and compounds. (3) **The failure is internally indistinguishable from correct behaviour**, so no internal check can catch it — only an external reconciliation can, and only if the external source is genuinely independent.
-Three design rules follow: **over-scope the key** — include every dimension that could conceivably vary (counterparty, centre, session, date), since over-scoping costs nothing (a genuine duplicate still carries identical values across all of them) while under-scoping loses data silently. **Count every discard**, with an alert on rate-of-change — the discard counter is the single metric that catches this class in week one rather than week eleven. And **monitor the in-transit position's aging**, not its balance, because aged in-transit detects the general symptom ("something that should have cleared hasn't") independently of any specific cause, which is what makes it robust to the next variant of this bug.
-**Why correct:** It abstracts two concrete incidents into a defect class with a mechanism, explains specifically why deduplication is more dangerous than other logic, and gives three rules ordered from prevention to detection.
-**Common mistakes:** Treating them as unrelated domain incidents; concluding "read the specification more carefully," which is unactionable since the specification was wrong; not recognizing that over-scoping is free.
-**Follow-ups:** Why is over-scoping free? (A true duplicate carries the same values in every dimension, so it's still caught. You only lose the ability to detect duplicates that legitimately differ in a dimension — which is exactly the case you *want* to treat as distinct.) What's the general test? (For every external identifier you deduplicate on, ask "unique across what?" and get an answer from the counterparty's *behaviour*, not their documentation — then test it.)
-
-**E3. Q: Argue for and against event sourcing the ledger, given a ledger is already append-only.**
-**Ideal Answer:** **For:** the ledger already satisfies event sourcing's core discipline — immutable append-only facts with derived state — so adopting it is a small step. It formalizes what's already true, brings a mature vocabulary and tooling, and makes projections a first-class concept: balance is one projection, and a merchant statement, a tax report, and a regulatory extract are others, each independently rebuildable from the same log. Temporal queries (§A6) come free. And it satisfies the adoption test Module 121 sets, more cleanly than most domains.
-**Against, and this is the stronger case:** a double-entry ledger is *already* the thing event sourcing would give you, so the question is what the framework adds beyond the model. Concretely, it adds costs: an event-sourcing framework typically introduces per-aggregate streams, and the natural aggregate here is the *account* — but a transaction spans multiple accounts, so a single financial event must be written to multiple streams atomically, which is precisely the problem most frameworks handle worst. You end up either with a single global stream (losing the framework's partitioning benefit) or with cross-stream atomicity you have to build yourself. Meanwhile, a plain relational ledger gets that atomicity from a single database transaction, for free.
-There's also a semantics mismatch: event sourcing's events are typically *domain intentions* ("PaymentCaptured"), while ledger entries are *accounting effects*. Both are useful, but conflating them means either your events carry accounting detail that makes them brittle, or your entries are derived from events by logic that can itself be wrong — introducing a gap between "what happened" and "what was recorded" that the direct model doesn't have.
-**Resolution:** keep the relational double-entry ledger as the system of record, because it gives multi-account atomicity natively and *is* already an immutable event log with a stronger invariant than event sourcing enforces. Use event sourcing's *ideas* — projections, replay, temporal queries — without the framework, and emit domain events via the Outbox (§I5) for consumers who want the intention-level stream. This is the "adopt the reasoning, reject the instrument" pattern from Module 177 §E6.
-**Why correct:** It identifies the specific technical mismatch (aggregate boundary versus transaction boundary) rather than arguing at the level of philosophy, and resolves to a position that captures the benefits without the cost.
-**Common mistakes:** Adopting event sourcing because the ledger "is already event sourced," missing that the aggregate boundary is the problem; rejecting it without engaging with what projections and replay genuinely offer.
-**Follow-ups:** What if a framework supports multi-stream atomic appends? (Then the objection weakens considerably — but check whether it does so with a distributed transaction, which reintroduces the cost elsewhere.) Where does the intention-versus-effect gap bite? (When the mapping logic from intention to entries has a bug — you now have two records that disagree, and must decide which is authoritative. The direct model has one.)
-
-**E4. Q: Design the observability for a ledger such that every failure has a detector, and identify which failures have none.**
-**Ideal Answer:**
-
-| Failure | Detector | Class |
-|---|---|---|
-| Unbalanced transaction | DB constraint, synchronous | Prevented, not detected |
-| Money created/destroyed | Global sum per currency, continuous | Easy |
-| Cached balance drift | Recompute-and-compare | Easy, if independently derived |
-| Money in the wrong account | **Nothing internal** — global sum is still zero | **Hard** |
-| Settlement line silently discarded | Discard counter + rate alert | Easy *if you thought to count* |
-| Capture lost before ledger posting | External reconciliation only | **Hard** |
-| Stuck in-transit position | Aged in-transit per account | Medium |
-| Duplicate charge | Idempotency-collision rate; customer complaint | Medium — often the customer detects |
-| Outbox publisher stalled | Outbox depth + oldest-unpublished age | Easy *if monitored* |
-| Fee model systematically wrong | Fee-variance account trend | Medium |
-| Integrity job stopped running | **Dead-man's switch on absence** | Easy but routinely missed |
-
-The two genuinely hard ones share a property and it is the important observation: **money in the wrong account** and **a capture lost before it reached the ledger** are both invisible to every internal invariant. The global sum is still zero when money is misallocated — conservation holds, allocation doesn't. And a capture that never reached the ledger was never in the expected set, so no internal completeness check can miss it: this is **exactly Module 133's incident**, where an event never *identified* as reportable was invisible to a reconciliation that took the same identification logic as its input.
-The only detector for both is an **externally-derived expected set** — the network's settlement file, the bank statement — which is why external reconciliation is not a hygiene process but the *only* control covering an entire class of failure. Everything else is checking the system against itself.
-The meta-point: the integrity job needs a liveness detector of its own, because a checker that silently stops emits no failures and is indistinguishable from a healthy system. That's the failure one level up, and it's the one most often missing.
-**Why correct:** It's exhaustive, it correctly identifies that internal invariants cannot cover misallocation or omission, and it explains *why* external reconciliation is structurally necessary rather than merely prudent.
-**Common mistakes:** Believing the global sum covers everything; not distinguishing conservation from allocation; no liveness check on the checker.
-**Follow-ups:** Can misallocation be caught internally at all? (Partially — per-account-type expectations, like "this expense account should never receive customer funds," catch some. But not the general case.) Why is customer complaint an acceptable detector for duplicate charges? (It isn't, but it's fast and reliable in practice — which is a reason to also have the idempotency-collision metric, not a reason to rely on it.)
-
-**E5. Q: A principal engineer proposes replacing the ledger with an append-only Kafka topic, arguing it's already an immutable log. Evaluate.**
-**Ideal Answer:** Take it seriously — the observation is accurate. A ledger *is* an immutable ordered log, and Kafka is an excellent one: durable, partitioned, replayable, high-throughput.
-It fails on four specific counts. (1) **No atomic multi-partition write.** A transaction touches multiple accounts; if partitioned by account, one financial event spans partitions. Kafka transactions provide atomicity across partitions, but only within a producer session and without the read-your-write semantics a balance check needs. (2) **No conditional write against derived state.** The negative-balance check (§2.1 Invariant 4) requires reading a computed balance and rejecting the write atomically. Kafka has no mechanism for this — you'd need a stream processor maintaining state and rejecting downstream, which means the "rejection" happens *after* the event is durably in the log, so the log contains transactions that were never valid. That inverts the model: the log is supposed to contain only valid facts. (3) **No enforceable sum-to-zero constraint at write time.** Validation moves to a consumer, so invalid transactions are durable before they're rejected — same inversion. (4) **Retention and queryability.** Seven-year retention with arbitrary point-in-time balance queries is not what a log broker is for; you'd build a database on the side, and then that database is the ledger.
-But the insight is right and worth extracting: **the ledger should be treated as a log, not as mutable state**, and the design already does that — append-only entries, derived balances, permissions that forbid mutation. What Kafka adds is *distribution* of that log to consumers, which is exactly what the Outbox (§I5) provides without making Kafka the system of record.
-So: the system of record stays in a database that can enforce constraints and conditional writes atomically; Kafka carries the *derived event stream* to everyone else. Reject the proposal, adopt its framing, and say which part was right — because a principal noticing "this is a log" has seen the model correctly and reached for the wrong instrument, the same pattern as Module 177 §E6's DNS proposal.
-**Why correct:** Four specific technical disqualifications, with the deepest one (validation-after-durability inverting the model) identified rather than just "Kafka can't do constraints," plus extraction of the valid insight.
-**Common mistakes:** Rejecting on "Kafka isn't a database"; missing that the real problem is validation happening after the write is durable; not noticing the design already treats the ledger as a log.
-**Follow-ups:** What if validation moved to the producer? (Then the producer holds the state, and you've built a database with worse durability semantics — and two producers can't both validate against the same balance.) Is there any ledger that works this way? (Some do, with a single-writer-per-partition design and the partition chosen so transactions never cross it — which is §9's approach 2, and it works because the *modelling* solved it, not the broker.)
-
-**E6. Q: How would you migrate a live system from a `balance` column to a proper double-entry ledger?**
-**Ideal Answer:** The hardest part is that the existing balances have **no history that explains them**, so you cannot reconstruct entries. Phases:
-(1) **Establish the opening position.** Freeze a point in time and post, for each account, an `opening_balance` transaction against a designated equity/opening account. This is honest: it records that the balance was inherited, not derived, and it keeps the global invariant satisfied from day one. It also makes the boundary explicit forever, which auditors will ask about — pretending to reconstruct history you don't have is far worse.
-(2) **Dual-write.** Every operation writes both the legacy balance update and the ledger transaction, in the same database transaction so they cannot diverge. The ledger is not yet authoritative.
-(3) **Continuous comparison.** A job compares the legacy balance against the ledger-derived balance for every account, continuously. Any divergence is a bug in the new path and must be fixed before proceeding. This runs for long enough to cover **scenario coverage, not elapsed time** — Module 134's central finding is that a clean parallel-run period measures how much time passed, not which scenarios occurred, and the incident there was a corporate-action path that simply never fired during the evidence window. So the gate is a *scenario inventory*: every payment type, refund, chargeback, FX case, payout, and adjustment must have been exercised and matched.
-(4) **Flip the read path** to ledger-derived balances, keeping the legacy column updated and compared. This is the reversible step, and it's where problems surface — because reads have different volumes and patterns than the comparison job.
-(5) **Stop writing the legacy column**, keeping the comparison against a frozen snapshot for a period, then drop it.
-Throughout: the reversal criterion must be pre-committed — "if divergence exceeds N accounts or any divergence is unexplained, we revert" — because a migration of money records without a stated exit condition is a bet nobody has priced.
-**Why correct:** It handles the unreconstructable-history problem honestly, dual-writes atomically, and — critically — gates on scenario coverage rather than elapsed time, which is the specific lesson Module 134 paid for.
-**Common mistakes:** Attempting to synthesize plausible historical entries, which fabricates records; dual-writing in separate transactions, so they diverge under failure; gating on "it's been clean for six weeks," which is exactly Module 134's incident.
-**Follow-ups:** What goes in the scenario inventory? (Every transaction type, plus the rare ones — chargeback reversal, partial capture, FX with a rate change, negative-balance recovery. The rare ones are the whole point.) Why is the opening balance transaction better than backfilling? (It's true. A fabricated history is an audit finding and destroys the ledger's evidentiary value permanently.)
-
-**E7. Q: Where in this design is the "correctness is unobservable yet consequential" theme sharpest, and what does the design do about it?**
-**Ideal Answer:** Sharpest at **misallocation**: money in the wrong account with the global invariant still satisfied. Conservation holds — nothing was created or destroyed — so the ledger's strongest internal check passes cleanly. Balances are wrong, every dashboard is green, no error exists anywhere, and the wrongness is *plausible* because the numbers look like ordinary numbers.
-It is consequential immediately: a merchant is underpaid, a fee is misbooked, revenue is misstated. And it is unobservable because the only internal authority — the entries — is exactly what's wrong.
-What the design does, in three layers. (1) **Reduce the surface**: enforce the sum-to-zero constraint in the database and the immutability by permission, so the *representable* wrong states are fewer. Prevention beats detection where prevention is possible. (2) **Make in-transit positions explicit accounts with aged monitoring** (§2.2, §4). This is the design's cleverest move: a misallocation involving an in-transit account shows up as a position that doesn't clear, which converts an unobservable balance error into an observable *aging* signal. The account is a detector, and it works because in-transit balances have a known expected behaviour — they should trend to zero — while ordinary balances have no expected value to compare against. (3) **Externally-derived reconciliation** (§2.7), which is the only genuine authority. The network's file and the bank statement were produced by someone else, and that independence is the entire reason they can detect what internal checks cannot.
-The residual honesty: misallocation *between two internal accounts neither of which reconciles externally* remains undetectable by design, and the mitigation is not technical — it's per-account-type expectations, review of manual journal entries, and separation of duties. The Principal move is to *know* that residual exists and name it rather than claim coverage.
-**Why correct:** It identifies the failure that defeats the system's own strongest invariant, explains the in-transit-account trick as the mechanism converting unobservable to observable, and honestly bounds what remains uncovered.
-**Common mistakes:** Naming duplicate charges, which are loud and customer-detected; claiming the global invariant covers misallocation; not admitting the residual.
-**Follow-ups:** Why do in-transit accounts work as detectors when others don't? (They have a known expected trajectory — clear to zero within the settlement window — so deviation is meaningful. A merchant payable balance has no such expectation.) What covers the residual? (Process, not technology: maker-checker on manual entries, separation of duties, per-account-type rules. Naming that some controls are organizational is itself the right answer.)
-
-**E8. Q: Construct the strongest argument for not building your own ledger.**
-**Ideal Answer:** It is strong for most organizations. **The correctness bar is unusually unforgiving and the failures are unusually quiet** — §E7's misallocation class, the deduplication-scope defect of §4, rounding that breaks invariants, FX modelled wrong. Each is subtle, each is expensive, and each has been made by competent teams. Ledger-as-a-service providers and mature open-source ledgers (TigerBeetle, Formance) have already encountered them.
-**The undifferentiated surface is large.** Reconciliation engines, settlement file parsers per acquirer with formats that change without notice, chargeback state machines, payout failure handling, dormancy — none of it is your product, all of it is required, and it never stops.
-**The compliance overhead is permanent**, not a project: audit support, control evidence, regulatory change.
-**And the commitment is indefinite.** A ledger has a seven-year queryable retention obligation and no end-of-life — the same permanence trap as Module 177 §E9, with legal weight attached.
-Where building is correct: **when the ledger is the product** (you're building a payments company, and this is the differentiating asset); **when your domain doesn't fit** a general ledger's model — unusual multi-party splits, complex netting, instruments a card-oriented product can't express; or **when scale or latency exceeds** what a vendor offers.
-The Principal move is to ask which applies before designing. And note the same interview caveat as Module 177 §E9: state the position in two sentences, then design it anyway under a stated assumption — refusing the exercise is not the demonstration of judgment it feels like. There's a further nuance worth adding: even when buying, **you still own the account model, the invariants, and reconciliation** — a vendor gives you the mechanics of balanced entries, not the decision about what accounts exist and what they mean. Those decisions are where most ledger bugs actually originate, so "we bought it" reduces the surface substantially but does not remove the design problem.
-**Why correct:** It makes the case honestly, names the three genuine build cases, and adds the non-obvious point that buying doesn't remove the modelling work — which is where the bugs live.
-**Common mistakes:** Not considering build-versus-buy; assuming a vendor removes the whole problem; refusing to design it after making the argument.
-**Follow-ups:** What does a vendor not give you? (Your chart of accounts, your invariants, your reconciliation against your banks — the parts requiring domain judgment.) When is the correctness argument weakest? (When the ledger is small and simple — an internal credits system with one currency and no external settlement is genuinely buildable, and the failure modes above mostly don't apply.)
-
-**E9. Q: Two customers pay simultaneously and both transactions touch the platform fee account. Trace the concurrency behaviour precisely, at each isolation level.**
-**Ideal Answer:** Assume both transactions insert entries, one of which credits `processing_fees`.
-**If the fee account's balance is derived** (no cached column): the two transactions insert into disjoint rows of `entries`. There is no shared row, no write-write conflict, and both commit concurrently at any isolation level including Serializable. **This is the entire argument for not caching balances on hot accounts** — the contention simply does not exist.
-**If the fee account has a cached `balance` column**, both must update the same row, and behaviour diverges:
-- *Read Committed:* the second `UPDATE` blocks on the first's row lock until commit, then re-reads and applies. Correct, but fully serialized — this row is now the system's throughput ceiling.
-- *Repeatable Read (PostgreSQL):* the second transaction, having taken its snapshot before the first committed, fails with a serialization error and must retry. Correct, but now the *application* must retry, and under load the retry rate can approach 100% on the hottest account — a livelock risk where throughput collapses rather than degrades.
-- *Serializable:* similar, with a higher abort rate.
-- *Read Uncommitted / naive read-modify-write in application code:* lost update. Transaction B reads the balance before A commits, adds its amount to the stale value, and writes — A's fee is silently gone. This is the actual bug, and it is silent.
-The correct design: derive the balance, or if a cached value is required, make the update an **atomic in-database increment** (`SET balance = balance + :amount`) rather than a read-modify-write in application code — which is correct at Read Committed without retries because the database performs the read and write as one operation under the row lock.
-And if the account is hot enough that even row-level serialization is the bottleneck, shard it (§2.4): 64 sibling accounts, random assignment, logical balance as the sum. Contention drops 64× and the atomicity story is unchanged.
-**Why correct:** It works through each isolation level with the specific outcome, identifies that derived balances make the problem vanish entirely, and distinguishes in-database increment from application-level read-modify-write — which is the actual defect.
-**Common mistakes:** Assuming a transaction prevents lost updates regardless of how the update is written (it doesn't, if the application reads then writes); not knowing Repeatable Read aborts rather than blocks in PostgreSQL; reaching for a distributed lock.
-**Follow-ups:** Why does Postgres abort rather than block at Repeatable Read? (Snapshot isolation — the transaction's snapshot predates the commit, so applying the write would violate the snapshot; there is no correct way to proceed.) What's the retry strategy? (Bounded, with jitter — but the real answer is to remove the contention, because retrying into a hot row is a losing game.)
-
-**E10. Q: What single question about a ledger most reliably separates a Staff answer from a Senior one?**
-**Ideal Answer:** *"Your global sum-to-zero check passes. What can still be wrong?"*
-It works because the sum-to-zero invariant is the thing every candidate knows, and the question asks what it *doesn't* cover — which cannot be answered by recalling the model, only by having reasoned about its limits.
-A **Senior** answer says "nothing — the ledger is balanced," treating the strongest invariant as complete.
-A **Staff** answer identifies that conservation and allocation are different properties: money can be in entirely the wrong account with the sum still zero. Adds that a capture lost *before* reaching the ledger was never in the expected set, so no internal check can miss it. Concludes that internal invariants cover conservation only, and that allocation and completeness require an **externally-derived** authority — the settlement file, the bank statement.
-A **Principal** answer adds the structural reason: **any check whose expected set derives from the system being checked cannot detect that system's omissions**, which is Module 133's incident precisely and generalizes far past ledgers. Then adds what the design does about it — in-transit accounts as detectors, because they have a known expected trajectory that ordinary balances lack. Then names the honest residual: misallocation between two internal accounts that neither reconciles externally is undetectable by design, and the mitigation is organizational — maker-checker, separation of duties, per-account-type rules. And finally, that the integrity checker needs its own liveness detector, because a check that silently stopped is indistinguishable from a check that passes.
-The question generalizes to this domain's central Principal move (Module 176 §E10): **"how would we know if this were wrong?"** — and it is at its sharpest here, because the ledger's *own* strongest guarantee is what creates the false confidence.
-**Why correct:** It targets the boundary of the best-known invariant, so recall cannot produce the answer, and it ladders cleanly through conservation-versus-allocation, independence-of-derivation, and the organizational residual.
-**Common mistakes:** Choosing a question about double-entry mechanics, which has a canonical rehearsed answer; choosing a scale question, which is the least differentiating thing about a ledger; not seeing that the strongest invariant is precisely where overconfidence lives.
-**Follow-ups:** One-sentence version. ("Conservation and allocation are different properties, and only one of them is checkable from the inside.") Where else does this shape appear? (Anywhere a system validates itself — Module 133's reconciliation, Module 177's revoked-link check, Module 132's tenant leak with no natural detector.)
-
----
-
 ## 11. Coding Exercises
 
 ### Easy — A `Money` type that makes currency errors unrepresentable
@@ -984,7 +918,7 @@ public sealed class LedgerIntegrityVerifier(
 {
     /// Layer 1 — conservation. One query proves money was neither created nor
     /// destroyed, system-wide. Cheap and total. Does NOT prove correct allocation
-    /// (§E4/§E7): money in the wrong account still sums to zero.
+    /// (§2.23): money in the wrong account still sums to zero.
     public async Task<CheckResult> VerifyConservationAsync(CancellationToken ct)
     {
         await using var conn = await db.OpenAsync(ct);
@@ -1116,21 +1050,21 @@ Three properties are the actual content here. **Independence:** every expected v
 
 **Non-functional requirements.** 2,000 payments/sec peak, ~8,000 entry writes/sec. Authorization p99 under 500ms end-to-end including the network hop, of which the fraud check gets 100ms. Ledger posting p99 under 20ms. Availability 99.99% for authorization; 99.9% for reporting. **RPO zero** for the ledger — non-negotiable. RTO minutes, made acceptable by the AP edge. Retention 7 years, queryable. Regulatory: PCI-DSS, SOX, and per-jurisdiction reporting.
 
-**Architecture.** As §3. The structural decision is the **three-layer separation**: an AP orchestration edge that accepts and retries, a CP ledger core that refuses rather than risks inconsistency, and asynchronous settlement/reconciliation operating on a days-long horizon. Idempotency is what allows the AP edge and CP core to coexist safely (§I8), and the days-long horizon is why in-transit accounts exist (§2.2).
+**Architecture.** As §3. The structural decision is the **three-layer separation**: an AP orchestration edge that accepts and retries, a CP ledger core that refuses rather than risks inconsistency, and asynchronous settlement/reconciliation operating on a days-long horizon. Idempotency is what allows the AP edge and CP core to coexist safely (§2.13), and the days-long horizon is why in-transit accounts exist (§2.2).
 
-**Components.** *Payments API* — idempotency claim, request validation, PCI-scope boundary. *Orchestrator* — the payment state machine, driven by an external authority, with indeterminate as a first-class state (§A4). *Vault* — tokenization; the only PCI-scoped component. *Ledger service* — the only writer to the ledger database, which is what makes the invariants enforceable. *Reconciliation engine* — file ingest, matching, break management. *Dispute service* — chargeback state machine with deadline alerting. *Payout service* — freeze, post to in-transit, transfer, confirm. *Integrity verifier* — §11's four layers.
+**Components.** *Payments API* — idempotency claim, request validation, PCI-scope boundary. *Orchestrator* — the payment state machine, driven by an external authority, with indeterminate as a first-class state (§2.16). *Vault* — tokenization; the only PCI-scoped component. *Ledger service* — the only writer to the ledger database, which is what makes the invariants enforceable. *Reconciliation engine* — file ingest, matching, break management. *Dispute service* — chargeback state machine with deadline alerting. *Payout service* — freeze, post to in-transit, transfer, confirm. *Integrity verifier* — §11's four layers.
 
 **Database selection.** **PostgreSQL** for the ledger, and the reasons are specific rather than habitual: deferred constraint triggers enforce sum-to-zero at write time; table-level `GRANT` enforces append-only structurally; multi-row atomic transactions are exactly what a multi-account posting needs; and `SERIALIZABLE`/`SELECT FOR UPDATE` give the balance guard without a distributed lock. No key-value store provides atomic multi-key writes with a validating constraint, which is why the "obvious" NoSQL choice is wrong here despite the volume. Separate PostgreSQL for payment state (different consistency needs, different lifecycle). Object storage for settlement files, retained raw and immutable, because the file is evidence.
 
-**Caching.** Deliberately minimal on the write path — a ledger posting reads almost nothing. Balance reads use snapshot-plus-delta (§2.3) rather than a cache, because a cached balance is a second source of truth (§A5). Reference data (fee schedules, account metadata) is cached freely; it is not money.
+**Caching.** Deliberately minimal on the write path — a ledger posting reads almost nothing. Balance reads use snapshot-plus-delta (§2.3) rather than a cache, because a cached balance is a second source of truth (§2.3). Reference data (fee schedules, account metadata) is cached freely; it is not money.
 
 **Messaging.** Outbox → Kafka. Consumers are notifications, analytics, and the merchant dashboard. The ledger never depends on the bus, which is what keeps the CP core's availability independent of the messaging tier.
 
 **Scaling.** The ledger stays single-primary as long as it can (§9), then shards by **currency or legal entity** — boundaries no transaction crosses. Reads scale on replicas with primary-routing for read-your-own-writes. Hot fee accounts have derived (not cached) balances and are sharded 64-ways if needed (§2.4). Orchestration and API tiers are stateless and scale freely.
 
-**Failure handling.** Network timeout on authorization → indeterminate state, resolved by lookup, retry with the network's idempotency key, or ultimately by settlement (§A4). Ledger unavailable → the AP edge queues instructions; nothing is lost because retries are idempotent. Fraud service unavailable → per-tier fail-open/fail-closed (§8), never one global default. Settlement file malformed → **fail loudly**, never skip rows, because a silently skipped row is §4's defect in a different costume. Outbox publisher stalled → depth and oldest-unpublished-age alerts, since a stalled publisher is otherwise silent.
+**Failure handling.** Network timeout on authorization → indeterminate state, resolved by lookup, retry with the network's idempotency key, or ultimately by settlement (§2.16). Ledger unavailable → the AP edge queues instructions; nothing is lost because retries are idempotent. Fraud service unavailable → per-tier fail-open/fail-closed (§8), never one global default. Settlement file malformed → **fail loudly**, never skip rows, because a silently skipped row is §4's defect in a different costume. Outbox publisher stalled → depth and oldest-unpublished-age alerts, since a stalled publisher is otherwise silent.
 
-**Monitoring.** §E4's table, with the standing recognition that **misallocation and pre-ledger loss have no internal detector** and are covered only by externally-derived reconciliation. Aged in-transit is the primary settlement control. The verifier has a dead-man's switch. Discard counters exist on every silent-discard path.
+**Monitoring.** §2.23's table, with the standing recognition that **misallocation and pre-ledger loss have no internal detector** and are covered only by externally-derived reconciliation. Aged in-transit is the primary settlement control. The verifier has a dead-man's switch. Discard counters exist on every silent-discard path.
 
 **Trade-offs.** CP ledger trades availability for correctness — correct here and almost nowhere else in this folder, and the reason is that a failed payment is recoverable while a corrupted book may not be. Snapshot-plus-delta trades a background job for bounded read cost while preserving a single source of truth. Single-primary trades headroom for atomicity, with a stated threshold and a shard boundary chosen in advance so the migration is a modelling change rather than an architecture change.
 
@@ -1240,7 +1174,7 @@ sequenceDiagram
 
 **Extensibility.** New transaction types are data. Multi-currency is already handled by per-currency validation. Adding a memorandum-account class (§2.6) means an account flag plus exclusion from the conservation check. The extension point most likely to strain is **sharding**: `PostAsync` assumes one connection and one transaction, so sharding by currency or entity requires routing by transaction, which is why §9 chose a boundary no transaction crosses — the routing is then a lookup, not a distributed transaction.
 
-**Concurrency and thread safety.** The service is stateless; all coordination is in the database. The idempotency unique index is the concurrency primitive — two concurrent retries serialize on it, and because the claim shares the transaction with the posting, the loser's rollback undoes nothing but its own claim attempt. The balance guard is a conditional insert, so no check-then-act window exists. Hot accounts must have **derived** balances or the row-level lock on a cached balance serializes the whole system (§E9), and the guarded-account path is the only one that reads before writing — acceptable because guarded accounts (wallets) are per-customer and therefore not hot. Isolation is `ReadCommitted` deliberately: the conditional insert provides the needed atomicity without the serialization-failure retry storms that `RepeatableRead` produces on hot rows (§E9).
+**Concurrency and thread safety.** The service is stateless; all coordination is in the database. The idempotency unique index is the concurrency primitive — two concurrent retries serialize on it, and because the claim shares the transaction with the posting, the loser's rollback undoes nothing but its own claim attempt. The balance guard is a conditional insert, so no check-then-act window exists. Hot accounts must have **derived** balances or the row-level lock on a cached balance serializes the whole system (§2.25), and the guarded-account path is the only one that reads before writing — acceptable because guarded accounts (wallets) are per-customer and therefore not hot. Isolation is `ReadCommitted` deliberately: the conditional insert provides the needed atomicity without the serialization-failure retry storms that `RepeatableRead` produces on hot rows (§2.25).
 
 ---
 
@@ -1269,9 +1203,9 @@ Three properties hid it. It affected only merchants with transactions in a one-h
 **Prevention.**
 
 - **The general rule adopted:** *a period boundary is an absolute instant, decided once and stored — never recomputed from a local-time expression at read time.* Any query whose result depends on when it is run is not a report; it is a hazard.
-- **Cross-projection consistency check.** The gap was that no check compared the *statement* against the *balance*. Both were derived from entries, but by different logic, and only one was verified. The new check asserts, for every account and period, that the statement's line-item sum plus the opening balance equals the closing balance. This is precisely the independence principle (§A1, Module 133) applied one level out: **verifying the ledger is not the same as verifying what you show people**, and this course had, until this incident, only ever discussed verifying the ledger.
+- **Cross-projection consistency check.** The gap was that no check compared the *statement* against the *balance*. Both were derived from entries, but by different logic, and only one was verified. The new check asserts, for every account and period, that the statement's line-item sum plus the opening balance equals the closing balance. This is precisely the independence principle (§2.14, and Module 133 §2.2) applied one level out: **verifying the ledger is not the same as verifying what you show people**, and this course had, until this incident, only ever discussed verifying the ledger.
 - **Immutable artifacts for anything a customer relies on.** A regenerated report can silently change; a stored one cannot. This also gives free reproducibility for audit, which was a separate outstanding requirement.
-- **The transferable observation.** Every integrity check in §11 verified the *ledger*, and the ledger was perfect throughout. The failure lived in the layer between correct data and what a human sees — and no invariant covered it. This extends §E7's theme one step: correctness being unobservable applies not only to the data but to **every derivation from it**, and each derivation needs its own independently-derived check. A perfect ledger displayed wrongly is, to the person reading it, simply a wrong ledger.
+- **The transferable observation.** Every integrity check in §11 verified the *ledger*, and the ledger was perfect throughout. The failure lived in the layer between correct data and what a human sees — and no invariant covered it. This extends §2.23's theme one step: correctness being unobservable applies not only to the data but to **every derivation from it**, and each derivation needs its own independently-derived check. A perfect ledger displayed wrongly is, to the person reading it, simply a wrong ledger.
 
 ---
 
@@ -1281,7 +1215,7 @@ Three properties hid it. It affected only merchants with transactions in a one-h
 
 **Option A — Mutable `balance` column on the account, updated with each entry.**
 *Advantages:* O(1) reads; simplest query; familiar.
-*Disadvantages:* a second source of truth that can drift, with nothing to compare it against; the update must be in the same transaction as the entry or a crash leaves permanent silent inconsistency; it creates row-level contention on hot accounts, serializing the entire system on the fee account (§E9).
+*Disadvantages:* a second source of truth that can drift, with nothing to compare it against; the update must be in the same transaction as the entry or a crash leaves permanent silent inconsistency; it creates row-level contention on hot accounts, serializing the entire system on the fee account (§2.25).
 *Cost:* lowest storage. *Complexity:* low to write, high to trust. *Maintainability:* poor — drift is silent and unattributable. *Performance:* best reads, worst writes. *Scalability:* the hot-account row is a hard ceiling. *Operational overhead:* low until the first drift incident.
 
 **Option B — Pure derivation: `SUM(entries)` on every read.**
@@ -1296,7 +1230,7 @@ Three properties hid it. It affected only merchants with transactions in a one-h
 
 **Option D — Event-sourced projection maintained by a stream processor.**
 *Advantages:* balance as one of many projections; replay rebuilds any of them; natural fit for multiple read models.
-*Disadvantages:* the projection is eventually consistent, so a balance read after a write may be stale — unacceptable for a negative-balance guard, which needs the current value atomically; and it adds a whole runtime, plus the aggregate-boundary mismatch of §E3 (a transaction spans accounts, so it spans streams).
+*Disadvantages:* the projection is eventually consistent, so a balance read after a write may be stale — unacceptable for a negative-balance guard, which needs the current value atomically; and it adds a whole runtime, plus the aggregate-boundary mismatch of §2.21 (a transaction spans accounts, so it spans streams).
 *Cost:* high. *Complexity:* high. *Maintainability:* moderate. *Performance:* excellent reads. *Scalability:* excellent. *Operational overhead:* substantial.
 
 **Recommendation: Option C, with Option B for low-volume accounts.**
@@ -1317,15 +1251,15 @@ Accepted costs: a background snapshot job and a verification job, both of which 
 
 **Engineering trade-offs.** The sharpest is §15's balance decision, and its interest is that it is *not* a performance trade-off despite presenting as one. Options A and C read at comparable speed; they differ in how many sources of truth exist and whether error is detectable. The general principle — **prefer the representation that makes error falsifiable, even at equal performance** — is one of the more transferable ideas in this module, and it explains why derived state beats stored state wherever the derivation is affordable.
 
-**Technical leadership.** §E5's Kafka proposal is the model. A principal observing "the ledger is already an immutable log" has seen the model correctly; the instrument is wrong for four specific reasons, the deepest being that validation would happen *after* durability, inverting the model so the log contains transactions that were never valid. Leading well means naming what was right, disqualifying precisely, and pointing at where the insight does belong — the Outbox distributing the log to consumers while the database remains the enforcing system of record.
+**Technical leadership.** §2.21's Kafka proposal is the model. A principal observing "the ledger is already an immutable log" has seen the model correctly; the instrument is wrong for four specific reasons, the deepest being that validation would happen *after* durability, inverting the model so the log contains transactions that were never valid. Leading well means naming what was right, disqualifying precisely, and pointing at where the insight does belong — the Outbox distributing the log to consumers while the database remains the enforcing system of record.
 
-**Cross-team communication.** §A9's wallet question is really a communication problem. The engineering is nearly free — a wallet is a liability account — while the obligations (licensing, safeguarding, dormancy, KYC) can invalidate the feature entirely and have lead times measured in quarters. The valuable contribution is not the design; it is **raising the licensing question before anyone writes code**, which requires knowing that the question exists. Much of Principal-level value is knowing which questions belong to someone else and asking them early enough to matter.
+**Cross-team communication.** §2.20's wallet question is really a communication problem. The engineering is nearly free — a wallet is a liability account — while the obligations (licensing, safeguarding, dormancy, KYC) can invalidate the feature entirely and have lead times measured in quarters. The valuable contribution is not the design; it is **raising the licensing question before anyone writes code**, which requires knowing that the question exists. Much of Principal-level value is knowing which questions belong to someone else and asking them early enough to matter.
 
-**Architecture governance.** Three invariants here are enforced *structurally* rather than by discipline: sum-to-zero as a database constraint, immutability as a table `GRANT`, and the balance guard as a conditional insert. Each could have been application logic, and each would eventually have been bypassed by a path added later by someone who did not know the rule existed. This is Module 177 §E7's principle at its highest stakes, and the governance argument is specific: **structural enforcement survives staff turnover; conventional enforcement decays at exactly the rate people leave.** The corollary is that manual journal entries — the one path that must bypass normal controls — require maker-checker, individual approval, and alerting, because a bypass that exists must be the most watched thing in the system.
+**Architecture governance.** Three invariants here are enforced *structurally* rather than by discipline: sum-to-zero as a database constraint, immutability as a table `GRANT`, and the balance guard as a conditional insert. Each could have been application logic, and each would eventually have been bypassed by a path added later by someone who did not know the rule existed. This is Module 177 §2.9's principle at its highest stakes, and the governance argument is specific: **structural enforcement survives staff turnover; conventional enforcement decays at exactly the rate people leave.** The corollary is that manual journal entries — the one path that must bypass normal controls — require maker-checker, individual approval, and alerting, because a bypass that exists must be the most watched thing in the system.
 
 **Cost optimization.** The dominant lever is not infrastructure. It is **PCI scope** (§8): tokenizing so no PAN enters your systems removes most components from a regime carrying quarterly scans, annual assessment, segmentation, and permanent audit overhead. That is an architectural decision with a compliance-budget consequence far exceeding any hosting choice. Second is **interchange optimization** — routing, card-type handling, and data quality materially affect the fee on every transaction, which at 2,000 TPS is a large number, and it is invisible to engineers who treat fees as an external constant. Naming a cost lever that isn't infrastructure is a reliable Principal signal.
 
-**Risk analysis.** The residual §E7 admits is the important one: **misallocation between two internal accounts that neither reconciles externally is undetectable by design.** Not "hard to detect" — undetectable, because every internal authority is exactly what's wrong and no external party observes it. The mature response is not to claim coverage but to name the gap and staff it organizationally: per-account-type expectations, review of manual entries, separation of duties. Knowing that some risks are closed by process rather than technology, and saying so, is more valuable than an architecture diagram implying total coverage.
+**Risk analysis.** The residual §2.23 admits is the important one: **misallocation between two internal accounts that neither reconciles externally is undetectable by design.** Not "hard to detect" — undetectable, because every internal authority is exactly what's wrong and no external party observes it. The mature response is not to claim coverage but to name the gap and staff it organizationally: per-account-type expectations, review of manual entries, separation of duties. Knowing that some risks are closed by process rather than technology, and saying so, is more valuable than an architecture diagram implying total coverage.
 
 **Long-term maintainability.** §14 extends this domain's central theme one step further than the six buy-side modules did. Those established that *correctness is unobservable at the point of consumption yet immediately consequential*. §14 shows that this applies not only to the data but to **every derivation from it**: the ledger was perfect throughout, every invariant held, and merchants still received wrong statements — because no check compared what was shown against what was stored. A perfect ledger displayed wrongly is, to the person reading it, simply a wrong ledger.
 

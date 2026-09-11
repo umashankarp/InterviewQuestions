@@ -30,39 +30,180 @@ Source systems (OMS, risk, positions)
 
 ## 2. Deep Dive
 
+This section is written to be **complete on its own** — every mechanism, the reasoning that selects it, the failure mode it introduces, and the push-back a Principal/Staff interviewer will raise, answered inline.
+
 ### 2.1 Completeness Is the Hard Problem, Not Transformation
-Engineers new to this domain assume the difficulty is format transformation. It is not — formats are specified, tedious, and tractable. The hard problem is **completeness**: proving that every reportable event was reported, which requires knowing what the complete set *is*.
 
-That set is not simply "everything in the OMS." Reportability depends on rules — instrument classification, counterparty type, venue, jurisdiction, whether the firm acted as principal or agent — and those rules change. An event is missed not because the pipeline failed to process it but because the pipeline never considered it reportable. This failure is invisible to every internal signal: the pipeline reports success, having correctly processed everything it believed was in scope.
+Engineers new to this domain assume the difficulty is format transformation. It is not — formats are specified, tedious and tractable. The hard problem is **completeness**: proving every reportable event was reported, which requires knowing what the complete set *is*.
 
-### 2.2 The Deadline as a Hard Architectural Constraint
-Most systems have latency targets; this one has **deadlines with legal force** — T+1 by a specific time, or intraday for some regimes. A deadline differs from a latency target in two ways that shape the architecture:
+That set is not "everything in the OMS." Reportability depends on rules — instrument classification, counterparty type, venue, jurisdiction, principal versus agent — and those rules change. **An event is missed not because the pipeline failed to process it, but because the pipeline never considered it reportable.** That failure is invisible to every internal signal: the pipeline reports success, having correctly processed everything it believed was in scope.
 
-- **It is not negotiable under load.** A system that degrades gracefully by slowing down has failed, because slow past the deadline is identical to not reporting.
-- **It creates a partial-submission decision.** If, at deadline minus one hour, 3% of records are failing validation, the choice is to submit the 97% (reporting incomplete but timely) or hold for repair (complete but late). Both are breaches of different kinds, and the decision must be made in advance as policy, not improvised at deadline (works this).
+### 2.2 The Incident — a Reconciliation That Could Not Possibly Work
 
-### 2.3 Enrichment and Its Failure Mode
-Reports require data the trading systems do not hold: legal entity identifiers (LEIs), instrument classifications (ISIN, CFI, taxonomy codes), counterparty details, and jurisdiction-specific fields. Enrichment joins reportable events against reference data (§Expert Q4's subsystem).
+§4's failure: a new instrument's classification was unrecognised by the reportability rules, whose default was **not-reportable**. The trades were never identified as reportable, and an entire instrument class went unreported for eleven months.
 
-The failure mode is specific: enrichment failures produce records that *cannot* be validly reported, and the volume of such failures is a leading indicator of a reference-data problem rather than a pipeline problem. Treating them as individual record errors, rather than as a signal about upstream data quality, is why firms accumulate persistent repair backlogs.
+**Why the completeness reconciliation missed it, stated precisely:** the reconciliation compared submitted records against *records identified as reportable* — taking identification as its **input**. The failure was *in* identification, so the comparison was between two quantities that were consistently and correctly equal. It verified **processing fidelity**, which was never the problem, and by construction could not verify **identification correctness**.
 
-### 2.4 Validation in Layers, and Why Regulator Rejection Is Too Late
-Three validation layers, each catching what the next cannot:
-- **Schema validation** — structural conformance to the published specification.
-- **Business-rule validation** — the regulator's published rules (field interdependencies, permitted enumerations, cross-field consistency).
-- **Firm-specific plausibility** — internal expectations catching data problems that are technically valid but wrong (a notional three orders of magnitude from typical).
+This is the folder's recurring rule in its sharpest form: **a check whose expected set derives from the logic being checked cannot detect that logic's omissions.**
 
-Relying on the regulator's own rejection as validation is a common and costly mistake: rejections arrive after submission, count against the firm's error statistics, and consume the repair window. Validation must be predominantly pre-submission.
+**The two-part structural fix:**
 
-### 2.5 The Repair Loop and Why It Needs Its Own Design
-Rejected and failed records enter a repair loop — investigated, corrected, resubmitted. This loop is frequently an afterthought and becomes the pipeline's operational bottleneck.
+**1. Invert the default.** An unrecognised classification must default to **reportable-pending-review**, not not-reportable. The failure modes are asymmetric: over-reporting is correctable (submit a cancellation); under-reporting is a breach that accrues silently. Default toward the correctable failure, and make unknowns loud.
 
-It needs first-class design: rejections categorized by cause (so systemic issues are visible rather than appearing as many individual errors), routed to whoever can actually fix them (a reference-data gap goes to data management, not to the reporting team), tracked against the deadline for resubmission, and — critically — **aged**, because an unrepaired record does not stop being a breach through the passage of time. Backlogs that are worked in arrival order rather than deadline order silently accumulate the oldest, most-breaching items at the bottom.
+**2. Reconcile against an independent source.** Start from **all executed trades in the OMS** — the system of record, independent of reportability logic — and require every exclusion to carry an **explicit, itemised, reviewed reason**. The output is not a match/mismatch but a reconciliation with a classified exclusion list, so "not reportable" becomes an asserted classification a human reviews rather than a silent default. A new instrument type then surfaces immediately as an unclassified exclusion.
 
-### 2.6 Amendments, Cancellations, and Reporting What You Previously Reported
-When an underlying trade is amended or busted, the firm must submit an amendment or cancellation referencing the original report. This requires the pipeline to retain the mapping between internal events and submitted report identifiers indefinitely — and to know precisely what was submitted, since an amendment references the prior submission's content.
+**Note the contrast with the multi-tenant platform:** there, no external party held comparable truth, so self-testing was the only verification. Here an external party *does* — the regulator, and counterparties' own reports — which is exactly how this failure eventually surfaced. That makes independent reconciliation both **possible and obligatory** here.
 
-This is why the pipeline's own record must be immutable and complete: not merely for audit, but operationally, because the next amendment three years from now needs to reference what was actually sent, not what the source system currently says.
+### 2.3 The Deadline as a Hard Architectural Constraint
+
+Most systems have latency targets; this one has **deadlines with legal force** — T+1 by a specific time, or intraday for some regimes. Two consequences shape the architecture.
+
+**It is not negotiable under load.** A system that degrades gracefully by slowing down has *failed*, because slow past the deadline is identical to not reporting.
+
+**It forces a partial-submission decision.** At deadline minus one hour with 3% of records failing validation, the choice is to submit the 97% (timely but incomplete) or hold for repair (complete but late). Both are breaches of different kinds.
+
+**That decision must be pre-agreed policy, executed automatically.** Structure it as: agreed with compliance; **regime-specific**, because regimes differ in how they weight lateness versus incompleteness; and expressed as a rule the pipeline executes without human judgement — e.g. *"submit validated records at deadline minus 30 minutes; hold failures for repair and late-submit."* The essential property is that it runs without a judgement call under time pressure, because a decision made at deadline by whoever happens to be on shift is not a policy.
+
+**A pipeline sized to just meet the deadline has a hidden failure mode: it has no repair window.** Any validation failure immediately becomes a deadline decision rather than a routine repair, converting an ordinary occurrence into a governance escalation. **Capacity must include a full repair-and-resubmit cycle.**
+
+**Running once daily immediately before the deadline is the same error, maximised.** It collapses the repair window to nothing and makes any failure — pipeline, reference data, or regulator endpoint — an immediate crisis. Run continuously or in early batches so problems surface while time remains. The counter-argument (late-arriving data means early runs are incomplete) is answered by running repeatedly and treating the early runs as progressive rather than final.
+
+**Submission capacity is externally capped.** Regulator endpoints impose rate limits, so adding workers does not increase throughput past the endpoint's ceiling. Submission is the one stage that **cannot be scaled horizontally**, which means deadline margin must be created *earlier* in the pipeline, never at submission.
+
+### 2.4 Enrichment, Reference Data, and the Valid-But-Wrong Report
+
+Reports need data the trading systems do not hold: legal entity identifiers, instrument classifications (ISIN, CFI, taxonomy codes), counterparty details, jurisdiction-specific fields. Enrichment joins reportable events against reference data.
+
+**Enrichment failures are a reference-data signal, not individual record errors.** Their *volume* indicates an upstream data-quality problem. Treating them one at a time produces a persistent repair backlog while the cause goes unaddressed — which is how firms end up with a permanent operations team working a queue that should not exist.
+
+**Caching reference data without staleness bounds is worse than it looks.** A stale LEI or classification produces a **validly formatted, incorrect report** — an *error* rather than a *failure* — so it passes every validation layer and is submitted, becoming a reportable inaccuracy the firm must later correct. The cache converts a **detectable enrichment failure into an undetectable misstatement**, which is the wrong-versus-missing asymmetry recurring yet again.
+
+### 2.5 Validation in Layers — and Why Regulator Rejection Is Too Late
+
+Three layers, each catching what the next cannot:
+
+| Layer | Catches |
+|---|---|
+| **Schema** | Structural non-conformance to the published specification |
+| **Business rules** | The regulator's published rules — field interdependencies, permitted enumerations, cross-field consistency |
+| **Firm plausibility** | Technically valid but wrong — a notional three orders of magnitude from typical |
+
+**Using the regulator's rejection feedback as the primary validation mechanism is wrong on three counts**, even though the regulator's rules are authoritative: rejections **count against the firm's error statistics**, which is a supervisory metric; they **consume the repair window**, leaving less time before deadline; and they arrive **after** the submission that constitutes the error. Implement the published rules pre-submission, and treat any rejection that reaches you as a **defect in your own validation** to be closed, not as normal operation.
+
+### 2.6 The Repair Loop Needs First-Class Design
+
+Rejected and failed records are investigated, corrected and resubmitted. This loop is frequently an afterthought and becomes the pipeline's operational bottleneck.
+
+- **Categorise by cause at rejection time** — reference-data gap, source-data error, rule-implementation defect, transient — so systemic issues are visible as a category rather than as many individual errors.
+- **Route to the owner who can actually fix it.** A reference-data gap goes to data management, not the reporting team. A rule defect goes to engineering. A transient goes to automatic retry.
+- **Age against the regulatory deadline for that record**, not against queue-entry time. This is the critical one: **an unrepaired record does not stop being a breach through the passage of time.** A queue worked in arrival order silently buries the oldest, most-breaching items at the bottom.
+- **Escalate on age**, with thresholds tied to the deadline rather than to queue depth.
+
+### 2.7 Amendments, Cancellations, and Reporting What You Previously Reported
+
+When an underlying trade is amended or busted, the firm submits an amendment or cancellation **referencing the original report**. That requires retaining the mapping between internal events and submitted report identifiers **indefinitely**.
+
+**The amendment must diff against the pipeline's own archive, never against current source state.** Regenerating from source would produce an amendment inconsistent with what the regulator actually holds — the firm would be amending a report that does not match the one on record. This is why the pipeline's archive must be immutable and complete **operationally**, not merely for audit: the amendment three years from now needs to know what was *sent*, not what the source system currently says.
+
+**Subscribe to the trade event stream rather than polling current state**, because a poll cannot distinguish "amended" from "always was this way." A bust hours after the original was reported requires a cancellation, and the pipeline must locate the original submission by internal event identity.
+
+### 2.8 The Archive — Evidence, Not Just Storage
+
+**The archive's integrity ranks alongside its confidentiality**, and that is unusual. It is the firm's evidence of what it submitted in any dispute with its regulator. If it can be altered retroactively it cannot serve that purpose, so **tamper-evidence (hash chaining) is a functional requirement**, not a security nicety.
+
+**Answering "produce this report from three years ago"** requires four things, all of which must have been retained deliberately:
+
+1. The exact submitted content and its acknowledgement, from the immutable archive.
+2. The submission timestamp.
+3. The **versions in effect at the time** — reportability rules, reference data, transformation logic.
+4. The underlying trade, reconstructable from the OMS's event stream, to demonstrate derivation.
+
+Any one missing and the query cannot be answered. This is the same provenance discipline the risk engine needs for a reproducible number, applied to a submitted report.
+
+### 2.9 Multiple Overlapping Regimes
+
+**Share extraction, enrichment and completeness determination; make transformation, validation and submission pluggable per regime.**
+
+The shared half is where the expensive, correctness-critical work lives, and where duplication would produce **divergent answers about the same trade**. The failure mode to avoid is per-regime pipelines each doing their own extraction — they will eventually disagree about what happened, and reconciling two internal answers about one trade is a problem with no good outcome.
+
+### 2.10 Novel Products and Retrospective Rule Changes
+
+**A genuinely new instrument or business requires an explicit reportability determination *before* trading begins.** §4's incident is precisely the failure of not having that gate: a new instrument reached production trading with nobody having determined its reporting treatment. The governance control is a **new-product-approval gate that includes a reporting assessment**; the engineering control (§2.2's reportable-pending-review default) is the backstop for when the gate is bypassed.
+
+**A retrospective change in regulatory interpretation** — previously-unreported activity becomes reportable — requires: determining scope from the **historical trade record and the reference data as it was** (bitemporality earning its keep again); **self-reporting proactively** rather than waiting for discovery; back-reporting the affected population; and updating the reportability rules with a **version-effective date**, so the change is auditable and future queries can distinguish pre- and post-change treatment.
+
+### 2.11 Preventing a Source-System Change From Silently Breaking Reporting
+
+**Contract tests between source and pipeline, run in the *source system's* CI.** The essential property is that the notification reaches **whoever is making the change, before they merge** — not the reporting team weeks later when a volume anomaly finally surfaces.
+
+Supplement with schema-change detection on source data, and with the **expected-volume monitoring** of §2.14, which is what catches a silent drop when a field quietly stops being populated.
+
+### 2.12 Reconciling Against the Counterparty Side
+
+For dual-sided regimes where both parties report, compare the firm's submissions against the counterparty's for the same trades, where the regulator or a matching utility exposes this. It is a **genuinely independent check** that catches both firm-side gaps and misstatements.
+
+§4's failure surfaced exactly this way — externally, and eleven months late. Building it proactively converts a discovery mechanism the firm *suffers* into one the firm *operates*.
+
+### 2.13 Availability Posture and Endpoint Outages
+
+**HA investment is deadline-relative**, which is unusual and worth stating: an outage hours before a deadline is a breach; the same outage well before it is immaterial. Availability requirements concentrate in the **pre-deadline window** rather than being uniform across the day.
+
+**The pipeline favours consistency over availability.** A duplicate submission requires a cancellation; an inconsistent one is a misstatement. Under uncertainty, holding and resolving beats submitting optimistically — bounded, of course, by the deadline.
+
+**A regulator endpoint outage extending toward the deadline** is handled by: continuing to process and **queueing validated submissions** so no time is lost on your own work; monitoring for recovery with automatic resumption; **escalating to compliance early rather than at deadline**, because regulators typically have documented outage procedures whose invocation requires notification within a defined window; and **preserving evidence** of the outage and of the firm's readiness to submit.
+
+### 2.14 Observability — Attribution, and the Signal That Looks Like a Quiet Day
+
+**Distinguishing pipeline, source-data and regulator problems** works by comparing across dimensions:
+
+| Observation | Conclusion |
+|---|---|
+| Validation failure rate spiking, submission success stable | **Source or reference data** |
+| Submission failures with clean validation | **Regulator endpoint or credentials** |
+| **Input volume drops**, everything else normal | **Upstream extraction problem** — the most dangerous signal, because it looks like a quiet day |
+
+That last case is why **expected-volume monitoring** is mandatory: a pipeline processing 40% of normal volume perfectly reports perfect health.
+
+**Applying "declared ≠ actual."** The claim is *"all reportable activity was reported completely, accurately and on time."* Each component fails differently:
+
+- **Complete** fails via unidentified reportability — invisible internally by construction (§2.2).
+- **Accurate** fails via stale enrichment producing valid-but-wrong reports that pass every check (§2.4).
+- **Timely** fails **visibly**, and is therefore the least dangerous of the three despite being the one everyone monitors.
+
+**Metrics for a board risk committee** — not pipeline uptime or throughput, which a board cannot evaluate:
+
+1. **Completeness** — reportable events identified versus reported, from the *independent* reconciliation.
+2. **Timeliness** — submissions before deadline, plus the **margin distribution**, because a shrinking margin is a leading indicator of a future breach.
+3. **Accuracy** — rejection and post-submission-correction rates.
+4. **Repair-backlog aging** against deadlines.
+
+These map directly onto the regulatory obligations the committee is accountable for.
+
+### 2.15 Principal-Level Judgements
+
+**Build versus buy: the buy case is unusually strong here.** Vendors maintain format specifications across regimes as they change — a continuous, high-volume maintenance burden with a hard deadline attached to every change — plus regulator connectivity and certification. The build case is narrow: unusual instruments or business models vendors do not cover, or a firm large enough that per-transaction pricing exceeds build cost.
+
+**Cloud is generally suitable** — batch, elastic, not latency-critical — with two constraints: **data residency**, since reports contain client and transaction data frequently subject to jurisdictional restriction; and **regulator connectivity**, where some endpoints require specific network arrangements or IP allowlisting, constraining egress architecture. The archive's statutory retention also argues for storage with provable immutability.
+
+**Responding to under-reporting found during an inspection.** Establish scope **precisely before responding** — how many, over what period, why — using the historical trade record and reference data as it was, because **an inaccurate scope statement is worse than the original failure**. Then: self-report the full scope proactively, including anything additional found while investigating; back-report the affected population; and present the **structural** remediation (§2.2's inverted default and independent reconciliation), because a regulator is assessing whether the failure can recur, not whether this instance was fixed.
+
+**The governance program required before a reporting pipeline goes live:**
+
+1. **Independent completeness reconciliation** with itemised, reviewed exclusions (§2.2).
+2. **Unknown classifications defaulting to reportable-pending-review** (§2.2).
+3. **Pre-agreed, regime-specific, automatically executed deadline policy** (§2.3).
+4. **Three-layer pre-submission validation**, with regulator rejections treated as defects (§2.5).
+5. **Categorised, deadline-aged repair queue** routed to real owners (§2.6).
+6. **Immutable, tamper-evident archive** with full provenance (§2.8).
+7. **Expected-volume monitoring** and source contract tests (§2.11, §2.14).
+8. **Counterparty-side reconciliation** where the regime allows it (§2.12).
+
+**This pipeline is where the previous modules' correctness problems become externally visible.** An OMS with an unknown position is *unreported activity* here. A market-data misattribution is a *misstated report*. An irreproducible risk figure cannot be defended when queried. Each upstream dependency propagates its failure modes into a regulatory consequence.
+
+**The closing synthesis — what makes regulatory reporting distinctively hard.** Not the transformation, and not the volume. Two properties:
+
+1. **The failure is defined by what you did not do**, and completeness cannot be verified from inside the system that defines scope. Every other system in this domain can at least in principle check its own work; here, the success measurement is scoped by the same logic that can be wrong.
+2. **The deadline converts every other problem into a governance decision.** Elsewhere, a validation failure is a bug to fix. Here, past a certain hour, it is a choice between two kinds of breach — which is why so much of this design is about *creating time* rather than creating throughput.
 
 ---
 
@@ -131,261 +272,9 @@ graph LR
 It surfaced when the regulator queried a counterparty-side report the firm had no matching submission for. The remediation was a self-report, back-reporting eleven months of transactions, and a finding.
 
 The reconciliation had been verifying the wrong thing. It confirmed the pipeline processed what it identified — but the failure was in *identification*, which the reconciliation took as its own input. **A completeness check whose expected set is derived from the same logic being checked cannot detect that logic's omissions.** The fix: reconcile against an *independent* source — the count of all executed trades from the OMS, with explicit, itemized, and reviewed reasons for every exclusion, so that "not reportable" becomes an asserted, auditable classification rather than a silent default. And, structurally: the rules engine's default for an unrecognized classification was inverted to **reportable-pending-review**, because over-reporting is correctable and under-reporting is a breach.
-## 10. Interview Questions
-
-### Basic (10)
-
-1. **Q: Why is completeness harder than transformation?**
- **A:** Formats are specified and tractable; completeness requires knowing the complete set of reportable events, which depends on changing rules — and an event never identified as reportable is invisible to every internal signal.
- **Why correct:** Identifies the actual difficulty and why it evades detection.
- **Common mistakes:** Focusing design effort on format mapping, which is tedious but solved.
- **Follow-ups:** "What determines reportability?" (Instrument classification, counterparty type, venue, jurisdiction, principal-versus-agent capacity — all changeable,.)
-
-2. **Q: How does a deadline differ from a latency target architecturally?**
- **A:** It is not negotiable under load — slow past the deadline equals not reporting — and it forces a partial-submission-versus-late decision that must be pre-agreed policy.
- **Why correct:** States both consequences that distinguish deadlines from latency targets.
- **Common mistakes:** Designing graceful degradation by slowing down, which is failure in this context.
- **Follow-ups:** "Which is the lesser breach, incomplete or late?" (Regime-dependent — which is exactly why it must be decided in advance as policy,.)
-
-3. **Q: Name the three validation layers and what each catches.**
- **A:** Schema (structural conformance), business rules (the regulator's published rules), and firm plausibility (technically valid but wrong, e.g. an implausible notional).
- **Why correct:** Names all three with distinct purposes.
- **Common mistakes:** Implementing schema validation only, letting rule violations reach the regulator.
- **Follow-ups:** "Why not rely on regulator rejection?" (It arrives post-submission, counts against error statistics, and consumes the repair window,.)
-
-4. **Q: What went wrong in the incident?**
- **A:** A new instrument's classification was unrecognized by the reportability rules, whose default was not-reportable, so the trades were never identified as reportable — and the completeness reconciliation compared against that same identification, so it matched perfectly while an instrument class went unreported for eleven months.
- **Why correct:** States the mechanism including why the reconciliation could not detect it.
- **Common mistakes:** Describing it as a rules-engine bug; the rules engine did what it was configured to do, and the reconciliation's design is what made it undetectable.
- **Follow-ups:** "What was the structural fix?" (Reconcile against an independent source, and default unknown classifications to reportable-pending-review,.)
-
-5. **Q: Why should unrecognized classifications default to reportable?**
- **A:** Over-reporting is correctable (submit a cancellation); under-reporting is a breach that accrues silently — the failure modes are asymmetric, so the default should favour the correctable one.
- **Why correct:** Grounds the default in the asymmetry of consequences.
- **Common mistakes:** Defaulting to not-reportable to avoid noise, which optimizes for the wrong failure.
- **Follow-ups:** "What does 'pending review' add?" (It surfaces the unknown classification for resolution rather than silently over-reporting indefinitely.)
-
-6. **Q: Why must the repair queue be worked in deadline order rather than arrival order?**
- **A:** An unrepaired record does not stop being a breach with time; arrival-order working buries the oldest, most-breaching items at the bottom of the backlog.
- **Why correct:** Identifies the specific consequence of arrival-order processing.
- **Common mistakes:** FIFO queue processing, which feels fair and is exactly wrong here.
- **Follow-ups:** "What else does the repair queue need?" (Categorization by cause and routing to whoever can actually fix it,.)
-
-7. **Q: Why must submitted report identifiers be retained indefinitely?**
- **A:** A future amendment or cancellation must reference the original submission, so the pipeline needs to know precisely what was submitted — not what the source system currently says.
- **Why correct:** States the operational reason, beyond audit.
- **Common mistakes:** Retaining source data only, leaving amendments unable to reference prior reports.
- **Follow-ups:** "Why isn't the source system sufficient?" (It reflects current state; the amendment must reference what was actually sent, which may differ,.)
-
-8. **Q: Why are enrichment failures a reference-data signal rather than individual record errors?**
- **A:** Their volume indicates an upstream data-quality problem; treating them individually produces a persistent repair backlog while the cause goes unaddressed.
- **Why correct:** Reframes the symptom as a signal about its cause.
- **Common mistakes:** Routing every enrichment failure to manual repair, permanently.
- **Follow-ups:** "Where should they be routed?" (Data management, who can fix the reference data, rather than the reporting team, who can only patch records,.)
-
-9. **Q: Why is HA investment deadline-relative here?**
- **A:** An outage hours before a deadline is a breach; the same outage well before it is immaterial — so availability requirements concentrate in the pre-deadline window rather than being uniform.
- **Why correct:** Identifies the non-uniform availability requirement.
- **Common mistakes:** Uniform availability targets, over-investing off-cycle and under-investing at the critical window.
- **Follow-ups:** "What does that imply operationally?" (Change freezes and heightened readiness in the pre-deadline window specifically.)
-
-10. **Q: Why does the pipeline favour consistency over availability?**
- **A:** A duplicate submission requires a cancellation and an inconsistent one is a misstatement — so under uncertainty, holding and resolving beats submitting optimistically, bounded by the deadline.
- **Why correct:** Derives the posture from the specific costs of the two error types.
- **Common mistakes:** Optimistic submission to maximize timeliness, converting uncertainty into misstatements.
- **Follow-ups:** "What bounds the hold?" (The deadline — at which point the pre-agreed policy governs.)
-
-### Intermediate (10)
-
-1. **Q: Explain precisely why the reconciliation was structurally incapable of catching the failure.**
- **A:** It compared submitted records against records identified as reportable, taking identification as its input. The failure was *in* identification — trades never entered the expected set — so the comparison was between two quantities that were consistently, correctly equal. The reconciliation verified processing fidelity, which was never the problem, and by construction could not verify identification correctness.
- **Why correct:** Explains the input dependency that made detection impossible rather than merely absent.
- **Common mistakes:** Concluding the reconciliation was buggy; it was correct and answering a different question than the one that mattered.
- **Follow-ups:** "What is the general principle?" (A completeness check must derive its expected set independently of the logic being checked — otherwise it validates consistency rather than completeness.)
-
-2. **Q: Design the independent completeness reconciliation the fix requires.**
- **A:** Start from all executed trades in the OMS (the system of record, independent of reportability logic), then require every exclusion to carry an explicit, itemized, reviewed reason. The output is not a match/mismatch but a reconciliation with a classified exclusion list — so "not reportable" becomes an asserted classification someone reviews rather than a silent default. New instrument types surface immediately as unclassified exclusions rather than disappearing.
- **Why correct:** Uses an independent source and converts silent exclusion into an explicit, reviewable assertion.
- **Common mistakes:** Reconciling against a filtered source, which reintroduces the dependency.
- **Follow-ups:** "What makes review tractable at volume?" (Group exclusions by reason — thousands sharing one reviewed reason is fine; a new reason appearing is the signal.)
-
-3. **Q: How should the deadline decision be structured as policy?**
- **A:** Pre-agreed with compliance, regime-specific (regimes differ in how they weight lateness versus incompleteness), expressed as a rule the pipeline can execute automatically — e.g. "submit validated records at deadline minus 30 minutes; hold failures for repair and late-submit." The essential property is that it executes without a judgment call under time pressure, since a decision made at deadline by whoever is available is not a policy.
- **Why correct:** Specifies pre-agreement, regime-specificity, and automatic execution as the three requirements.
- **Common mistakes:** Escalating to a human at deadline, which is when judgment is worst and time is shortest.
- **Follow-ups:** "Who owns this policy?" (Compliance, with engineering implementing it — it is a regulatory-risk decision, not a technical one.)
-
-4. **Q: Why does a pipeline sized to just meet the deadline have a hidden failure mode?**
- **A:** It has no repair window, so any validation failure immediately becomes a deadline decision rather than a routine repair — converting an ordinary occurrence into a governance escalation. Capacity must include a full repair-and-resubmit cycle.
- **Why correct:** Identifies that the margin is for repair, not for throughput headroom.
- **Common mistakes:** Sizing on processing time alone, which measures the happy path.
- **Follow-ups:** "How much margin?" (Enough for a realistic failure rate to be repaired and resubmitted — derived from observed failure rates, not chosen arbitrarily.)
-
-5. **Q: Critique caching reference data for enrichment without staleness bounds.**
- **A:** A stale LEI or classification produces a validly-formatted, *incorrect* report — an error rather than a failure, so it passes validation and is submitted, becoming a reportable inaccuracy the firm must later correct. This is the wrong-versus-missing asymmetry recurring: the cache converts a detectable enrichment failure into an undetectable misstatement.
- **Why correct:** Identifies that caching here converts a visible failure into an invisible error.
- **Common mistakes:** Treating reference-data caching as purely a performance decision.
- **Follow-ups:** "What bounds are appropriate?" (Tied to the reference data's own change cadence — LEI status changes matter within days, so a multi-day cache is unsafe.)
-
-6. **Q: How should amendments be handled when the original submission's content differs from current source state?**
- **A:** The amendment references what was actually submitted, so the pipeline must diff against its own archive rather than against current source state. Regenerating from source would produce an amendment inconsistent with what the regulator holds — the firm would be amending a report that does not match the one on record.
- **Why correct:** Identifies that the archive, not the source, is the amendment's reference point.
- **Common mistakes:** Regenerating the report from current source data, producing an inconsistent amendment.
- **Follow-ups:** "Why might they differ?" (The source has since been corrected, or the report was generated under a prior reference-data or logic version — the provenance problem recurring.)
-
-7. **Q: Why do regulator endpoint rate limits make submission capacity externally capped?**
- **A:** Adding workers does not increase throughput past the endpoint's limit, so submission is the one stage that cannot be scaled horizontally — which means deadline margin must be created earlier in the pipeline, not at submission.
- **Why correct:** Identifies the external constraint and its consequence for where margin must come from.
- **Common mistakes:** Planning to scale out submission under deadline pressure, which the endpoint will not permit.
- **Follow-ups:** "What does this imply about batch timing?" (Submission must start early enough that the rate-limited stage completes before deadline — the limit, not the volume, sets the start time.)
-
-8. **Q: Why does the archive's integrity rank alongside its confidentiality?**
- **A:** The archive is the firm's evidence of what it submitted in any dispute with its regulator; if it can be altered retroactively, it cannot serve that purpose — so tamper-evidence (hash-chaining) is a functional requirement, not merely a security control.
- **Why correct:** Ties integrity to the archive's evidentiary function.
- **Common mistakes:** Securing the archive for confidentiality only, leaving its evidentiary value unprotected.
- **Follow-ups:** "Who is the archive's audience?" (The regulator, in a dispute — which is why its credibility, not merely its contents, matters.)
-
-9. **Q: How does this pipeline's failure asymmetry compare to's?**
- **A:** Both have failures invisible internally, but the detection paths differ: had no external party to reconcile against, so self-testing was the only verification; here an external party — the regulator, and counterparties' own reports — does hold comparable truth, which is exactly how the failure eventually surfaced. That makes independent reconciliation (Intermediate Q2) both possible and obligatory here, where had no equivalent option.
- **Why correct:** Draws the correct contrast and identifies why the available control differs.
- **Common mistakes:** Treating both as equivalent silent-failure problems, missing that this one has an external reference and therefore a stronger available control.
- **Follow-ups:** "Why not rely on the regulator to detect gaps?" (Detection arrives as a finding — the firm learns of its breach from its regulator, which is the worst discovery path,.)
-
-10. **Q: Synthesize how this pipeline depends on Modules 129, 130, and 131.**
- **A:** It reports on the trade events using the prices and reference data, and the positions and exposures for prudential regimes. Each dependency propagates its own failure modes: a unknown position is unreported activity here; a misattribution produces a misstated report; a irreproducible figure cannot be defended if queried. This pipeline is where the previous three modules' correctness problems become externally visible — it is the firm's reporting surface for their failures.
- **Why correct:** Traces each dependency to its specific downstream consequence here.
- **Common mistakes:** Treating this as an independent pipeline rather than the externalization point for upstream correctness.
- **Follow-ups:** "What follows for prioritization?" (Upstream correctness investment reduces reporting risk directly — this pipeline cannot report correctly on incorrect inputs.)
-
-### Advanced (10)
-
-1. **Q: Diagnose the incident and design the complete structural fix.**
- **A:** Root cause: the reportability rules' unknown-classification default was silent and unsafe, and the completeness reconciliation took identification as its input, making the failure undetectable (Intermediate Q1). Fix: (1) invert the default to reportable-pending-review, making unknowns loud and erring toward the correctable failure; (2) reconcile against the OMS's independent trade record with itemized, reviewed exclusion reasons (Intermediate Q2); (3) alert on any new instrument classification appearing in trading activity, since a new classification is precisely the precondition for this failure; (4) periodically review the reportability rules against current regulatory guidance, since rules change and a rules engine correct at implementation drifts silently.
- **Why correct:** Addresses the unsafe default, the dependent reconciliation, the triggering precondition, and the ongoing drift.
- **Common mistakes:** Fixing the reconciliation only, leaving the unsafe default to cause a different variant.
- **Follow-ups:** "Why is (3) valuable given (1) and (2)?" (It detects the condition proactively at first trade rather than at the next reconciliation cycle, compressing exposure from days to minutes.)
-
-2. **Q: A team proposes using the regulator's rejection feedback as the primary validation mechanism, arguing it is authoritative. Evaluate.**
- **A:** The regulator's rules are authoritative, but using rejection as the mechanism is wrong on three counts: rejections count against the firm's error statistics (a supervisory metric), they consume the repair window leaving less time before deadline, and they arrive too late to prevent the submission that constitutes the error. The correct approach implements the regulator's published rules pre-submission and treats any rejection as a gap in that implementation — a defect to fix, not a normal outcome.
- **Why correct:** Names all three costs and reframes rejections as implementation gaps.
- **Common mistakes:** Treating a low rejection rate as acceptable rather than as a defect signal.
- **Follow-ups:** "What is a reasonable rejection target?" (Approaching zero — every rejection represents a rule the firm could have checked and did not.)
-
-3. **Q: Critique running the pipeline only once daily, immediately before the deadline.**
- **A:** It collapses the repair window to nothing (Intermediate Q4) and makes any failure — pipeline, reference data, or regulator endpoint — an immediate deadline crisis with no recovery time. Running continuously or in early batches surfaces problems while time remains to fix them, converting deadline management from crisis response into routine operation. The counter-argument (late data completeness) is addressed by running repeatedly and treating early runs as provisional, not by delaying the only run.
- **Why correct:** Identifies the eliminated recovery time and rebuts the usual counter-argument.
- **Common mistakes:** Batching at deadline for data completeness, trading all recovery time for marginal completeness.
- **Follow-ups:** "How do you handle records arriving after an early run?" (Incremental subsequent runs — the early run is not final, merely early, and most records are stable well before deadline.)
-
-4. **Q: Design the repair-queue routing and aging model.**
- **A:** Categorize by cause at rejection time (reference-data gap, source-data error, rule-implementation defect, transient); route each to the owner who can actually resolve it — data management, the source system's team, engineering, or automatic retry. Age against the *regulatory* deadline for that record, not queue-entry time, so the display and the working order reflect breach severity rather than arrival. Escalate on aging thresholds, and — critically — report *category counts* to management, since a spike in one category is a systemic issue, whereas the individual records look like ordinary errors.
- **Why correct:** Covers categorization, routing by resolvability, deadline-relative aging, and the systemic signal.
- **Common mistakes:** One undifferentiated queue owned by the reporting team, who can patch records but cannot fix causes.
- **Follow-ups:** "Which category is most often mis-routed?" (Reference-data gaps, which land with the reporting team and get patched per-record indefinitely rather than fixed once at source,.)
-
-5. **Q: How would you handle a retrospective change in regulatory interpretation making previously-unreported activity reportable?**
- **A:** Determine the scope (which historical activity is affected — requiring the historical trade record and the reference data as it was, §Expert Q4's bitemporality), self-report to the regulator proactively rather than waiting for discovery, back-report the affected population, and update the reportability rules with a version-effective date so the change is auditable and future queries can distinguish pre- and post-change treatment. Proactive self-reporting is materially better received than regulator discovery — the same honest-disclosure posture established in Modules 118 and 129.
- **Why correct:** Covers scoping, disclosure, remediation, and the versioning that makes the change auditable.
- **Common mistakes:** Applying the new interpretation forward only, leaving historical exposure unaddressed and undisclosed.
- **Follow-ups:** "Why does rule versioning matter?" (Without it, the firm cannot demonstrate which interpretation applied when — and a future review cannot distinguish a rule change from an error.)
-
-6. **Q: The regulator queries a specific report from three years ago. Walk through the response.**
- **A:** Retrieve from the immutable archive the exact submitted content, its acknowledgement, the submission timestamp, and the versions of reportability rules, reference data, and transformation logic in effect at the time (the provenance discipline, applied here). Reconstruct the underlying trade from the OMS's event stream to demonstrate the report's derivation. If any of these four is unavailable, the query cannot be fully answered — which is why the archive must retain the report and its provenance, not merely the report.
- **Why correct:** Enumerates all four required artifacts and identifies the incompleteness if any is missing.
- **Common mistakes:** Retaining submitted reports without the logic and reference-data versions, leaving derivation undemonstrable.
- **Follow-ups:** "Which is hardest to sustain over three years?" (Logic version re-instantiability — the same problem §Advanced Q5 identified for pricing models, and with the same answer: retain executable artifacts, not source references.)
-
-7. **Q: Apply the "declared ≠ actual" theme to this pipeline.**
- **A:** The claim is "all reportable activity was reported completely, accurately, and on time." Each component fails differently and independently: *complete* fails via unidentified reportability — invisible internally by construction; *accurate* fails via stale enrichment (Intermediate Q5) producing valid-but-wrong reports that pass every check; *timely* fails visibly and is therefore the least dangerous. What distinguishes this module is that the declared basis — "the pipeline ran successfully" — is not merely insufficient but *actively misleading*, because success is measured against a scope the same system defined. is the purest instance in this run: the system was correct about everything it considered, and wrong about what to consider.
- **Why correct:** Decomposes the claim, ranks the components by detectability, and identifies the self-referential scope problem as the distinguishing feature.
- **Common mistakes:** Treating pipeline success metrics as evidence of compliance.
- **Follow-ups:** "Which component is most dangerous and why?" (Completeness — accuracy errors are eventually caught by counterparty or regulator matching, but an unidentified population is never compared against anything.)
-
-8. **Q: Design the monitoring distinguishing "pipeline problem" from "source data problem" from "regulator problem."**
- **A:** Compare across dimensions: validation failure rate spiking with stable submission success indicates source or reference data; submission failures with clean validation indicate the regulator endpoint or credentials; a drop in *input volume* with everything else normal indicates an upstream extraction problem — the most dangerous signal, since it looks like a quiet day. That last case is why expected-volume monitoring against historical patterns matters: a pipeline processing zero records successfully reports complete success.
- **Why correct:** Provides discriminating signals and identifies the counter-intuitive volume-drop case.
- **Common mistakes:** Monitoring only error rates, which are clean when the problem is that nothing arrived.
- **Follow-ups:** "How do you set the expected-volume baseline?" (Historical pattern by day-of-week and accounting for holidays and market closures — naive averages produce false alarms on known-quiet days and miss genuine drops on busy ones.)
-
-9. **Q: How should the pipeline handle a regulator endpoint outage extending toward the deadline?**
- **A:** Continue processing and queue validated submissions so no time is lost on the pipeline's own work; monitor for endpoint recovery with automatic resumption; escalate to compliance early rather than at deadline, since regulators typically have documented procedures for endpoint outages (and invoking them requires notification, often within a defined window); and preserve evidence of the outage and of the firm's readiness to submit — because demonstrating that the firm was ready and the endpoint was unavailable is materially different from being late.
- **Why correct:** Covers continued work, recovery, early escalation, and evidence — the last being the element that distinguishes an excusable from an inexcusable delay.
- **Common mistakes:** Waiting for recovery without notification, forfeiting the documented outage procedure by missing its notification window.
- **Follow-ups:** "Why does evidence matter so much here?" (The firm's position depends on demonstrating readiness — without it, an endpoint outage is indistinguishable from the firm's own lateness.)
-
-10. **Q: Synthesize the governance program required before a reporting pipeline goes live.**
- **A:** (1) Independent completeness reconciliation with itemized, reviewed exclusions (Intermediate Q2). (2) Unknown classifications defaulting to reportable-pending-review (Advanced Q1). (3) Pre-agreed, regime-specific, automatically-executed deadline policy (Intermediate Q3). (4) Three-layer pre-submission validation with rejections treated as defects (Advanced Q2). (5) Categorized, deadline-aged repair queue routed by resolvability (Advanced Q4). (6) Immutable archive retaining submissions with full provenance for the statutory period (Advanced Q6). (7) Expected-volume monitoring catching the silent-zero case (Advanced Q8). (8) Rule versioning with effective dates supporting retrospective interpretation changes (Advanced Q5). (9) Documented outage procedures with notification windows understood in advance (Advanced Q9).
- **Why correct:** Assembles a program covering completeness, timeliness, accuracy, evidence, and the operational procedures that only matter under failure.
- **Common mistakes:** Presenting extraction, transformation, and submission without the completeness verification and repair governance, which is where compliance actually fails.
- **Follow-ups:** "Which is most often missing?" (Independent completeness reconciliation — most firms reconcile against their own reportability logic, which is exactly.)
-
-### Expert (10)
-
-1. **Q: Evaluate building this pipeline versus using a regulatory-reporting vendor.**
- **A:** The buy case is unusually strong. Vendors maintain format specifications across regimes as they change — a continuous, high-volume maintenance burden with a hard deadline attached to every change — plus regulator connectivity and certification. The build case is narrow: unusual instruments or business models vendors do not cover, or a firm large enough that vendor per-transaction pricing exceeds build cost. The critical caveat that firms miss: **the obligation is not outsourceable.** A vendor failure is the firm's breach, so vendor selection requires the same diligence as an internal system, plus contractual visibility into their controls — buying transfers the work, not the responsibility.
- **Why correct:** Identifies the maintenance burden as decisive and states the non-transferable-obligation caveat that distinguishes this from ordinary build-versus-buy.
- **Common mistakes:** Treating vendor adoption as risk transfer, then discovering the firm is answerable for the vendor's failures.
- **Follow-ups:** "What contractual terms matter most?" (Visibility into their completeness controls and incident notification — the firm must be able to detect and respond to a vendor failure that is legally its own.)
-
-2. **Q: How should a firm reporting under multiple overlapping regimes structure the pipeline?**
- **A:** Shared extraction, enrichment, and completeness determination — where the expensive, correctness-critical work is and where duplication would produce divergent answers about the same trade — with regime-specific transformation, validation, and submission as pluggable modules. The failure mode to avoid is per-regime pipelines duplicating extraction, which guarantees they eventually disagree about what happened (§Expert Q6's divergence risk, recurring). The subtlety is that regimes define reportability differently, so completeness determination must be *per-regime evaluation over a shared event set*, not one shared determination.
- **Why correct:** Identifies what to share and what to keep separate, and notes the non-obvious constraint on completeness determination.
- **Common mistakes:** Either fully separate pipelines (divergence) or one shared determination (wrong, since regimes differ in scope).
- **Follow-ups:** "What breaks if extraction is duplicated?" (Two pipelines disagreeing about the same trade's existence or attributes — the firm then reports inconsistently to two regulators, which is worse than either error alone.)
-
-3. **Q: Design the control preventing a source-system change from silently breaking reporting.**
- **A:** Contract tests between source and pipeline (the discipline), run in the *source system's* CI so its team is notified before merging — the essential property being that the notification reaches whoever is making the change, not the reporting team afterward. Supplement with schema-change detection on source data and the expected-volume monitoring (Advanced Q8) that catches a silent drop. is the archetype: a change elsewhere (new instrument type) silently altered reporting scope, and nothing connected the two.
- **Why correct:** Places the control where the change originates and adds the runtime backstop.
- **Common mistakes:** Contract tests in the reporting pipeline's CI, which catch the break after the source has shipped.
- **Follow-ups:** "Why does test location matter so much?" (A test that fails in the reporting team's pipeline after release tells them they have a problem; one that fails in the source team's pipeline prevents it.)
-
-4. **Q: How does this pipeline interact with the trade amendments and busts?**
- **A:** Each generates a downstream regulatory amendment or cancellation referencing the original report — so the pipeline must subscribe to the event stream rather than polling current state, since a poll cannot distinguish "amended" from "always was this way." A bust hours after the original was reported requires a cancellation, and the pipeline must locate the original submission by internal event identity, which is why that mapping must be retained.
- **Why correct:** Identifies the event-subscription requirement and its reason, plus the identity-mapping dependency.
- **Common mistakes:** Polling current trade state, which reports the corrected value without ever submitting the required amendment — leaving the regulator holding an unamended incorrect report.
- **Follow-ups:** "What if the original was never successfully submitted?" (Then the amendment has nothing to reference — the pipeline must detect this and submit an original instead, a case that is easy to miss and produces a regulator rejection.)
-
-5. **Q: Evaluate cloud deployment for this pipeline.**
- **A:** Generally suitable — the workload is batch, elastic, and not latency-critical — with two constraints. Data residency: reports contain client and transaction data frequently subject to jurisdictional restrictions (§Expert Q6's constraint recurring). Regulator connectivity: some endpoints require specific network arrangements or IP allowlisting, which constrains egress architecture. The archive's statutory retention also makes cloud storage economics attractive but requires confidence in multi-year durability and the ability to demonstrate retention compliance — a governance requirement on top of the technical one.
- **Why correct:** Identifies suitability plus the two specific constraints and the retention-demonstration requirement.
- **Common mistakes:** Assuming batch workload suitability settles it, without checking residency and connectivity constraints.
- **Follow-ups:** "What does IP allowlisting imply architecturally?" (Stable egress addressing — NAT gateways or dedicated egress, which constrains otherwise-free scaling decisions.)
-
-6. **Q: A regulator finds under-reporting during an inspection. Walk through the response.**
- **A:** Establish scope precisely before responding — how many, over what period, why — using the historical trade record and reference data as it was, because an inaccurate scope statement is worse than the original failure. Self-report the full scope proactively including any additional issues found while investigating, back-report the affected population, and present the *structural* remediation (Advanced Q1's fixes) rather than a case-specific patch, because the regulator's concern is whether it recurs. The firm's credibility rests on the completeness of its own investigation more than on the original error's size — which is why scoping before responding matters more than responding quickly.
- **Why correct:** Sequences scoping before disclosure, includes proactive disclosure of additional findings, and identifies structural remediation as what the regulator actually assesses.
- **Common mistakes:** Responding quickly with an incomplete scope, then revising upward — which damages credibility far more than the original finding.
- **Follow-ups:** "Why disclose additional issues found while investigating?" (Discovery of undisclosed related issues later is materially worse; proactive disclosure is evidence the firm's investigation was genuine.)
-
-7. **Q: Design the reconciliation against counterparty-side reporting.**
- **A:** For dual-sided regimes where both parties report, compare the firm's submissions against the counterparty's for the same trades where the regulator or a matching utility exposes this — a genuinely independent check that catches both firm-side gaps and misstatements. the failure surfaced exactly this way, but externally and late. Building it proactively converts a discovery mechanism the firm suffers into one it operates. Where no matching facility exists, bilateral reconciliation with major counterparties is a partial substitute.
- **Why correct:** Identifies the strongest available independent check and notes it is exactly how the failure surfaced anyway.
- **Common mistakes:** Waiting for the regulator's matching process to report mismatches, learning of breaches from the regulator.
- **Follow-ups:** "What causes legitimate mismatches?" (Different valid interpretations of fields between counterparties — which is itself worth knowing, since it may indicate the firm's interpretation is the outlier.)
-
-8. **Q: How should the pipeline handle an instrument or business genuinely novel to the firm?**
- **A:** Treat it as requiring explicit reportability determination *before* trading begins, not after — a pre-trade governance gate where new product approval includes a reporting assessment. the incident is exactly the failure of not having this: a new instrument reached production trading with no one having determined its reporting treatment. The engineering control (Advanced Q1's reportable-pending-review default and new-classification alerting) is a backstop for when the governance gate is missed, not a substitute for it.
- **Why correct:** Places the primary control at product approval and correctly frames the engineering control as a backstop.
- **Common mistakes:** Relying on the pipeline to handle novelty, when the determination requires regulatory interpretation the pipeline cannot make.
- **Follow-ups:** "Why must the engineering backstop exist anyway?" (Governance gates are missed — a business change may not be recognized as new-product, so the backstop catches what the process does not.)
-
-9. **Q: Design the metrics a Principal Engineer would report to a board risk committee.**
- **A:** Not pipeline uptime or throughput, which a board cannot evaluate. Report: completeness (reportable events identified versus reported, from the *independent* reconciliation), timeliness (submissions before deadline, and the margin distribution — a shrinking margin is a leading indicator), accuracy (rejection and post-submission-correction rates), and repair-backlog aging against deadlines. These map to the four ways the obligation can be breached, which is what the committee is accountable for — and the margin distribution specifically is the metric that predicts a future breach rather than reporting a past one.
- **Why correct:** Selects metrics mapping to the obligation's failure modes and identifies the leading indicator among them.
- **Common mistakes:** Reporting system-health metrics, which are not the board's concern and do not indicate compliance.
- **Follow-ups:** "Which metric is the best leading indicator?" (Deadline margin trend — it degrades before breaches occur, whereas the others report failures that already happened.)
-
-10. **Q: Deliver the closing synthesis: what makes regulatory reporting distinctively hard?**
- **A:** Not the transformation, and not the volume. Two properties. First, **the failure is defined by what you did not do**, and completeness cannot be verified from inside the system that defines scope (Advanced Q7) — every other module in this run could at least in principle check its own work, whereas here the system's success measurement is scoped by the same logic that can be wrong. Second, **the deadline converts every other problem into a crisis**: a validation failure with a week's margin is routine and the identical failure an hour before deadline is a governance escalation, so the architecture must create margin as a first-class property rather than treating time as slack. Together these mean the design's difficulty lies in *proving completeness against an independent reference* and *engineering time margin*, neither of which is a data-processing problem — and a candidate who designs an efficient ETL pipeline has, once again, solved the tractable half.
- **Why correct:** Identifies both distinguishing properties, contrasts the completeness problem with the prior modules' self-checkability, and locates the difficulty away from the obvious framing.
- **Common mistakes:** Treating it as an ETL problem with formatting requirements, producing a correct-looking pipeline that cannot prove it reported everything.
- **Follow-ups:** "How does the capstone differ?" (addresses migrating a legacy batch estate to intraday — where the difficulty is that the system being changed is the one every other system, including this pipeline, depends on.)
-
----
-
 ## 11. Coding Exercises
 
-### Easy — Reportability with a Safe Default (Advanced Q1)
+### Easy — Reportability with a Safe Default (§2.2)
 **Problem:** Classify an event's reportability so unknowns are loud rather than silent.
 **Solution:**
 ```csharp
@@ -407,7 +296,7 @@ public ReportabilityDecision Classify(TradeEvent e)
 **Space complexity:** O(1).
 **Optimized solution:** Emit a metric per distinct exclusion reason so a *new* reason appearing is itself an alert — the signal that caught nothing because exclusions were silent and uncounted.
 
-### Medium — Independent Completeness Reconciliation (Intermediate Q2)
+### Medium — Independent Completeness Reconciliation (§2.2)
 **Problem:** Reconcile against the OMS rather than against reportability logic.
 **Solution:**
 ```csharp
@@ -436,7 +325,7 @@ public async Task<CompletenessReport> ReconcileAsync(DateOnly businessDate)
 **Space complexity:** O(n).
 **Optimized solution:** Diff exclusion-reason counts against the prior period and alert on any *new* reason or a material shift in an existing one — a new exclusion reason is the precise signature of the failure.
 
-### Hard — Deadline-Aged Repair Queue (Advanced Q4)
+### Hard — Deadline-Aged Repair Queue (§2.6)
 **Problem:** Work repairs in deadline order with category routing.
 **Solution:**
 ```csharp
@@ -457,9 +346,9 @@ public sealed class RepairQueue
 ```
 **Time complexity:** O(log n) enqueue and dequeue.
 **Space complexity:** O(n).
-**Optimized solution:** Maintain per-cause queues with independent ownership and SLAs, so a reference-data backlog owned by data management does not compete for attention with a rule-implementation defect owned by engineering (Advanced Q4's routing).
+**Optimized solution:** Maintain per-cause queues with independent ownership and SLAs, so a reference-data backlog owned by data management does not compete for attention with a rule-implementation defect owned by engineering (§2.6's routing).
 
-### Expert — Amendment Against Archived Submission (Intermediate Q6)
+### Expert — Amendment Against Archived Submission (§2.7)
 **Problem:** Generate an amendment referencing what was actually submitted, not current source state.
 **Solution:**
 ```csharp
@@ -481,7 +370,7 @@ public async Task<Submission> BuildAmendmentAsync(InternalEventId eventId, Trade
 ```
 **Time complexity:** O(f) for f fields compared.
 **Space complexity:** O(f).
-**Optimized solution:** Record the reference-data and logic versions used for the original (Advanced Q6's provenance) so an amendment can distinguish "the trade changed" from "our interpretation changed" — materially different situations that may require different regulatory treatment.
+**Optimized solution:** Record the reference-data and logic versions used for the original (§2.8's provenance) so an amendment can distinguish "the trade changed" from "our interpretation changed" — materially different situations that may require different regulatory treatment.
 
 ---
 
@@ -824,11 +713,11 @@ classDiagram
 
 **Sequence diagram:** the second diagram — submission with archived acknowledgement supporting future amendments.
 
-**Design patterns used:** Chain of Responsibility (layered validation); Strategy (per-regime transformation, Expert Q2); Specification (reportability rules); Priority Queue (deadline-ordered repair); Memento (immutable archived submissions).
+**Design patterns used:** Chain of Responsibility (layered validation); Strategy (per-regime transformation, §2.9); Specification (reportability rules); Priority Queue (deadline-ordered repair); Memento (immutable archived submissions).
 
 **SOLID mapping:** Single Responsibility (classification, enrichment, validation, submission are separate); Open/Closed (a new regime adds transformation and validation strategies without touching extraction); Liskov (every validator must fail closed — a validator erroring must reject, not pass, contract-tested); Interface Segregation (archive read and write paths separate, since the reconciler needs only reads); Dependency Inversion (the reconciler depends on the classifier interface, allowing an independent implementation to cross-check the production one).
 
-**Extensibility:** A new regime adds strategies; a new instrument type requires a reportability determination (Expert Q8's governance gate) that the classifier then encodes — deliberately requiring a human decision rather than allowing silent defaulting.
+**Extensibility:** A new regime adds strategies; a new instrument type requires a reportability determination (§2.10's governance gate) that the classifier then encodes — deliberately requiring a human decision rather than allowing silent defaulting.
 
 **Concurrency/thread safety:** Records process independently; the repair queue is the shared mutable structure requiring synchronization; the archive is append-only, eliminating write conflicts. Submission must be serialized per regime to respect rate limits and preserve any required ordering.
 
@@ -846,7 +735,7 @@ The deeper issue: schema updates arrived as regulator publications on a website,
 
 **Tools:** Regulator rejection messages (specific and accurate); schema version comparison against the published specification; release history showing the schema had not been updated in eleven months while the regulator had published twice.
 
-**Fix:** Update to the current schema and resubmit the rejected records within the repair window (which existed because the pipeline ran early — Advanced Q3's discipline, which is what converted this from a crisis into a repair).
+**Fix:** Update to the current schema and resubmit the rejected records within the repair window (which existed because the pipeline ran early — §2.3's discipline, which is what converted this from a crisis into a repair).
 
 **Prevention:** (1) Automated schema-version checking against the regulator's published specification, alerting on drift — the system must detect its own staleness rather than depending on a human relay. (2) Subscription to regulator publication feeds where available, routed to a monitored channel rather than an individual. (3) A standing periodic review of specification currency, since the failure mode is *absence* of a notification, which no reactive process detects — the same class of failure as the dead-letter alert routing to an unmonitored address: the information existed, the delivery path silently did not.
 
@@ -867,7 +756,7 @@ The deeper issue: schema updates arrived as regulator publications on a website,
 *Cost:* Low. *Complexity:* Low. *Risk:* Amplifies a small problem into a total one.
 
 **Option C — Regime-specific policy, automatically executed (recommended):**
-*Advantages:* Regimes genuinely differ in how they weight lateness versus incompleteness, so a single policy is wrong for some; encoding per-regime rules applies the right behaviour in each case, executed automatically without a judgment call under time pressure (Intermediate Q3).
+*Advantages:* Regimes genuinely differ in how they weight lateness versus incompleteness, so a single policy is wrong for some; encoding per-regime rules applies the right behaviour in each case, executed automatically without a judgment call under time pressure (§2.3).
 *Disadvantages:* Requires compliance to make and document a determination per regime — real work, and work that must be revisited as regimes change.
 *Cost:* Moderate (governance effort). *Complexity:* Moderate. *Risk:* Lowest, provided the determinations are correct and maintained.
 
@@ -883,11 +772,11 @@ The deeper issue: schema updates arrived as regulator publications on a website,
 
 **Technical leadership:** the lesson — a completeness check dependent on the logic it checks proves nothing — generalizes well beyond this pipeline, and is worth teaching explicitly because it recurs wherever a system measures its own scope. The habit to instill is asking, of any completeness or correctness check, *where does its expected set come from?*
 
-**Cross-team communication:** Reporting depends on source systems whose teams have no reporting obligation of their own and no visibility into how their changes affect it (Expert Q3). Making that dependency visible — contract tests in *their* CI, not yours — is a communication design problem as much as a technical one, and the placement of the test is the substance of the solution.
+**Cross-team communication:** Reporting depends on source systems whose teams have no reporting obligation of their own and no visibility into how their changes affect it (§2.11). Making that dependency visible — contract tests in *their* CI, not yours — is a communication design problem as much as a technical one, and the placement of the test is the substance of the solution.
 
 **Architecture governance:** Reportability rules, the deadline policy, retention, and validation layers should be ADRs jointly owned with compliance, since each encodes a regulatory interpretation. Engineering-only ownership of a regulatory interpretation is a governance failure regardless of whether the interpretation is correct.
 
-**Cost optimization:** Expert Q1's build-versus-buy dominates. The recurring cost that decides it — tracking specification changes across regimes, each with a deadline — is systematically underestimated because it is invisible until a specification changes, which is exactly the cost the incident illustrates.
+**Cost optimization:** §2.15's build-versus-buy dominates. The recurring cost that decides it — tracking specification changes across regimes, each with a deadline — is systematically underestimated because it is invisible until a specification changes, which is exactly the cost the incident illustrates.
 
 **Risk analysis:** The dominant risk is under-reporting, because it is silent, accrues per event, and is typically discovered by the regulator rather than the firm. Risk registers should weight it above pipeline availability, since an outage is loud and recoverable within the deadline while under-reporting compounds undetected for months.
 

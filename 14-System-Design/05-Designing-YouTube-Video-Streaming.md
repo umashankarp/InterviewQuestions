@@ -28,20 +28,156 @@ Any system serving large media content at scale (video, audio, large file downlo
 
 ## 2. Deep Dive
 
-### 2.1 Chunked, Resumable Upload — Why Large Files Can't Use an Ordinary HTTP POST
-A multi-gigabyte video file cannot be reliably uploaded as a single HTTP request — any network interruption partway through would require restarting the entire upload from scratch, and many infrastructure components (load balancers, gateways, the own gateway tier) impose practical request-size/duration limits. The standard solution: the client splits the file into chunks (e.g., 5-10MB each), uploads each independently (with retry-per-chunk, directly the retry-with-backoff pattern applied per chunk rather than the whole file), and the server reassembles/acknowledges completion once all chunks arrive — directly analogous to §Advanced Q2's external-merge-sort chunking discipline, here applied to network transfer instead of disk-bound sorting, and to the idempotency-key pattern (each chunk upload should be idempotent, safely retryable without corrupting the reassembled file).
+This section is written to be **complete on its own** — every mechanism, the reasoning that selects it, the failure mode it introduces, and the push-back a Principal/Staff interviewer will raise, answered inline.
 
-### 2.2 The Transcoding Pipeline — Asynchronous, Compute-Intensive Fan-Out
-Once a raw video is uploaded, it must be transcoded into multiple resolutions (240p, 480p, 720p, 1080p, 4K) and formats/codecs, each transcoding job being CPU/GPU-intensive and taking anywhere from seconds to hours depending on video length and target quality. This is architecturally a **fan-out** problem (one input video, many independent output renditions) processed via a **message-queue-driven worker fleet** (directly §Advanced Q4's asynchronous, burst-absorbing fan-out pipeline, and the Streams-based durable job processing) — each rendition is an independent job that can be retried, parallelized across many workers, and monitored independently (a failed 1080p transcode shouldn't block the 480p rendition from becoming available, letting a video go "live" progressively as lower-resolution renditions complete first, even before the highest-quality rendition finishes).
+### 2.1 Chunked, Resumable Upload
 
-### 2.3 Adaptive Bitrate Streaming — Client-Driven Quality Switching
-Rather than the server deciding what quality to send, standard streaming protocols (HLS, DASH) have the server publish a **manifest** listing all available quality renditions (each broken into small, independently-requestable segments, typically a few seconds each) — the **client** continuously measures its own actual download throughput and **dynamically switches** which rendition it requests for the *next* segment, seamlessly adapting to changing network conditions (a viewer's bandwidth dropping mid-video) without an interruption or manual quality change — this client-driven model is precisely why the transcoding pipeline must produce multiple discrete quality levels upfront, rather than the server attempting to dynamically re-encode on the fly per viewer (computationally infeasible at this scale).
+A multi-gigabyte file cannot go up as one HTTP request. A network interruption would force a restart from zero, and load balancers, gateways and proxies impose practical request-size and duration limits regardless.
 
-### 2.4 CDN as the Primary Delivery Mechanism, Not a Cache Layered on Top
-Unlike the CDN discussion (framed as a latency-optimization layered onto an origin-server-centric design), a video platform's CDN **is** the primary serving path for the overwhelming majority of view traffic — the origin (object storage) is touched only on a genuine cache miss (a video's first view in a given geographic region, or an unpopular, rarely-viewed video), with the CDN absorbing the vast majority of aggregate bandwidth (video content is enormous relative to typical API response sizes, making origin-server-direct-serving at this scale economically and technically infeasible) — this reframes the CDN from "nice latency win" to "the actual system," directly informing why video URLs are typically CDN-domain URLs from the start, not origin URLs with a CDN transparently interposed.
+The standard solution: the client splits the file into chunks (5–10 MB), uploads each independently with **per-chunk retry**, and the server reassembles once all chunks arrive. Two properties make it work:
 
-### 2.5 View-Count Aggregation — a High-Write-Volume Counter Problem
-Every video view increments a counter — at YouTube's scale, this is an extremely high-frequency write operation that **cannot** be a synchronous, strongly-consistent database increment on every single view (the row-level locking/contention concerns from the SQL Server modules would make this a severe bottleneck) — the standard approach: buffer view events into a message queue/stream, aggregate counts in batches (e.g., incrementing an in-memory or Redis counter, the atomic `INCR`, per short time window), and periodically flush aggregated batch totals to the durable, authoritative datastore — trading strict, real-time-exact view counts for a system that can actually sustain the write volume, directly the same "batch high-frequency writes rather than synchronously persisting each individually" discipline behind lock-escalation-avoidance batching, now applied to counter aggregation instead of bulk updates.
+- **Retry granularity matches failure granularity.** An interruption costs one chunk, not the gigabytes already transferred.
+- **Each chunk upload must be idempotent** — identified by `(uploadId, chunkIndex, checksum)` — so a retry after an ambiguous timeout cannot corrupt the reassembled file by appending twice. This is the idempotency-key pattern applied to bytes rather than to API requests.
+
+The server tracks which chunk indices have been received, so a client resuming after a long gap asks "what do you still need?" rather than guessing.
+
+### 2.2 The Transcoding Pipeline — Decompose Along the Grain of the Work
+
+An uploaded video must become many renditions (240p, 480p, 720p, 1080p, 4K) across codecs. Each job is CPU- or GPU-intensive and runs from seconds to hours.
+
+Architecturally this is **fan-out**: one input, many independent outputs, processed by a queue-driven worker fleet. The decisive design decision, and the subject of §4's incident, is the **unit of work**:
+
+> **One job per rendition, never one job per video.** A monolithic per-video job means the cheap 240p rendition cannot become available until the expensive 4K rendition finishes — head-of-line blocking inside a single work item, invisible to any queue-depth metric.
+
+With per-rendition jobs, a failed 1080p transcode does not block 480p, each job retries and scales independently, and a video goes live progressively as lower renditions complete.
+
+**Prioritise the queue, not just the jobs.** Splitting is the baseline fix; the better one is a priority policy where **every video's lowest rendition is processed before any video's highest rendition**, system-wide. During a backlog that maximises the number of videos that are *minimally watchable* soonest, rather than letting one video's 240p wait behind another video's already-queued 1080p. It deliberately trades strict fairness for the metric viewers actually feel.
+
+**Per-rendition availability needs a schema that expresses it:**
+
+```
+Video      { id, title, status: "processing" | "partially_ready" | "ready", uploadedAt }
+Rendition  { videoId, resolution, codec, status: "queued" | "processing" | "ready" | "failed", cdnUrl }
+```
+
+The video becomes `partially_ready` as soon as **any** rendition is `ready`, and `ready` when all intended renditions complete. The manifest simply reflects whichever renditions are currently `ready` — progressive availability with no special-case logic. Note `codec` belongs in this table **from day one**, for reasons that only become obvious years later (§2.11).
+
+**Poison jobs need a dead-letter queue.** A corrupted upload or unsupported codec will fail every time. Track a per-job retry count, and after a configured maximum move the job to a DLQ for investigation and **notify the uploader** ("your video couldn't be processed — please check the format") rather than leaving it silently stuck in perpetual retry. Infinite retry on a deterministic failure is wasted capacity plus a silent user-facing failure.
+
+### 2.3 Adaptive Bitrate Streaming — Client-Driven Quality
+
+Rather than the server choosing quality, HLS (Apple's, dominant for device compatibility) and DASH (the MPEG standard) publish a **manifest** listing all available renditions, each split into small independently requestable segments of a few seconds. The **client** continuously measures its own throughput and switches which rendition it requests for the *next* segment.
+
+Two consequences worth stating:
+
+- Because all renditions are pre-generated, the server never re-encodes per viewer — which would be computationally impossible at this scale. The transcoding pipeline exists precisely to make the client's choice cheap.
+- Because segments are plain HTTP objects, **CDNs cache them natively** with no video-specific support. The protocol design is what makes §2.4 possible.
+
+**Ladder granularity is a real trade-off.** More renditions let the client match bandwidth precisely, producing smaller, less jarring quality steps — and linearly increase transcode compute and storage per video. Fewer renditions cost less and risk visible jumps, or wasted bandwidth when the nearest available rendition is well below what the client could handle. Most platforms settle empirically on five or six tiers.
+
+**Client buffering is the other half of resilience**, and an answer that only says "the client switches down" is incomplete. The player keeps a local buffer a few seconds ahead of the playhead to absorb brief hiccups without a visible stall. The buffer size is itself a trade: larger buffers tolerate longer drops but increase startup latency and memory, and *delay the client's reaction* to a sustained change that warrants an actual rendition switch. Quality switching and buffering jointly determine perceived resilience.
+
+**Time-to-first-frame** is the video-specific UX metric with no API analogue — the delay before playback visibly begins, driven by manifest fetch plus initial segment delivery. Measure it separately from request latency.
+
+### 2.4 The CDN Is the System, Not a Cache on Top of It
+
+In most designs a CDN is a latency optimisation layered over an origin-centric architecture. Here it is **the primary serving path**. Origin (object storage) is touched only on a genuine miss — a video's first view in a region, or an unpopular video. Video payloads are enormous relative to API responses, so origin-direct serving is economically and technically infeasible at scale.
+
+This reframing has concrete consequences: video URLs are CDN URLs from the start rather than origin URLs with a CDN transparently interposed, and nearly every other decision is evaluated by whether it raises edge cache-hit ratio or lowers origin traffic.
+
+**Origin shielding bounds an otherwise unbounded fan-out.** Without a shield, a video going viral produces simultaneous origin requests proportional to the number of distinct edge locations receiving first-time traffic — a number that scales with the *CDN vendor's* footprint, not with anything you control, so worst-case origin load is unbounded by design. A shield tier caps it at one origin fetch per shield region regardless of edge count. The argument to a sceptical finance stakeholder is the insurance argument, the same one used for circuit breakers and bulkheads: it converts an open-ended tail risk into a fixed, budgeted cost, and its value is realised precisely on the one day it is needed.
+
+**Pre-warm only where demand is known.** For a scheduled premiere, push renditions to edges in advance (a CDN pre-fetch API, or synthetic requests from each target region shortly before release) so that thousands of viewers do not all trigger the cold-start miss simultaneously.
+
+**But pre-warming is the exception, not the delivery model.** Proactively pushing every rendition to every region on completion guarantees zero cold start everywhere and multiplies transfer cost by region count for content that, given power-law popularity, will mostly never be watched in most of those regions. The pull/cache-miss default pays a one-time per-region cost only where content is actually requested, which is strictly cheaper in aggregate. This is exactly the fan-out-on-write versus fan-out-on-read trade-off, applied to CDN distribution instead of follower feeds — push only with high-confidence known demand.
+
+**Build versus buy.** Start with a mature third-party CDN. Pay-as-you-go is far cheaper and simpler at low-to-moderate scale. Custom edge infrastructure becomes justifiable only at truly massive sustained scale — which is why YouTube and Netflix built theirs — and the decision should be revisited from measured cost data, never taken preemptively.
+
+### 2.5 What the Estimation Says the Hard Problem Is
+
+At the scale §12 estimates — roughly 125 Tbps sustained egress against ~1.8 EB/year of storage growth — **egress is the system**. It is the one number with no path to being solved by this system's own engineering; it can only be delegated to a CDN vendor and minimised through cache-hit ratio.
+
+That conclusion reorganises everything downstream: URL structure, cache-control headers, origin shielding, popularity-driven rendition generation, and segment sizing all exist to reduce origin traffic.
+
+A candidate who opens by optimising storage cost has identified a real lever and the wrong *primary* one — and that is a specific interview signal: it shows someone who can optimise a component without first establishing which component the estimation says dominates. Run the estimate, then let the estimate choose the hard problem.
+
+### 2.6 Popularity-Driven Renditions and Storage Tiering
+
+Pre-generating every resolution for every upload wastes compute and storage on renditions that may never be requested — 4K for an obscure video nobody watches. The alternative is generating expensive tiers **on demand**, triggered by view thresholds, trading a first-request latency cost for a large reduction in cost across the long tail.
+
+**Storage tiering follows the same distribution.** Hot content lives on fast, CDN-adjacent storage; cold content moves to cheaper archival tiers with slower first-byte times.
+
+A proposal to keep every rendition of every video on the fastest tier forever, "to guarantee the best experience regardless of age," should be pushed back on. It ignores the power-law popularity distribution, applying uniform cost to wildly non-uniform demand. Reserve that guarantee for content with *measured* sustained long-tail demand, evaluated from view history rather than blanket policy.
+
+### 2.7 View-Count Aggregation — a High-Write Counter Problem
+
+Every view increments a counter. At scale this cannot be a synchronous strongly-consistent database increment per view: row-level contention on a hot counter makes it an immediate bottleneck.
+
+The standard pipeline: buffer view events into a stream, aggregate in Redis with atomic `INCR` over a short window, and flush aggregated totals to the durable store periodically. This trades exact real-time counts for a system that can sustain the volume — entirely acceptable for a view count, and **not** acceptable for a financial counter, which is the distinction to name aloud.
+
+**The durability failure mode, and the right fix.** If a Redis node is lost between an `INCR` and the next flush, every view accumulated since the last flush on that node is gone — the batching window is also the data-loss exposure window. The fix is *not* to make the counter durable, which would reintroduce the synchronous bottleneck the design exists to avoid. Instead, make loss bounded and recoverable: shorten the exposure window with AOF persistence and a short fsync interval, and **retain the raw view-event stream independently** so counts can be recomputed from the durable log when divergence is detected. The counter is a fast, lossy cache of a truth that lives elsewhere — not the truth itself.
+
+**Live viewer count is a different problem with a different mechanism.** Live streaming needs seconds of freshness, not minutes, and asks a different question ("how many are watching *now*") rather than a cumulative total. Use TTL-expiring per-viewer heartbeat keys in Redis, with the current count as a set cardinality over non-expired heartbeats — an ephemeral presence-counting mechanism, structurally the same as a connection registry's heartbeat, rather than the batched-for-durability on-demand pipeline.
+
+### 2.8 Parallel Jobs That Must Not Gate Availability
+
+**Moderation** runs as another independent job in the same fan-out structure, using infrastructure already processing the video, and gates public availability or flags for review rather than requiring a separate coordinated system.
+
+**Content identification** (fingerprint matching against a copyrighted-works database) runs **in parallel, not as a serial gate**. A video becomes watchable at its lowest rendition while matching proceeds concurrently, with any claim or takedown applied after the fact. Making fingerprinting a blocking prerequisite would delay every legitimate upload by the matching step's latency — paying a cost on all content to handle a minority case.
+
+The general shape: independent analysis jobs join the same fan-out; only the ones whose *legal* posture demands it are allowed to gate, and even then usually at the publish step rather than the transcode step.
+
+### 2.9 Access Control, DRM and Geo-Restriction
+
+**Signed URLs** let a CDN serve access-controlled content by validating a time-limited cryptographic signature, without the CDN needing to understand the platform's authorization model. **Expiry matters as much as the signature**: without it, a leaked or shared URL grants indefinite access. A short window bounds the exposure of a leak.
+
+**DRM is an architectural layer, not a config flag.** It requires content encryption, a license server in the playback flow, and coordination with the adaptive-bitrate mechanism itself — meaningfully more complex than unencrypted delivery, and worth scoping explicitly rather than waving at.
+
+**Geo-restriction under a court order** is the interesting case, because CDN-primary delivery means cached content is largely outside direct control. Enforce at the **manifest layer**: the manifest service checks the client's region against a per-video restriction list before returning a playable manifest, so a restricted region never gets one regardless of what nearby edges hold. Additionally issue a geo-scoped CDN invalidation for the affected segment keys so already-cached copies stop serving during the TTL window. The residual risk — a client that already downloaded segments locally before the restriction — is outside the system entirely and should be **named as a limitation** rather than silently assumed solved.
+
+### 2.10 Time-to-First-Rendition Is a Queueing Problem
+
+Once the system is under load, time-to-first-rendition is dominated by **queue wait**, not encode time. Little's Law makes this precise:
+
+```
+L = λW      jobs in system = arrival rate × time in system
+```
+
+If the upload arrival rate `λ` exceeds the fleet's sustained service rate even briefly, queue length `L` grows for the duration of the burst and every job's wait `W` grows with it.
+
+This is why §4's fix — independent, priority-ordered per-rendition jobs — **reduces no total work at all**. It reorders the queue so the cheapest jobs' wait time stays bounded even while the queue is backed up, trading strict fairness for the metric viewers experience: can I watch *something* soon. Recognising that the fix is a scheduling change rather than a capacity change is the Staff-level reading.
+
+### 2.11 Codec Migration Without Stopping the World
+
+Migrating a catalogue of billions of videos to a more efficient codec (AV1) cannot be a bulk re-transcode. Treat it as an extension of the popularity-driven ladder rather than a separate project:
+
+- Hot content migrates **naturally and first**, as it crosses view thresholds and gets re-requested.
+- Cold content migrates lazily on next request, or stays on the legacy codec indefinitely if it never crosses the threshold again.
+- The player and manifest must serve **mixed-codec renditions** throughout a multi-year transition, offering the new codec only to clients that declare support via capability negotiation.
+
+And the reason `codec` belongs in the rendition table from day one: otherwise this migration requires a schema change under pressure, years after the person who designed the table has moved on.
+
+### 2.12 Observability — Segment Before You Alert
+
+A single aggregate queue-depth metric is precisely what stayed misleadingly healthy during §4's incident: total throughput was not zero, it was badly *ordered*.
+
+The actionable signal is **queue depth and wait-time percentile segmented by rendition tier** — specifically watching the 240p queue's p95 wait time diverging from its historical baseline while aggregate throughput looks fine. Alert on the **divergence**, not an absolute threshold, because the absolute number is normal during ordinary busy periods and the divergence is not.
+
+This is the same discipline as detecting straggler skew by looking at the task-duration *distribution* rather than the mean: **an aggregate cannot detect a concentrated failure.** Other signals worth carrying: time-to-first-frame by region, edge cache-hit ratio by five-minute bucket rather than daily average, origin request rate (the number origin shielding exists to bound), and DLQ depth and age.
+
+### 2.13 Principal-Level Judgements, and the Principle Underneath Them All
+
+**Quantify before building an optimisation.** Per-title or per-scene encoding — tuning bitrate to each video's actual visual complexity rather than a fixed ladder — closes a real gap, since low-motion content is over-provisioned by uniform presets. It also requires a per-video parameter search or a trained predictor, materially complicating the pipeline. The judgement: **measure the achievable saving on a representative sample first.** Broad-based savings justify the investment; savings concentrated in one content category argue for a narrower, cheaper fix capturing most of the value.
+
+**The synthesis worth carrying out of this module.** The transcoding incident here, the news-feed fan-out problem, and the risk-engine straggler incident are three instances of one principle:
+
+> **A system's unit of work should match the actual independent grain of the problem, not an administratively convenient bundling of it.**
+
+A monolithic per-video transcode bundles genuinely independent renditions. Naive synchronous fan-out bundles a celebrity's millions of independent follower writes into one blocking operation. Position-count-based partitioning bundles a few 4,000×-more-expensive exotic positions into ordinary-looking blocks.
+
+It recurs because bundling by what is *easy to enumerate* — one video, one fan-out call, one position count — is almost always the first design built, and it reveals its head-of-line-blocking or straggler failure only when real-world skew in cost, popularity or complexity shows up in production. Which is why the fix is rarely "add capacity" and almost always "decompose the unit of work along the dimension that is actually skewed."
+
+---
 
 ## 3. Visual Architecture
 ```mermaid
@@ -69,83 +205,6 @@ graph TB
 
 ## 4. Production Example
 **Scenario**: A video platform's transcoding pipeline processed all resolutions for a given video as a **single, monolithic job** (one worker handling 240p through 4K sequentially for one video before moving to the next video in the queue) — under normal upload volume this worked adequately, but during a period of unusually high upload volume (a coordinated content-creator upload event), the queue backed up severely: videos took hours to become available in **any** resolution, since even the fastest, cheapest rendition (240p) was blocked behind the same job's slower, more expensive renditions (1080p, 4K) for every video ahead of it in the queue. **Investigation**: confirmed the monolithic per-video job design meant a single video's total processing time (dominated by its most expensive rendition) gated when *any* of its renditions became available, and this blocking effect compounded across the backlog — even videos whose 240p rendition could have been ready in seconds were stuck behind other videos' multi-hour 4K transcodes. **Fix**: split the transcoding pipeline into independent, per-rendition jobs — a video's 240p job is entirely independent of its 1080p job, allowing a low-resolution rendition to complete and make the video watchable (at lower quality) within moments of upload, while higher-resolution renditions continue processing in the background, with the video's available-quality-levels list in the metadata store updated incrementally as each rendition completes. **Lesson**: a monolithic job design that bundles genuinely independent work (each resolution rendition) creates unnecessary head-of-line blocking — decomposing into independent, separately-queued, separately-prioritizable jobs (directly the "match the structure to the actual independence of the work" theme and the fan-out-job-independence principle) is what allows a system to make partial progress visible to users quickly, rather than an all-or-nothing wait for the single slowest component of a bundled unit of work.
-## 10. Interview Questions
-
-### Basic (10)
-1. **Q: Why can't a large video file be uploaded as a single HTTP request?** **A:** Network interruptions would require restarting the entire upload; infrastructure components often impose practical size/duration limits — chunked, resumable upload solves both.
-2. **Q: What is transcoding?** **A:** Converting an uploaded video into multiple resolutions/formats/bitrates for adaptive delivery.
-3. **Q: What is adaptive bitrate streaming?** **A:** A client-driven mechanism where the player dynamically switches between available quality renditions based on its own measured network throughput.
-4. **Q: Why is the CDN considered the primary delivery mechanism for video, not just a cache?** **A:** Video content volume is enormous; serving it directly from origin at scale is both economically and technically infeasible — the CDN absorbs the vast majority of actual serving traffic.
-5. **Q: Why can't view counts be incremented synchronously on the database for every single view?** **A:** The write volume at scale would create severe database contention — counts are instead batched/aggregated asynchronously.
-6. **Q: What is a manifest, in adaptive streaming terms?** **A:** A file listing all available quality renditions and their segment locations, which the client uses to make streaming decisions.
-7. **Q: Why should transcoding be split into independent per-rendition jobs rather than one monolithic per-video job?** **A:** To avoid a video's fastest, cheapest rendition being blocked behind its slowest, most expensive rendition, allowing partial availability sooner.
-8. **Q: What is a signed URL used for in this context?** **A:** Allowing a CDN to serve access-controlled content by validating a time-limited, cryptographically-signed URL without needing to understand the platform's own authorization logic.
-9. **Q: Why might older, rarely-viewed videos use different storage than recently-uploaded, popular ones?** **A:** Storage tiering by access frequency — hot content on fast/CDN-adjacent storage, cold content on cheaper archival storage.
-10. **Q: What two protocols are commonly used for adaptive bitrate streaming?** **A:** HLS (Apple's, dominant for device compatibility) and DASH (the MPEG standard) — both segment video into small chunks encoded at multiple bitrate "ladder" renditions listed in a manifest, letting the *client* switch quality per segment based on measured bandwidth, over plain HTTP that CDNs cache natively.
-
-### Intermediate (10)
-1. **Q: Why does per-chunk retry (not whole-file retry) matter for upload reliability?** **A:** A network interruption only requires retrying the specific failed chunk, not re-uploading gigabytes of already-successfully-transferred data — directly the retry-with-backoff pattern applied at chunk granularity.
-2. **Q: Why is the transcoding pipeline architecturally similar to the asynchronous fan-out processing?** **A:** Both decouple an expensive, independent-per-item operation (fan-out to followers; transcoding to a specific rendition) from the triggering event via a message queue, allowing independent scaling, retry, and burst absorption.
-3. **Q: Why does client-driven adaptive bitrate switching avoid the need for server-side per-viewer dynamic encoding?** **A:** Since all renditions are pre-generated upfront by the transcoding pipeline, the client simply requests whichever pre-existing rendition's segments match its current measured bandwidth — no real-time encoding decision is needed server-side at all.
-4. **Q: Why does view-count aggregation trade exactness for sustainability, and is this an acceptable trade-off?** **A:** Batched, eventually-consistent counts might be briefly inaccurate (a few seconds/minutes behind the true real-time count) but the alternative (synchronous, exact per-view increments) doesn't scale — for a metric like view count, brief inexactness is an entirely acceptable, standard trade-off, unlike a genuinely financial counter.
-5. **Q: Why does a signed URL's expiration matter for security, not just its signature?** **A:** Without expiration, a leaked/shared signed URL would grant indefinite access to the content — a short expiration window limits the exposure of a leaked URL to a bounded time period.
-6. **Q: Why might content moderation run as part of the transcoding pipeline rather than as a separate, later process?** **A:** Running it as another independent job within the same fan-out structure lets it gate public availability (or flag for review) using the same infrastructure already processing the video, rather than requiring an entirely separate system to be built and coordinated.
-7. **Q: Why is "time-to-first-frame" a distinct metric from ordinary API request latency?** **A:** It specifically measures the user-perceived delay before playback visibly begins, influenced by manifest-fetch time and initial segment delivery — a video-specific UX metric with no direct analog in a typical request/response API.
-8. **Q: Why might a platform choose not to pre-generate every resolution for every uploaded video upfront?** **A:** Storage/compute cost for renditions that may rarely or never be requested (e.g., 4K for an obscure, rarely-viewed video) can be avoided by generating them on-demand only when actually requested, trading a first-request latency cost for reduced storage/compute expenditure on unpopular content.
-9. **Q: Why does the read path (streaming) scale largely independently of the write path (upload/transcode)?** **A:** They're architecturally decoupled — the read path serves already-transcoded, CDN-cached content with no dependency on the write path's current load, meaning a surge in uploads doesn't directly degrade streaming performance for existing content, and vice versa.
-10. **Q: Why does DRM integration represent a genuinely additional architectural layer, not just a configuration option?** **A:** It requires encryption of content, license-server validation as part of the playback flow, and coordination with the adaptive-bitrate mechanism itself — a meaningfully more complex requirement than standard, unencrypted content delivery.
-
-### Advanced (10)
-1. **Q: Diagnose the monolithic-transcoding-job production incident from first principles, and design the job-prioritization strategy that would further improve on the basic per-rendition-job fix.**
- **A:** Beyond simply splitting into independent per-rendition jobs (the baseline fix), prioritize the queue itself so that **every video's lowest-resolution rendition** is processed before **any video's highest-resolution rendition**, system-wide (a priority-queue-based scheduling policy, rather than simple FIFO-per-job-type) — this ensures that during a backlog, the maximum number of videos become minimally watchable as quickly as possible, rather than a strict FIFO ordering that could still let one video's 240p job wait behind another video's already-queued (but lower-priority) 1080p job.
-2. **Q: Design the metadata schema tracking a video's per-rendition availability state, supporting the "watchable at lower quality while higher quality still processes" requirement.**
- **A:**
- ```
- Video: { id, title, status: "processing" | "partially_ready" | "ready", uploadedAt }
- Renditions: { videoId, resolution, status: "queued" | "processing" | "ready" | "failed", cdnUrl }
- ```
- The video's overall `status` becomes `"partially_ready"` as soon as **any** rendition reaches `"ready"` (making it watchable, at whatever quality is currently available), transitioning to fully `"ready"` once all intended renditions complete — the client's manifest request simply reflects whichever renditions currently have `status: "ready"`, naturally supporting progressive quality availability without any special-case logic beyond querying current rendition state.
-3. **Q: Explain how you would design a strategy for handling a transcoding job that fails repeatedly (a corrupted upload, an unsupported codec), avoiding an infinite retry loop.**
- **A:** Directly §Advanced Q7's dead-letter-queue pattern — track a per-job retry count, and after a configured maximum, move the job to a dead-letter queue for manual/automated investigation rather than continuing to retry indefinitely, surfacing the failure to the uploader (a "your video couldn't be processed, please check the file format" notification) rather than leaving it silently stuck in a perpetual retry state.
-4. **Q: Design a strategy for pre-warming CDN edge caches for an anticipated high-demand event (a scheduled video premiere), rather than relying purely on reactive, first-request cache population.**
- **A:** Proactively push the video's renditions to CDN edge nodes in advance of the scheduled release time (a CDN "pre-fetch"/"pre-warm" API call, if the CDN provider supports it, or a synthetic traffic pattern simulating requests from each target edge region shortly before release) — directly the same "proactive versus reactive" distinction as §Advanced Q1's claims-transformation caching discussion, here applied to avoid every viewer in a newly-popular region experiencing an origin-fetch cache-miss penalty simultaneously at the exact moment of peak anticipated demand.
-5. **Q: How would you design the view-count aggregation system to also support near-real-time "live viewer count" for a live-streaming feature, which has a stricter freshness requirement than on-demand video view counts?**
- **A:** Live viewer count needs a shorter aggregation window (seconds, not minutes) and a different underlying mechanism — rather than batching for eventual database persistence, use a Redis-based, TTL-expiring per-viewer "heartbeat" key (directly §Advanced Q2's connection-registry-heartbeat pattern, here repurposed for presence/viewer-counting instead of connection routing) with the current live count computed as a fast `SCARD`/count of currently-non-expired heartbeat keys — trading the on-demand system's batched-for-durability approach for a live, ephemeral, Redis-native presence-counting mechanism better suited to this stricter freshness requirement.
-6. **Q: Explain the trade-off between generating a large number of discrete quality renditions (more storage/compute cost, finer-grained adaptive-bitrate switching) versus a small number of coarse renditions (less cost, coarser quality steps).**
- **A:** More renditions let the adaptive-bitrate client more precisely match its available bandwidth (smaller quality "jumps" when switching), improving perceived smoothness, but linearly increases transcoding compute cost and storage footprint per video; fewer renditions reduce cost but risk a more jarring quality transition (or wasted bandwidth if the closest available rendition is meaningfully lower quality than the client's actual capacity supports) — most platforms settle on an empirically-tuned handful of renditions (e.g., 5-6 resolution tiers) balancing this cost/quality-granularity trade-off, rather than either extreme.
-7. **Q: Design a strategy for handling copyright/content-identification matching (e.g., YouTube's Content ID system) within this architecture, without significantly slowing down the time-to-availability for legitimate uploads.**
- **A:** Run content-fingerprint matching (comparing the uploaded video's audio/video fingerprint against a database of known copyrighted content) as **another independent, parallel job** within the same transcoding fan-out structure (/Advanced Q1) rather than a serial, gating step before transcoding begins — a video can become watchable via its lowest-resolution rendition while content-ID matching runs concurrently in the background, with any resulting copyright action (a claim, a takedown) applied after the fact if a match is found, rather than delaying every single upload's availability by the fingerprint-matching step's own processing time.
-8. **Q: A team proposes storing every video's every rendition, indefinitely, on the fastest available storage tier "to guarantee the best possible playback experience for every video regardless of age or popularity." Evaluate this as a Principal Engineer.**
- **A:** Push back on the cost implications — this ignores the power-law popularity distribution where the overwhelming majority of storage/serving cost should be justified by actual, ongoing view volume, not applied uniformly regardless of demand; recommend storage tiering as the standard, cost-effective approach, reserving the "guarantee best experience regardless of age" goal specifically for content genuinely expected to have sustained long-tail demand (evaluated via actual view-history data, not a blanket policy) — directly this course's recurring "match infrastructure investment to demonstrated, measured need" discipline (§Advanced Q9), now applied to storage-tiering economics specifically.
-9. **Q: Explain how you would design the system to gracefully handle a viewer's network condition degrading mid-playback, beyond simply "the client switches to a lower rendition."**
- **A:** The client's adaptive-bitrate logic should also maintain a small local buffer of upcoming segments (a few seconds ahead of current playback position) specifically to absorb brief network hiccups without an immediately visible playback stall — the buffer size itself is a genuine trade-off (a larger buffer better tolerates brief network drops but increases startup latency and memory usage, and delays the client's own reaction time to a *sustained* quality-appropriate-rendition switch) — a complete answer addresses both the quality-switching mechanism and this buffering trade-off together, since they jointly determine the actual viewer-perceived resilience to changing network conditions.
-10. **Q: As a Principal Engineer, how would you decide whether to build a custom CDN/edge infrastructure versus using a third-party CDN provider for a growing video platform?**
- **A:** Weigh the platform's actual scale/growth trajectory (a third-party CDN's pay-as-you-go model is typically far more cost-effective and operationally simpler at low-to-moderate scale) against the potential for custom infrastructure to provide meaningfully better cost-efficiency or control at truly massive, sustained scale (which is why YouTube, Netflix, and similarly enormous platforms have historically built significant custom CDN/edge infrastructure) — recommend starting with a mature third-party CDN provider by default (directly this course's recurring "don't build custom infrastructure without a demonstrated, measured need the off-the-shelf option can't meet," §Advanced Q9/ §Advanced Q8's recurring theme), revisiting the build-vs-buy decision only once actual, sustained scale and cost data justify the very substantial investment custom CDN infrastructure requires.
-
-### Expert (10)
-1. **Q: The back-of-the-envelope estimation (§12 Step 1) concludes egress, not storage or compute, is "the system." Walk through why a candidate who instead optimizes storage cost first has misread the problem, and what interview signal that mistake sends.**
- **A:** At ~125 Tbps sustained egress against ~1.8 EB/year of storage growth, egress is the number with no path to being solved by *this system's own* engineering — it can only be delegated to a CDN vendor, which reframes nearly every subsequent decision (URL structure, cache-control, origin shielding, popularity-driven rendition generation) around minimizing origin traffic and maximizing edge cache-hit ratio. A candidate who leads with storage-tiering optimizations has correctly identified a real cost lever (§12 Step 1's third conclusion) but the wrong *primary* one — it signals they can optimize a component without first establishing which component the estimation says actually dominates, exactly the "estimate first, then let the estimate choose the hard problem" discipline this format is built to test.
-2. **Q: Design a strategy for migrating an existing catalog of billions of already-transcoded videos to a new, more efficient codec (e.g., AV1) without a "stop the world" re-transcode of the entire library, given the popularity-driven ladder means most videos were never transcoded to every tier.**
- **A:** Treat codec migration as an extension of the popularity-driven ladder decision (§12 §3.5), not a separate project — re-transcode into the new codec on the same view-triggered schedule already governing rendition generation (hot content migrates first, naturally, as it crosses view thresholds and gets re-requested), while cold, rarely-viewed content is migrated lazily on next-request or left on the legacy codec indefinitely if it never crosses the threshold again. The player/manifest must support serving mixed-codec renditions during the multi-year transition window (client capability negotiation via the manifest, offering the new codec only to clients that declare support), and the metadata schema's `rendition` table (§12) needs a `codec` column from day one specifically so this migration doesn't require a schema change under pressure later.
-3. **Q: A regulator or court order requires a specific video be made permanently unavailable in one country but not others. Design this given the CDN-primary delivery model where content, once cached at an edge, is largely outside your direct control.**
- **A:** Geo-restriction must be enforced at the manifest layer, not relied upon at the CDN edge alone — the manifest service checks the requesting client's region against a per-video restriction list before returning `manifest_url`, so a restricted region never receives a playable manifest regardless of what's cached at nearby edges; additionally, issue a CDN purge/invalidation for the specific segment keys in the affected region's edge nodes (most CDN vendors support geo-scoped invalidation) so already-cached copies don't continue serving stale, unrestricted access during the TTL window. The genuinely hard residual risk — a client that already downloaded/cached segments locally before the restriction took effect — is out of this system's control entirely and should be explicitly named as a limitation, not silently assumed solved.
-4. **Q: Explain why "time-to-first-rendition" (§7) is fundamentally a queueing-theory problem, and derive what happens to it during the §4 incident's upload burst using Little's Law.**
- **A:** Time-to-first-rendition is dominated by queue wait time, not encode time, once the system is under load — Little's Law (`L = λW`, average jobs in system = arrival rate × average time in system) means that if arrival rate `λ` (uploads/sec) exceeds the fleet's sustained service rate even briefly, queue length `L` grows unboundedly for the duration of the burst, and every job's wait time `W` grows with it — which is exactly why §4's fix (splitting into independent, priority-ordered per-rendition jobs) doesn't reduce total work at all, it only reorders the queue so the *cheapest* jobs' wait time stays bounded even while the queue overall is backed up, trading fairness for the metric that actually matters to viewers (can I watch *something* soon).
-5. **Q: Design the monitoring and alerting that would have caught the §4 monolithic-job incident before it became user-visible, going beyond "queue depth is high."**
- **A:** A single aggregate queue-depth metric is exactly what would have stayed misleadingly normal-looking during the incident (total throughput wasn't zero, it was just badly ordered) — the actionable signal is **queue depth and wait-time percentile, segmented by rendition tier**, specifically watching for the 240p queue's P95 wait time diverging upward from its historical baseline even while aggregate throughput looks healthy; alerting on that divergence (not on an absolute threshold) catches the head-of-line-blocking failure mode structurally, the same "segment before you alert, don't trust the aggregate" discipline as the risk-engine module's straggler incident (task-duration distribution skew, not mean).
-6. **Q: A Principal Engineer is asked to justify, to a finance stakeholder skeptical of infrastructure spend, why the platform should invest in origin-shield caching (§12 §3.4) before a single incident has occurred. Construct that argument.**
- **A:** Frame it as bounding a known, quantifiable tail risk rather than a speculative improvement: without origin shielding, a viral video's cold-start moment produces a fan-out of simultaneous origin requests proportional to the number of distinct edge locations receiving first-time traffic — a number that scales with the CDN's own footprint, not with anything this system controls — meaning the worst-case origin load is effectively unbounded by design. Origin shielding caps that fan-out at "one origin fetch per shield region regardless of edge count," converting an open-ended tail risk into a fixed, budgeted cost — the argument is the same one made for circuit breakers and bulkheads elsewhere in this course: the investment is insurance against a rare, severe, and otherwise-uncapped failure mode, not a routine efficiency gain, and its value is realized precisely on the one day it's needed.
-7. **Q: Compare fan-out-on-write (push every rendition to every configured CDN region proactively) versus the pull/cache-miss model this design uses, for the transcoding-to-delivery handoff specifically.**
- **A:** Proactively pushing every rendition to every CDN region on completion guarantees zero cold-start latency anywhere but multiplies transfer cost by the number of regions for content that, per §12 Step 1's third conclusion, mostly will never be watched in most of those regions — nearly all of that push traffic would be wasted. The pull/cache-miss model (this design's default) pays a one-time, per-region cold-start cost only for regions that actually request the content, which is strictly cheaper in aggregate given the power-law popularity distribution — push is justified only as the targeted pre-warming exception (§12 §3.4) for content with *known*, high-confidence anticipated demand (a scheduled premiere), never as the default delivery mechanism, exactly mirroring the fan-out-on-write-vs-read trade-off from the news-feed module now applied to CDN distribution instead of follower feeds.
-8. **Q: The view-count pipeline (§2.5, §11) uses Redis `INCR` plus a "dirty set" batched flush. Identify the failure mode if a Redis node is lost between an `INCR` and the next flush cycle, and design the fix.**
- **A:** Any views accumulated in that Redis node's counter since the last successful flush are lost outright — Redis's default configuration prioritizes throughput over durability for exactly this kind of hot counter, and the batching window (30s, §11) is also the exposure window for data loss on node failure. Since view counts are explicitly an approximate, eventually-consistent metric (§2.5's stated trade-off), the pragmatic fix is not to make the counter durable (which would reintroduce the synchronous-write bottleneck this design exists to avoid) but to make loss bounded and recoverable: enable Redis AOF persistence with a short fsync interval to shrink the exposure window, and retain the raw view-event stream (Kafka, §12 §3.6) independently so counts can be *recomputed* from the durable event log if a divergence is detected — the counter is a fast, lossy cache of a truth that lives elsewhere, not the truth itself.
-9. **Q: As a Principal Engineer, how would you decide whether per-title/per-scene encoding optimization (§12 Step 4's "next largest cost win") is worth building, versus continuing to ship a fixed rendition ladder?**
- **A:** The fixed ladder encodes every video in a content category at the same bitrate targets regardless of actual visual complexity, meaning simple, low-motion content (a static talking-head video) is measurably over-provisioned relative to what its perceptual quality actually requires — per-title encoding closes that gap but requires a materially more complex, per-video encoding-parameter search (or a trained model predicting good parameters) rather than a fixed preset, meaningfully increasing transcode-pipeline engineering complexity and per-video encode time. The Principal-level judgment: **quantify the gap first** — measure aggregate bitrate savings achievable on a representative sample before committing engineering investment, exactly the same "don't build custom infrastructure without a demonstrated, measured need" discipline (§Advanced Q10) applied to an encoding optimization rather than a build-vs-buy CDN decision — if the sample shows a large, broad-based savings (as Netflix's public per-title encoding results have shown), the investment is justified; if savings concentrate in a narrow content category, a narrower, lower-complexity fix targeting just that category may capture most of the value at a fraction of the cost.
-10. **Q: Synthesize this module's central lesson (independent, decomposed jobs) with the news-feed module's fan-out lesson and the risk-engine module's straggler incident. What single principle do all three share, and why does it recur across such different systems?**
- **A:** All three are instances of the same underlying principle: **a system's unit of work should match the actual, independent grain of the problem, not an administratively convenient bundling of it** — a monolithic per-video transcode job bundles genuinely independent renditions (this module, §4); naive synchronous fan-out bundles a celebrity's millions of independent follower-feed writes into one blocking operation (the news-feed module); and position-count-based task partitioning bundled a handful of 4,000×-more-expensive exotic-option positions into ordinary-sized blocks, hiding a severe cost skew inside an innocuous-looking count (the risk-engine module). It recurs because "bundle by what's administratively easy to enumerate" (one video, one fan-out call, one position count) is almost always the first design that gets built, and only reveals its head-of-line-blocking or straggler failure mode once real-world skew (in cost, in popularity, in complexity) appears in production — meaning the fix is rarely "add more capacity" and is almost always "decompose the unit of work along the dimension that's actually skewed."
-
----
-
 ## 11. Coding Exercises
 
 *(System design case studies use worked design exercises, consistent with this domain's format.)*
@@ -159,11 +218,11 @@ Per day: 500 GB/min * 1440 min = 720 TB/day raw
 Total (including transcoded renditions, ~2x raw): 720 TB * 3 (raw + renditions) ≈ 2.16 PB/day
 Over 5 years: 2.16 PB/day * 365 * 5 ≈ 3,942 PB (~3.9 Exabytes)
 ```
-**Discussion**: This exabyte-scale number immediately justifies both storage tiering and the "don't pre-generate every rendition for every video indefinitely" trade-off (/Advanced Q8) as economic necessities, not optional optimizations — at this scale, uniform "store everything on the fastest tier forever" is simply not economically viable.
+**Discussion**: This exabyte-scale number immediately justifies both storage tiering and the "don't pre-generate every rendition for every video indefinitely" trade-off (§2.6) as economic necessities, not optional optimizations — at this scale, uniform "store everything on the fastest tier forever" is simply not economically viable.
 
 ### Medium — Per-rendition transcoding job queue design (the fix)
 ```csharp
-public record TranscodeJob(string VideoId, string Resolution, int Priority); // Priority: lower resolution = higher priority (Advanced Q1)
+public record TranscodeJob(string VideoId, string Resolution, int Priority); // Priority: lower resolution = higher priority (§2.2)
 
 public class TranscodeJobScheduler
 {
@@ -176,7 +235,7 @@ public class TranscodeJobScheduler
         if (_queue.TryDequeue(out var job, out _))
         {
             await worker.TranscodeAsync(job.VideoId, job.Resolution);
-            await _metadataStore.MarkRenditionReadyAsync(job.VideoId, job.Resolution); // Advanced Q2's schema
+            await _metadataStore.MarkRenditionReadyAsync(job.VideoId, job.Resolution); // §2.2's schema
         }
     }
 }
@@ -687,7 +746,7 @@ sequenceDiagram
 
 **Architecture governance:** The popularity-threshold values (§12 §3.5) and the rendition-priority ordering (§12 §3.2) are exactly the kind of decision that looks like an arbitrary tuning parameter to a future engineer and is in fact load-bearing — these should be recorded as ADRs with the cost/quality trade-off data that justified the specific threshold chosen, so a future "let's just lower the threshold, more quality is better" change is made with the original cost analysis in hand, not against a blank slate.
 
-**Cost optimization:** Beyond the popularity-driven ladder itself, the highest-leverage remaining levers are per-title/per-scene encoding (§10 Expert Q9) and storage tiering by access recency — both are modeling/policy changes rather than infrastructure spend, and both should be quantified against a representative content sample before investment, the same discipline applied throughout this course to distinguish a justified optimization from a speculative one.
+**Cost optimization:** Beyond the popularity-driven ladder itself, the highest-leverage remaining levers are per-title/per-scene encoding (§2.13) and storage tiering by access recency — both are modeling/policy changes rather than infrastructure spend, and both should be quantified against a representative content sample before investment, the same discipline applied throughout this course to distinguish a justified optimization from a speculative one.
 
 **Risk analysis:** The dominant risk class here is not outage but **silent cost or quality drift** — a codec regression that quietly increases average bitrate 10%, a popularity threshold that's drifted wrong as the catalog's view distribution shifts, a CDN cache-hit ratio degrading gradually as content ages past its shield TTL — each produces no user-visible failure and no alert unless specifically instrumented for, and each compounds continuously at this system's scale. A Principal Engineer's risk register for this system should weight these drift metrics at least as heavily as availability, which is a genuinely counter-intuitive prioritization to defend to stakeholders trained to think of "risk" as "outage."
 

@@ -198,6 +198,256 @@ An EU customer's phone number, email address, and message content are personal d
 
 The workable architecture is **regional pipelines with a global control plane**: templates, category definitions, and campaign definitions replicate globally (they are not personal data); recipient resolution, rendering, dispatch, receipt ingest, and the delivery log stay in-region. Cross-region, you replicate **counts and states, not payloads**. This costs an extra deployment unit per region and is far cheaper than retrofitting after a DPIA finds the problem.
 
+### 2.11 What This System Can and Cannot Guarantee
+
+Derive the limit rather than asserting it, because the whole design follows from it.
+
+**The delivery path ends outside your control.** A push goes to APNs or FCM; an SMS goes to an aggregator, then a carrier, then a handset; an email goes to a provider, then a receiving mail server, then a spam filter. Each hop can drop, delay or silently discard, and **none of them is obliged to tell you.** A carrier that drops a message for policy reasons reports success upstream. A mail server that files a message as spam accepted it.
+
+**Therefore: delivery cannot be guaranteed, and any system claiming to guarantee it is claiming something about infrastructure it does not own.**
+
+What *can* be guaranteed, and these are the commitments to make:
+
+1. **Acceptance** — the request was durably recorded. Fully in your control.
+2. **Attempt** — at-least-once handoff to the provider, with retries and a dead-letter path. In your control.
+3. **Evidence** — the provider's acknowledgement, the receipt where the channel supplies one, and an explicit **indeterminate** state where it does not. In your control.
+4. **Reconciliation** — an independently derived comparison between what you sent and what the provider says it handled (§2.8).
+
+**"Exactly-once notification delivery" is therefore the wrong framing twice over.** Exactly-once transport is unachievable in general, and the terminal hop is not yours. What the system provides is `at-least-once attempt` + `idempotency at the provider boundary` + `deduplication at the recipient`, and the honest phrasing — *"we guarantee we attempted, we can evidence what happened, and we can tell you which ones we cannot account for"* — is a stronger commitment than a guarantee nobody can keep.
+
+### 2.12 Failure Modes That Present as Success — the Defining Hazard
+
+Collect them, because this system has more of them than anything else in the folder and they share one shape.
+
+| Failure | Why it looks like success |
+|---|---|
+| Provider accepted, carrier dropped | The provider's 200 is the only signal you get |
+| Email accepted, filed as spam | Delivered, by every definition your system can observe |
+| Push sent to a stale token | APNs accepts; the feedback that the token is dead arrives later, on a different channel |
+| Message stuck in a non-terminal state | **Counted in the success numerator** — so the more messages get stuck, the better the dashboard looks |
+| One app version or OS broken | Aggregate delivery rate barely moves |
+| One country's routes failing | The aggregator reports 100%, because *it* succeeded |
+| Suppressed by a consent check that was wrong | Correctly suppressed and incorrectly suppressed are the same log line |
+
+**The general rule this establishes — and it is the module's central lesson:** *an acknowledgement from a party who is not the final recipient is evidence of handoff, never of delivery.* Every metric built on such an acknowledgement is measuring your own outbound behaviour and calling it an outcome.
+
+**The three-part remedy, which recurs throughout this folder:**
+
+1. **An independent verifier** — reconcile sent-versus-receipted against the provider's own records, not against your emitter (§2.8).
+2. **A counter on every silent path** — every suppression, discard, dedup-drop and timeout increments something. A dropped notification is acceptable; an *uncounted* dropped notification makes the data silently wrong.
+3. **Detection by aging, not by rate** — the oldest message in a non-terminal state, not the percentage in terminal states. This is what catches §4's defect, where the success rate *improved* as the failure worsened.
+
+**And never count a non-terminal state as success.** `ACCEPTED`, `SENT` and `PENDING_RECEIPT` are not `DELIVERED`. Getting this one modelling decision right removes an entire class of dashboard lie.
+
+### 2.13 Priority Lanes, Campaigns, and the Single Hot Key
+
+**A marketing campaign must never delay an OTP**, and the mechanism is structural rather than configurational: **separate queues per priority class, with separate consumer pools and separate provider connections.**
+
+Why a shared queue with a priority field is insufficient: 20 million campaign items already enqueued sit *ahead* of the OTP in partition order, and priority within a partition cannot reorder what is already committed. Separate topics — or at minimum separate partitions with dedicated consumers — are what make the guarantee real.
+
+Three classes is usually enough: **critical** (OTP, fraud, security), **transactional** (receipts, status changes), **bulk** (campaigns, digests). Each gets its own rate budget against the provider, so bulk cannot consume the shared sender throughput.
+
+**A 40-million-recipient regulatory notice with a statutory deadline** is the bulk case at its hardest, and the design points are: expand the audience **incrementally into durable work items** rather than materialising 40 million rows in one transaction; **rate-shape the drain** against provider limits and reputation (§2.5), computing backwards from the deadline to confirm the window is achievable *before* starting; make every work item individually retryable and idempotent; track **completion as a burn-down against the deadline**, not as a percentage; and — because it is a statutory obligation — produce **per-recipient evidence** of attempt and outcome, which is the reason the work items must be durable rather than a fan-out loop.
+
+**A single institutional account generating 8 million notifications partitioned to one key** is the hot-partition problem in this domain: one partition serialises, one consumer does all the work, and lag on that partition grows while every other partition is healthy — invisible in aggregate lag. Fixes, in order: **compound the partition key** (`accountId:shardIndex`) to spread across partitions, accepting that per-account ordering is lost — which §2.18 argues you did not need; **coalesce** at the source, since 8 million notifications to one account is almost always a bug or a digest opportunity (§2.6); and **detect per-partition**, because this never shows up in an aggregate.
+
+### 2.14 Consent, Replica Lag, and the Unsubscribe Race
+
+**Consent must be evaluated at dispatch time, not at enqueue time** (§2.2). The 20-million-item campaign expanded at 09:00 and draining until 09:40 contains items for users who unsubscribe at 09:12 — and if consent was checked during expansion, those users receive a message after opting out, which is a regulatory violation in most jurisdictions, not a UX blemish.
+
+So: work items carry *who* and *what*, and the **consent check happens in the worker immediately before handoff**, with the suppression counted (§2.12).
+
+**The replica-lag case is the subtle one.** The preference store has 200 ms replica lag; a user unsubscribes and a message is dispatched 150 ms later against a lagging replica, which still shows them subscribed. The message goes out.
+
+Three honest observations:
+
+1. **This is unavoidable in general** — there is always *some* window between a consent change and its visibility, and claiming zero is claiming synchronous global consistency on every dispatch.
+2. **The window can be bounded and stated**, which is what compliance actually requires: "opt-outs take effect within N seconds" is defensible; "immediately" is not.
+3. **Bound it structurally where the stakes justify it**: read consent from the **primary** for suppression checks (the volume is low relative to reads generally), or maintain a **suppression list as a separate, fast, strongly-consistent store** — a small set of "do not contact" identities, replicated synchronously, checked last. That is cheaper than making the whole preference store strongly consistent and it covers exactly the case that matters.
+
+And note the asymmetry that makes the design tractable: **a false suppression is harmless; a false send is a violation.** So the check fails *closed* — if the consent store is unavailable, suppress non-critical traffic rather than sending it.
+
+### 2.15 The Indeterminate Dispatch
+
+A dispatch times out and you do not know whether the provider accepted it. Retrying may duplicate; not retrying may lose.
+
+**Model `INDETERMINATE` as a first-class state**, resolve it deliberately, and never let the ambiguity be decided by a default:
+
+1. **Retry with the same provider-level idempotency key** where the provider supports one — most major providers do, and this makes the retry safe. This is the primary answer, and the reason to require idempotency-key support during provider selection.
+2. **Query the provider** by your own reference where an API exists.
+3. **Wait for the receipt** (§2.8) — slower, and authoritative for channels that supply one.
+4. **For a channel with neither**, decide by *consequence*: for an OTP, re-send (a duplicate code is an annoyance, a missing one is a failed login); for a marketing message, do not (a duplicate is a complaint and a reputation cost).
+
+**Alert on aged indeterminate items**, because each one individually looks fine and the population is where the real problem hides.
+
+### 2.16 Storage for the Delivery Log, and Retention
+
+At 1.5 billion notifications/day the delivery log is the dominant storage problem, and its access pattern decides the engine: **write-heavy, append-only, immutable, read as recent-lookups by recipient or by message ID, plus analytical scans.** Almost never updated, never randomly read from deep history.
+
+That argues against a single relational store as the primary log — not because PostgreSQL cannot take the writes, but because **seven years of an append-only, high-volume, mostly-cold dataset is the wrong shape for it**: vacuum and index maintenance on a table nobody updates, partition management at that scale, and cost per terabyte that a columnar or object-store tier beats by an order of magnitude.
+
+**A tiered design fits the access pattern:**
+
+| Tier | Store | Holds |
+|---|---|---|
+| Hot (days) | Cassandra/DynamoDB or a fast KV | Live state machine, receipt matching, recent lookups |
+| Warm (months) | Columnar analytical store | Aggregations, per-channel and per-tenant reporting |
+| Cold (years) | Object storage, immutable, partitioned by date | The evidentiary archive |
+
+**Retention is not uniform, and that is the design point.** Most of the 1.5 billion are marketing and can expire in 90 days. A small subset — regulatory notices, statements, anything that constitutes legal notice — carries a **seven-year obligation**. So retention class must be an **attribute of the message, set at send time by the producing service**, not a global policy applied later. Tag it at the source, and make the tag mandatory, because reclassifying years of history retrospectively is not possible.
+
+### 2.17 Multi-Tenancy for Internal Teams
+
+Forty internal teams share this platform, and the requirement is that one team's mistake cannot affect the others.
+
+- **Per-tenant rate budgets**, enforced, with a hard ceiling — so a bug that enqueues ten million messages throttles that tenant rather than the platform.
+- **Separate queues or partitions per priority class** (§2.13), not per tenant, with per-tenant quotas *within* a class — otherwise forty queues each need capacity provisioned.
+- **Per-tenant sender identity where the channel allows it** (separate sending domains or subdomains for email, separate sender IDs for SMS), so one team's content problem does not poison the **shared reputation** that §2.5 identifies as a shared-fate resource. This is the single highest-value isolation in the system, because reputation damage is slow to detect and slow to repair.
+- **Per-tenant metrics and their own error budget**, so a tenant's failures are visible to that tenant and do not disappear into the aggregate.
+- **A required template-approval step** for anything at bulk volume, because content is where reputation is lost.
+
+### 2.18 Ordering — a Position Worth Taking
+
+**Most notifications do not need ordering, and claiming they do is expensive.** Independent notifications are independent; a receipt and a shipping update have no required relative order, and the recipient reads them by timestamp anyway.
+
+Where ordering genuinely matters, it is narrow and specific:
+
+- **Supersession** — a later message invalidates an earlier one. "Your code is 123456" followed by "your code is 789012" must not arrive reversed. But the correct mechanism is **not** ordered delivery; it is **carrying a version and having the recipient discard stale ones**, because the final hop reorders regardless of what you do.
+- **State transitions the user reads as a narrative** — "payment received" then "order shipped."
+
+So the position: **do not buy global ordering; buy supersession semantics where they matter.** Partition by recipient where per-recipient order is useful, accept that cross-recipient order is meaningless, and note the direct trade-off with §2.13 — partitioning by recipient for ordering is exactly what creates the hot-partition problem for a heavy account. Choosing ordering you do not need costs you throughput you do.
+
+### 2.19 Diagnosing Growing Consumer Lag
+
+Lag growing steadily on the notification topic has a small set of causes, and the diagnosis is a sequence:
+
+1. **Is lag uniform across partitions or concentrated?** Concentrated means a hot key (§2.13) or a poison message blocking one partition. Uniform means capacity or a downstream problem.
+2. **Is production rate up, or consumption rate down?** They look identical in the lag metric and have opposite fixes.
+3. **If consumption is down: where is the time going?** Provider latency (check per-provider dispatch duration), consumer CPU, or a dependency — the consent check (§2.14) and template rendering (§2.7) are both on the per-message path and both can regress.
+4. **Are we being rate-limited by a provider?** A 429 from the provider slows every consumer simultaneously and looks exactly like insufficient capacity.
+5. **Has a retry storm started?** Retries re-enter the topic and inflate production rate — a feedback loop where the symptom amplifies the cause, bounded only by a retry budget.
+
+**The signal that matters most is per-partition lag alongside per-provider dispatch latency**, together. Either alone leaves you guessing between structurally different incidents.
+
+### 2.20 When Notification Is on the Critical Path
+
+SMS OTP for card authorisation makes this system a dependency of payments, which changes its risk profile entirely. §2.11's honest conclusion — delivery cannot be guaranteed — is uncomfortable here and must be confronted rather than papered over.
+
+**Assess it plainly:** a channel you do not control is now a hard dependency of a revenue-critical, regulated flow. Carrier issues become authorisation failures.
+
+**The fixes, in order of value:**
+
+1. **Multiple providers with automatic failover**, and — the part usually missed — **routing diversity per destination country**, because aggregators often share the same underlying carrier routes, so two providers can fail together.
+2. **A fallback channel** — push, voice call, or an in-app authenticator — so the flow is not single-channel.
+3. **Strict latency budget with a timeout**, because an OTP arriving after the user's session expires is a failure even though it was delivered.
+4. **Push the strategic fix**: move away from SMS OTP toward app-based authentication or passkeys. SMS is the weakest channel on both delivery evidence and security (SIM swap), and an architect's job here includes saying that the dependency is the problem, not just hardening it.
+5. **Monitor OTP delivery separately from everything else**, by country and by carrier, with its own alerting — because it will never move the aggregate.
+
+### 2.21 Evidentiary Strength — Proving Notice Was Given
+
+When the requirement is to *prove* a customer was notified, the channels are not equivalent, and the ranking is not the one people expect:
+
+| Channel | Evidence available | Strength |
+|---|---|---|
+| **Email** | Provider acceptance, SMTP transaction log, DKIM signature, and — for regulated notices — a retained copy of exactly what was sent | **Strongest.** The receiving server's acceptance is a logged transaction between identified parties |
+| **SMS** | Aggregator acceptance, sometimes a carrier delivery receipt | **Middle.** The receipt is real where supplied and frequently unavailable |
+| **Push** | Provider acceptance only; APNs/FCM explicitly do not confirm device delivery | **Weakest.** Acceptance says the message was queued, nothing more |
+| **In-app / secure message centre** | **A read event from your own system** | **Strongest for proof of receipt** — the only channel where you observe the recipient, not an intermediary |
+
+**For proving notice, use email plus a secure message centre**, and retain the rendered content, not just the template ID — because "we sent template 47 with these variables" requires reconstructing what the customer saw, and template 47 has changed since. This is the one place where §2.7's template-plus-variables storage rule is overridden deliberately: for evidentiary messages, store the rendered artefact.
+
+### 2.22 CAP Posture — One Answer Is Not Enough
+
+Different components take different sides, deliberately:
+
+| Component | Posture | Reason |
+|---|---|---|
+| **Ingestion API** | **AP** — accept and queue | Refusing to accept a notification request loses it entirely; the queue absorbs downstream trouble |
+| **Consent / suppression store** | **CP** | Sending after an opt-out is a violation; suppressing wrongly is harmless (§2.14) |
+| **Delivery state machine** | **CP within a message** | Two workers must not both transition the same message |
+| **Delivery log / reporting** | **AP** | Eventually consistent reporting is fine |
+| **Rate limiting against providers** | **AP with bounded overshoot** | Brief over-admission costs reputation, not correctness |
+
+**Stating one CAP answer for "the notification system" is the error**, and the interviewer is checking whether you decompose. The consent store being CP while ingestion is AP is what lets the system be both highly available and compliant.
+
+### 2.23 Would You Event-Source It?
+
+*For:* the delivery lifecycle genuinely is a sequence of events (accepted → dispatched → receipted → bounced), the audit trail is a requirement rather than a nicety, and reconstructing "what happened to this message" is a real and frequent operational need.
+
+*Against, and decisive at this volume:* 1.5 billion messages/day means **billions of events per day**, and the projection-rebuild cost becomes the system's dominant operational risk — a rebuild that takes days is not a recovery procedure. The aggregate is also trivially small (one message, a handful of transitions), so event sourcing's strength in modelling rich aggregate behaviour buys nothing here.
+
+**Decision: no, not as a framework — but keep the property.** Store the state machine's **transitions as an append-only log alongside the current state**, which gives the audit trail and the reconstruction without a generic event-sourcing runtime, a projection-rebuild problem, or an aggregate abstraction the domain does not need. Take the property, not the pattern.
+
+### 2.24 Migrating Forty Teams Off Their Own Integrations
+
+Forty teams each with their own SMTP or Twilio integration, migrating to one platform. The technical work is the easy half.
+
+**Sequence:**
+
+1. **Build the platform and make it obviously better** — templating, retries, receipts, preference handling, per-tenant dashboards. Migration is voluntary until adoption proves the platform; mandating first produces resentment and workarounds.
+2. **Migrate one team fully**, including a real campaign, and use their result as the reference.
+3. **Provide a compatibility shim** — an SDK whose call signature approximates what teams already use — so the port is hours rather than a project.
+4. **Dual-run per team**: send through both paths with the new platform in shadow, compare, then cut over.
+5. **Only then centralise the credentials.** The forcing function is **provider account consolidation** — once the platform owns the sending domains and provider accounts, individual integrations stop working by construction rather than by policy.
+
+**The organisational obstacles matter more than the code**: teams lose control of their own sending and will fear becoming blocked on a platform team's backlog, so **self-service template management and per-tenant quotas are adoption requirements**, not features. And forty integrations carry forty sets of undocumented behaviour — one team's "unsubscribe" may mean something different from another's. Reconciling **consent semantics across forty sources** is the genuinely hard part of the data migration, and getting it wrong is a compliance incident rather than a bug.
+
+### 2.25 Monitoring, SLIs, and What Remains Undetectable
+
+**SLIs, with the emphasis on what they are computed over:**
+
+- **Acceptance success rate** — your API's own availability. Fully attributable.
+- **Time-to-dispatch, p50/p95/p99, by priority class** — the thing you actually control end to end.
+- **Dispatch success rate by provider, channel and country** — the cut matters more than the number; an aggregate hides §2.12's entire table.
+- **Receipt-confirmed rate by channel**, understood as evidence rather than truth.
+- **Oldest message age in a non-terminal state**, by class — the aging signal that catches silent non-progress.
+- **Reconciliation break count and age** (§2.8).
+- **Suppression and discard counters**, by reason.
+
+**Alert on aging and on divergence, not on rate**, because rates stay healthy through exactly the failures that matter.
+
+**What remains structurally undetectable, stated honestly:**
+
+- **Whether a human being read it.** Only the in-app channel observes this.
+- **Silent carrier drops** where no receipt mechanism exists — you can bound the population via reconciliation, not identify the individuals.
+- **Spam filing** — delivered by every observable definition.
+- **A correct-looking suppression that was wrong** — a consent bug suppresses messages and the suppression counter increments exactly as designed.
+
+The honest posture: this system produces **evidence of attempt and best-available evidence of outcome**, and the gap between that and "the user was notified" is real, quantifiable via reconciliation, and must be stated to the business rather than smoothed over in a dashboard.
+
+### 2.26 AI-Generated Notification Content
+
+The request will come. The architect's position should be settled in advance rather than improvised.
+
+**Not on the critical path, and not for regulated content.** A generated OTP message, payment confirmation or regulatory notice introduces latency, non-determinism and hallucination risk into a flow whose entire value is that it is exact and evidenced. Templates are correct here *because* they are boring.
+
+**Where it is genuinely useful:** subject-line and copy variants for marketing campaigns; summarisation of digest content; localisation assistance; send-time optimisation. All of these are bulk-class, all are reviewable before send, and none is legally operative text.
+
+**The controls that make it acceptable:** generate **offline, at template-authoring time**, never per message at dispatch — which removes the latency and availability dependency entirely; require **human approval** before any generated variant goes to volume; keep the generated text **versioned and stored as the rendered artefact** (§2.21) so what was sent is reconstructable; and **never generate anything that carries a legal or financial commitment.**
+
+The one-line position: **generated content is authored content that happened to be drafted by a model — it goes through the same approval, versioning and evidence path as any other template, and it never enters the dispatch path at runtime.**
+
+### 2.27 Testing Safely, and the Most Discriminating Question
+
+**Testing this system is unusually dangerous**, because the failure mode is sending real messages to real people. The controls:
+
+- **A hard environment guard**: non-production environments route to a sink provider by default, with the real provider requiring an explicit, audited configuration — and no shared credentials between environments, so a misconfiguration cannot reach a real provider at all.
+- **Allow-listed recipients** in non-production: only internal, verified addresses and numbers.
+- **Provider sandbox modes** for integration tests, which most providers offer.
+- **Load-test against a mock provider** with realistic latency and error injection — the real one will rate-limit you, and testing against it risks reputation damage.
+- **Synthetic canaries in production**, sending to internal recipients across every channel and several countries, asserting receipt — which is the only way to detect §2.12's country-specific and version-specific failures.
+
+**The most discriminating question to ask about this system:**
+
+> **"Your dashboard says 99.9% delivered. What does that number actually mean, and what could be badly wrong?"**
+
+It discriminates because a weak answer accepts the number, a middling answer notes that provider acceptance is not delivery, and a strong answer decomposes it completely: which state is being counted as success (§2.12's non-terminal-state trap); what the denominator excludes (suppressed, deduplicated, discarded — all invisible); that the aggregate hides per-country, per-carrier and per-app-version failures; that a *provider's* success is a handoff, not an outcome; and that the correct instruments are **aging, per-segment breakdowns, and independent reconciliation** rather than a single rate.
+
+That single question reaches the system's defining property — **that its failures present as success** — and everything else in this module follows from taking it seriously.
+
+---
+
+
 ---
 
 ## 3. Visual Architecture
@@ -346,271 +596,6 @@ Note the two states most designs omit and both incidents in this module turn on:
 1. **A provider's acknowledgement is a receipt for your request, not a report on your user.** Model them as separate columns or you will conflate them within a year.
 2. **Every non-terminal state needs a clock.** A state with no maximum age is a state records go to disappear in.
 3. **Never let "unknown" fall into the success bucket of an SLI.** This is the same structural blindness as Module 178 §4's silent discard and Module 177 §14's aggregate p50 — third instance in this folder, arriving by a different route each time.
-## 10. Interview Questions
-
-### Basic (10)
-
-**B1. What is a notification system responsible for, and what is it *not* responsible for?**
-*Ideal answer.* It is responsible for accepting an intent to inform a person, resolving who and how, enforcing consent and rate policy, rendering, dispatching to a provider, and recording the outcome. It is not responsible for actual delivery — Apple, Google, carriers, and mailbox providers do that — nor for the user reading it.
-*Why correct.* It draws the ownership boundary that every later design decision depends on.
-*Common mistakes.* Claiming the system "delivers" notifications; conflating dispatch with delivery.
-*Follow-ups.* If you don't own delivery, how do you know it happened? What does your provider's 202 actually mean?
-
-**B2. What are the main channels, and how do their delivery semantics differ?**
-*Ideal answer.* Push (APNs/FCM) — fast, free, silently dropped if the device is offline past TTL, requires a live token. SMS — near-universal reach, costs money per message, carrier filtering is invisible, receipts are weak. Email — rich content, deliverability governed by reputation, hard/soft bounce distinction. In-app — fully under your control, but only seen if the user opens the app. Each has a different definition of "delivered".
-*Why correct.* Channel choice is a design decision driven by semantics and cost, not preference.
-*Common mistakes.* Treating channels as interchangeable transports.
-*Follow-ups.* Which would you use for an OTP, and why not push?
-
-**B3. Why can't a producing service just call the email provider directly?**
-*Ideal answer.* Because consent, rate limits, deduplication, templating, localisation, suppression, retries, receipts, and audit are cross-cutting concerns that every producer would otherwise reimplement — inconsistently. Centralising also gives one place to enforce compliance and one place to see total user contact.
-*Why correct.* It motivates the system's existence in terms of correctness and governance, not convenience.
-*Common mistakes.* "Reusability" as the only reason; missing the compliance argument.
-*Follow-ups.* What breaks first when forty teams each send their own email?
-
-**B4. What is a device token and why is it not stable?**
-*Ideal answer.* An opaque, per-app-per-device credential issued by APNs/FCM that identifies where to deliver a push. It changes on reinstall, restore-from-backup, and occasionally at the platform's discretion, so the registry must refresh on every app launch and invalidate on `410 Unregistered` / `UNREGISTERED`.
-*Why correct.* It correctly frames the token as a rotating credential rather than an ID.
-*Common mistakes.* Storing one token per user forever; treating invalidation responses as retryable errors.
-*Follow-ups.* The same token appears for a different user — what happened, and what must you do?
-
-**B5. What is the difference between a transactional and a marketing notification?**
-*Ideal answer.* Transactional messages arise from something the user did or something that affects their account, and are generally exempt from marketing consent rules. Marketing requires opt-in (in most jurisdictions), honours quiet hours and unsubscribe, and is the first thing shed under load. The distinction is legal, not stylistic, and drives suppressibility, priority lane, retention, and sender reputation pool.
-*Why correct.* It ties a business classification to four concrete architectural consequences.
-*Common mistakes.* Treating it purely as a priority hint.
-*Follow-ups.* Where does a "your subscription is expiring, renew now" message fall?
-
-**B6. Why do you need a queue between the API and the provider?**
-*Ideal answer.* To decouple acceptance latency from provider latency, to absorb bursts that far exceed provider throughput, to survive provider outages without losing intent, and to make retries a property of the pipeline rather than of the caller. Without it, a slow provider becomes a slow API for every producer.
-*Why correct.* It names buffering, isolation, and retry ownership rather than just "async is better".
-*Common mistakes.* "Performance" with no mechanism; ignoring that the queue is also what makes consent-at-enqueue wrong.
-*Follow-ups.* What new problems does the queue create?
-
-**B7. What is an idempotency key here and who generates it?**
-*Ideal answer.* A caller-generated unique value (typically a UUID or a deterministic hash of the business event) sent in the `Idempotency-Key` header. The gateway claims it atomically; a repeat claim returns the original `notification_id` rather than creating a second notification. The caller generates it because only the caller knows that its retry is the same logical request.
-*Why correct.* Identifies both the mechanism and the ownership.
-*Common mistakes.* Server-generated keys (useless — they differ per retry); treating it as a cache key.
-*Follow-ups.* How long must the key be retained, and what sets that duration?
-
-**B8. What is a hard bounce versus a soft bounce?**
-*Ideal answer.* A hard bounce is a permanent failure (mailbox doesn't exist, domain invalid) and the address must go on a suppression list. A soft bounce is transient (mailbox full, greylisting, temporary server error) and should be retried with backoff. Treating hard bounces as retryable damages sender reputation, which degrades delivery for every message from the domain.
-*Why correct.* Connects the classification to the shared-fate consequence.
-*Common mistakes.* Retrying everything uniformly; not maintaining a suppression list at all.
-*Follow-ups.* Who else is affected when your bounce rate rises?
-
-**B9. What does "quiet hours" mean and where is it enforced?**
-*Ideal answer.* A per-user window (typically derived from their local timezone) during which non-urgent notifications are held rather than sent. It is enforced in the policy engine at dispatch time, applies only to suppressible categories, and in some jurisdictions is a legal requirement for marketing rather than a courtesy.
-*Why correct.* Places it correctly in the pipeline and distinguishes courtesy from law.
-*Common mistakes.* Enforcing it in UTC; applying it to fraud alerts.
-*Follow-ups.* What happens to a message that hits quiet hours — dropped, delayed, or downgraded to another channel?
-
-**B10. Why store a notification's content as a template ID plus variables rather than the final text?**
-*Ideal answer.* Localisation and versioning become possible; a template fix doesn't require reprocessing a queue; and — most importantly — the final rendered text, which often contains financial or personal data, is not written into every broker, log, and dead-letter queue along the way.
-*Why correct.* Leads with the operational reasons and lands on the data-minimisation one, which is the one that matters in a regulated firm.
-*Common mistakes.* Only citing "reusability".
-*Follow-ups.* Where exactly do you render, then — and what do you keep for audit?
-
-### Intermediate (10)
-
-**I1. Design the deduplication key. What goes in it and what must not?**
-*Ideal answer.* In: the business event identifier, the recipient, the category, the channel, and (for coalescing) a window bucket. Out: anything that varies between retries — timestamps taken at send time, attempt numbers, request IDs, consumer instance identifiers. The TTL must exceed the maximum redelivery horizon, which is set by your slowest dependency and your broker's rebalance behaviour.
-*Why correct.* It states both the composition rule and the TTL constraint, which is the half most candidates omit.
-*Common mistakes.* Including a timestamp (dedup then never fires); excluding channel (the fallback message vanishes).
-*Follow-ups.* What is the cost of over-scoping versus under-scoping the key?
-
-**I2. A campaign is expanded into 20 million work items at 09:00 and drains over 40 minutes. A user unsubscribes at 09:12. What must happen?**
-*Ideal answer.* They must not receive the message. That requires consent to be evaluated at dispatch time, not at expansion time — the work item carries intent, the adapter performs authorisation. A globally-honoured suppression list checked immediately before the provider call is the backstop.
-*Why correct.* It identifies the enqueue/dispatch timing distinction, which is the whole point of the question.
-*Common mistakes.* "We'd filter at expansion" — which is exactly the violation; "eventually consistent is fine" — which it legally is not.
-*Follow-ups.* Your preference store has read replicas with 200ms lag. Does that break this?
-
-**I3. How do you prevent a marketing campaign from delaying OTP delivery?**
-*Ideal answer.* Physical separation: distinct Kafka topics, distinct consumer groups and worker pools, distinct provider credentials with their own quota, and separate sender identities/pools. A priority field in a shared queue does not help, because the urgent message still sits behind millions of others in the same partition.
-*Why correct.* It rejects the intuitive but ineffective answer and gives the structural one.
-*Common mistakes.* Priority queues; "we'd scale up the consumers".
-*Follow-ups.* Under total overload, what do you shed and in what order?
-
-**I4. What do you do when a dispatch times out and you don't know whether the provider accepted it?**
-*Ideal answer.* Record an explicit `INDETERMINATE` state — never `SENT` and never `FAILED`. Then resolve it by retrying with the *same* provider-side idempotency handle (`apns-id`, provider idempotency key, your message ID in provider metadata) so a duplicate submission is deduplicated at their end, or by querying the provider's status API, or ultimately by reconciliation against the nightly file.
-*Why correct.* It treats the unknown as a first-class state with a resolution path, rather than guessing.
-*Common mistakes.* Defaulting to `FAILED` and retrying with a fresh ID — which double-sends; defaulting to `SENT` — which is §4's incident.
-*Follow-ups.* What if the channel has no idempotency support at all?
-
-**I5. How do you handle 400 price alerts for one user in 90 seconds?**
-*Ideal answer.* Per-user token bucket per category to cap the rate; a coalescing window that collapses N alerts into one digest; and platform collapse keys (`apns-collapse-id` / `collapse_key`) so an undelivered older push is replaced rather than accumulated. Coalescing is only valid for supersedable content — three payment receipts must remain three messages.
-*Why correct.* Combines server-side and device-side mechanisms and states the validity boundary.
-*Common mistakes.* Collapsing everything, which loses accumulative facts; only rate-limiting, which drops information silently.
-*Follow-ups.* What happens to the alerts you suppressed — are they gone?
-
-**I6. Webhooks or polling for delivery receipts?**
-*Ideal answer.* Both, for different purposes. Webhooks give low-latency state updates but are at-least-once, out-of-order, occasionally lost, and — critically — may not cover every outcome type in a default subscription. The provider's nightly export is complete and authoritative and is what reconciliation runs against. Webhooks for speed, files for truth.
-*Why correct.* Mirrors the payment-settlement pattern and explains *why* one is not sufficient.
-*Common mistakes.* Webhooks only; assuming webhook coverage is complete.
-*Follow-ups.* How do you handle an out-of-order webhook that would move a record backwards?
-
-**I7. How do you model preferences so a fraud alert can never be suppressed?**
-*Ideal answer.* Suppressibility is a property of the *category*, not of the user's preference row. The policy engine consults the category definition first; if `is_suppressible = false`, no preference, quiet-hour rule, or bulk opt-out can remove it. This makes the bad state unrepresentable rather than merely discouraged.
-*Why correct.* Chooses structural enforcement over convention, which this course treats as a recurring principle.
-*Common mistakes.* "It defaults to on" — a bulk update will still turn it off.
-*Follow-ups.* A user replies STOP to an SMS. Carrier rules now block *all* SMS to that number. What now?
-
-**I8. What database would you choose for the delivery log, and why not PostgreSQL?**
-*Ideal answer.* A wide-column store (Cassandra or DynamoDB) partitioned by user or notification, because the log is append-only, enormous (hundreds of GB/day), written far more than read, read almost exclusively by partition key, and has a natural TTL. PostgreSQL remains right for the small, relational, correctness-critical data: preferences, consent, devices, idempotency claims. Using one store for both means either paying relational costs for log volume or losing ACID where you need it.
-*Why correct.* Chooses per-workload rather than per-system, and justifies each with an access pattern.
-*Common mistakes.* One database for everything; choosing NoSQL for consent data.
-*Follow-ups.* Seven-year retention — where does that data live?
-
-**I9. Your dashboard shows 99.9% success. What could still be badly wrong?**
-*Ideal answer.* The numerator may include non-terminal states (§4); the aggregate may hide a concentrated failure — one carrier, one country, one template, one app version at 100% failure while the overall ratio barely moves; and "success" may mean provider-accepted rather than user-delivered. The fixes are: count unknowns as their own series, segment every delivery SLI by channel/provider/country/template, and detect on aging rather than rate.
-*Why correct.* Names all three blindnesses rather than one.
-*Common mistakes.* Only "we should alert on the rate".
-*Follow-ups.* Design the specific alert that would have caught §4's incident on day one.
-
-**I10. How do you test this system safely?**
-*Ideal answer.* Provider sandboxes plus a simulator that reproduces real latency distributions, 429s, partial batch failures, and delayed/out-of-order receipts. A hard environment guard so non-production can never reach a real address (allowlist by domain/number, enforced in the adapter, not by configuration convention). Contract tests on webhook signature verification. And a production **synthetic canary** — real messages to owned endpoints on every channel, continuously, verifying end-to-end delivery, because that is the only test that exercises the parts you don't own.
-*Why correct.* Covers pre-production and, crucially, the production canary that is the only real detector for third-party breakage.
-*Common mistakes.* Mocking the provider with an instant 200 and calling it tested.
-*Follow-ups.* What does the canary do when it stops receiving — how do you avoid a dead canary being silent?
-
-### Advanced (10)
-
-**A1. Walk through exactly-once notification delivery. Is it achievable?**
-*Ideal answer.* No — and the honest decomposition is `exactly-once = at-least-once ∧ at-most-once`. You get at-least-once from retries with backoff. You approach at-most-once through (a) an idempotency claim at ingest, (b) a business dedup key with a TTL exceeding the redelivery horizon, and (c) provider-side idempotency handles on retry. What remains unclosable is the final hop: if the provider accepted the message and your record of that acceptance is lost, you cannot distinguish "not sent" from "sent, unrecorded" without reconciliation. The correct posture is **effectively-once with a stated residual duplicate window**, and for notifications a rare duplicate is the right trade against a missed fraud alert.
-*Why correct.* Refuses the marketing term, decomposes it properly, and names the residual risk with an explicit business justification.
-*Common mistakes.* Claiming exactly-once via "a Redis SETNX"; not identifying which hop remains open.
-*Follow-ups.* Which categories would you flip that trade-off for?
-
-**A2. Design the fan-out for a 40-million-recipient regulatory notice with a statutory deadline.**
-*Ideal answer.* Accept the notice as a single request with an audience reference and acknowledge immediately. A checkpointed streaming expander produces per-recipient work items in batches, recording expansion progress (expected count, produced count, last checkpoint) so the job is resumable and "did it all go out?" is answerable. Dispatch across a dedicated lane with its own provider quota. Because the deadline is statutory, plan capacity against the *deadline*, not the average: 40M over an 8-hour window is ~1,400/s sustained, which is a provisioning question you must answer before starting, and the per-channel provider quota is the binding constraint, not your compute.
-*Why correct.* Handles the expansion-progress problem — the thing that makes bulk sends unverifiable — and converts a deadline into a rate requirement.
-*Common mistakes.* Expanding synchronously; no progress record; sizing for average load.
-*Follow-ups.* Halfway through, the email provider starts 429-ing. What do you do, given the deadline?
-
-**A3. The preference store has 200ms replica lag. A user unsubscribes and a message is dispatched 150ms later. Analyse.**
-*Ideal answer.* If the dispatcher reads from a replica, it may read stale consent and send unlawfully. Options: (a) route dispatch-time consent reads to the primary — simple, correct, but concentrates read load; (b) a version-stamped cache where the unsubscribe write also invalidates/updates the cache synchronously before returning 200 to the user, so the user's own action is causally ordered ahead of any subsequent send; (c) a fast, strongly-consistent suppression list (a small, separate store) checked in the adapter as a final gate, accepting that the full preference model stays eventually consistent. In practice (b)+(c): the suppression list is small and hot, so making *it* strongly consistent is cheap, while leaving the large preference dataset on replicas.
-*Why correct.* Recognises that you do not need strong consistency over the whole dataset — only over the small, legally-critical part.
-*Common mistakes.* "Make everything strongly consistent"; "eventual consistency is fine here".
-*Follow-ups.* Now the suppression store is unavailable. Do you send or not, and does the answer differ by category?
-
-**A4. How would you detect that push notifications have stopped working for one app version on one OS, while overall delivery looks normal?**
-*Ideal answer.* You cannot, from aggregates — that is the point. You need delivery SLIs **segmented** by `(channel, provider, platform, app_version, country, template)` with anomaly detection per segment against that segment's own baseline, plus aging-based detection so a segment that stops producing terminal states raises a break even when its volume is too small to move a ratio. Additionally, a synthetic canary per platform and per major app version gives an independent signal that does not depend on organic traffic existing in that segment.
-*Why correct.* Names segmentation, aging, *and* the independent probe, and explains why the aggregate is structurally blind.
-*Common mistakes.* Proposing a global anomaly detector on the overall rate.
-*Follow-ups.* What is the cardinality cost of that segmentation, and how do you keep it affordable?
-
-**A5. Your SMS aggregator reports 100% success, but users in one country report nothing arriving. Diagnose.**
-*Ideal answer.* Almost certainly carrier-level filtering: the aggregator's "success" means *accepted by the aggregator or handed to the carrier*, not delivered to the handset. Causes include an unregistered sender ID, content that trips a spam filter, missing local registration (e.g. 10DLC/short-code registration requirements), or a route change by the aggregator. Investigation: request full delivery receipts (DLRs) rather than submission acks; compare per-route and per-sender-ID success; test with a real handset in-country; check whether the aggregator silently changed routes. Mitigation: multi-aggregator routing with per-country health, and a fallback channel when a country's confirmed-delivery rate collapses.
-*Why correct.* Distinguishes the layers of "success" in the SMS stack — the specific knowledge that separates someone who has run this from someone who has read about it.
-*Common mistakes.* Assuming the aggregator's success metric is delivery.
-*Follow-ups.* How would you have known before the users told you?
-
-**A6. Notification delivery is on the critical path for card authorisation via SMS OTP. Assess and fix.**
-*Ideal answer.* This is a mislabelled tier-1 dependency: a "best-effort" notification system now gates payment authorisation, so its availability multiplies into the payment SLO and its worst-case latency becomes the customer's. Fixes, in order: (1) reduce coupling — prefer in-app push approval with SMS as fallback, so the weakest dependency is not the only path; (2) isolate — dedicated lane, dedicated provider credentials, dedicated capacity, and multi-provider failover with fast health-based routing; (3) set an explicit SLO on OTP delivery and monitor it as a payment-flow metric, not a notification metric; (4) define the degraded mode — what does authorisation do when OTP cannot be delivered within N seconds, and is that decision made by the payment system rather than by a timeout?
-*Why correct.* Reframes the problem as coupling and SLO ownership rather than as a notification-tuning exercise.
-*Common mistakes.* Only proposing "add a second SMS provider".
-*Follow-ups.* Who owns the SLO when the failure is at the carrier?
-
-**A7. Design retention for a system sending 1.5B notifications/day with a 7-year obligation on some of them.**
-*Ideal answer.* Do the arithmetic first: full-fidelity retention of everything for seven years is on the order of 1.5 PB and is neither affordable nor lawful for marketing data under GDPR minimisation. But the regulated subset is ~2% of volume — roughly 30M/day, ~12 GB/day, ~30 TB over seven years — which is entirely tractable. So **classification at ingest is the storage architecture decision**: mandatory-notice categories are written with full rendered artefact to an immutable archive with a legal-hold capability; everything else keeps metadata only (template version + content hash), hot for 30 days in the operational store, then aggregated. The `category` field stops being a label and becomes the thing that determines cost, lawfulness, and evidentiary capability.
-*Why correct.* Uses estimation to convert a compliance requirement into an architectural one — the exact move the four-step method demands.
-*Common mistakes.* One retention policy for all traffic; keeping everything "to be safe", which is itself a violation.
-*Follow-ups.* A legal hold lands on one customer. How does that interact with your TTL-based deletion?
-
-**A8. How do you make the system multi-tenant for internal teams without one team's mistake affecting others?**
-*Ideal answer.* Per-producer quotas enforced at the gateway (not just documented), separate priority lanes by traffic class, separate provider credentials per class so one team's bounce rate cannot consume another's reputation or quota, per-tenant circuit breakers so a team generating systematic errors is isolated rather than filling shared retry queues, and cost attribution so SMS spend is visible per team. Category-level authorisation prevents a low-trust producer sending high-trust message types.
-*Why correct.* Applies structural isolation across quota, reputation, failure, and cost — four distinct blast radii.
-*Common mistakes.* Only rate-limiting; ignoring reputation as a shared resource.
-*Follow-ups.* One team's template has a bug producing a 40% bounce rate. What happens automatically?
-
-**A9. What is your position on ordering guarantees, and where do you actually need them?**
-*Ideal answer.* No global ordering — it would serialise the system for no benefit. Ordering matters only within `(user, category)` for **supersedable** content: OTPs, balances, order status. There, attach a monotonically increasing sequence to the notification and use both server-side discard of stale sequences and platform collapse keys so the device shows only the latest. Accumulative content (individual payments) must never be collapsed. Making supersedability a declared property of the category prevents producers deciding inconsistently.
-*Why correct.* Scopes ordering precisely and connects it to a concrete platform mechanism.
-*Common mistakes.* Promising per-user FIFO globally; collapsing accumulative messages.
-*Follow-ups.* Two OTPs are requested 200ms apart across two regions. Which wins, and how do you decide?
-
-**A10. Kafka consumer lag on the notification topic is growing steadily. Walk through your diagnosis.**
-*Ideal answer.* Establish whether input rose or output fell — they have different fixes. If output fell: check provider latency and error rate first (the usual cause), then partition skew (a hot user/tenant), then consumer-side pauses (GC, poll-interval-driven rebalances, a blocking call added in a recent deploy). Check whether consumers are *rebalancing repeatedly*, which presents as lag with normal-looking per-message latency and is often caused by provider latency exceeding `max.poll.interval.ms` — a feedback loop where slowness causes reprocessing which causes more slowness. Adding consumers beyond the partition count does nothing; adding them beyond the provider's concurrency limit produces 429s and makes it worse.
-*Why correct.* Separates input from output, names the rebalance feedback loop, and rejects the reflexive "scale out".
-*Common mistakes.* Immediately adding consumers; not checking rebalance metrics.
-*Follow-ups.* You find a rebalance loop. What is the minimal safe fix, and what is the durable one? (See §14.)
-
-### Expert (10)
-
-**E1. Derive, from first principles, why a notification system cannot guarantee delivery, and what it can guarantee instead.**
-*Ideal answer.* Delivery requires an acknowledgement from an agent outside your trust and failure domain — a carrier, an OS push service, a mailbox provider — and each may fail, filter, or lie, with no recourse. This is a variant of the Two Generals problem where the second general is not merely unreachable but adversarially incentivised (spam filtering). Therefore the strongest achievable guarantees are: **(1)** every accepted intent is durably recorded before acknowledgement; **(2)** every accepted intent is dispatched at least once, or terminally classified with a reason; **(3)** every dispatch reaches a terminal state or is escalated as a break within a bounded time; **(4)** no suppressible message is dispatched against a valid suppression. Note what these have in common: they are all statements about **evidence and bounded uncertainty**, not about outcomes. Designing for evidence rather than outcomes is the entire discipline of this system.
-*Why correct.* Derives the guarantee set from the trust boundary rather than asserting it, and identifies the common structure.
-*Common mistakes.* Promising delivery SLAs the system cannot own.
-*Follow-ups.* Which of those four can be enforced structurally, and which only detected?
-
-**E2. Collect the failure modes in this system that present as success, and give the general rule.**
-*Ideal answer.* (a) Provider 202 recorded as delivery (§4). (b) Dedup key containing a timestamp — deduplication silently never fires, so the system merely sends more. (c) Carrier filtering with aggregator-reported success. (d) Consent evaluated at enqueue — messages sent after opt-out, with a perfect audit trail showing "we checked". (e) Suppression list silently swallowing an entire category. (f) Collapse keys collapsing accumulative content — the user receives one message where three were owed, and every metric says three succeeded. (g) A campaign expansion that stopped halfway with no progress record — no errors anywhere. **General rule: any operation whose failure produces no error, and whose success and failure are represented by the same stored value, is undetectable from the inside.** The remedy is always one of three: give the operation an independent verifier (reconciliation, canaries), give every silent path a counter, or make the states structurally distinct so the ambiguity cannot be stored.
-*Why correct.* Generalises across seven concrete instances to a stated rule with three named remedies — and connects to the same defect class in Modules 177, 178, and 133.
-*Common mistakes.* Listing incidents without extracting the invariant.
-*Follow-ups.* Which of the three remedies is cheapest, and which is most reliable?
-
-**E3. Would you event-source the notification system? Argue both sides and decide.**
-*Ideal answer.* The delivery log is already an append-only event stream and benefits from that shape: out-of-order receipts, corrections from reconciliation, and audit questions ("what did we know at 14:00 on 4 March") are natural. But full event sourcing as a framework brings a schema-evolution burden and rebuild cost that is poorly matched here, because the natural aggregate (a delivery) is small, short-lived, and never needs multi-aggregate transactional consistency. **Decision: adopt the append-only event log for delivery state and derive the current state; do not adopt event sourcing as an architecture.** This is the same conclusion Module 178 §E3 reached for the ledger by a different route — take the idea, decline the framework — and the reasoning generalises: event sourcing pays off when the aggregate boundary and the transaction boundary coincide and history is the product; here history is evidence, which the log alone provides.
-*Why correct.* Distinguishes the pattern from the framework with a stated criterion, and cross-references consistently.
-*Common mistakes.* Adopting or rejecting wholesale.
-*Follow-ups.* How do you handle a receipt that arrives after the delivery record has been archived?
-
-**E4. Design the complete monitoring for this system. What are the SLIs and what is structurally undetectable?**
-*Ideal answer.*
-
-| Signal | Why | Detects |
-|---|---|---|
-| `delivered / dispatched`, segmented by channel × provider × country × platform × template | The only SLI grounded in provider-confirmed terminal state | Segment-level collapse invisible to aggregates |
-| Non-terminal records by age bucket | Detects §4's failure directly | Missing receipts, unsubscribed webhook events |
-| Suppression counters per reason (dedup, cap, consent, quiet hours, suppression list) | Suppression is a silent success path | A dedup-key regression (count → 0) or a policy bug (count → everything) |
-| Expansion progress: expected vs produced per campaign | Absence of rows is ambiguous | Half-finished fan-outs |
-| Provider error rate and latency by code | Upstream health | 429 onset, credential expiry, route change |
-| Synthetic canary success per channel × platform, **with a dead-man's switch** | Independent of organic traffic | Total channel failure; and a canary that itself stopped running |
-| Ingest → provider-accepted latency, p50/p99, per lane | Lane isolation actually working | Campaign traffic bleeding into the critical lane |
-| Reconciliation break counts by class, and break *age* | External truth vs internal record | Everything the fast path missed |
-
-**Structurally undetectable from the inside:** messages the carrier silently filtered but reported as delivered; messages the user received but did not perceive; and content that was wrong-but-well-formed (right person, right template, wrong variable). The first is covered only by in-country synthetic probes, the second not at all, and the third only by template-level review and content-hash sampling. Naming what your monitoring *cannot* see is what distinguishes a Principal answer here.
-*Why correct.* Gives a complete, mechanism-linked table and then states the blind spots explicitly.
-*Common mistakes.* CPU/memory dashboards; a single "delivery rate" number.
-*Follow-ups.* Your canary has been green for 30 days. How confident are you that it is actually running?
-
-**E5. You must migrate from a legacy per-service notification approach (40 teams, each with its own SMTP/Twilio integration) to this platform, without a big bang. Plan it.**
-*Ideal answer.* Sequence: (1) build the platform and put the **suppression list and consent store in front of the legacy paths first**, via a thin shared library or an egress proxy — this delivers the compliance win before any migration and immediately reduces the worst risk. (2) Onboard by *category*, not by team, starting with high-volume/low-risk (marketing) to build operational confidence, and leaving regulated notices for last when the evidence pipeline is proven. (3) Run **dual-write with comparison** for each migrated category: legacy sends, platform computes what it *would* have sent, and a differ reports mismatches — cut over only when the diff is clean across a full business cycle including month-end and a campaign peak. (4) Gate cutover on **scenario coverage, not elapsed time** (Module 134's principle): every category must have exercised bounce handling, provider failure, opt-out, and quiet hours before it counts as validated. (5) Decommission aggressively — a legacy path left running is a compliance gap that will be found by an auditor, not by you.
-*Why correct.* Front-loads the risk reduction, uses comparison rather than trust, and applies the course's established cutover criterion.
-*Common mistakes.* Team-by-team migration (leaves the compliance gap open longest); time-boxed cutover.
-*Follow-ups.* A team refuses to migrate because the platform is slower than their direct integration. How do you handle it?
-
-**E6. A single institutional account generates 8 million notifications in a burst, all partitioned to one key. Analyse and fix.**
-*Ideal answer.* Partitioning by `user_id` colocates rate-limit and dedup state, which is right for consumers and catastrophic for an account that is really an organisation: one partition, one consumer, unbounded lag on that partition while others idle, and the per-user cap — designed to protect a human — now throttling a legitimate institutional flow. Fix in two parts. **Structurally:** salt large accounts across `N` sub-partitions (`user_id:shard`), which is safe because cross-user ordering is not required and within-user ordering is only needed per category for supersedable content, which can be routed by `(user_id, category)` to preserve it where it matters. **Policy-wise:** recognise that an institutional account is a *different entity type* with different caps and probably a different channel (a feed or webhook, not 8 million emails) — the deeper answer is that the requirement was mis-modelled, and the right fix is a bulk-delivery product rather than a better shard key.
-*Why correct.* Solves the immediate hot-partition problem and then challenges the requirement, which is the Principal-level move.
-*Common mistakes.* Only reshaping the key; not noticing the cap is now harmful.
-*Follow-ups.* How do you detect the *next* account that outgrows the consumer model, before it becomes an incident?
-
-**E7. Compare push, SMS, and email as delivery channels on evidentiary strength. Which would you use to prove notice was given?**
-*Ideal answer.* Email is strongest: providers supply per-message terminal events (delivered/bounced/dropped) with message IDs, exports are complete, and the rendered artefact can be retained. SMS is weakest despite feeling more immediate: aggregator success often means submission, DLRs are inconsistent per carrier and country, and content is not retained by the carrier. Push is unsuitable as evidence: delivery depends on a token that may be stale, the OS may drop after TTL, and there is no per-message durable third-party record you can produce two years later. **For proving notice: email as the primary evidentiary channel, with a physically-retained rendered artefact and a reconciled terminal state; push and SMS as *supplementary* for timeliness only.** And a system-of-record note: the evidence is the reconciled terminal state plus the retained artefact, not the fact that your service logged `SENT`.
-*Why correct.* Ranks by the specific property asked about rather than by general quality, and separates timeliness from evidence.
-*Common mistakes.* Choosing SMS because it "feels" more reliable; treating internal logs as evidence.
-*Follow-ups.* The customer claims they never received it and their mailbox provider marked it spam. What is your position?
-
-**E8. Where does this system sit on CAP, and is one answer sufficient?**
-*Ideal answer.* No — and giving a single answer is the mistake. The **dispatch path is AP**: under partition, sending a possibly-duplicate notification is far better than sending none, because a missed fraud alert is a loss event and a duplicate is an annoyance. The **consent gate is CP**: if consent cannot be verified, suppressible traffic must not be sent, because an unlawful send is unrecoverable while a delayed one is not. The **delivery log is AP with reconciliation** — accept writes, resolve conflicts against provider truth later. The interesting consequence is that the CP component must be *small* to be affordable, which is why the design splits a strongly-consistent suppression list out of the eventually-consistent preference store (§A3). This layered posture — different components, different answers, with a stated mechanism letting them coexist — is exactly the structure Module 178 §9 arrived at for payments, where idempotency is what lets an AP edge front a CP core.
-*Why correct.* Rejects the single-answer framing, justifies each choice by the recoverability of the failure, and generalises across modules.
-*Common mistakes.* "It's AP because notifications are best-effort."
-*Follow-ups.* The consent store is down for 20 minutes. Exactly which traffic keeps flowing?
-
-**E9. What is the most discriminating question you could ask a candidate about this system, and why?**
-*Ideal answer.* *"Your delivery dashboard says 99.9%. How would you know if a specific customer had received nothing for three months?"* It is discriminating because it cannot be answered from aggregate metrics at all — it requires the candidate to recognise that per-user delivery is a different question from system-wide delivery, that a user with zero notifications produces zero failure signals (absence generates no events), and that detecting it needs either a per-user expectation model (this user should have received a statement notice this month) or reconciliation against what *should* have been sent. Weak candidates propose better alerting on the same aggregate. Strong candidates identify that **the failure produces silence, and silence is not a signal you can alert on unless you first predict what should have been there** — the same shape as regulatory reporting's completeness problem (Module 133) and payment reconciliation's missing-file problem (Module 178).
-*Why correct.* Identifies the class of failure that monitoring is structurally incapable of seeing and states the only remedy — a predicted expectation.
-*Common mistakes.* Treating it as an alerting-threshold question.
-*Follow-ups.* Build the expectation model. What generates the "should have received" set, and what is that model's own blind spot?
-
-**E10. This system will be asked to add AI-generated notification content. What is your position as the architect?**
-*Ideal answer.* The generation is not the risk; the **loss of the template invariant** is. Today, content is reviewable ahead of time: a finite set of versioned templates, each reviewed once, rendered deterministically. Generated content makes every message unique and unreviewed, which breaks four things simultaneously: (1) compliance review of financial communications, which is a regulatory requirement in most jurisdictions and assumes pre-approval; (2) the content-hash evidence model — you must now retain full artefacts for everything, with the storage and privacy implications of §A7; (3) localisation QA; (4) the phishing boundary of §8, since generated text can be steered by untrusted inputs. Position: permit generation **only inside bounded slots within an approved template**, with the generated span constrained (length, no links, no amounts, no calls to action), a deterministic fallback when generation fails or is filtered, full retention of generated spans, and a category-level allowlist that excludes every regulated notice. In short — treat the model as an untrusted variable source feeding an approved template, not as a replacement for the template.
-*Why correct.* Identifies the actual invariant at risk rather than debating model quality, and specifies a design that preserves it.
-*Common mistakes.* Debating hallucination rates; or refusing outright without offering the bounded design.
-*Follow-ups.* Who signs off on the constraint list, and how do you prove at audit that no unapproved content shipped?
-
----
-
 ## 11. Coding Exercises
 
 ### Easy — Quiet-hours evaluation in the user's local time
@@ -662,7 +647,7 @@ private static TimeZoneInfo ResolveOrUtc(string id)
 }
 ```
 
-Two production hardenings that matter more than the algorithm: the `suppressible` short-circuit makes it structurally impossible for quiet hours to hold a fraud alert, and the unknown-timezone fallback prevents a bad profile record from throwing on the dispatch path — with a counter, because a silent fallback is exactly the silent-success pattern of §E2.
+Two production hardenings that matter more than the algorithm: the `suppressible` short-circuit makes it structurally impossible for quiet hours to hold a fraud alert, and the unknown-timezone fallback prevents a bad profile record from throwing on the dispatch path — with a counter, because a silent fallback is exactly the silent-success pattern of §2.12.
 
 ---
 
@@ -728,9 +713,9 @@ public sealed record Digest(long UserId, string Category, PendingItem[] Items);
 **Time complexity.** O(1) amortised per admit; O(K) per drain over active buckets.
 **Space complexity.** O(active users × categories + held items).
 
-**The bug this design avoids.** A limiter that returns `Dropped` for over-cap traffic silently destroys information, and — critically — produces no distinguishable signal from "the user had no notifications". `Held` plus a digest preserves the information and makes the suppression countable (§E2's remedy).
+**The bug this design avoids.** A limiter that returns `Dropped` for over-cap traffic silently destroys information, and — critically — produces no distinguishable signal from "the user had no notifications". `Held` plus a digest preserves the information and makes the suppression countable (§2.12's remedy).
 
-**Optimised for distribution.** Single-node `Dictionary` state does not survive scale-out or restart. In production this is a Redis Lua script performing the check-and-increment atomically, keyed `rl:{user}:{category}:{windowBucket}` with a TTL of one window, and held items appended to a Redis list under the same key prefix. The Lua script matters: a `GET`/`INCR` round-trip is a read-modify-write race that lets two workers each believe they are under the cap — the same lost-update shape as Module 178 §E9's hot fee account. Cap memory with a bounded held-list length, dropping *and counting* beyond it, because an unbounded hold list is a memory leak with a market-crash trigger.
+**Optimised for distribution.** Single-node `Dictionary` state does not survive scale-out or restart. In production this is a Redis Lua script performing the check-and-increment atomically, keyed `rl:{user}:{category}:{windowBucket}` with a TTL of one window, and held items appended to a Redis list under the same key prefix. The Lua script matters: a `GET`/`INCR` round-trip is a read-modify-write race that lets two workers each believe they are under the cap — the same lost-update shape as Module 178 §2.25's hot fee account. Cap memory with a bounded held-list length, dropping *and counting* beyond it, because an unbounded hold list is a memory leak with a market-crash trigger.
 
 ---
 
@@ -1291,11 +1276,11 @@ Stateful participants: preferences/consent, device registry, delivery log, dedup
 
 **External consistency** rests on reconciliation. Even where a provider offers idempotent APIs, reconcile — for the same reason the payment chapter gives: do not assume the external system is always correct.
 
-**Replication lag** is the sharpest consistency problem here, because it has legal consequences (§A3). Options: primary-only reads (simple, doesn't scale), consensus stores (YugabyteDB/CockroachDB — real, expensive), or the chosen approach: **make only the small critical part strongly consistent.** The suppression list is a few hundred million rows of `(channel, address_hash)` — cheap to replicate synchronously and check last. The large preference dataset stays on replicas, with the unsubscribe write path invalidating the cache synchronously before returning success, so a user's own action is causally ordered ahead of any subsequent send.
+**Replication lag** is the sharpest consistency problem here, because it has legal consequences (§2.14). Options: primary-only reads (simple, doesn't scale), consensus stores (YugabyteDB/CockroachDB — real, expensive), or the chosen approach: **make only the small critical part strongly consistent.** The suppression list is a few hundred million rows of `(channel, address_hash)` — cheap to replicate synchronously and check last. The large preference dataset stays on replicas, with the unsubscribe write path invalidating the cache synchronously before returning success, so a user's own action is causally ordered ahead of any subsequent send.
 
 #### 3.8 Storm control and load shedding
 
-On burst: the queue absorbs (that is its job), lanes ensure the critical traffic drains first, per-provider concurrency limiters hold at the provider's actual ceiling rather than generating 429s, per-user caps and coalescing collapse the human-facing volume, and — past a threshold — the shedding policy drops marketing entirely, then downgrades digests, and never touches the mandatory lane. Every shed decision is counted and labelled, because shedding is a silent success path (§E2).
+On burst: the queue absorbs (that is its job), lanes ensure the critical traffic drains first, per-provider concurrency limiters hold at the provider's actual ceiling rather than generating 429s, per-user caps and coalescing collapse the human-facing volume, and — past a threshold — the shedding policy drops marketing entirely, then downgrades digests, and never touches the mandatory lane. Every shed decision is counted and labelled, because shedding is a silent success path (§2.12).
 
 #### 3.9 Security
 
@@ -1307,7 +1292,7 @@ Covered fully in §8. The three decisions that belong in the design itself rathe
 
 **What we did not cover, and would be the next questions:**
 
-- **Monitoring and alerting** — the full SLI set is §E4. The two that matter most: segmented `delivered/dispatched`, and non-terminal records by age.
+- **Monitoring and alerting** — the full SLI set is §2.25. The two that matter most: segmented `delivered/dispatched`, and non-terminal records by age.
 - **Debugging tooling** — a per-user timeline view joining requests, deliveries, events, and provider raw payloads; and a "why was this suppressed?" explainer that replays the policy chain, because "the system decided not to send" is otherwise unanswerable by support.
 - **Cost attribution** — SMS at ~$525k/day needs per-team chargeback, or no team will optimise.
 - **Additional channels** — WhatsApp, RCS, voice; each is a new adapter and a new set of delivery semantics, which the adapter interface must not assume away.
@@ -1445,7 +1430,7 @@ Note the detail that matters: the **same `providerRef` is presented to the secon
 - **OCP** — a new channel is a new adapter registration, no changes to the dispatcher.
 - **LSP** — the decorator is substitutable for any adapter, which is what makes resilience policy uniform.
 - **ISP** — `IProviderAdapter` is deliberately narrow; providers that lack an invalidation concept implement a no-op rather than being forced into a fat interface.
-- **DIP** — every dependency is an abstraction, which is what makes the provider simulator (§I10) possible at all.
+- **DIP** — every dependency is an abstraction, which is what makes the provider simulator (§2.27) possible at all.
 
 **Extensibility.** WhatsApp is a new adapter plus a template type. A new resilience policy (adaptive concurrency, hedged requests) is a new decorator. A new routing rule (cost-based provider selection) is a change confined to the selector.
 
@@ -1468,7 +1453,7 @@ Note the detail that matters: the **same `providerRef` is presented to the secon
 
 **Root cause.** A **dedup TTL shorter than the maximum redelivery horizon.** The horizon is not a configuration value — it is an emergent property of the slowest dependency's latency multiplied by the batch size, compared against the consumer's poll interval. A third-party latency increase silently pushed the horizon from seconds to minutes, past a 60-second TTL that had been correct under every condition anyone had tested.
 
-**Tools.** Kafka consumer-group metrics (`rebalance-rate-per-hour`, `commit-latency`, `records-lag`); provider latency histograms segmented by provider; the delivery-event log grouped by `notification_id` to count distinct dispatches; Redis `INFO keyspace` and TTL sampling; the suppression counter by reason — **which was the single most diagnostic signal, and existed only because §E2's "count every silent path" rule had been applied**.
+**Tools.** Kafka consumer-group metrics (`rebalance-rate-per-hour`, `commit-latency`, `records-lag`); provider latency histograms segmented by provider; the delivery-event log grouped by `notification_id` to count distinct dispatches; Redis `INFO keyspace` and TTL sampling; the suppression counter by reason — **which was the single most diagnostic signal, and existed only because §2.12's "count every silent path" rule had been applied**.
 
 **Fix.**
 
@@ -1520,7 +1505,7 @@ The question that determines whether §4's incident is possible.
 *Advantages:* maximum fidelity; temporal queries natural.
 *Disadvantages:* schema-evolution burden across billions of events; rebuild cost at this volume is prohibitive; and the aggregate here is small and short-lived, so the pattern's main benefit — complex multi-step aggregate consistency — is not needed.
 *Cost:* high. *Complexity:* high. *Maintainability:* poor at this cardinality. *Performance:* read-side requires projections anyway. *Ops overhead:* high.
-*Verdict:* the framework's costs without its benefits (§E3).
+*Verdict:* the framework's costs without its benefits (§2.23).
 
 **Comparison.**
 
