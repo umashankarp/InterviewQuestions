@@ -135,19 +135,7 @@ Every System Design treatment in this repo — both §12 of any module and every
 **Interaction with A6:** the four-step spine governs §12 only; §1–4 and §13–15/17 stay exactly as specified in A6. Where §12's four-step treatment would duplicate §13 (LLD) or §14 (Production Debugging), §12 states the decision and cross-references rather than repeating.
 
 ## A8. Current progress snapshot (context only — README Progress Log is authoritative)
-**All 45 effective domains plus the ad hoc `56-LINQ-EFCore` are complete or near-complete; 188 numbered modules are logged (1–187, 189), plus two unnumbered gap-fill blocks.** The arc, in order:
-
-- **Modules 1–104** — core fundamentals: language, framework, data layer, OOP/SOLID/patterns, DS&A, system design, distributed systems, microservices, EDA, messaging, cloud, containers, delivery, observability, security, performance.
-- **Modules 105–128** — `30-Architecture-Patterns` through `38-API-Gateway`.
-- **Modules 129–134** — buy-side System Design extension.
-- **Modules 135–149** — Distributed Systems / Microservices / EDA depth extensions.
-- **Modules 150–161** — `39-Service-Mesh` through `43-React` (42/43 written as an explicit comparative pair).
-- **Modules 162–168, 181–185** — `44-AI-Systems`, **12 modules total**, re-scoped up from the original 7-module plan as audit gaps surfaced (A9). *(Earlier revisions of this file said "14 modules"; that was an arithmetic error — 7 + 1 + 4 = 12, and the folder holds 12 files.)*
-- **Modules 169–172 and 187–188** — `51-Engineering-Leadership`, scoped at 6 modules: 169 combined overview, 170 Technical Leadership, 171 Staff+, 172 Principal, 187 Software Architecture as a role, **188 Engineering Management — still open**.
-- **Modules 173–180, 186** — assorted: 173 Microservices/AWS load balancing; 174 + 189 LINQ & EF Core (**190 still open**); 175–180 System Design (180 is the first module under the A7 four-step standard); 186 Design Patterns GoF completion.
-- **Unnumbered gap-fill blocks (2026-09-03)** — 5 files added to `01-CSharp` (folder now 13 files) and 2 files added to `02-DotNet-AspNetCore` (folder now 8 files), both under A9 variant 2.
-
-**Two modules are named-but-unwritten** and are forward-referenced by already-published files, so they are the natural next work: **188** (Engineering Management) and **190** (EF Core in practice). Both are listed under "Open items" at the end of the README.
+All progress detail — the module arc, per-domain ranges, named-but-unwritten modules, and open items — lives in `00-Roadmap/README.md`'s Progress Log; this section was trimmed 2026-09-12 (Claude Code Doctor pass) because it duplicated that authoritative source and had already drifted once (see the corrected AI-Systems module count this section used to carry). Read the README directly rather than this file for current counts.
 
 **Non-module files in the repo:** `14-System-Design/README.md` is a domain-local index mapping each System Design module to the interview question class it answers; `agent.md` at the repo root holds the FinTech Interview Reviewer persona used for audit/improvement passes, and is separate from the authoring rules in this file.
 
