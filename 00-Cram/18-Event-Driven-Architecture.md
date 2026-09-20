@@ -57,7 +57,7 @@
 
 - **At-most-once** — ack before processing. Fast, loses messages.
 - **At-least-once** — ack after processing. **The default and the correct choice.** Duplicates happen.
-- **"Exactly-once" is not a delivery property.** State the identity: **`exactly-once = at-least-once (retry) AND at-most-once (idempotent consumer)`**. The dedupe lives in the consumer, not the wire.
+- **"Exactly-once" is not a wire-level delivery property.** State the honest guarantee: **at-least-once delivery plus idempotent, atomic consumer handling can produce an effectively-once effect within the dedupe-retention window.** The dedupe lives with the consumer effect, not on the wire.
 - **Kafka's "exactly-once semantics" is narrower than the name suggests:** it covers a consume-transform-produce cycle *within Kafka* (idempotent producer + transactions spanning the offset commit and the output write). It does **not** make a side effect in your database or an external HTTP call exactly-once.
 - **Internal vs external idempotency are different problems:** internal you control both sides; external you must reconcile because the third party's view is authoritative.
 
@@ -191,7 +191,7 @@ Where choreography is right: notification-style events where consumers are genui
 
 ### Quick-fire (30 seconds each)
 
-- **"How do you get exactly-once processing?"** → You don't get it on the wire. You get at-least-once delivery from retries plus at-most-once effect from an idempotent consumer — that composition is exactly-once. Concretely: a stable business-derived idempotency key, and a dedupe record written in the *same transaction* as the side effect. Kafka's EOS only covers consume-transform-produce inside Kafka; it does nothing for your database write or an outbound API call.
+- **"How do you get exactly-once processing?"** → You do not get exactly-once delivery on the wire. You get at-least-once delivery from retries plus an **effectively-once business effect** from an idempotent consumer. Concretely: a stable business-derived idempotency key, and a dedupe record written in the *same transaction* as the side effect, with an explicit retention window. Kafka's EOS only covers consume-transform-produce inside Kafka; it does nothing for your database write or an outbound API call.
 - **"Consumer lag is growing — what do you do?"** → First establish how much runway is left: lag against retention, because that's where lag becomes permanent loss. Then diagnose which of four causes it is — producer spike, consumer slowdown, partition skew, or a rebalance storm — because the fix differs. Adding consumers only helps if I have spare partitions, which is the most common wrong first move.
 - **"Choreography or orchestration?"** → Choreography for notifications where consumers are optional and independent. Orchestration for any business transaction with a defined outcome, because someone will eventually ask "where is this order?" and with pure choreography the workflow exists nowhere — you'd be reconstructing it from logs across five services.
 

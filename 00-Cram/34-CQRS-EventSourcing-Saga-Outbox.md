@@ -10,7 +10,7 @@
 | **Saga** | a business transaction spans services and 2PC is unavailable |
 | **Outbox** | atomically "save to the DB **and** publish an event" |
 
-**CQRS does not require Event Sourcing. Event Sourcing effectively requires CQRS.** Say this — conflating them is the most common mistake in this area.
+**CQRS does not require Event Sourcing. Event Sourcing does not require CQRS either, but high-volume or complex event-sourced reads commonly need projections/read models.** Keep the concepts separate — conflating them is the common mistake.
 
 ---
 
@@ -101,7 +101,7 @@
 
 The costs I'd put on the table before agreeing to any of it: every engineer joining has to learn it; eventual consistency becomes pervasive because reads need projections; **event schema evolution is forever** — you can never edit a historical event, only upcast on read; and GDPR right-to-erasure directly conflicts with immutability, which needs crypto-shredding — delete the key, not the event — decided up front rather than discovered.
 
-So my answer is: pick the one or two aggregates where history is genuinely the product, do those properly, and leave the rest CRUD. And I'd separate the two concepts explicitly, because they get conflated — **CQRS doesn't require event sourcing** and is often worth doing alone; **event sourcing effectively requires CQRS**, because replay-based reads are too slow to serve queries directly.
+So my answer is: pick the one or two aggregates where history is genuinely the product, do those properly, and leave the rest CRUD. And I'd separate the two concepts explicitly, because they get conflated — **CQRS doesn't require event sourcing** and is often worth doing alone; **event sourcing can serve simple reads by replaying streams, but complex or high-volume reads commonly justify CQRS-style projections**.
 
 **Why it lands.** Scopes it per aggregate, names the four costs including GDPR, and separates CQRS from ES — the most common conflation in this area.
 **✗ Weak answer.** "Yes, it gives us a full audit trail" with no cost or scope.

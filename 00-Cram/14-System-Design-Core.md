@@ -145,7 +145,7 @@ Consequences to state in any scatter-gather: **adding shards makes the tail wors
 - **Monotonic reads** is the one candidates miss — "I saw the post, refreshed, and it vanished" is a monotonicity failure, and it is *stronger* than eventual consistency.
 - **Quorum:** `W + R > N` gives strong-ish reads. `N=3, W=2, R=2` is the standard. `W=1` = fast, lossy. `R=1` = fast, possibly stale.
 - **Split brain** → **fencing tokens** (a monotonically increasing epoch the storage layer checks) — a lease alone is not enough, because the old leader may be paused, not dead.
-- **Exactly-once does not exist on the wire.** The identity: **`exactly-once = at-least-once (retry) AND at-most-once (idempotency key)`**. Say it this way.
+- **Exactly-once is not a wire-level delivery guarantee.** Say: **at-least-once delivery plus idempotent, atomic handling can give an effectively-once business effect** — bounded by the deduplication-retention window.
 
 ---
 
@@ -215,7 +215,7 @@ These are **execution** questions — the ones that decide your level regardless
 
 **Answer.** I'd spend the first five minutes narrowing it, out loud, because the prompt is vague on purpose and jumping to boxes is the failure being tested. Questions in order: who are the users — consumers, merchants, internal? Which flows are in scope — pay-in only, or pay-out and refunds too? Single or multi-currency, single or multi-region? What's delegated to a third party — are we PCI-scoped or using a hosted payment page? And what volume?
 
-Then I'd state back: functional requirements as a list, non-functional as a list, and a back-of-envelope estimate with the arithmetic shown. **The sentence that matters is the one after the numbers** — "at 10 TPS, throughput is trivially easy, so the hard problem here is *correctness*: exactly-once semantics, reconciliation and auditability, not scale." Skipping that concluding implication is what makes an answer read as Senior; the numbers exist to eliminate architectures, and if a number eliminates nothing I shouldn't have computed it.
+Then I'd state back: functional requirements as a list, non-functional as a list, and a back-of-envelope estimate with the arithmetic shown. **The sentence that matters is the one after the numbers** — "at 10 TPS, throughput is trivially easy, so the hard problem here is *correctness*: idempotent effects, reconciliation and auditability, not scale." Skipping that concluding implication is what makes an answer read as Senior; the numbers exist to eliminate architectures, and if a number eliminates nothing I shouldn't have computed it.
 
 **Why it lands.** Demonstrates the script, and the explicit "therefore the hard problem is X" is the single strongest early signal.
 **✗ Weak answer.** Starting with "I'd use microservices and Kafka" before establishing what's being built.

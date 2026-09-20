@@ -2,6 +2,7 @@
 
 > Tier 1 · Source: `21-AWS/` (8 modules, 4,078 lines) · Read: 20 min
 > Focus: how services **connect**, and the decision frameworks — not per-service feature lists.
+> **Version note:** AWS defaults, limits and prices change. Treat named figures as current planning inputs and verify them in the AWS documentation for the target region before committing a design.
 
 ---
 
@@ -126,7 +127,7 @@ Cross-cutting: IAM role (no keys) · Secrets Manager · CloudWatch + X-Ray
 | **Kinesis** | **sharded log** | **✔ (retention)** | per shard | streaming analytics, replay |
 | **MSK** | managed Kafka | ✔ | per partition | you need Kafka specifically |
 
-- **Fan out to SQS, not directly to consumers** — SNS→SQS gives each consumer its own durable buffer, independent retry and its own DLQ. SNS→Lambda directly means a consumer outage loses messages.
+- **Choose the subscription shape by failure semantics.** SNS→SQS gives each consumer an independent durable buffer, retry policy and DLQ — usually best when consumers need isolation, controlled replay or long outages. SNS→Lambda is asynchronous and SNS retries delivery; configure a subscription DLQ and make the function idempotent, because messages can be discarded after retries are exhausted if no DLQ is attached.
 - **SQS visibility timeout** must exceed processing time, or the message is redelivered while still being processed. **`maxReceiveCount`** on the redrive policy sends it to the DLQ.
 - **Kinesis shard** = 1 MB/s or 1,000 records/s in, 2 MB/s out. **Partition key determines shard → hot shard** is the recurring failure.
 - **Kinesis vs SQS — the decisive difference is replay** (and multiple independent consumers).

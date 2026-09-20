@@ -9,9 +9,8 @@
 | Fact | Value |
 |---|---|
 | LOH threshold | **85,000 bytes** |
-| Object header (x64) | **16 bytes** (SyncBlockIndex + MethodTable ptr) |
-| Tier0 → Tier1 promotion | **~30 calls** |
-| Thread-pool growth when starved | **~1 thread / sec** |
+| Object layout / JIT thresholds | **runtime implementation details — measure; do not memorise a fixed value** |
+| Thread-pool injection rate | **adaptive and workload-dependent — diagnose with queue length, latency and CPU** |
 | Server GC | 1 heap + 1 GC thread **per core** |
 | GC generations | Gen0 / Gen1 / Gen2 + LOH + POH |
 
@@ -19,7 +18,7 @@
 
 ## 1. CLR · JIT · GC
 
-- **Pipeline:** C# → Roslyn → **IL + metadata** → JIT → native. Tiered: Tier0 (fast, unoptimised) → Tier1 (optimised, ~30 calls) + **OSR** for long-running loops. **R2R** = precompiled, still re-JITs hot code. **NativeAOT** = no JIT, no startup cost, no reflection-emit.
+- **Pipeline:** C# → Roslyn → **IL + metadata** → JIT → native. Tiered compilation starts with quick code, then promotes hot methods using runtime heuristics; **OSR** can optimise long-running loops. **R2R** = precompiled, and hot code may still be JIT-optimised. **NativeAOT** removes runtime JIT, but startup work (loading, initialisation and I/O) still exists; reflection/dynamic-code features need explicit AOT-safe design.
 - **Generational hypothesis:** most objects die young. Cost is proportional to **survivors, not garbage** — a Gen0 collection is cheap because dead objects are never touched.
 - **Write barrier + card table:** storing a reference into an older-gen object marks a card, so ephemeral GCs skip scanning all of Gen2. This is *why* Gen0 stays cheap with a huge Gen2.
 - **LOH** is swept, not compacted (by default) → fragmentation; only collected with Gen2.

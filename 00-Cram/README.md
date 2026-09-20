@@ -1,6 +1,6 @@
 # 00-Cram — One-Week Interview Preparation
 
-**34 sheets · ~6,000 lines · 108 scenario Q&A · distilled from 168,141 lines across 47 domain folders.**
+**34 sheets · ~4,200 lines · 108 scenario Q&A · distilled from 168,141 lines across 47 domain folders.**
 
 The deep modules in the numbered folders are untouched — they remain your reference when a sheet isn't enough. **These sheets are what you memorise.** Everything is calibrated to the Elite FinTech panel bar for **Lead / Principal Engineer and Software-Solutions-Enterprise Architect**.
 
@@ -77,7 +77,7 @@ Each day: **read (30–45 min) → drill the traps (10 min) → say the 30-secon
 
 ### Day 4 — Distributed Systems & Messaging · ~655 lines
 [[16-Distributed-Systems]] · [[17-Microservices]] · [[18-Event-Driven-Architecture]] · [[19-Kafka-RabbitMQ]] · [[34-CQRS-EventSourcing-Saga-Outbox]]
-> **Must know cold:** exactly-once = at-least-once AND at-most-once · outbox vs dual write · 2PC vs saga · fencing tokens · `W+R>N` · `acks=all` + `min.insync.replicas` · consumers ≤ partitions · compensate, don't undo.
+> **Must know cold:** at-least-once delivery + idempotent, atomic handling = effectively-once business effect (within a retention window) · outbox vs dual write · 2PC vs saga · fencing tokens · `W+R>N` · `acks=all` + `min.insync.replicas` · consumers ≤ partitions · compensate, don't undo.
 
 ### Day 5 — Cloud & Infrastructure · ~730 lines
 [[21-AWS]] · [[22-Azure]] · [[23-Kubernetes]] · [[24-Docker]] · [[25-DevOps-CICD]] · [[27-Observability]]
@@ -116,7 +116,7 @@ Each day: **read (30–45 min) → drill the traps (10 min) → say the 30-secon
 ## The five things that transfer to every answer
 
 1. **Estimate to eliminate.** A number that retires an architecture earns its place; one that doesn't was wasted.
-2. **`exactly-once = at-least-once + idempotency`.** Never claim it on the wire.
+2. **At-least-once delivery + idempotent, atomic handling yields an effectively-once business effect within a retention window.** Never claim exactly-once delivery on the wire.
 3. **Reconcile against external truth** — even when the other side claims correctness.
 4. **Append-only, always forward** for anything financial or audited.
 5. **Name what has no detector.** Then propose the detector. This single move reads as Principal-level more reliably than anything else.
@@ -139,4 +139,4 @@ Whatever the question, add the second and third layers unprompted.
 
 ---
 
-*Built 2026-09-20. Sheets are the map; the domain folders are the territory.*
+*Built 2026-09-20. Platform defaults, limits and pricing evolve: verify them against current vendor documentation before making a production commitment. Sheets are the map; the domain folders are the territory.*

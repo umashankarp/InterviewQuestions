@@ -35,7 +35,7 @@
   | **TPC** | one per concrete type | no joins, good for polymorphic queries | no shared identity; duplicated columns |
 - **Owned types vs complex types** — owned types are still entities with identity (and were the old way to model value objects); **complex types (EF 8+) are true value objects, no identity, no tracking as a separate entity.** Prefer complex types for `Address`/`Money` going forward.
 - **JSON columns and primitive collections** — a document inside a row, queryable, with a contract you now own (schema evolution is on you).
-- **Global query filters** — the right mechanism for **soft delete** and **multi-tenancy**. **What quietly defeats them:** `IgnoreQueryFilters()`, raw SQL, `ExecuteUpdate`/`ExecuteDelete`, and **navigation to a filtered entity from a required relationship** (which can throw or silently drop rows). Treat a query filter as defence in depth, never the only tenancy control.
+- **Global query filters** — the right mechanism for **soft delete** and **multi-tenancy**. **What quietly defeats them:** `IgnoreQueryFilters()`, direct SQL or other data access that bypasses the EF query pipeline, and **navigation to a filtered entity from a required relationship** (which can throw or silently drop rows). `ExecuteUpdate`/`ExecuteDelete` compose over the filtered query by default. Treat a query filter as defence in depth, never the only tenancy control.
 - **Indexes and constraints belong in the model** — the model is also your physical design.
 
 ---
@@ -48,7 +48,7 @@
 - **Single vs split query — a genuine trade:** one query with multiple `Include`s on collections causes a **cartesian explosion** (rows multiply). `AsSplitQuery()` issues one query per collection — no explosion, but **multiple round trips and no longer a single consistent snapshot** unless you wrap it in a transaction.
 - **Projection (`Select`) beats `Include`** when you only need some fields — less data, no tracking, no explosion.
 - **`Contains` on a list** translates to `IN (...)` — a large list produces a huge query and parameter-count limits (SQL Server's ~2,100 parameter cap). Batch or use a temp table / TVP.
-- **`ExecuteUpdate` / `ExecuteDelete` (EF 7+)** — set-based, one statement, **no tracking, no `SaveChanges`, and they bypass the change tracker, interceptors, query filters and concurrency tokens.** Fast and correct for bulk, but they will not fire your soft-delete or auditing logic.
+- **`ExecuteUpdate` / `ExecuteDelete` (EF 7+)** — set-based, one statement, **no tracking and no `SaveChanges` pipeline**. They still apply the source query's global filters by default, but bypass automatic optimistic concurrency and `SaveChanges`-based auditing/soft-delete logic. Command interceptors still observe the generated command. Fast and correct for bulk; use explicit predicates and concurrency checks where required.
 - **`SaveChanges`** — orders operations by dependency, **batches** them, and wraps everything in an implicit transaction (all-or-nothing). Returns the number of affected rows.
 - **Optimistic concurrency:** `[Timestamp]` / `rowversion` or `IsConcurrencyToken()`. EF adds the token to the `WHERE` clause; 0 rows affected ⇒ `DbUpdateConcurrencyException`. **What it cannot see:** changes made through raw SQL or `ExecuteUpdate`, and anything on an entity you didn't load. Resolution strategies: client wins, store wins, or merge — always a business decision.
 - **Transactions:** the `SaveChanges` implicit transaction is usually enough. Use an explicit `BeginTransaction` only to span multiple `SaveChanges` calls — and with retries you **must** use `IExecutionStrategy.ExecuteAsync`.
@@ -82,7 +82,7 @@
 3. Missing `AsNoTracking()` on read paths.
 4. N+1 from lazy loading or a loop.
 5. Cartesian explosion from multiple collection `Include`s.
-6. `ExecuteUpdate`/`ExecuteDelete` silently bypassing query filters, concurrency tokens and interceptors.
+6. Assuming `ExecuteUpdate`/`ExecuteDelete` runs `SaveChanges` auditing, soft-delete logic or automatic concurrency checks. Query filters still apply unless disabled.
 7. `Database.Migrate()` at startup with multiple replicas.
 8. Rename generated as drop + add.
 9. InMemory provider used as a database in tests.
@@ -145,7 +145,7 @@ Operationally: migrations do **not** run from application startup — with multi
 ### Q5 · `ExecuteUpdate` and the silent bypass *(Lead)* ⭐⭐⭐
 **Asked as:** *"A developer replaced a slow bulk update with `ExecuteUpdate`. It's much faster. Any concerns?"*
 
-**Answer.** Yes — it's faster because it bypasses a lot, and some of that matters. `ExecuteUpdate` issues one set-based statement with **no change tracking, no `SaveChanges`, and therefore no interceptors, no global query filters, and no concurrency tokens**. Concretely: if we use a global query filter for soft delete or tenancy, it is **not applied**, so a bulk update can cross a tenant boundary. If we have an auditing interceptor on `SaveChanges`, those rows change with no audit trail — a finding in a regulated system. And optimistic concurrency is silently skipped, so it can overwrite a concurrent edit. None of that means don't use it; it means use it deliberately, with the tenancy predicate written explicitly in the `Where`, and not on tables where auditing is a compliance requirement. I'd want a code-review rule that flags it.
+**Answer.** Yes — it's faster because it bypasses materialisation, tracking and the `SaveChanges` pipeline. `ExecuteUpdate` issues one set-based statement; **global query filters on its source query still apply by default**, and database-command interceptors still see the command. But any soft-delete or auditing logic implemented in `SaveChanges` does not run, and automatic optimistic concurrency is skipped, so it can overwrite a concurrent edit. None of that means don't use it; it means use it deliberately: keep tenancy filters enabled and make the tenant predicate explicit for sensitive writes, add a concurrency-token predicate plus an affected-row check where the business needs it, and provide an alternate audit path where compliance requires one. I'd want a code-review rule that flags it.
 
 **Why it lands.** Accepts the win and enumerates exactly what was traded for it, including the compliance consequence.
 **✗ Weak answer.** "It's fine, it's the recommended bulk API."

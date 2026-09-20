@@ -29,7 +29,7 @@
   3. Miss → insert key with a **unique constraint** (this is what makes it race-safe), execute, store the response.
 - Store the **request fingerprint** too — same key with a *different* body is a client bug → **422**.
 - TTL of 24h–7d is typical. Stripe is the canonical reference implementation.
-- **The identity to quote:** `exactly-once = at-least-once (retries) AND at-most-once (idempotency key)`.
+- **The honest framing:** retries provide **at-least-once delivery**; an idempotency key plus atomic deduplication provides an **effectively-once business effect within a stated retention window**. It does not make the network at-most-once.
 
 ---
 
@@ -146,7 +146,7 @@
 
 **Answer.** Almost certainly the client retried after a lost *response* — the network can't distinguish "request lost" from "response lost", so the client must retry and the server must deduplicate. Mechanism is an **`Idempotency-Key`** header, client-generated per logical operation, and the critical detail is that the server inserts that key under a **unique constraint before executing**. That's what makes it race-safe: two concurrent duplicates both attempt the insert, one loses on the constraint and replays the stored response instead of charging again. Without the unique constraint a check-then-act still races under concurrency — the mistake I see most. I'd also store a request fingerprint, so the same key with a *different* body is a client bug returning 422 rather than silently replaying the wrong response.
 
-Framing: **exactly-once = at-least-once (the retry) AND at-most-once (the key)**. Honest limits — the dedup store needs a retention window (24h–7d), and a retry after expiry re-executes, so I'd state that window explicitly. Then, because it's money: reconcile against the provider's settlement file daily regardless, because their view is authoritative and our idempotency doesn't cover their side.
+Framing: retries give **at-least-once delivery**; the unique key and stored result make the **business effect effectively once within the retention window**. Honest limits — the dedup store needs a retention window (24h–7d), and a retry after expiry can re-execute, so I'd state that window explicitly. Then, because it's money: reconcile against the provider's settlement file daily regardless, because their view is authoritative and our idempotency doesn't cover their side.
 
 **Why it lands.** Unique-constraint-before-execute, the fingerprint, a stated retention limit, and reconciliation-anyway. The highest-frequency fintech API question.
 **✗ Weak answer.** "Check if the key exists, if not then process" — that's the race.
@@ -193,7 +193,7 @@ I'd build only against a specific constraint the market can't meet — data resi
 
 ### Quick-fire (30 seconds each)
 
-- **"How do you make a payment API safe to retry?"** → Client sends an `Idempotency-Key`; the server inserts it under a unique constraint before executing, so concurrent duplicates lose the race and replay the stored response instead of re-charging. Retries give at-least-once; the key gives at-most-once; together that's exactly-once. Pair it with an ETag `If-Match` to stop conflicting concurrent updates.
+- **"How do you make a payment API safe to retry?"** → Client sends an `Idempotency-Key`; the server inserts it under a unique constraint before executing, so concurrent duplicates lose the race and replay the stored response instead of re-charging. Retries are at-least-once; atomic deduplication makes the business effect effectively once for a stated key-retention window. Pair it with an ETag `If-Match` to stop conflicting concurrent updates.
 - **"Which rate-limiting algorithm and why?"** → Token bucket, because it bounds sustained rate while allowing the bursts real clients produce. Fixed window is simpler but permits a 2x burst across the boundary. It has to be enforced centrally — Redis with an atomic Lua script — or N replicas each enforce the full limit.
 - **"How do you version an API?"** → URI path for major versions, because it's cacheable, routable and obvious. But the real answer is to need it rarely: additive-only changes, tolerant readers, and a deprecation window with sunset headers before anything is removed.
 

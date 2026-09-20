@@ -238,7 +238,7 @@ See [[14-System-Design-Core]] §1–3. The three things that most often cap a ca
 ## The five recurring principles (say these, they transfer everywhere)
 
 1. **Estimate to eliminate.** A number that retires an architecture earns its place.
-2. **Exactly-once = at-least-once + idempotency.** Never claim it on the wire.
+2. **At-least-once delivery + idempotent, atomic handling = effectively-once business effects within a retention window.** Never claim exactly-once delivery on the wire.
 3. **Reconcile against external truth** — even when the other side claims correctness.
 4. **Append-only, always forward** for anything financial or audited.
 5. **Name what has no detector.** Then build the detector.
