@@ -1,6 +1,7 @@
 # 9. AWS Architecture — 46 Questions (Answered)
 
 > **Method:** every definition is taken from the **official AWS documentation** — the *Global Infrastructure* pages, *Amazon VPC User Guide*, *IAM User Guide*, the *Well-Architected Framework*, *AWS Prescriptive Guidance* and the individual service developer guides — then extended with the architect-level trade-off, the cost consequence and the failure mode. Links in **References**.
+> **Version note:** AWS limits, prices, regional availability and defaults change. Verify them for the target Region before approving a production design.
 
 ---
 
@@ -420,7 +421,7 @@ These are **not competing options** — they operate at different layers, and th
 
 **Where Transit Gateway is right:** you own both sides, you need many-to-many routing, you need hybrid on-premises connectivity, or the traffic isn't a single TCP service.
 
-**In a real fintech landing zone you use both:** TGW as the internal backbone across accounts and to the data centre; PrivateLink for every partner/vendor integration and for all AWS-service access from private subnets.
+**In a real fintech landing zone you often use both:** TGW as the internal backbone across accounts and to the data centre; PrivateLink for supported partner/vendor integrations and AWS services where the private-connectivity benefit outweighs endpoint cost and operational overhead.
 
 ---
 
@@ -697,10 +698,10 @@ Why: bulk data never crosses the network to KMS, throughput is not bound by KMS 
 | Type | Control | Cost | Use when |
 |---|---|---|---|
 | **AWS managed** (`aws/s3`, `aws/rds`) | AWS controls policy and rotation | Free | Low-sensitivity defaults |
-| **Customer managed (CMK)** | **You** control key policy, grants, rotation, and can disable/delete | ~$1/month + $0.03 per 10k requests | **Anything regulated** — you need the key policy and the audit trail |
+| **Customer managed KMS key** | **You** control key policy, grants, rotation, and can disable/delete | Region- and usage-dependent — verify current pricing | Use when customer-controlled key policy, separation or lifecycle controls are required |
 | **Imported key material (BYOK)** | You supply material; you own the master copy | Same | Regulatory requirement to hold key material outside AWS |
 | **Custom key store (CloudHSM / External)** | Keys in a dedicated HSM cluster or an external HSM | Much higher | Strict FIPS/HSM-custody mandates |
-| **Multi-Region keys** | Same key ID and material replicated across Regions | Per-Region charge | Cross-Region DR of encrypted data — **needed**, because a normal CMK is Region-bound |
+| **Multi-Region keys** | Same key ID and material replicated across Regions | Per-Region charge — verify current pricing | Cross-Region DR of encrypted data when this model fits; ordinary KMS keys are Region-bound |
 
 **Points that score:**
 
@@ -1378,9 +1379,9 @@ Root ── Organizations, SCPs
 ```
 **SCPs** deny: Regions outside the approved list (data residency), disabling CloudTrail/Config/GuardDuty, `iam:CreateAccessKey`, making S3 buckets public, deleting KMS keys, and root usage.
 
-**2. Network.** Three-tier VPCs per workload account (public/private/isolated), **Transit Gateway** with segmented route tables (prod / non-prod / shared / inspection), **per-AZ NAT** (Q9), **centralised egress with AWS Network Firewall** for domain-based egress filtering, **PrivateLink** for every AWS service and every partner integration, Direct Connect (plus VPN backup) to the data centre, and **central IPAM** so nothing ever overlaps.
+**2. Network.** Three-tier VPCs per workload account (public/private/isolated), **Transit Gateway** with segmented route tables (prod / non-prod / shared / inspection), **per-AZ NAT** (Q9), **centralised egress with AWS Network Firewall** for domain-based egress filtering, and **PrivateLink/VPC endpoints selectively** for supported AWS services and partners where private connectivity justifies the endpoint cost and operational footprint. A partner must expose an endpoint service for PrivateLink to be possible. Add Direct Connect (plus VPN backup) to the data centre, and **central IPAM** so nothing ever overlaps.
 
-**3. Compute.** **EKS or ECS on Fargate** for the .NET microservices — Fargate removes node patching from PCI scope, which is a genuine compliance saving. Lambda for event glue and scheduled work. Deployment via **GitOps (Argo CD)** or CodePipeline with **immutable, signed images**, ECR scanning, and blue/green or canary rollouts.
+**3. Compute.** **EKS or ECS on Fargate** for the .NET microservices where its operational trade-off fits. Fargate moves underlying compute-infrastructure patching to AWS, reducing customer operational responsibility; it does **not** by itself determine PCI scope or remove responsibility for images, applications, identity, network and data controls. Lambda for event glue and scheduled work. Deployment via **GitOps (Argo CD)** or CodePipeline with **immutable, signed images**, ECR scanning, and blue/green or canary rollouts.
 
 **4. Data — pick per workload, not per fashion.**
 
@@ -1393,9 +1394,9 @@ Root ── Organizations, SCPs
 | **S3 + Glue/Athena/Lake Formation** | Data lake, regulatory reporting, archive with **Object Lock (WORM)** for record-keeping rules |
 | **OpenSearch** | Log/search analytics |
 
-**5. Transaction integrity — the part a fintech panel is really testing.** **Transactional outbox** so the database write and the event publish cannot diverge; **Saga with compensations** across services (payments have no distributed rollback); **idempotency keys** on every external-facing mutation, stored in DynamoDB with a TTL; **exactly-once business processing = at-least-once delivery + at-most-once effect**, achieved by dedupe on the consumer side; and **daily reconciliation** against the provider's settlement file, with breaks classified into auto-resolvable / manual / investigate. Reconciliation is mandatory even when the counterparty claims idempotency.
+**5. Transaction integrity — the part a fintech panel is really testing.** **Transactional outbox** so the database write and the event publish cannot diverge; **Saga with compensations** across services (payments have no distributed rollback); **idempotency keys** on every external-facing mutation, stored in DynamoDB with a TTL; and **at-least-once delivery plus idempotent, atomic consumer handling** to achieve an effectively-once business outcome within the dedupe-retention window. Add **daily reconciliation** against the provider's settlement file, with breaks classified into auto-resolvable / manual / investigate. Reconciliation is mandatory even when the counterparty claims idempotency.
 
-**6. Security.** IAM roles everywhere (IRSA/task roles/OIDC for CI), **KMS CMKs** per data domain with key policies and rotation, **Secrets Manager** with automatic rotation, TLS 1.2+ everywhere and **mTLS service-to-service** (App Mesh/Istio or ALB mTLS), **CloudFront + WAF + Shield** on the edge, tokenisation/vaulting of PAN so cardholder data never lands in your own stores, field-level encryption for PII, and **Macie** to detect PII that leaks into the wrong bucket anyway.
+**6. Security.** IAM roles everywhere (IRSA/task roles/OIDC for CI), **customer managed KMS keys** per data domain with key policies and rotation, **Secrets Manager** with automatic rotation, TLS 1.2+ everywhere and **mTLS service-to-service** (App Mesh/Istio or ALB mTLS), **CloudFront + WAF + Shield** on the edge, tokenisation/vaulting of PAN so cardholder data never lands in your own stores, field-level encryption for PII, and **Macie** to detect PII that leaks into the wrong bucket anyway.
 
 **7. Observability.** OpenTelemetry instrumentation → CloudWatch (metrics/logs) + X-Ray or an OTel backend for traces, **correlation ID propagated end to end and stamped on every log line**, business-level dashboards (authorisation rate, settlement lag, reconciliation breaks) alongside technical ones, **SLOs with burn-rate alerts**, and **Synthetics canaries** on the payment path. Cross-account observability into a central monitoring account.
 

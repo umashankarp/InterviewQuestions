@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this directory is
 
-`Architect-Role-Cheat-Sheet/` is a self-contained set of 19 interview-prep documents for a
+`Architect-Role-Cheat-Sheet/` is a self-contained set of 21 numbered interview-prep documents plus
+one standalone SQL interview appendix for a
 **Solution / Technical / Enterprise Architect** role, calibrated to hiring panels at investment
 banks, payments companies, and capital-markets firms. Each file is one topic, written as a fixed
 number of answered Q&A. There is no code, no build, and no test suite — the Markdown *is* the
@@ -48,14 +49,16 @@ Topic map (leading number = the cross-reference key):
 | 12–14 | Architecture patterns — layered/Clean/Hexagonal, event sourcing, CQRS+Saga+Outbox+Idempotency |
 | 15–17 | Security — identity/OAuth/OWASP web, API security, database/data security |
 | 18–19 | System design; AI / RAG |
+| 20–21 | Frontend architecture — Angular, React |
+| Appendix | SQL Query Interview Questions — Top 30 |
 
-## House style (consistent across all 19 files — match it exactly when editing)
+## House style (consistent across all numbered files — match it exactly when editing)
 
 1. **H1:** `# N. Topic — X Questions (Answered)`. `X` must equal the number of `## QN.` headings in
    the file. Update it whenever you add or remove a question.
 2. **Intro blockquote**, one of the two established forms:
    - Files 01–03: `> Role lens: **Solution / Technical Architect**. …`
-   - Files 04–19: `> **Method:** …` — names the **primary sources** whose definitions are quoted
+   - Files 04–21: `> **Method:** …` — names the **primary sources** whose definitions are quoted
      *verbatim* (Microsoft Learn, Azure Architecture Center, AWS docs / Well-Architected /
      Prescriptive Guidance, Apache Kafka docs, Kubernetes docs, IETF RFCs, OWASP, NIST, GoF,
      Anthropic Claude docs). Some files add a short `**Interview note:**` line.
@@ -67,7 +70,7 @@ Topic map (leading number = the cross-reference key):
 4. **`## References`** at the end: a Markdown table (`| Topic | Source |`, sometimes `| … | URL |`)
    of official-documentation links. Anything quoted in the body gets a row here.
 5. **Footer nav** (final line): `**Previous:** [NN — Title](./NN-...md) | **Next:** [NN — Title](./NN-...md)`.
-   `01` carries **Next** only; `19` carries **Previous** only. Repair the chain if you add or reorder files.
+   `01` carries **Next** only; `21` carries **Previous** only. The standalone SQL appendix is intentionally outside the numbered navigation chain. Repair the numbered chain if you add or reorder files.
 
 Domain flavour is fintech (payments, ledger, settlement, reconciliation, PCI DSS / SOX) woven in
 where it fits, never forced onto a domain-agnostic topic. Tech baseline is .NET 8/9, C# 13+, and

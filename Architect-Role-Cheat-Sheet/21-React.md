@@ -1,5 +1,6 @@
 # 21. React — 20 Questions (Answered)
 
+> **Version note:** React and framework features evolve independently. Verify the actual React, framework and compiler versions before relying on a feature or migration claim.
 > **Method:** every definition is taken from the **official React documentation** (`react.dev` — Learn, the API Reference, and the *"You Might Not Need an Effect"* and *"Start a New React Project"* guides) and the **React blog** (the React 18 and 19 release posts, React Compiler, Server Components), supplemented by **MDN** for browser-platform mechanics and the **Next.js** / **React Router** docs where a framework concern is unavoidable. Then the architect-level analysis: what it costs, when it is the wrong choice, and how a customer-facing bank portal or a trading UI actually uses it. Angular comparisons are drawn against the sibling module **20**. Links in **References**.
 
 ---

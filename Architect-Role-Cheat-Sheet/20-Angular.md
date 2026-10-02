@@ -1,6 +1,7 @@
 # 20. Angular — 20 Questions (Answered)
 
 > **Method:** every definition is taken from the **official Angular documentation** (`angular.dev` — the Guide, the API reference and the *Best Practices* pages), supplemented by the **RxJS documentation**, the **TypeScript handbook**, the **Angular blog** release notes, and **web.dev / MDN** for the browser-platform mechanics. Then the architect-level analysis: what it costs, when it is the wrong choice, and how a customer-facing bank portal or a trading UI actually uses it. React comparisons are drawn against the sibling module **21**. Links in **References**.
+> **Version note:** Angular release features and migration guidance move quickly. Pin interview claims to the application’s actual Angular version and verify the current upgrade path before committing work.
 
 ---
 

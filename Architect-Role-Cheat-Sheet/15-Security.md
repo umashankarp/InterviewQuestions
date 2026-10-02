@@ -1,6 +1,7 @@
 # 15. Security — 33 Questions (Answered)
 
 > **Method:** identity and token questions are answered from the **IETF RFCs** — RFC 6749 (OAuth 2.0), RFC 7519 (JWT), RFC 7636 (PKCE), **RFC 9700 (OAuth 2.0 Security Best Current Practice)** — and the **OpenID Connect Core** specification, quoted where the wording matters; implementation is from **Microsoft Learn** (ASP.NET Core authentication/authorization, Data Protection, Identity); web-vulnerability definitions from **OWASP**; and cloud controls from the **AWS Well-Architected Security pillar**. Then the architect-level analysis and the fintech-specific requirement. Links in **References**.
+> **Version note:** OAuth 2.1 is an active IETF Internet-Draft, while OAuth 2.0 Security BCP (RFC 9700) and FAPI profiles are published specifications. Verify the profile and implementation requirements applicable to the regulated market before committing a design.
 
 ---
 
@@ -494,7 +495,7 @@ WITH PKCE
 
 **Why RFC 9700 extends it to confidential clients too** — a point that separates a current answer from a 2018 one: *"Although PKCE was designed as a mechanism to protect native apps, this advice applies to all kinds of OAuth clients, including web applications."* The reasons are that PKCE also defends against **authorization code injection** (an attacker injecting their own captured code into a victim's session) and against certain **mix-up attacks** where a client talks to multiple authorization servers. It costs nothing and closes attack classes that a client secret alone does not.
 
-**Its status today:** mandatory in **OAuth 2.1**, required by **FAPI** (Financial-grade API — the profile behind Open Banking and UK/EU regulated APIs), and enabled by default in every current library. In an interview, the strong statement is: **"authorization code with PKCE, for every client type, always; and for a browser SPA I would go further and keep the tokens server-side behind a BFF."**
+**Its status today:** PKCE is required by the current **OAuth 2.1 Internet-Draft** for authorization-code clients, and FAPI 2.0 requires `S256` for its authorization-code flow. Do not claim OAuth 2.1 is a published RFC yet, or that every library enables PKCE without checking. In an interview, the strong statement is: **"authorization code with PKCE for every client type; for a browser SPA I would go further and keep tokens server-side behind a BFF."**
 
 ---
 

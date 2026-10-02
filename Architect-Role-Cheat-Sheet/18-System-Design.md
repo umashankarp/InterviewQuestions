@@ -289,10 +289,10 @@ CREATE TABLE ledger_entries (
 
 ### Step 4 — Exactly-once, stated precisely
 
-**exactly-once = at-least-once AND at-most-once.**
+**Exactly-once delivery is not available across an unreliable network.** The engineering goal is an **effectively-once business outcome within a stated idempotency-retention window**: at-least-once delivery, plus idempotent and atomic handling of the effect.
 
-- **At-least-once** comes from **retries**: the payment is durably recorded before the PSP call, and a retry loop (with exponential backoff and jitter) plus a DLQ guarantees the attempt eventually happens.
-- **At-most-once** comes from **idempotency**: the `Idempotency-Key` unique constraint, plus a PSP-side idempotency key on the outbound call, guarantees it happens no more than once.
+- **At-least-once** comes from **retries**: the payment intent is durably recorded before the PSP call. Exponential backoff and jitter retry transient failures; a DLQ preserves a failed attempt for monitored replay or manual resolution — it does not make execution automatic.
+- **Effectively-once** comes from **idempotency**: the `Idempotency-Key` unique constraint, plus a PSP-side idempotency key on the outbound call, ensures duplicate attempts resolve to one business effect within the providers' retention windows.
 
 Two scenarios worth working through, because they are the ones interviewers actually ask:
 

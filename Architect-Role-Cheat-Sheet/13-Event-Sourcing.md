@@ -295,14 +295,14 @@ var balance = events.Aggregate(Money.Zero, (acc, e) => e switch
 | **Read side — projection** | Fold events **incrementally** into a stored read model as they arrive | Serving queries (Q8) |
 | **Ad hoc — replay to a point in time** | Fold only events up to a timestamp or version | *"What was this balance on 30 June?"* — audit, dispute, regulatory |
 
-That third one is Event Sourcing's signature capability, and it is worth stating explicitly: **temporal queries are free**, because the data required to answer them was never discarded. In a CRUD system the answer does not exist at any price.
+That third one is Event Sourcing's signature capability: **temporal queries are possible because the required history was retained**. They still cost storage, replay and operational discipline. A CRUD system with temporal tables or a sufficient audit history can answer some historical questions too; Event Sourcing makes the complete domain-history model explicit.
 
 **The rules for `Apply`, restated because they are load-bearing:**
 - **Pure**: no I/O, no clock, no random, no calls to other services. Same events in → same state out, always. If `Apply` calls an external service, replay is no longer deterministic and your event store no longer reconstructs the truth.
-- **Total**: it must handle every event type it might encounter, including old versions (via upcasting — Q16) and unknown ones (ignore rather than throw).
+- **Total**: it must handle every event type it is contractually able to encounter, including old versions (via upcasting — Q16). An unexpected event version/type on an aggregate stream is a compatibility failure: stop and quarantine/escalate it rather than silently ignoring state that may enforce an invariant.
 - **Non-validating**: history cannot be rejected (Q4).
 
-**Performance:** for the write side, snapshots bound the cost (Q11). For the read side, **never** fold on demand to answer a query — that is what projections are for, and doing it on demand is the single most common performance mistake in an event-sourced system.
+**Performance:** for the write side, snapshots bound the cost (Q11). For the read side, use projections for common or high-volume queries. On-demand replay remains appropriate for aggregate loading and low-frequency audit/temporal investigation; it is the wrong default for a hot user-facing query.
 
 ---
 

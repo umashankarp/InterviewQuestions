@@ -345,7 +345,7 @@ Any function applied to the column (`ToLower()`, date arithmetic, `price / 2`) m
 
 **7. Stream instead of buffering for large result sets.** `ToListAsync()` buffers everything into memory; `AsAsyncEnumerable()` with `await foreach` streams one row at a time with fixed memory. The docs also flag two cases where **EF buffers internally regardless**: when a retrying execution strategy is enabled, and for all but the last query of a split query.
 
-**8. Use async everywhere.** *"In order for your application to be scalable, it's important to always use asynchronous APIs"* — and the docs' warning is worth quoting: *"Avoid mixing synchronous and asynchronous code in the same application — it's very easy to inadvertently trigger subtle thread-pool starvation issues."*
+**8. Use async end-to-end on I/O-bound request paths.** It frees a request thread while the database, network or file system is waiting. It does not make CPU work faster; use bounded parallelism or dedicated worker capacity for CPU-bound work. The operational rule is to avoid sync-over-async (`.Result`, `.Wait()`) and accidental blocking on request threads, which can cause thread-pool starvation.
 
 **9. Drop to SQL when EF cannot generate what you need** — `FromSql`, a user-defined/table-valued function, or a view. The docs are clear that this is a **last resort** because of the maintenance cost, but for a hot reporting query it is often the right call.
 

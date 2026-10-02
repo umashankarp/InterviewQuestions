@@ -1,6 +1,7 @@
 # 10. Kubernetes — 30 Questions (Answered)
 
 > **Method:** every definition is quoted from the **official Kubernetes documentation** (kubernetes.io/docs) — Concepts, Tasks and Reference sections — supplemented by the **Amazon EKS User Guide** and the **EKS Best Practices Guides** where the question is AWS-specific, and by **Microsoft Learn** for the .NET container guidance. Then the architect-level trade-off, the failure mode and the production runbook. Links in **References**.
+> **Version note:** Kubernetes APIs, EKS add-ons and CNI behaviour evolve independently. Verify the target cluster version, CNI enforcement and managed-service defaults before approving a production control.
 
 ---
 
