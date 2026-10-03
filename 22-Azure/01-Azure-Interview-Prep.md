@@ -1,64 +1,533 @@
-# Module 65 — Azure: Compute & Networking Fundamentals — VMs, VNet, Load Balancer/App Gateway & VM Scale Sets
+# Azure — Complete Interview Prep (All Topics, One File)
 
-> Domain: Azure | Level: Beginner → Expert | Prerequisite: [[../21-AWS/01-Compute-Networking-VPC-LoadBalancing-AutoScaling]] (this module deliberately mirrors that module's structure, using AWS as the reference model and calling out every point of genuine divergence rather than re-deriving cloud-networking fundamentals from scratch), [[../14-System-Design/01-System-Design-Fundamentals]]
+> Domain: Azure | Level: Beginner → Expert | Prerequisite: [[../21-AWS/01-AWS-Interview-Prep]] (AWS is the reference model; this file maps concepts and highlights **genuine divergences**), [[../14-System-Design/01-System-Design-Fundamentals]]
+> **Quick-prep edition** (consolidated 2026-10-03). This one file replaces Modules 65–72. Originals: `git show ebb2d5c:22-Azure/<file>.md`
+> Each topic has: **Key concepts → .NET/Bicep/CLI example → Most common interview questions with answers.** Verify current limits and pricing in Microsoft Learn.
+
+| # | Topic | # | Topic |
+|---|---|---|---|
+| 1 | AWS ↔ Azure service map | 8 | Messaging: Service Bus, Event Grid, Event Hubs |
+| 2 | Organization: tenants, management groups, subscriptions, resource groups | 9 | Containers: AKS, Container Apps, Dapr, KEDA |
+| 3 | Networking: VNet, NSG, Private Link, Front Door, App Gateway | 10 | App hosting: App Service & deployment slots |
+| 4 | Compute: VMs, Availability Zones/Sets, VM Scale Sets | 11 | Observability: Azure Monitor & Application Insights |
+| 5 | Identity & security: Entra ID, RBAC, Managed Identity, Key Vault | 12 | IaC (Bicep/ARM/Terraform), governance (Policy) & Well-Architected |
+| 6 | Storage: Blob, redundancy tiers, Disks, Files | 13 | DR, paired regions, cost & Hybrid Benefit |
+| 7 | Databases: Azure SQL, Managed Instance, Cosmos DB | 14 | Top 30 rapid-fire + Principal · 15 Mistakes checklist |
+| 7b | Serverless: Functions, Durable Functions, APIM, Logic Apps | | |
 
 ---
 
-## 1. Fundamentals
+## 1. AWS ↔ Azure Service Map
 
-### Why does a Principal Engineer need Azure networking/compute depth given this course already covered the identical concepts on AWS?
-The underlying distributed-systems and resilience principles (multi-zone redundancy, health-check-driven load balancing, elastic scaling) are cloud-agnostic and already fully established — what a Principal Engineer specifically needs from this module is the **precise mapping** between AWS's and Azure's concrete service names and the **specific points where Azure's actual behavior genuinely diverges** from the AWS model, since a Principal Engineer operating across both clouds (or migrating between them, or architecting a multi-cloud system) who assumes naive one-to-one equivalence will misconfigure the platform-specific details that don't actually match.
+| Capability | AWS | Azure |
+|---|---|---|
+| Account structure | Organizations / accounts / OUs | Entra tenant / management groups / **subscriptions** / **resource groups** |
+| Network | VPC, subnets, SG, NACL | **VNet**, subnets, **NSG** (subnet or NIC), ASG (app security groups) |
+| Private service access | VPC endpoints / PrivateLink | **Private Endpoints** / Private Link, Service Endpoints |
+| L4 / L7 LB | NLB / ALB | **Azure Load Balancer** / **Application Gateway (+WAF)** |
+| Global edge | CloudFront + Global Accelerator + Route 53 | **Front Door** (+WAF), Traffic Manager (DNS), Azure DNS |
+| VMs / autoscale | EC2 / ASG | VMs / **VM Scale Sets** |
+| PaaS web apps | Elastic Beanstalk / App Runner | **App Service** (slots) |
+| Serverless | Lambda / Step Functions | **Azure Functions** / **Durable Functions**, Logic Apps |
+| API management | API Gateway | **API Management (APIM)** |
+| Containers | ECS / EKS / Fargate | **Container Apps** / **AKS** / Container Instances |
+| Registry | ECR | ACR |
+| Identity | IAM roles, Identity Center | **Entra ID**, **Azure RBAC**, **Managed Identity**, PIM |
+| Keys & secrets | KMS + Secrets Manager | **Key Vault** (keys + secrets + certificates) |
+| Object / block / file | S3 / EBS / EFS | **Blob Storage** / Managed Disks / **Azure Files** |
+| Relational | RDS / Aurora | **Azure SQL Database**, **SQL Managed Instance**, Azure Database for PostgreSQL Flexible Server |
+| NoSQL | DynamoDB | **Cosmos DB** |
+| Cache | ElastiCache | Azure Cache for Redis / Azure Managed Redis |
+| Queue / pub-sub / bus | SQS / SNS / EventBridge | **Service Bus** / **Event Grid** |
+| Streaming | Kinesis / MSK | **Event Hubs** (Kafka-compatible) |
+| Monitoring | CloudWatch / X-Ray / CloudTrail | **Azure Monitor**, **Application Insights**, Log Analytics, Activity Log |
+| IaC | CloudFormation / CDK | **ARM / Bicep**, Terraform |
+| Governance | SCPs, Config | **Azure Policy**, management groups, Defender for Cloud |
+| DR | Elastic DR / Backup | **Azure Site Recovery**, Azure Backup, paired regions |
 
-### Why does this matter?
-Because Azure and AWS, despite solving the same underlying problems, differ in specific, consequential ways (Azure's resource-group/subscription hierarchy has no direct AWS analog; Azure VNets support a materially different subnet-delegation and NSG-association model than AWS Security Groups; Azure Availability Zones and Availability Sets are two distinct, non-interchangeable resilience mechanisms with no single AWS equivalent) — a Principal Engineer's credibility in an Azure-specific interview or architecture review depends on correctly using Azure's own vocabulary and specific mechanisms, not describing AWS concepts with Azure service names substituted in.
+**Common interview question**
 
-### When does this matter?
-Any system deployed on Azure, and specifically any Principal Engineer working across a genuinely multi-cloud or Azure-primary organization (directly relevant given this course's stated baseline already includes professional AWS and Azure experience) — this module's comparative approach is designed to build precise, transferable judgment rather than requiring the AWS material to be unlearned and Azure material learned independently from scratch.
+**Q. You know AWS well. What are the biggest conceptual differences in Azure?**
+Hierarchical scopes with **RBAC inheritance** (management group → subscription → resource group → resource) instead of AWS's policy evaluation per account; **resource groups** as lifecycle containers; **Entra ID** as the single identity plane for users and workloads (managed identities); **Key Vault** combining keys and secrets; storage **redundancy as an account setting** (LRS/ZRS/GRS/GZRS); Cosmos DB's **five consistency levels** and multi-region writes; Service Bus combining queues and topics; and **Container Apps** as a serverless Kubernetes tier with no AWS equivalent.
 
-### How does it work (30,000-ft view)?
+---
+
+## 2. Organization: Tenants, Management Groups, Subscriptions, Resource Groups
+
+**Key concepts**
+- **Entra ID tenant** = identity boundary. **Management groups** = hierarchy for policy and RBAC. **Subscriptions** = billing and scale/quota boundary (closest to an AWS account). **Resource groups** = lifecycle containers for related resources (deploy, secure and delete together); every resource belongs to exactly one RG.
+- **Landing zones** (Cloud Adoption Framework): platform subscriptions (identity, management, connectivity hub) + application landing zones per workload/environment; Azure Policy at management-group level.
+- Tags and naming conventions for cost allocation.
+
+**Common interview question**
+
+**Q. How do you structure subscriptions and resource groups for 50 product teams?**
+Management groups for platform vs landing zones (and prod vs non-prod), a subscription per workload/environment (quota and billing isolation, blast radius), resource groups per application component lifecycle, Azure Policy and RBAC assigned at management-group scope, and subscription vending automated via IaC.
+
+---
+
+## 3. Networking: VNet, NSG, Private Link, Front Door, App Gateway
+
+**Key concepts**
+- **VNets** span all AZs in a region (subnets are regional, unlike AWS AZ-scoped subnets).
+- **NSGs** attach to **subnets and/or NICs** (both evaluated — a common surprise); stateful; priority-ordered allow/deny rules; **Application Security Groups** group VMs logically in rules.
+- **Hub-and-spoke** with VNet peering (non-transitive) or **Virtual WAN**; Azure Firewall in the hub; route tables (UDRs) force traffic through the firewall.
+- **Private Endpoints:** a private IP in your VNet for a PaaS resource (SQL, Storage, Key Vault, Service Bus) + private DNS zones (`privatelink.database.windows.net`) — getting DNS right is the main pitfall. **Service Endpoints:** older, routes to the public endpoint over the Azure backbone.
+- **Load balancing:** **Azure Load Balancer** (L4, regional), **Application Gateway** (L7 regional, WAF, path routing, AKS ingress via AGIC/Application Gateway for Containers), **Front Door** (global L7, anycast, CDN, WAF, fast failover), **Traffic Manager** (DNS-based global routing).
+- **NAT Gateway** for outbound SNAT; Bastion for VM access without public IPs.
+
+```bash
+# Private endpoint for Azure SQL + private DNS zone link
+az network private-endpoint create -g rg-pay -n pe-sql --vnet-name vnet-pay --subnet data \
+  --private-connection-resource-id $(az sql server show -g rg-pay -n sql-pay --query id -o tsv) \
+  --group-id sqlServer --connection-name sqlconn
+az network private-dns zone create -g rg-pay -n privatelink.database.windows.net
+az network private-dns link vnet create -g rg-pay -z privatelink.database.windows.net -n link-pay -v vnet-pay -e false
 ```
-Resource Group: a logical container for related Azure resources -- NO DIRECT AWS EQUIVALENT
- (closest analog: tagging + IAM scoping combined, but Resource Groups are a first-class,
- structural organizing unit in Azure, not an optional convention)
-VNet: Azure's VPC equivalent -- isolated virtual network, divided into Subnets
-NSG (Network Security Group): Azure's Security Group equivalent -- BUT associates with BOTH
- subnets AND individual NICs (a genuine divergence from AWS's instance-only association)
-VM: Azure's EC2 equivalent
-Load Balancer (Layer 4) / Application Gateway (Layer 7): Azure's NLB/ALB equivalents --
- Application Gateway ALSO bundles a Web Application Firewall (WAF), unlike AWS's ALB
-VMSS (Virtual Machine Scale Set): Azure's Auto Scaling Group equivalent
-Availability Zones vs. Availability Sets: TWO DISTINCT resilience mechanisms -- AWS has only
- the single AZ concept; Azure additionally has Availability Sets for a WEAKER, same-datacenter
- fault-domain/update-domain guarantee
+
+**Common interview questions**
+
+**Q1. NSG on the subnet and the NIC — which applies?**
+Both: inbound traffic is evaluated against the subnet NSG then the NIC NSG (outbound in reverse); traffic must be allowed by both. Teams often troubleshoot one and forget the other.
+
+**Q2. Private Endpoint vs Service Endpoint?**
+A Private Endpoint gives the service a private IP inside your VNet (traffic never uses the public endpoint; you can disable public access entirely; works from on-prem and peered VNets) but needs private DNS. A Service Endpoint keeps the public endpoint but restricts it to your subnet over the backbone. Prefer Private Endpoints for regulated workloads.
+
+**Q3. Front Door vs Application Gateway vs Traffic Manager?**
+Front Door: global HTTP(S) entry with anycast, WAF, caching and fast failover between regions. Application Gateway: regional L7 load balancer/WAF in your VNet (private backends, AKS). Traffic Manager: DNS-based routing (any protocol) with DNS-caching-limited failover speed. Common pattern: Front Door → (private link) → App Gateway/internal LB per region.
+
+---
+
+## 4. Compute: VMs, Availability Zones/Sets, VM Scale Sets
+
+**Key concepts**
+- **Availability Zones:** separate data centres → zonal/zone-redundant deployment (99.99% VM SLA across zones).
+- **Availability Sets:** fault domains (rack/power) + update domains within one data centre — protects from hardware/maintenance failures, **not** a data-centre loss (legacy; prefer zones).
+- **VM Scale Sets (Flexible orchestration):** autoscale (metrics, schedules, predictive), **zone-spanning must be explicitly configured**, rolling upgrades, health extension, Spot VMs.
+- VM SKUs, Azure Hybrid Benefit (Windows/SQL licences), reserved instances/savings plans, Spot.
+
+**Common interview question**
+
+**Q. Availability Set or Availability Zones?**
+Zones for protection against a data-centre failure and the higher SLA; Availability Sets only protect within one data centre (rack/maintenance), useful in regions without zones or for legacy constraints. Configure VMSS with zones explicitly — it's not automatic.
+
+---
+
+## 5. Identity & Security: Entra ID, RBAC, Managed Identity, Key Vault
+
+**Key concepts**
+- **Entra ID** (formerly Azure AD): users, groups, **app registrations** (OIDC/OAuth clients and APIs), **service principals**, Conditional Access, MFA, **PIM** (just-in-time privileged roles with approval).
+- **Azure RBAC:** role assignment = principal + role definition + **scope**; **inherits downward** (assign at subscription → applies to all RGs/resources). Built-in roles (Owner, Contributor, Reader, data-plane roles like `Storage Blob Data Reader`, `Key Vault Secrets User`); custom roles; **deny assignments** are limited (mostly via Blueprints/managed apps). Separate **control plane** vs **data plane** roles.
+- **Managed Identities:** system-assigned (lifecycle tied to the resource) or **user-assigned** (shareable, pre-provisioned); the app gets tokens from the platform — **no secrets**. **Workload Identity Federation** for AKS pods and GitHub Actions/external IdPs (OIDC trust, no client secrets).
+- **Key Vault:** secrets + keys (HSM-backed, Premium/Managed HSM) + certificates; RBAC authorization model; soft delete + **purge protection**; private endpoint; Key Vault references in App Service/Functions config.
+- **Defender for Cloud**, **Microsoft Sentinel** (SIEM), **Azure Policy** for security baselines.
+
+```csharp
+// DefaultAzureCredential: managed identity in Azure, developer login locally — no secrets anywhere
+var credential = new DefaultAzureCredential();
+builder.Configuration.AddAzureKeyVault(new Uri("https://kv-payments.vault.azure.net/"), credential);
+builder.Services.AddAzureClients(c =>
+{
+    c.UseCredential(credential);
+    c.AddBlobServiceClient(new Uri("https://stpayments.blob.core.windows.net"));
+    c.AddServiceBusClientWithNamespace("sb-payments.servicebus.windows.net");
+});
+
+// Azure SQL with Entra authentication (no password in the connection string)
+// "Server=tcp:sql-pay.database.windows.net;Database=Payments;Authentication=Active Directory Default;Encrypt=True;"
 ```
 
----
+**Common interview questions**
 
-## 2. Deep Dive
+**Q1. How does Azure RBAC differ from AWS IAM?**
+Azure grants roles at a scope that inherits down the hierarchy (management group → subscription → RG → resource), and the evaluation is the union of role assignments (allow-based, with limited deny). AWS evaluates JSON policies with explicit deny precedence, SCPs and boundaries per request. In Azure, a broad assignment high in the hierarchy silently grants access to everything below — review high-scope assignments carefully.
 
-### 2.1 Resource Groups and Subscriptions — a Structural Organizing Concept AWS Has No Direct Equivalent For
-Every Azure resource must belong to exactly one **Resource Group** (a logical container, typically grouping resources that share a lifecycle — deployed, managed, and deleted together), and every Resource Group belongs to a **Subscription** (a billing and access-management boundary, roughly analogous to an AWS Account, though Azure additionally nests Subscriptions under **Management Groups** for organization-wide policy inheritance) — this is a genuine structural divergence from AWS, where "which resources belong together" is typically expressed via tagging conventions and IAM scoping rather than a first-class containment hierarchy: a Principal Engineer designing an Azure resource-organization strategy should treat Resource Group boundaries as a deliberate architectural decision (typically aligned with a specific application or environment's lifecycle) rather than an afterthought, since deleting a Resource Group deletes every resource within it — a powerful convenience for environment teardown, and a genuine risk if resource-group boundaries are drawn carelessly.
+**Q2. System-assigned vs user-assigned managed identity?**
+System-assigned is created and deleted with the resource — simple, 1:1. User-assigned is a standalone resource you can pre-provision, grant access to before deployment, and share across instances or slots (useful for scale sets, blue/green and avoiding role-assignment propagation delays).
 
-### 2.2 VNets, Subnets, and NSGs — Azure's Genuinely Different Security-Group Association Model
-Azure VNets and Subnets map closely to the VPC/subnet model (public/private subnet segmentation, an internet-facing NAT Gateway-equivalent for private-subnet outbound access) — but Azure's **Network Security Group (NSG)**, the Security-Group equivalent, has a genuinely different association model than AWS: an NSG can be associated with **either a subnet or an individual network interface (NIC)** — or both simultaneously, with **both** layers' rules applied — whereas AWS Security Groups associate only with the instance's network interface, never the subnet itself (subnet-level traffic control in AWS is a distinct mechanism, Network ACLs, which are stateless, unlike NSGs' stateful behavior). This means an Azure network-security review must explicitly check **both** the subnet-level and NIC-level NSG (if both exist) to understand a VM's actual effective access rules — a common, Azure-specific misconfiguration is assuming a permissive NIC-level NSG is the complete picture when a more restrictive subnet-level NSG is also silently in effect (or vice versa), a genuinely different reasoning process than AWS's single-layer Security Group model.
+**Q3. How do you remove secrets from a .NET app on Azure?**
+Managed identity + `DefaultAzureCredential` for Azure SQL (Entra auth), Storage, Service Bus, Key Vault and Cosmos DB; Key Vault references for any remaining third-party secrets; workload identity federation for AKS and CI/CD pipelines.
 
-### 2.3 Availability Zones vs. Availability Sets — Two Distinct, Non-Interchangeable Resilience Mechanisms
-This is the single most consequential Azure-specific divergence from the AWS model in this section: Azure **Availability Zones** are physically separate datacenters within a Region (directly analogous to AWS AZs) — but Azure additionally offers **Availability Sets**, a *weaker*, single-datacenter mechanism that spreads VMs across distinct **fault domains** (separate physical racks/power/network within the same datacenter) and **update domains** (groups of VMs Azure won't patch/reboot simultaneously), protecting against rack-level hardware failure and simultaneous-maintenance-induced downtime, but providing **no protection against a full datacenter/Availability-Zone-level failure** — a Principal Engineer must explicitly distinguish these: a workload using only an Availability Set (no Availability Zone spread) has a materially weaker resilience posture than the multi-AZ discipline would suggest is adequate, and this specific two-tier distinction (Zone vs. Set) has no single AWS equivalent to map onto, making it a genuine, not merely terminological, point of required new understanding.
-
-### 2.4 Load Balancer vs. Application Gateway — Azure's Split, and Application Gateway's WAF Bundling
-Azure Load Balancer (Layer 4, TCP/UDP) and Application Gateway (Layer 7, HTTP/HTTPS with path-based routing, cookie-based session affinity, and SSL termination) map respectively to AWS's NLB and ALB — but Application Gateway additionally, natively bundles a **Web Application Firewall (WAF)** as an integrated capability (protecting against common web exploits — SQL injection, XSS — via managed rule sets), whereas AWS's equivalent (AWS WAF) is a separate service explicitly attached to an ALB or CloudFront distribution rather than a built-in Application Gateway capability — this is a genuine Azure-specific convenience (fewer separate resources to provision and wire together for a common web-security requirement) worth explicitly knowing about rather than assuming Application Gateway is a pure ALB-equivalent requiring a separately-bolted-on WAF the way AWS does.
-
-### 2.5 VM Scale Sets — Azure's Auto Scaling Group Equivalent, With Explicit Zone-Spanning Configuration
-VM Scale Sets (VMSS) directly implement the Auto Scaling Group model — automatically launching/terminating VM instances based on a scaling policy's trigger conditions — but critically, VMSS's zone-spanning behavior must be **explicitly configured** (specifying which Availability Zones the scale set should span) rather than being an implicit, automatic property of using the service at all, meaning the exact same single-zone-risk failure mode the incident described can occur in Azure specifically if a VMSS is provisioned without explicit zone configuration — a Principal Engineer reviewing an Azure architecture should treat "is this VMSS explicitly zone-spanning?" with the same scrutiny established for "is this ASG multi-AZ?"
-
-### 2.6 The Well-Architected Framework's Azure Equivalent, and Why This Module's Comparative Structure Continues Throughout the Domain
-Microsoft publishes its own, structurally similar **Azure Well-Architected Framework** (five pillars: Reliability, Security, Cost Optimization, Operational Excellence, Performance Efficiency — a near-direct match to AWS's six, minus the separately-broken-out Sustainability pillar, which Azure folds into its general guidance rather than a standalone pillar) — this course's capstone discipline (a recurring, structured review applying accumulated domain knowledge systematically) applies identically here, and this Azure domain's own capstone module (72) will apply it to the Azure-specific service set the same way did for AWS, reinforcing that the *review methodology* itself, not just the underlying resilience/security knowledge, is a genuinely portable, cloud-agnostic Principal-Engineer skill.
+**Q4. What is PIM and why does it matter for audits?**
+Privileged Identity Management gives just-in-time, time-bound activation of privileged roles with approval, MFA and justification — no standing admin access, plus an audit trail of every elevation (a typical SOX/ISO control).
 
 ---
 
-## 3. Visual Architecture
+## 6. Storage: Blob, Redundancy Tiers, Disks, Files
 
-### Azure Resource Hierarchy — No Direct AWS Equivalent
+**Key concepts**
+- **Redundancy (a storage-account setting — the key divergence from AWS):** **LRS** (3 copies, one DC), **ZRS** (3 zones), **GRS** (LRS + async copy to the paired region), **GZRS** (ZRS + paired region), **RA-GRS/RA-GZRS** (read access to the secondary). Failover of GRS is customer-initiated (async → possible data loss).
+- **Blob access tiers:** Hot, Cool, Cold, Archive (rehydration hours) + **lifecycle management**; immutability policies (**WORM**, legal hold) for compliance; soft delete; versioning; strong consistency.
+- **SAS tokens** (account/service/**user-delegation SAS** — preferred, signed with Entra credentials) ≈ S3 pre-signed URLs.
+- **Managed Disks:** zonal; **ZRS disks** for zone-resilient shared scenarios. **Azure Files:** SMB/NFS shares (≈ EFS/FSx) with AD integration. **Blob events** via **Event Grid**.
+
+```csharp
+// User-delegation SAS: time-limited upload URL signed with Entra credentials (no account key)
+var blobService = new BlobServiceClient(new Uri("https://stloans.blob.core.windows.net"), new DefaultAzureCredential());
+var key = await blobService.GetUserDelegationKeyAsync(DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddMinutes(15));
+var blob = blobService.GetBlobContainerClient("docs").GetBlobClient($"{tenantId}/{Guid.NewGuid()}.pdf");
+var sas = new BlobSasBuilder(BlobSasPermissions.Create | BlobSasPermissions.Write, DateTimeOffset.UtcNow.AddMinutes(10))
+    { BlobContainerName = "docs", BlobName = blob.Name, Resource = "b" };
+Uri uploadUri = new BlobUriBuilder(blob.Uri) { Sas = sas.ToSasQueryParameters(key, blobService.AccountName) }.ToUri();
+```
+
+**Common interview questions**
+
+**Q1. Which redundancy for a regulated document store needing regional DR?**
+GZRS (zone-redundant in the primary + async geo-replication) or RA-GZRS if you need read access to the secondary during an outage; plus immutability policies for retention, versioning/soft delete for accidental deletion, and documented customer-initiated failover with its RPO.
+
+**Q2. Account key SAS vs user-delegation SAS?**
+Account-key SAS is signed with the storage account key (powerful, hard to revoke — rotating the key invalidates everything). User-delegation SAS is signed with an Entra-issued key tied to an identity with RBAC, limited lifetime and auditable — preferred; disable shared-key access where possible.
+
+---
+
+## 7. Databases: Azure SQL, Managed Instance, Cosmos DB
+
+**Key concepts — Azure SQL**
+- **Azure SQL Database** (PaaS single DB/elastic pools): built-in HA (remote storage + compute failover in General Purpose; Always On–style replicas in **Business Critical** with a free readable secondary); **zone redundancy** option; **Hyperscale** (up to 100+ TB, fast scale, many replicas); **serverless** tier (auto-pause); **active geo-replication** and **failover groups** (listener endpoints that survive regional failover); automatic tuning; PITR and long-term retention.
+- **SQL Managed Instance:** near-100% SQL Server compatibility (SQL Agent, cross-database queries, CLR, Service Broker, linked servers) in your VNet — for lift-and-shift of SQL Server estates.
+- **Elastic pools:** share resources across many databases (multi-tenant SaaS, database-per-tenant).
+- .NET: `Microsoft.Data.SqlClient`, Entra authentication, `EnableRetryOnFailure` (transient faults during reconfiguration are normal in PaaS).
+
+**Key concepts — Cosmos DB**
+- Multi-model (NoSQL API, MongoDB API, Cassandra, Gremlin, Table, PostgreSQL via Citus), global distribution, single-digit-ms latency, SLA-backed.
+- **Five consistency levels:** **Strong** → **Bounded staleness** → **Session** (default: read-your-writes per session) → **Consistent prefix** → **Eventual**. Stronger = higher latency/RU cost; Strong limits multi-region write options.
+- **Partition key** design is critical (like DynamoDB): high cardinality, even distribution, used in most queries; logical partition limit 20 GB; hierarchical partition keys help.
+- **Request Units (RU/s):** normalized cost of operations (a 1 KB point read ≈ 1 RU); provisioned (manual/**autoscale**) or **serverless**; 429 throttling → SDK retries.
+- **Multi-region writes** (multi-master) with conflict resolution (last-writer-wins by `_ts` or custom stored procedure).
+- **Change feed** (≈ DynamoDB Streams) for projections and event-driven processing.
+
+```csharp
+// Cosmos DB .NET SDK v3: singleton client, session consistency, point reads by id + partition key
+builder.Services.AddSingleton(_ => new CosmosClient("https://cosmos-pay.documents.azure.com:443/", new DefaultAzureCredential(),
+    new CosmosClientOptions { ConsistencyLevel = ConsistencyLevel.Session, ApplicationRegion = Regions.WestEurope,
+                              SerializerOptions = new() { PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase } }));
+
+var container = cosmos.GetContainer("payments", "orders");
+var order = await container.ReadItemAsync<Order>(id: "O-9", partitionKey: new PartitionKey("CUST-123"));   // ~1 RU per KB
+Console.WriteLine(order.RequestCharge);
+
+// Optimistic concurrency with ETag
+await container.ReplaceItemAsync(updated, updated.Id, new PartitionKey(updated.CustomerId),
+    new ItemRequestOptions { IfMatchEtag = order.ETag });
+```
+
+**Common interview questions**
+
+**Q1. Azure SQL Database vs Managed Instance vs SQL Server on a VM?**
+Azure SQL Database for new cloud-native apps (fully managed, scales, serverless/Hyperscale). Managed Instance to lift-and-shift SQL Server workloads needing instance-level features (Agent jobs, cross-DB queries, CLR) with PaaS management. SQL Server on VMs only for full OS/instance control or unsupported features — you manage HA, patching and backups.
+
+**Q2. Explain Cosmos DB consistency levels and which you'd choose.**
+Strong (linearizable), bounded staleness (lag bounded by time or versions), session (read-your-writes and monotonic reads within a session — the default and usually best for user-facing apps), consistent prefix (no out-of-order reads), eventual (cheapest, fastest). Choose session for most apps; bounded staleness or strong for financial reads that must be current across regions, accepting latency and RU cost.
+
+**Q3. Cosmos DB costs are spiking. Why?**
+Cross-partition queries (fan-out), a poor partition key causing hot partitions and throttling-then-overprovisioning, indexing everything (write RU cost), large documents, strong consistency doubling read cost, chatty point reads instead of batched queries. Fix the partition key and queries, tune the indexing policy, use autoscale or serverless appropriately, cache hot reads.
+
+**Q4. Failover groups — what do they give you?**
+Geo-replicated databases with read-write and read-only **listener endpoints** that keep the same DNS name across failover, plus automatic or manual failover policies — the app doesn't change connection strings during a regional failover (async replication → RPO > 0).
+
+---
+
+## 7b. Serverless: Functions, Durable Functions, API Management, Logic Apps
+
+**Key concepts**
+- **Hosting plans** (a choice Lambda doesn't have): **Flex Consumption** (scale to zero, VNet integration, fast scaling — the modern default), Consumption (legacy), **Premium** (pre-warmed instances, no cold start, VNet), **Dedicated (App Service plan)**, Container Apps hosting.
+- **.NET isolated worker model** (out-of-process; in-process model is retiring) with full DI and middleware.
+- **Triggers/bindings:** HTTP, timer, Service Bus, Event Grid, Event Hubs, Blob, Cosmos DB change feed, queue.
+- **Durable Functions:** orchestrator functions written as code that are **replayed** from history → must be **deterministic** (use `context.CurrentUtcDateTime`, no direct I/O, no random); activities do the work (idempotent); patterns: function chaining, fan-out/fan-in, async HTTP APIs, monitors, human interaction (external events + timers), **sagas**. Durable Task Scheduler as a managed backend.
+- **API Management:** full API lifecycle — gateway (policies: JWT validation, rate limiting, quotas, transformation, caching), developer portal, products/subscriptions, versions/revisions, self-hosted gateways.
+- **Logic Apps:** low-code workflows with 1,000+ connectors (B2B/EDI, SaaS integrations) — for integration teams rather than core domain logic.
+
+```csharp
+// Durable Functions (isolated): payout saga with compensation
+[Function(nameof(PayoutOrchestrator))]
+public static async Task<string> PayoutOrchestrator([OrchestrationTrigger] TaskOrchestrationContext ctx)
+{
+    var req = ctx.GetInput<PayoutRequest>()!;
+    var retry = TaskOptions.FromRetryPolicy(new RetryPolicy(5, TimeSpan.FromSeconds(2), backoffCoefficient: 2));
+    await ctx.CallActivityAsync(nameof(ReserveFunds), req, retry);
+    try
+    {
+        var reference = await ctx.CallActivityAsync<string>(nameof(SendToBank), req, retry);   // pivot
+        await ctx.CallActivityAsync(nameof(PostLedger), (req, reference), retry);
+        return reference;
+    }
+    catch (TaskFailedException)
+    {
+        await ctx.CallActivityAsync(nameof(ReleaseFunds), req);                                  // compensate
+        throw;
+    }
+}
+```
+
+```xml
+<!-- APIM policy: validate JWT, rate limit per subscription, forward correlation id -->
+<inbound>
+  <validate-jwt header-name="Authorization" failed-validation-httpcode="401">
+    <openid-config url="https://login.microsoftonline.com/{tenant}/v2.0/.well-known/openid-configuration" />
+    <audiences><audience>api://payments</audience></audiences>
+  </validate-jwt>
+  <rate-limit-by-key calls="100" renewal-period="60" counter-key="@(context.Subscription.Id)" />
+  <set-header name="x-correlation-id" exists-action="skip"><value>@(context.RequestId.ToString())</value></set-header>
+</inbound>
+```
+
+**Common interview questions**
+
+**Q1. Durable Functions vs Step Functions?**
+Both give durable orchestration. Durable Functions express workflows as **code** (C#) replayed from history — powerful and testable but requiring determinism discipline; Step Functions use declarative JSON state machines with visual tooling and service integrations. Choose by platform and team preference; both need idempotent activities.
+
+**Q2. Why must orchestrator code be deterministic?**
+The orchestrator is replayed from its event history after every await to rebuild state; non-deterministic calls (current time, GUIDs, random, direct I/O) would produce different decisions on replay and corrupt the workflow. Use the context's deterministic APIs and move side effects into activities.
+
+**Q3. Which Functions hosting plan for a latency-sensitive payment API?**
+Premium (always-ready instances, no cold start, VNet) or Flex Consumption with always-ready instances; or host as a container in Container Apps/App Service. Consumption-style scale-to-zero is fine for background/event processing where cold starts don't matter.
+
+**Q4. API Management vs Application Gateway?**
+APIM manages APIs as products (auth policies, quotas, transformations, versioning, developer portal, analytics). Application Gateway is an L7 load balancer/WAF. They're often combined: Front Door/App Gateway (WAF) → APIM → backends.
+
+---
+
+## 8. Messaging: Service Bus, Event Grid, Event Hubs
+
+**Key concepts**
+- **Service Bus** (enterprise broker): **queues and topics/subscriptions** in one service; **sessions** (FIFO per session ID ≈ SQS FIFO groups), **duplicate detection** window, scheduled messages, deferral, **dead-letter sub-queues**, peek-lock with lock renewal, transactions (send + complete atomically within a namespace), subscription filters (SQL/correlation), Premium tier for isolation and VNet.
+- **Event Grid** (push-based event routing ≈ EventBridge): reacts to Azure resource events (blob created) and custom/CloudEvents; filters; push to webhooks/Functions/queues; **retries with backoff then drops unless a dead-letter destination is configured** (sharp edge). Event Grid namespaces add MQTT and pull delivery.
+- **Event Hubs** (partitioned log ≈ Kinesis/Kafka): partitions, consumer groups, checkpointing (Blob Storage), Capture to storage, **Kafka-compatible endpoint**, Schema Registry.
+- **Decision:** commands/work with ordering, transactions, DLQ → Service Bus; reactive notifications of state changes → Event Grid; high-volume telemetry/streams with replay → Event Hubs (or Kafka).
+
+```csharp
+// Service Bus processor with sessions (ordered per customer) and dead-lettering
+var client = new ServiceBusClient("sb-payments.servicebus.windows.net", new DefaultAzureCredential());
+var processor = client.CreateSessionProcessor("payments", new ServiceBusSessionProcessorOptions
+    { MaxConcurrentSessions = 16, AutoCompleteMessages = false, MaxAutoLockRenewalDuration = TimeSpan.FromMinutes(5) });
+
+processor.ProcessMessageAsync += async args =>
+{
+    try
+    {
+        await handler.HandleAsync(args.Message.Body.ToObjectFromJson<PaymentCommand>()!, args.CancellationToken); // idempotent
+        await args.CompleteMessageAsync(args.Message);
+    }
+    catch (ValidationException ex)
+    {
+        await args.DeadLetterMessageAsync(args.Message, "ValidationFailed", ex.Message);   // poison → DLQ
+    }
+};
+processor.ProcessErrorAsync += e => { logger.LogError(e.Exception, "SB error"); return Task.CompletedTask; };
+await processor.StartProcessingAsync();
+
+// Sending in order for one customer: SessionId = customerId; MessageId enables duplicate detection
+await client.CreateSender("payments").SendMessageAsync(new ServiceBusMessage(BinaryData.FromObjectAsJson(cmd))
+    { SessionId = cmd.CustomerId, MessageId = cmd.CommandId.ToString() });
+```
+
+**Common interview questions**
+
+**Q1. Service Bus vs Event Grid vs Event Hubs?**
+Service Bus for reliable business messaging (commands, ordered sessions, transactions, DLQ). Event Grid for lightweight reactive routing of discrete events to handlers (push, filtering) — not for high-volume streams. Event Hubs for big streams (telemetry, clickstreams, CDC) with partitions and replay; Kafka clients work against it.
+
+**Q2. What's the Event Grid "sharp edge"?**
+It retries delivery with backoff for a limited time/attempts (by default up to 24 hours) and then **drops** the event unless dead-lettering to a storage container is configured. Always configure dead-lettering and make handlers idempotent (at-least-once delivery).
+
+**Q3. How do you guarantee ordering per customer in Service Bus?**
+Use sessions with SessionId = customerId; a session processor locks a session so one consumer processes it sequentially while different sessions are processed in parallel.
+
+---
+
+## 9. Containers: AKS, Container Apps, Dapr, KEDA
+
+**Key concepts**
+- **Three tiers:** **Container Apps** (serverless containers on managed Kubernetes: revisions, traffic splitting, **scale to zero with KEDA**, built-in Dapr, ingress, jobs) → **AKS** (full Kubernetes: node pools, CNI choices (Azure CNI Overlay), Workload Identity, AGIC/Application Gateway for Containers, KEDA add-on, Azure Policy, upgrades) → App Service for containers / Container Instances for simple single containers.
+- **Dapr** (portable microservices runtime via sidecar): service invocation (mTLS, retries), state stores, pub/sub, bindings, secrets, actors, workflows — swap backing services by configuration. Cost: an extra sidecar hop, abstraction lowest-common-denominator, another component to operate.
+- **KEDA:** event-driven autoscaling on queue length/lag (Service Bus, Event Hubs, Kafka, Prometheus) — including to zero (mind cold starts).
+- AKS identity: **Microsoft Entra Workload ID** (federated service account tokens) — no secrets in pods.
+
+```yaml
+# KEDA ScaledObject: scale a worker on Service Bus queue length
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: { name: payments-worker }
+spec:
+  scaleTargetRef: { name: payments-worker }
+  minReplicaCount: 1          # keep 1 warm for latency; 0 for batch
+  maxReplicaCount: 30
+  triggers:
+  - type: azure-servicebus
+    metadata: { queueName: payments, namespace: sb-payments, messageCount: "50" }
+    authenticationRef: { name: keda-workload-identity }
+```
+
+**Common interview questions**
+
+**Q1. Container Apps or AKS?**
+Container Apps for teams that want containers with autoscaling, revisions, Dapr and minimal Kubernetes operations — most microservices and workers. AKS when you need full Kubernetes control (custom operators, service mesh, node-level tuning, GPU pools, multi-tenant platform) and have a platform team.
+
+**Q2. When is Dapr worth it?**
+When you need portability across clouds/brokers, a polyglot estate wanting consistent building blocks (pub/sub, state, secrets, workflows), or quick productivity in Container Apps. Not when the team needs broker-specific features or wants to avoid sidecar overhead and another abstraction layer.
+
+**Q3. Scale-to-zero — what's the catch?**
+Cold starts: the first request or message waits for a container to start (image pull, .NET startup, warm-up). Keep a minimum replica for latency-sensitive services, use ReadyToRun/NativeAOT and small images, and accept zero only for batch/async workloads.
+
+---
+
+## 10. App Hosting: App Service & Deployment Slots
+
+**Key concepts**
+- **App Service:** PaaS for web apps/APIs (Windows/Linux, containers), autoscale, VNet integration (outbound) + private endpoints (inbound), built-in auth (Easy Auth), managed certificates, **deployment slots** (staging slot → warm-up → **swap** with zero downtime; slot-sticky settings), health check, Always On.
+- Good default for .NET web apps that don't need Kubernetes.
+
+**Common interview question**
+
+**Q. How do you do zero-downtime deployments on App Service?**
+Deploy to a staging slot with production-like settings (sticky settings for slot-specific config), warm it up (application initialization/health checks), then swap — traffic moves to the pre-warmed instance; swap back to roll back. Combine with database expand–contract changes.
+
+---
+
+## 11. Observability: Azure Monitor & Application Insights
+
+**Key concepts**
+- **Azure Monitor:** metrics, **Log Analytics** workspaces (KQL), alerts (metric, log, activity log), workbooks, **Activity Log** (control-plane audit ≈ CloudTrail), diagnostic settings to route resource logs.
+- **Application Insights:** APM for apps — requests, dependencies, exceptions, distributed tracing, live metrics, availability tests; **OpenTelemetry Azure Monitor distro** for .NET is the recommended path.
+- KQL is a key interview skill.
+
+```csharp
+builder.Services.AddOpenTelemetry().UseAzureMonitor();   // Azure.Monitor.OpenTelemetry.AspNetCore — traces, metrics, logs
+```
+
+```kusto
+// p95 latency and failure rate per operation, last hour
+requests
+| where timestamp > ago(1h) and cloud_RoleName == "payments-api"
+| summarize p95 = percentile(duration, 95), failures = countif(success == false), total = count() by operation_Name
+| extend failureRate = todouble(failures) / total
+| order by p95 desc
+```
+
+**Common interview question**
+
+**Q. How do you trace a request across App Service, Service Bus and Functions?**
+OpenTelemetry instrumentation exporting to Application Insights; W3C trace context propagated over HTTP automatically and in Service Bus message properties (Diagnostic-Id/traceparent); consumers continue the trace; the transaction search/application map shows the end-to-end flow.
+
+---
+
+## 12. IaC (Bicep/ARM/Terraform), Governance (Policy) & Well-Architected
+
+**Key concepts**
+- **ARM** templates (JSON) → **Bicep** (concise DSL compiling to ARM, first-class Azure support, modules, `what-if`), **Terraform** (multi-cloud), Azure Developer CLI (`azd`) templates.
+- **Azure Policy:** deny/audit/modify/deployIfNotExists effects (e.g., deny public IPs, require tags, enforce private endpoints, require TLS 1.2) at management-group scope; initiatives (policy sets); compliance dashboard.
+- **Well-Architected (Azure):** five pillars — Reliability, Security, Cost Optimization, Operational Excellence, Performance Efficiency (AWS adds Sustainability as a sixth); **Azure Advisor** for continuous recommendations; Well-Architected Review assessments.
+
+```bicep
+// Bicep: storage account with GZRS, no public blob access, TLS 1.2
+resource st 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+  name: 'stpayments${uniqueString(resourceGroup().id)}'
+  location: location
+  sku: { name: 'Standard_GZRS' }
+  kind: 'StorageV2'
+  properties: {
+    minimumTlsVersion: 'TLS1_2'
+    allowBlobPublicAccess: false
+    allowSharedKeyAccess: false
+    publicNetworkAccess: 'Disabled'
+  }
+}
+```
+
+**Common interview question**
+
+**Q. How do you enforce security baselines across all subscriptions?**
+Azure Policy initiatives at management-group scope (deny public endpoints, require private endpoints and encryption, allowed regions/SKUs, tag requirements) with deployIfNotExists for diagnostics, Defender for Cloud recommendations and secure score, RBAC least privilege with PIM, and IaC modules that are compliant by default.
+
+---
+
+## 13. DR, Paired Regions, Cost & Hybrid Benefit
+
+**Key concepts**
+- **Paired regions:** Microsoft pairs regions (e.g., North Europe ↔ West Europe) for sequential platform updates, prioritized recovery and GRS replication targets. Some newer regions are unpaired (use zones + your own cross-region design).
+- **DR tools:** Azure Site Recovery (VM replication/orchestrated failover — mostly IaaS), Azure Backup, SQL failover groups, Cosmos DB multi-region, GZRS storage, Front Door for traffic failover.
+- **Cost levers:** Reservations and Savings Plans, **Azure Hybrid Benefit** (reuse Windows Server/SQL Server licences with Software Assurance — big savings for .NET/SQL estates), Spot VMs, autoscale and auto-pause (serverless SQL), right-sizing via Advisor, storage tiering, Dev/Test pricing, budgets and Cost Management alerts.
+
+**Common interview questions**
+
+**Q1. Design regional DR for a .NET + Azure SQL + Service Bus app.**
+Front Door for global routing with health probes; app deployed in both regions (warm standby); Azure SQL failover groups (listener endpoints, async geo-replication); Service Bus Premium geo-replication/geo-DR (metadata, and data replication where available) or dual namespaces with idempotent producers; GZRS storage; Key Vault in both regions; documented RTO/RPO; regular failover drills.
+
+**Q2. How do you cut Azure costs for a SQL Server–heavy estate?**
+Azure Hybrid Benefit for SQL and Windows licences, reservations for steady compute and SQL vCores, right-size tiers (General Purpose vs Business Critical), serverless or elastic pools for spiky/multi-tenant DBs, move .NET apps to Linux containers to drop Windows licences, auto-shutdown of non-prod, and storage lifecycle tiering.
+
+---
+
+## 14. Top 30 Rapid-Fire Questions + Principal Questions
+
+1. **Account equivalent?** Subscription.
+2. **Lifecycle container?** Resource group.
+3. **Policy hierarchy?** Management groups.
+4. **RBAC inheritance?** Downward from the assigned scope.
+5. **Identity platform?** Entra ID.
+6. **No-secret app identity?** Managed identity + `DefaultAzureCredential`.
+7. **JIT admin?** PIM.
+8. **KMS + Secrets Manager?** Key Vault.
+9. **Security group?** NSG (subnet and/or NIC).
+10. **Private PaaS access?** Private Endpoint + private DNS.
+11. **Global L7 entry?** Front Door.
+12. **Regional L7 + WAF?** Application Gateway.
+13. **DNS-based routing?** Traffic Manager.
+14. **ASG equivalent?** VM Scale Sets.
+15. **AZ vs Availability Set?** DC failure vs rack/update domains.
+16. **Storage redundancy?** LRS/ZRS/GRS/GZRS (+RA).
+17. **Pre-signed URL?** SAS (prefer user-delegation SAS).
+18. **WORM?** Blob immutability policies.
+19. **SQL lift-and-shift?** SQL Managed Instance.
+20. **Huge SQL DB?** Hyperscale.
+21. **Regional SQL failover with same endpoint?** Failover groups.
+22. **Cosmos default consistency?** Session.
+23. **Cosmos cost unit?** Request Units.
+24. **Cosmos CDC?** Change feed.
+25. **Ordered messages?** Service Bus sessions.
+26. **Event Grid risk?** Drops after retries without dead-lettering.
+27. **Kinesis equivalent?** Event Hubs (Kafka-compatible).
+28. **Serverless containers?** Container Apps (KEDA, Dapr).
+29. **Durable orchestration in code?** Durable Functions (deterministic orchestrators).
+30. **License savings?** Azure Hybrid Benefit.
+
+**Principal-level questions**
+
+**P1. Multi-cloud (AWS + Azure) — when is it justified?**
+Rarely as "active-active everything". Justified for regulatory/concentration-risk requirements, acquisitions, or best-of-breed services (e.g., Entra ID + M365 integration with workloads on AWS). Costs: duplicated platforms, skills, lowest-common-denominator abstractions, networking and egress. Prefer one primary cloud with portable architecture (containers, Kubernetes, Terraform, OpenTelemetry, standard protocols) and a credible exit plan.
+
+**P2. Design an Azure landing zone for a bank.**
+CAF enterprise-scale: management group hierarchy, platform subscriptions (identity, management with Log Analytics/Sentinel, connectivity hub with Azure Firewall/Virtual WAN, Private DNS), application landing zones per workload/env, Azure Policy baselines (no public endpoints, private DNS, encryption with CMK where required, allowed regions), PIM and Conditional Access, Defender for Cloud, subscription vending via IaC, and evidence export for audits.
+
+**P3. Translate your AWS payment architecture to Azure — what changes beyond names?**
+Identity model (managed identities + RBAC scopes instead of IAM roles), networking (Private Endpoints + DNS zones, regional subnets), Cosmos DB consistency choices vs DynamoDB, Service Bus sessions/transactions vs SQS FIFO, Durable Functions instead of Step Functions (code vs JSON), Front Door instead of CloudFront + Global Accelerator, Hybrid Benefit economics for SQL Server, and paired-region DR semantics.
+
+---
+
+## 15. Mistakes Checklist (say why each is wrong)
+- [ ] Broad Owner/Contributor assignments at subscription or management-group scope · no PIM
+- [ ] Client secrets/connection strings in config instead of managed identity
+- [ ] Private Endpoints without private DNS zones (still resolving public IPs)
+- [ ] Forgetting NIC-level NSGs · public endpoints left enabled on PaaS services
+- [ ] LRS for data needing zone/region resilience · relying on Availability Sets for DC failure
+- [ ] Account-key SAS everywhere · shared key access enabled
+- [ ] Cosmos DB with a low-cardinality partition key · strong consistency by default without need
+- [ ] Event Grid without dead-lettering · Service Bus consumers that aren't idempotent
+- [ ] Non-deterministic Durable Functions orchestrators
+- [ ] Scale-to-zero for latency-critical APIs · Consumption plan for always-hot APIs
+- [ ] Ignoring Hybrid Benefit and reservations for SQL Server estates
+
+---
+
+## Architecture Diagrams (preserved from the original modules)
+
+> All 32 Mermaid/ASCII diagrams from the original `22-Azure/` files, kept verbatim and grouped by source module. Originals: `git show ebb2d5c:22-Azure/<file>.md`.
+
+### Module 65 — Azure: Compute & Networking Fundamentals — VMs, VNet, Load Balancer/App Gateway & VM Scale Sets
+*Source: `01-Compute-Networking-VNet-LoadBalancer-VMSS.md`*
+
+**Azure Resource Hierarchy — No Direct AWS Equivalent**
+
 ```mermaid
 graph TB
  MG[Management Group] --> Sub[Subscription]
@@ -69,197 +538,16 @@ graph TB
  RG1 --> LB1[Application Gateway]
 ```
 
-### NSG Dual Association — Subnet AND NIC Level
+**NSG Dual Association — Subnet AND NIC Level**
+
 ```mermaid
 graph TB
  Subnet["Subnet<br/>NSG: allow 443 inbound from Internet"] --> VM["VM's NIC<br/>NSG: allow 443 ONLY from Application Gateway subnet"]
  VM --> Effective["EFFECTIVE rule = INTERSECTION<br/>of BOTH NSGs -- most restrictive wins<br/>(check BOTH layers, not just one)"]
 ```
 
-## 4. Production Example
-**Scenario**: A team migrating a customer-facing API from AWS to Azure (as part of a broader multi-cloud strategy) replicated their existing AWS architecture — a multi-AZ ASG behind an ALB — by provisioning a VM Scale Set behind an Application Gateway, and, because the team's runbook described "distribute VMs for resilience" without specifying the exact Azure mechanism, an engineer configured an **Availability Set** (reasoning, based on AWS familiarity, that "distributing across the datacenter" was equivalent to AWS's multi-AZ spread) rather than explicitly configuring the VMSS to span **Availability Zones**. **Investigation**: during a genuine, if rare, Azure datacenter-level incident affecting a single Availability Zone in that Region, every VM in the Availability-Set-configured scale set went down simultaneously — because Availability Sets provide fault-domain/update-domain distribution *within a single datacenter*, not *across* datacenters/Availability Zones, the entire fleet resided within the affected zone's single physical facility, with zero VMs surviving in an unaffected zone. **Root cause**: the migrating team's mental model, built entirely on AWS's single-tier AZ-distribution concept, didn't have a place for Azure's two-tier Zone-vs-Set distinction — "distribute across the datacenter for resilience" sounded like it satisfied the same requirement AWS's multi-AZ ASG satisfies, but Availability Sets are a structurally weaker, same-datacenter-scoped mechanism, and the engineer had no specific reason (without Azure-specific training) to know these were two distinct concepts requiring two distinct configuration decisions. **Fix**: reconfigured the VM Scale Set with explicit `zones = ["1", "2", "3"]` configuration (spanning genuine Availability Zones, matching the actual resilience posture the original AWS multi-AZ ASG provided), and updated the team's internal migration runbook to explicitly flag every AWS-to-Azure concept mapping with a documented divergence note wherever the mapping isn't a clean one-to-one equivalence (directly this module's own approach, now applied as an internal team practice) — Availability Sets retained as a *secondary*, within-zone consideration (for very latency-sensitive same-zone clustering scenarios) rather than mistakenly treated as the primary resilience mechanism. **Lesson**: cross-cloud migration risk isn't primarily about unfamiliar new concepts — it's specifically about concepts that sound familiar and analogous but have a subtly different actual guarantee, which is more dangerous precisely because it doesn't trigger the "I should look this up carefully" instinct that a genuinely unfamiliar concept would.
-## 10. Interview Questions
+**12. System Design**
 
-### Basic (10)
-1. **Q: What is a Resource Group, and what AWS concept is it most similar to?** **A:** A logical container for related Azure resources sharing a lifecycle — it has no precise direct AWS equivalent, though it combines aspects of tagging and IAM scoping.
-2. **Q: What is the Azure equivalent of an AWS VPC?** **A:** A VNet (Virtual Network) — the same isolated, CIDR-addressed private network boundary; the notable divergence is that VNet subnets are Region-scoped (spanning Availability Zones) whereas AWS subnets are pinned to a single AZ.
-3. **Q: What is the key structural difference between an Azure NSG and an AWS Security Group?** **A:** An NSG can associate with both a subnet and an individual NIC simultaneously; AWS Security Groups associate only with the instance's network interface.
-4. **Q: What is the difference between Azure Availability Zones and Availability Sets?** **A:** Availability Zones are physically separate datacenters within a Region (protecting against datacenter-level failure); Availability Sets spread VMs across fault/update domains within a single datacenter only.
-5. **Q: What is the Azure equivalent of an AWS ALB?** **A:** Application Gateway (Layer 7), which additionally bundles a Web Application Firewall natively.
-6. **Q: What is the Azure equivalent of an AWS Auto Scaling Group?** **A:** VM Scale Sets (VMSS) — the same declarative "maintain N instances from a template with metric-driven scaling" role; Flexible orchestration mode is the closer ASG analog (mixed sizes, spot mix, fault-domain spreading) versus the older Uniform mode's identical-instance model.
-7. **Q: Must VMSS zone-spanning be explicitly configured, or is it automatic?** **A:** It must be explicitly configured — it is not an automatic, implicit property of using VMSS.
-8. **Q: What does Azure Policy provide, and what AWS mechanism is it most analogous to?** **A:** Organization-wide, enforceable configuration constraints — analogous to AWS Service Control Policies.
-9. **Q: How many pillars does the Azure Well-Architected Framework have, and how does this compare to AWS's?** **A:** Five (Reliability, Security, Cost Optimization, Operational Excellence, Performance Efficiency) versus AWS's six — Azure folds Sustainability into general guidance rather than a standalone pillar.
-10. **Q: What roughly corresponds to an AWS Account in Azure's hierarchy?** **A:** A Subscription, which additionally nests under Management Groups for organization-wide policy inheritance.
-
-### Intermediate (10)
-1. **Q: Why is checking only the NIC-level NSG insufficient for a complete Azure network-security audit?** **A:** A subnet-level NSG can independently impose additional, more restrictive rules that apply regardless of what the NIC-level NSG allows — the effective access is the intersection of both layers, so reviewing only one risks missing a rule silently in effect at the other.
-2. **Q: Why did the incident's Availability-Set misconfiguration go undetected until an actual zone-level failure occurred?** **A:** Availability Sets do provide genuine, real resilience against fault-domain/update-domain-scoped failures (rack-level hardware issues, simultaneous patching), so the configuration "worked" and looked correct for any failure scope within that scope — the gap was invisible until a failure specifically at the datacenter/zone level (a scope Availability Sets don't protect against) actually occurred.
-3. **Q: Why is Resource Group deletion described as "a powerful convenience and a genuine risk," rather than purely one or the other?** **A:** It provides a clean, single-operation way to tear down an entire environment's resources when boundaries are drawn deliberately along a genuine shared lifecycle, but the same mechanism becomes a risk if resources with independent lifecycles are carelessly placed in the same group, since deleting the group has no selective-exclusion mechanism.
-4. **Q: Why does Application Gateway's native WAF bundling represent a genuine architectural difference from AWS, not just a naming difference?** **A:** In AWS, WAF is a separately-provisioned resource explicitly attached to an ALB or CloudFront; in Azure, WAF capability is an integrated, built-in option of Application Gateway itself — this changes the actual provisioning/architecture diagram (fewer distinct resources), not just terminology.
-5. **Q: Why should an AWS-to-Azure migration runbook explicitly flag divergent concept mappings rather than simply listing equivalent service names?** **A:** A migrating engineer relying on a simple name-mapping (as) has no signal to prompt closer scrutiny of concepts that sound equivalent but have subtly different actual guarantees (Availability Zones vs. Sets) — explicit divergence flags counteract exactly the false-familiarity risk that caused the incident.
-6. **Q: Why is VNet peering's throughput characteristic a capacity-planning concern analogous to the NAT Gateway discussion?** **A:** Both are network paths with real, non-infinite throughput ceilings that a sufficiently high-volume workload can hit — assuming either is a limitless pass-through risks an unanticipated bottleneck at genuine scale.
-7. **Q: Why does Azure's dual-layer NSG model represent both an additional security opportunity and an additional audit burden?** **A:** It enables a deliberate two-tier design (coarse subnet-level baseline plus fine-grained NIC-level refinement) unavailable in AWS's single-layer model, but correspondingly requires reviewing both layers together to correctly understand a VM's actual effective access, rather than a single-layer check being sufficient.
-8. **Q: Why is Azure Policy described as the structurally correct fix for the incident, rather than updated runbook documentation alone?** **A:** Runbook documentation depends on individual engineers reading and correctly applying it every time, the same unreliable-manual-diligence pattern this course has repeatedly flagged; Azure Policy can enforce a rule like "no VMSS without explicit zone configuration" structurally, at the platform level, regardless of whether any individual engineer remembered the documented guidance.
-9. **Q: Why must Azure subscription-level quotas be tracked separately from any AWS account's quotas for an organization operating in both clouds?** **A:** They are entirely independent capacity-tracking systems specific to each cloud provider — verifying sufficient AWS quota provides no information about Azure's separate, differently-structured quota system, and vice versa.
-10. **Q: Why does this module's comparative (AWS-referenced) structure make sense pedagogically, rather than presenting Azure concepts in isolation?** **A:** Because the underlying distributed-systems principles (multi-zone redundancy, health-check-gated load balancing, elastic scaling) are already fully established from the AWS module — presenting Azure independently would require re-deriving the same conceptual foundation; explicitly mapping onto and diverging from the already-learned AWS model is a more efficient and more precisely calibrated way to build accurate, non-naive Azure-specific judgment.
-
-### Advanced (10)
-1. **Q: Diagnose the incident from first principles, and design the specific automated Azure Policy definition that would have prevented this exact misconfiguration from ever reaching production, independent of any individual engineer's cloud-specific knowledge.**
- **A:** Root cause: an AWS-derived mental model conflated Availability Sets with Availability Zones, a distinction with no AWS analog to prompt closer scrutiny. Structural fix: an Azure Policy definition using a `deny` effect on any Microsoft.Compute/virtualMachineScaleSets resource that lacks a non-empty `zones` property in a designated production Resource Group — this converts a reliance on individual cross-cloud expertise into a non-bypassable platform-level gate, directly the same automated-governance pattern §Advanced Q10 and §Advanced Q1 already established for AWS, now expressed via Azure's own native policy mechanism.
-2. **Q: A team migrating from AWS to Azure argues that since both clouds provide "the same fundamental cloud primitives," a Principal Engineer with deep AWS expertise can architect an Azure system without dedicated Azure-specific training, learning details "as needed" during implementation. Evaluate this claim using the incident as evidence.**
- **A:** Push back, using directly — the danger isn't unfamiliar concepts (which naturally prompt research) but *falsely familiar* concepts (Availability Sets sounding like AWS's AZ model) that don't trigger the instinct to look something up carefully, precisely because they seem already understood; "learning as needed" systematically under-invests in exactly the class of risk that caused this incident, since the engineer never generates the "I should verify this" signal for a concept that feels already known — dedicated, structured Azure-specific training (or, as this module models, an explicit comparative-divergence review) is necessary specifically to surface these false-equivalence traps before they reach production, not simply "more cloud experience in general."
-3. **Q: Design the specific pre-production validation practice that would catch a resilience-configuration gap like the before an actual zone-level failure exposes it, generalizing this domain's recurring "steady-state doesn't exercise the failure-triggering condition" pattern to Azure specifically.**
- **A:** A pre-production or staging-environment **simulated zone-failure drill** — using Azure's own zone-down simulation capabilities where available, or, more generally, deliberately stopping/deallocating every VM instance within a single specific Availability Zone (or, for an Availability-Set-only configuration, verifying this test would reveal that *all* instances are affected simultaneously since none are actually zone-isolated) — and confirming the workload continues serving traffic from surviving zones; this directly parallels §Advanced Q1's scaling-event load test and §Advanced Q6's DR drill discipline, now applied to zone-failure resilience specifically, converting an assumed guarantee into a verified one.
-4. **Q: Explain why a genuinely multi-cloud (not just AWS-primary or Azure-primary) architecture faces a category of risk beyond what either cloud's own documentation individually addresses, using this module's Zone-vs-Set distinction as a concrete example.**
- **A:** Each cloud's own documentation correctly explains its own concepts in isolation, but neither AWS's nor Azure's documentation is positioned to warn a reader specifically about the *other* cloud's subtly different equivalent — the risk is inherently at the intersection/mapping between two systems, a space that requires deliberate, dedicated cross-cloud comparative material (exactly this module's approach) to address, since no single cloud provider's documentation has an incentive or a natural occasion to describe how its own concept differs from a competitor's similarly-named one.
-5. **Q: Critique the following claim: "Since our Application Gateway has WAF enabled, our web-facing service is now equivalently protected to an AWS ALB with AWS WAF attached, so no further review of AWS-specific migration checklist items is needed for this component."**
- **A:** The specific claim about WAF-equivalence is reasonable (both provide comparable managed-rule-based web-exploit protection) — but generalizing "this one component is fine" into "no further Azure-specific migration review is needed" is the same overgeneralization pattern flagged elsewhere in this course (§Advanced Q9): a correctly-verified equivalence for *this specific capability* says nothing about the *other* divergent concepts covered elsewhere in this module (NSG dual-layer association, Availability Zone/Set distinction) that remain independently unverified and require their own explicit checks.
-6. **Q: Design a decision framework for when an organization should invest in genuinely Azure-idiomatic architecture (embracing Azure-specific capabilities like Application Gateway's bundled WAF or Azure Policy) versus deliberately maintaining AWS-parallel architecture patterns for consistency across a multi-cloud estate.**
- **A:** Favor Azure-idiomatic patterns when the Azure-specific capability provides a genuine simplification or capability AWS's equivalent lacks (Application Gateway's bundled WAF reducing resource count) and when the workload/team operates predominantly or exclusively in Azure; favor AWS-parallel patterns specifically when an organization has active workloads genuinely spanning both clouds with shared tooling/runbooks/on-call expertise where consistency reduces operational cognitive load more than the Azure-specific optimization would save — this mirrors §Advanced Q4's individual-workload-vs-organizational-standardization trade-off, now applied to cloud-idiomatic-vs-portable architecture choice specifically.
-7. **Q: A Principal Engineer is asked to design the specific Resource Group boundary strategy for a multi-service application with distinct dev/staging/production environments and multiple independently-deployable microservices within each environment. Propose a structure and justify it.**
- **A:** Structure Resource Groups primarily along the environment axis first (e.g., `checkout-prod`, `checkout-staging`, `checkout-dev`), with each environment-specific Resource Group containing that environment's full set of related microservice resources — this ensures an entire environment can be safely and completely torn down or recreated via a single Resource Group deletion (a genuine operational convenience for staging/dev environments specifically) while production's boundary is deliberately scoped to prevent accidental co-mingling with lower environments; further sub-grouping by individual microservice is a reasonable secondary consideration only if services within an environment genuinely have independent lifecycles worth isolating, directly applying the "deliberate lifecycle-aligned boundary" principle to a concrete, multi-dimensional scenario.
-8. **Q: Explain why Azure's NSG dual-association model could, if adopted without corresponding review-process rigor, produce a WORSE security posture than AWS's simpler single-layer model, despite offering strictly more configuration flexibility.**
- **A:** Additional flexibility without correspondingly rigorous review discipline creates more configuration surface area where an error can hide — a team accustomed to AWS's single-layer mental model, migrating to Azure without adjusting their audit practice (the anti-pattern), might review only one NSG layer out of habit, missing a genuinely dangerous rule at the other layer that a security review would have caught in AWS's simpler model precisely because there's only one place to look — more capability requires commensurately more rigorous process, or it can net-produce worse outcomes than a simpler, harder-to-misconfigure model.
-9. **Q: Design the specific set of Azure Policy definitions (beyond the single zone-spanning check from Advanced Q1) that would comprehensively enforce this module's key resilience and security lessons across an entire subscription.**
- **A:** (1) Deny any VMSS without explicit non-empty `zones` configuration in production Resource Groups (Advanced Q1). (2) Deny any NSG rule permitting unrestricted inbound access (`0.0.0.0/0` equivalent, Azure's `Internet`/`Any` source) on ports beyond an explicitly-approved allowlist, checked at both subnet and NIC association layers. (3) Require Application Gateway WAF to be enabled (not merely available) for any Application Gateway in a production Resource Group. (4) Deny provisioning of any resource outside an approved, tagged Resource Group naming/organization convention, preventing ungoverned resource sprawl outside the deliberate lifecycle-aligned structure (Advanced Q7). Each policy targets a distinct, concrete configuration risk this module identified, mirroring the automated-governance-gate pattern established throughout the AWS domain (Modules 57-64) but expressed via Azure's own native policy engine.
-10. **Q: As a Principal Engineer establishing Azure standards for an organization already operating on AWS, design the specific onboarding/training practice (synthesizing this entire module) that ensures engineers with strong AWS backgrounds don't repeat the incident's category of mistake.**
- **A:** Require every engineer transitioning to Azure work to complete an explicit, structured **divergence review** (not general Azure training, but specifically a curated list of "concepts that sound like an AWS equivalent but differ" — Availability Zones vs. Sets, NSG's dual-layer model, Resource Group's lack of AWS equivalent, Application Gateway's bundled WAF) before being granted production-deployment permissions in Azure, paired with the Advanced Q9 policy suite as a structural backstop for anything the training doesn't fully prevent — directly treating "false familiarity from cross-cloud experience" as a distinct, specifically-addressed risk category rather than assuming general cloud expertise transfers safely by default, the central lesson this entire module establishes.
-
-### Expert (10)
-1. **Q: Design the specific hub-and-spoke topology and Azure Firewall rule structure for a multi-region FX trading platform where the order-matching-engine spoke must never initiate unaudited outbound internet connectivity, while a separate market-data-ingestion spoke legitimately needs high-throughput outbound connectivity to multiple external venues.**
- **A:** A central hub VNet per region hosting Azure Firewall (Premium tier, for TLS inspection and IDPS) with forced tunneling of all spoke egress through it; the order-matching spoke gets an explicit deny-by-default egress NSG plus an Azure Firewall application rule allowlisting only the specific, named FQDNs required (settlement system, internal risk service) — no broad internet egress rule at all; the market-data spoke gets a separate, wider Azure Firewall network/application rule collection scoped to the specific known venue FQDNs/IP ranges, still centrally logged, but not identical to the order-matching spoke's tighter policy — the key design point being that both spokes share the same centralized, auditable choke point (Azure Firewall) while each has its own independently-scoped, purpose-specific rule set, rather than one shared, lowest-common-denominator egress policy that would either over-permit the matching engine or under-permit market-data ingestion.
-
-2. **Q: A team argues that since Azure Standard Load Balancer is zone-redundant "by default," a VMSS behind it is automatically resilient to a zone failure even if the VMSS itself has no explicit `zones` configuration. Evaluate this claim.**
- **A:** False, and a dangerous half-truth — the Load Balancer's own frontend IP and dataplane being zone-redundant means the *load balancer* survives a zone failure and continues routing to whatever healthy backends remain, but it provides zero resilience to the *backend pool* itself; if every VMSS instance behind it resides in a single zone (no explicit `zones` configuration), a zone failure removes 100% of the backend pool, and the zone-redundant Load Balancer simply has nothing healthy left to route to — this is precisely the incident's failure mode, now reframed with a load-balancer-level distraction that makes the underlying compute-layer gap easier to overlook.
-
-3. **Q: Design a pre-production validation practice that would have caught the incident's Availability-Set-instead-of-Zones misconfiguration before an actual zone-level failure exposed it, generalizing the "steady-state doesn't exercise the failure-triggering condition" pattern to Azure compute specifically.**
- **A:** A staged, pre-production **simulated zone-failure drill**: deliberately stop/deallocate every VM instance Azure Resource Graph reports as residing in a specific Availability Zone (or, for an Availability-Set-only configuration, confirming this query itself reveals zero zone-diversity, since Availability Sets carry no zone assignment to query at all) and verify the workload continues serving traffic from the remaining zones/instances — converting an assumed resilience property into a verified one, run as a mandatory pre-production gate for any workload claiming zone-redundant resilience, not merely a documentation checkbox.
-
-4. **Q: Explain why an Azure Policy that merely checks "does this VMSS have a non-empty `zones` property" is an incomplete safeguard against the incident's failure class, and design a more complete check.**
- **A:** A non-empty `zones` array satisfies the letter of the check even if it specifies only a single zone (e.g., `zones: ["1"]`) — technically "zone-configured" but providing zero actual cross-zone resilience, the same "object presence ≠ enforced reality" pattern recurring from this course's Kubernetes modules. The more complete check verifies the `zones` array contains at least the number of zones the workload's stated resilience requirement demands (typically all three, for full-region-zone-count workloads) **and** separately verifies, via a runtime query against Azure Resource Graph, that instances are actually currently distributed across those zones (not merely configured to be, in case of a transient scale-in leaving all surviving instances in one zone) — static configuration-linting and runtime-distribution verification are two independent checks, and a policy performing only the former misses the latter.
-
-5. **Q: A Principal Engineer is evaluating whether a payment-gateway-integration service (synchronous, latency-sensitive, calling out to Stripe/Adyen) should sit behind Application Gateway or Azure Load Balancer. Design the recommendation and justify it against the specific security and latency requirements of a PCI-scoped payment path.**
- **A:** Application Gateway, despite its higher per-request latency versus Load Balancer, is the correct choice here specifically because of the PCI-relevant requirements: its bundled WAF provides managed protection against injection/XSS attacks on the inbound path (a PCI-DSS-relevant control), and its Layer-7 visibility enables path-based routing and centralized TLS termination/certificate management at a single, auditable point — the single-digit-millisecond latency overhead is a justified, deliberate trade against these security and operability gains for a PCI-scoped, internet-facing path; a purely internal, backend-to-backend call with no external exposure and no WAF requirement would correctly default to Load Balancer instead, since that path has no PCI-relevant inbound-web-threat surface to protect against.
-
-6. **Q: Design the Resource Group and RBAC boundary strategy specifically for a network topology spanning a shared hub VNet (owned by a central platform team) and multiple application-owning teams' spoke VNets, addressing the tension between centralized network governance and per-team deployment autonomy.**
- **A:** Place the hub VNet, Azure Firewall, and VPN/ExpressRoute gateways in a platform-team-owned Resource Group with RBAC restricted to the platform team (Contributor) and read-only Reader access for application teams (visibility without modification rights); place each application's spoke VNet in that application team's own Resource Group, with the application team granted Contributor scoped to their own spoke Resource Group only (not the hub) — VNet peering connections themselves require a role assignment on **both** sides (the hub and the spoke), so the platform team retains a structural veto over which spokes can peer into the hub, preventing an application team from unilaterally establishing unreviewed connectivity into the shared, centrally-governed network — directly applying Module 66's lowest-necessary-scope RBAC discipline to network-topology governance specifically.
-
-7. **Q: Explain why a VMSS's Flexible orchestration mode is described as "the closer ASG analog" versus Uniform mode, and design a scenario where a FinTech workload specifically benefits from Flexible mode's capabilities.**
- **A:** Uniform mode requires every instance to be identical (same VM image/SKU); Flexible mode allows mixing instance sizes and Spot/on-demand pricing within a single scale set, individually addressable VMs (rather than an opaque, scale-set-managed pool), and per-instance fault-domain placement — directly matching AWS ASG's mixed-instance-policy capability. A concrete FinTech benefit: an end-of-day batch-reconciliation workload that can tolerate interruption benefits from mixing Spot instances (substantially lower cost) with a baseline of on-demand instances for guaranteed minimum capacity within the same Flexible-mode scale set, achieving cost savings Uniform mode's identical-instance constraint doesn't allow.
-
-8. **Q: A security review finds that an NSG's rule set correctly denies all inbound traffic except from an Application Gateway subnet, but the review is unable to determine, from the NSG rules alone, which specific VMs are actually reachable via that path in production right now. Diagnose the gap and design the fix.**
- **A:** The NSG rule set describes the *permitted* topology, not the *actual, currently-deployed* topology — determining which VMs are actually reachable requires cross-referencing the NSG-permitted source (the Application Gateway subnet) against Azure Resource Graph's live inventory of which NICs/VMs currently exist in the target subnet and which NSGs are actually associated with each (both subnet- and NIC-level, Module 65 §2.2's dual-association model) — the fix is a standing, automated **effective-network-path** report (analogous to Module 66 Advanced Q3's effective-RBAC-permissions computation) that resolves declared NSG rules against live resource inventory, rather than relying on manual cross-referencing during each individual review.
-
-9. **Q: Critique the following claim: "Since our production VNet uses Azure Firewall for centralized egress filtering, our NSGs no longer need careful per-subnet review, since the Firewall is our real security boundary."**
- **A:** Incomplete and risky — Azure Firewall and NSGs operate at different layers addressing different threats: Azure Firewall's forced-tunneling primarily governs *outbound, internet-bound* traffic leaving the VNet; NSGs govern *lateral, east-west* traffic between subnets/NICs within and across the VNet, a threat surface Azure Firewall's typical hub-egress deployment does not inspect at all (traffic between two spoke subnets, or between two VMs in the same subnet, generally never transits the hub Firewall). An attacker who compromises one internal VM and attempts lateral movement to a second, more sensitive VM in the same VNet is constrained entirely by NSG rules, not by Azure Firewall — treating Firewall as a substitute for NSG rigor leaves the lateral-movement threat surface effectively unreviewed.
-
-10. **Q: As a Principal Engineer establishing Azure network/compute standards for a FinTech organization, design the specific set of standing architectural reviews and automated policy checks (synthesizing this entire module) required before any new production Azure workload goes live.**
- **A:** (1) Mandatory zone-redundancy verification for both compute (VMSS explicit `zones`) and load-balancing (Standard SKU, not Basic) tiers, backed by the Advanced Q1 Azure Policy and the Expert Q3 pre-production zone-failure drill. (2) Mandatory dual-layer (subnet + NIC/ASG) NSG review with an automated effective-network-path report (Expert Q8), not manual-only review. (3) Mandatory Azure Firewall centralized egress for any Resource Group handling regulated financial data, with FQDN-scoped allowlists rather than broad internet egress (§8). (4) Mandatory Azure Bastion for all management access, with a policy denying any NSG rule directly exposing RDP/SSH. (5) Mandatory DDoS Protection Standard (not Basic-only) for any internet-facing production endpoint. (6) A deliberate Application-Gateway-vs.-Load-Balancer decision recorded per service, justified against that service's actual PCI/WAF/latency requirements (Expert Q5), not defaulted uniformly. This set converts the module's individual lessons into a non-bypassable, structurally-enforced pre-production gate, rather than relying on any individual engineer independently recalling each one under delivery pressure.
-
----
-
-## 11. Coding Exercises
-
-### Easy — VNet with explicit public/private subnet split (mirroring)
-```hcl
-resource "azurerm_virtual_network" "main" {
-  name = "checkout-vnet"
-  address_space = ["10.1.0.0/16"]
-  location = azurerm_resource_group.checkout_prod.location
-  resource_group_name = azurerm_resource_group.checkout_prod.name
-}
-
-resource "azurerm_subnet" "public" {
-  name = "public-subnet"
-  resource_group_name = azurerm_resource_group.checkout_prod.name
-  virtual_network_name = azurerm_virtual_network.main.name
-  address_prefixes = ["10.1.1.0/24"]
-}
-
-resource "azurerm_subnet" "private" {
-  name = "private-subnet"
-  resource_group_name = azurerm_resource_group.checkout_prod.name
-  virtual_network_name = azurerm_virtual_network.main.name
-  address_prefixes = ["10.1.2.0/24"] # SEPARATE, non-overlapping range -- no direct internet route
-}
-```
-
-### Medium — Dual-layer NSG association
-```hcl
-resource "azurerm_network_security_group" "subnet_baseline" {
-  name = "private-subnet-baseline-nsg"
-  security_rule {
-    name = "AllowFromAppGatewayOnly"; priority = 100; direction = "Inbound"; access = "Allow"
-    protocol = "Tcp"; source_port_range = "*"; destination_port_range = "8080"
-    source_address_prefix = "10.1.1.0/24"; destination_address_prefix = "*" # ONLY from public/AppGw subnet
-  }
-}
-
-resource "azurerm_subnet_network_security_group_association" "private_subnet" {
-  subnet_id = azurerm_subnet.private.id
-  network_security_group_id = azurerm_network_security_group.subnet_baseline.id # SUBNET-level layer
-}
-
-resource "azurerm_network_interface_security_group_association" "checkout_vm_nic" {
-  network_interface_id = azurerm_network_interface.checkout_vm.id
-  network_security_group_id = azurerm_network_security_group.checkout_nic_specific.id # NIC-level layer --
-    # BOTH apply
-}
-```
-
-### Hard — VM Scale Set with EXPLICIT Availability Zone spanning
-```hcl
-resource "azurerm_linux_virtual_machine_scale_set" "checkout" {
-  name = "checkout-vmss"
-  resource_group_name = azurerm_resource_group.checkout_prod.name
-  sku = "Standard_D2s_v5"
-  instances = 4
-
-  # EXPLICIT zone spanning -- the fix. Omitting this entirely (or using an
-    # Availability Set instead) reproduces the incident's single-zone risk.
-  zones = ["1", "2", "3"]
-  zone_balance = true # instances spread as evenly as possible ACROSS the specified zones
-
-  # NOT this (the anti-pattern):
-    # availability_set_id = azurerm_availability_set.checkout.id # same-DATACENTER only, NOT zone-resilient
-}
-```
-
-### Expert — Azure Policy enforcing zone-spanning at the subscription level (§Advanced Q1, §Advanced Q9)
-```json
-{
-  "properties": {
-    "displayName": "Deny VMSS without explicit Availability Zone configuration in production",
-      "policyType": "Custom",
-      "mode": "Indexed",
-      "parameters": {},
-      "policyRule": {
-      "if": {
-        "allOf": [
-          { "field": "type", "equals": "Microsoft.Compute/virtualMachineScaleSets" },
-          { "field": "Microsoft.Compute/virtualMachineScaleSets/zones", "exists": "false" },
-          { "field": "resourceGroup", "contains": "prod" }
-        ]
-      },
-      "then": { "effect": "deny" }
-    }
-  }
-}
-```
-**Discussion**: this policy structurally prevents the exact misconfiguration from ever being deployed to a production Resource Group, regardless of any individual engineer's AWS-derived assumptions about Availability Sets versus Zones — directly Advanced Q1's answer, made concrete, and the same "structural enforcement over reliance on individual knowledge" principle this entire AWS-and-now-Azure domain has established repeatedly.
-
----
-
-## 12. System Design
-
-**Scenario:** Design the network and compute foundation for a multi-region FX spot-trading order-routing platform: client order intake, an order-matching/routing tier, and outbound connectivity to multiple liquidity venues, deployed across two Azure regions (primary: East US 2; secondary: West Europe, chosen for genuine geographic/regulatory separation, not merely a second AZ) with an RTO target under 5 minutes.
-
-**Functional requirements:** accept client orders over HTTPS; route orders to the correct venue-connectivity service; survive a single Availability Zone failure with zero manual intervention; survive a full-region failure with a bounded, tested RTO; centrally audit every outbound network connection for compliance.
-
-**Non-functional requirements:** p99 order-intake-to-venue-dispatch latency under 15ms within a region (excluding venue round-trip); zero unaudited egress from the matching tier; Standard (not Basic) Load Balancer/zone-redundant components throughout; every network-security decision independently reviewable via Infrastructure-as-Code, not manual portal configuration.
-
-**Architecture:**
 ```mermaid
 graph TB
  subgraph "Region: East US 2 (primary)"
@@ -282,29 +570,8 @@ graph TB
  FW1 -->|allowlisted venue FQDNs only| Venues[External liquidity venues]
 ```
 
-**Component glossary:** Azure Front Door — global Anycast Layer-7 entry point, health-probes both regions and fails traffic over to West Europe if East US 2's probe fails; Application Gateway — regional Layer-7 ingress with WAF, zone-redundant; VMSS order-intake — public-facing, stateless, terminates client sessions, zone-spanning; VMSS order-matching — private-subnet-only, no public IP, reached only from order-intake's subnet via NSG rule; Azure Firewall — hub-VNet-deployed, the *only* path to external venues, enforcing an FQDN allowlist per venue.
+**13. Low-Level Design**
 
-**Database selection:** order state persisted to a regional SQL Managed Instance with active geo-replication to West Europe (asynchronous, accepting a small RPO in the failover path) — a boring, ACID relational store is deliberately chosen over a NoSQL alternative for the same reason the payment-system reference architecture prefers it: transactional integrity for order state, mature tooling, and DBA/on-call familiarity outweigh a NoSQL benchmark's raw throughput number for this specific, correctness-critical workload.
-
-**Caching:** venue-connectivity credentials and routing-table lookups cached in a zone-redundant Azure Cache for Redis instance per region, with a short TTL (venue routing tables change infrequently, but a stale route must never persist longer than the venue's own maintenance-window notice period).
-
-**Messaging:** order events published to a regional Event Hub for downstream reconciliation/audit consumption, decoupling the synchronous order-matching hot path from the asynchronous audit-trail write.
-
-**Scaling:** VMSS order-intake and order-matching each scale independently on a leading indicator (request queue depth, not CPU alone, per §7's scale-out-latency discussion) with explicit `zones=["1","2","3"]` and Flexible orchestration for mixed on-demand/reserved-capacity cost optimization on the (interruption-intolerant) matching tier restricted to on-demand only.
-
-**Failure handling:** a single-zone failure is absorbed silently by VMSS zone-spanning and Standard Load Balancer/App Gateway's own zone redundancy (§9); a full East US 2 region failure is detected by Front Door's health probes (configurable probe interval/failure threshold, typically probing every 30s with a 2-3 consecutive-failure threshold before failover, meaning realistic detection-to-failover time is 60-90 seconds) and traffic shifts to the West Europe standby, which must be scaled up from its warm-standby instance count — the RTO budget explicitly accounts for this scale-up latency (§7's 2-5 minute VMSS scale-out figure), not just DNS/routing failover time.
-
-**Monitoring:** Azure Monitor + Log Analytics aggregating NSG flow logs, Azure Firewall logs, Application Gateway access logs, and VMSS instance health across both regions into one queryable workspace; alerting on sustained (not momentary) health-probe failure, sustained NSG-deny-rate anomalies (a leading indicator of either misconfiguration or an active scanning/attack attempt), and Front Door failover events.
-
-**Trade-offs:** warm-standby (Option B in §15) accepted over full active-active, trading a materially simpler, lower-cost operational model for a 2-5-minute RTO rather than near-zero — justified because this specific platform's regulatory RTO requirement (5 minutes) does not demand active-active's added consistency and cost complexity; a genuinely sub-minute RTO requirement would flip this trade-off toward active-active with its attendant cross-region data-consistency engineering cost.
-
----
-
-## 13. Low-Level Design
-
-**Requirements:** the network/compute topology must enforce zone-redundancy for every production tier, deny-by-default egress with explicit FQDN allowlisting, and be fully expressible and auditable as Infrastructure-as-Code.
-
-**Class diagram (Infrastructure-as-Code module structure):**
 ```mermaid
 classDiagram
  class NetworkModule {
@@ -336,7 +603,8 @@ classDiagram
  ComputeModule --> NetworkSecurityGroup : NIC-level association
 ```
 
-**Sequence diagram — order intake through matching to venue, with the NSG/Firewall checkpoints:**
+**13. Low-Level Design**
+
 ```mermaid
 sequenceDiagram
  participant Client
@@ -359,81 +627,570 @@ sequenceDiagram
  Intake-->>Client: ack
 ```
 
-**Design patterns used:** Facade (Application Gateway/Front Door presenting one entry point over a zone-spanning fleet); Strategy (per-tier scaling-trigger selection — queue depth for intake, CPU-plus-queue for matching); Chain of Responsibility (NSG rule evaluation, subnet layer then NIC layer, both must pass).
+### Module 66 — Azure: IAM & Security — Entra ID, RBAC, Key Vault & Managed Identities
+*Source: `02-IAM-Security-EntraID-RBAC-KeyVault.md`*
 
-**SOLID mapping:** Single Responsibility (NetworkModule owns topology/peering; ComputeModule owns scaling/zone configuration — neither reaches into the other's concern); Open/Closed (a new spoke VNet/application onboards via a new SpokeModule instance without modifying the hub or Firewall module); Dependency Inversion (ComputeModule depends on an abstract LoadBalancer interface, not a concrete Basic-vs-Standard SKU, allowing the SKU decision to be swapped centrally).
+**RBAC Hierarchical Scope Inheritance**
 
-**Extensibility:** a new liquidity venue is onboarded by adding one FQDN entry to Azure Firewall's application-rule collection and one routing-table entry in Redis — no NSG or VMSS change required, since the matching tier's own network posture doesn't vary per venue.
+```mermaid
+graph TB
+ MG["Management Group<br/>Role: Reader (inherited by ALL below)"] --> Sub["Subscription: Production<br/>Role: + Contributor (checkout team)"]
+ Sub --> RG1["Resource Group: checkout-prod<br/>-- Contributor INHERITED from Subscription --"]
+ Sub --> RG2["Resource Group: inventory-prod<br/>-- Contributor INHERITED (may be unintended!) --"]
+ RG1 --> Res1["VM: checkout-vm-01<br/>-- Contributor INHERITED --"]
+```
 
-**Concurrency/thread safety:** VMSS scale-in must be **instance-protection-aware** for the order-matching tier — an instance currently processing an in-flight order must not be selected for scale-in termination; Azure VMSS supports instance-protection flags (`protectFromScaleIn`) precisely for this purpose, and the matching-tier application must set/clear this flag around each order's processing lifecycle to avoid a scale-in event silently dropping an in-flight order.
+**Key Vault's Combined Model vs. AWS's Split KMS/Secrets Manager**
 
----
+```mermaid
+graph LR
+ subgraph "AWS: TWO independent services/policies"
+ KMS[KMS Key Policy] -.->|"factor 1"| S3Data[Encrypted S3 Object]
+ IAM[IAM Resource Policy] -.->|"factor 2"| S3Data
+ end
+ subgraph "Azure: ONE service -- Key Vault"
+ RBAC["Object-level RBAC<br/>(scoped per secret/key)"] --> KV[Key Vault]
+ NetIso["Network isolation<br/>(private endpoint/firewall)"] --> KV
+ end
+```
 
-## 14. Production Debugging
+**12. System Design**
 
-**Incident:** p99 order-intake-to-matching latency spiked from a steady 4ms to over 200ms for roughly 40 minutes during a known, scheduled high-volume market-open window, with no corresponding CPU, memory, or VMSS instance-count anomaly visible in the standard dashboards.
+```mermaid
+graph TB
+ subgraph "East US 2 (primary)"
+  Auth[Auth Service<br/>System-assigned Managed Identity]
+  KV1[Key Vault: payments-prod-eastus<br/>RBAC model, object-level scoping]
+  Recon[Reconciliation Service<br/>System-assigned Managed Identity]
+  Auth -->|Key Vault Secrets User<br/>on card-processor-api-key ONLY| KV1
+  Recon -->|Key Vault Secrets User<br/>on settlement-sftp-creds ONLY| KV1
+ end
+ subgraph "West Europe (standby)"
+  KV2[Key Vault: payments-prod-westeu<br/>synchronized via rotation pipeline]
+ end
+ PIM[PIM: Key Vault Secrets Officer<br/>eligible, not standing]
+ OnCall[On-call engineer] -->|activate: MFA + device compliance<br/>+ justification, 4h auto-expire| PIM
+ PIM -->|time-bound| KV1
+ KV1 -.->|rotation-time sync| KV2
+```
 
-**Root cause:** the order-intake-to-matching internal call path traversed the subnet's NSG, whose rule set had grown, over many incremental changes across several quarters, to over 400 rules — including a substantial number of now-obsolete, never-cleaned-up rules from decommissioned services, all evaluated in priority order for every *new* connection. Market-open specifically drove a burst of new, short-lived connections (a client-reconnection storm following a brief upstream client-side network blip), and because NSGs evaluate rules per-new-flow (§7), the connection-establishment-heavy burst was disproportionately, specifically slowed by the bloated rule list's evaluation depth — a cost invisible during steady-state traffic (few new flows, mostly warm, cached flow-table hits) and only exposed under a connection-churn burst.
+**13. Low-Level Design**
 
-**Investigation:** Azure Network Watcher's **NSG flow logs** combined with **connection troubleshoot** and **IP flow verify** tooling confirmed individual new-flow evaluation latency correlating with rule-list position — flows matching a rule near the end of the 400-rule list showed measurably higher establishment latency than flows matching an early rule; VMSS/App Gateway metrics showed no saturation, correctly directing investigation away from a compute/scaling explanation and toward the network dataplane.
+```mermaid
+classDiagram
+ class ManagedIdentity {
+  +string PrincipalId
+  +ResourceLifecycle boundTo
+ }
+ class RoleAssignment {
+  +string Scope
+  +string RoleDefinition
+  +ManagedIdentity principal
+ }
+ class KeyVaultSecretClient {
+  -TokenCredential credential
+  -MemoryCache cache
+  +GetSecretAsync(name) Secret
+  -RefreshBeforeExpiry() void
+ }
+ class PimActivation {
+  +string Justification
+  +TimeSpan Duration
+  +DateTime ActivatedAt
+  +bool RequiresDeviceCompliance
+ }
+ class AuditLogger {
+  +LogAccess(principalId, secretName, operation) void
+ }
+ KeyVaultSecretClient --> ManagedIdentity : authenticates via
+ RoleAssignment --> ManagedIdentity
+ PimActivation --> RoleAssignment : grants time-bound
+ KeyVaultSecretClient --> AuditLogger
+```
 
-**Tools:** Azure Network Watcher (NSG flow logs, IP flow verify, connection troubleshoot); Azure Monitor metrics correlated against the specific market-open timestamp window; a manual NSG rule-list audit cross-referenced against the service-decommissioning history to identify obsolete rules.
+**13. Low-Level Design**
 
-**Fix:** the NSG rule set was audited and pruned from 400+ rules down to roughly 30 active, justified rules (removing every rule tied to a decommissioned service, consolidating overlapping IP-range rules using Application Security Groups instead of individually-enumerated IPs); the remaining rules were reordered so the highest-frequency-matched rules (the intake-to-matching allow rule specifically) sit at the highest priority (lowest numeric value), minimizing average evaluation depth for the dominant traffic pattern.
+```mermaid
+sequenceDiagram
+ participant Svc as Auth Service
+ participant Cache as In-memory cache
+ participant MI as Managed Identity / IMDS
+ participant KV as Key Vault
 
-**Prevention:** (1) a standing quarterly NSG-rule-hygiene review, explicitly cross-referenced against the service-decommissioning log, so obsolete rules are removed as part of decommissioning rather than accumulating indefinitely; (2) an automated Azure Policy/Resource Graph query alerting when any production NSG's rule count exceeds a defined threshold (e.g., 100), surfacing bloat proactively rather than waiting for a connection-churn event to expose its latency cost; (3) load-testing NSG connection-burst throughput explicitly as part of the pre-production performance gate (§7's benchmarking guidance), rather than only load-testing steady-state warm-flow throughput, which had never previously exercised this failure mode.
+ Svc->>Cache: get card-processor-api-key
+ alt cache hit, not near expiry
+  Cache-->>Svc: cached value
+ else cache miss or near expiry
+  Svc->>MI: acquire token (local IMDS call)
+  MI-->>Svc: token
+  Svc->>KV: GET secret (RBAC + network check)
+  KV-->>Svc: secret value
+  Svc->>Cache: store with TTL
+ end
+```
 
----
+### Module 67 — Azure: Storage — Blob Storage, Managed Disks, Azure Files & Redundancy Tiers (LRS/ZRS/GRS)
+*Source: `03-Storage-Blob-ManagedDisks-Files-Redundancy.md`*
 
-## 15. Architecture Decision
+**Redundancy Tier Spectrum — the Explicit Choice Axis With No AWS Equivalent**
 
-**Context:** choosing the multi-region resilience posture for the trading platform's order-routing tier.
+```mermaid
+graph LR
+ LRS["LRS<br/>3 copies, SINGLE datacenter<br/>= Availability-SET-equivalent risk"] --> ZRS["ZRS<br/>3 copies, 3 AZs<br/>= S3's baseline guarantee"]
+ ZRS --> GRS["GRS<br/>ZRS/LRS + ASYNC replication<br/>to paired Region"]
+ GRS --> RAGZRS["RA-GZRS<br/>Zone-redundant primary +<br/>readable geo-replica<br/>= closest to S3's automatic guarantee"]
+```
 
-**Option A — Active-active (both regions serving live traffic simultaneously):**
-*Advantages:* near-zero RTO, no failover-triggered scale-up latency, continuous validation that the secondary region actually works (no "warm standby that's silently broken" risk).
-*Disadvantages:* requires a data layer that can tolerate genuine multi-region concurrent writes (materially harder consistency engineering for order state specifically, where correctness is paramount); doubles steady-state compute cost; requires careful, tested conflict-resolution logic for any order that could theoretically be processed in either region.
-*Cost:* high — full production-capacity compute running continuously in both regions.
-*Operational overhead:* high — requires ongoing validation of true bidirectional data consistency, not just infrastructure health.
+**Managed Disk Zone-Redundant Storage — Stronger Than Standard AWS EBS**
 
-**Option B — Active-passive/warm standby (secondary region scaled down, promoted on failover):**
-*Advantages:* materially simpler data-consistency model (single-region-authoritative order state, asynchronous geo-replication to the standby); substantially lower steady-state cost; the model recommended in §12.
-*Disadvantages:* RTO bounded below by VMSS scale-out latency (2-5 minutes, §7) plus Front Door failover-detection latency (60-90 seconds) — not near-zero; risk of "the standby doesn't actually work" if not regularly drilled.
-*Cost:* moderate — minimal standby compute footprint, full compute only provisioned on actual failover.
-*Operational overhead:* moderate — requires disciplined, scheduled failover drills (Expert Q3's zone-failure-drill discipline, extended to full-region scope) to keep the "it works" claim genuinely verified rather than assumed.
+```mermaid
+graph TB
+ subgraph "Zone A"
+ VM1[VM -- primary] --> Disk["Managed Disk (ZRS)<br/>synchronously replicated"]
+ end
+ subgraph "Zone B"
+ Disk -.->|"can be REATTACHED here<br/>if Zone A fails -- NO AWS EBS equivalent"| VM2["VM -- failover target"]
+ end
+```
 
-**Option C — Single-region with only intra-region (multi-AZ) resilience:**
-*Advantages:* lowest cost and complexity of the three.
-*Disadvantages:* no protection against a genuine full-region event (a rare but real risk class, and specifically the class this module's own production incident narrowly avoided only because the failure was zone-scoped, not region-scoped); does not satisfy a regulatory RTO/DR requirement most FinTech production trading platforms carry.
-*Cost:* lowest.
-*Operational overhead:* lowest, but carries unaddressed regulatory/business risk.
+**13. Low-Level Design**
 
-**Recommendation: Option B (active-passive warm standby), with mandatory, scheduled full-region failover drills treated as a non-negotiable operational requirement, not a nice-to-have.** Justification: the platform's stated 5-minute RTO requirement is comfortably met by Option B's realistic failover timeline without requiring Option A's substantially harder cross-region write-consistency engineering for order state — a domain where correctness must never be traded for availability. Option A becomes the correct choice only if a future regulatory or business requirement tightens RTO to a sub-minute bound, at which point the added consistency-engineering cost becomes justified rather than premature.
+```mermaid
+classDiagram
+    class IStorageAccessIssuer {
+        <<interface>>
+        +IssueRetrievalAccess(requestorId, blobPath, ttl) SasGrant
+    }
+    class UserDelegationSasIssuer {
+        +IssueRetrievalAccess(requestorId, blobPath, ttl) SasGrant
+    }
+    class ImmutabilityPolicyEnforcer {
+        +Apply(container, retentionPeriod) void
+        +VerifyActive(container) bool
+    }
+    class LifecycleTransitionEngine {
+        +EvaluateAndTransition(blob, ageDays) TierTransitionResult
+    }
+    class RedundancyDriftScanner {
+        +Scan(accounts) List~DriftFinding~
+    }
+    class AuditTrailWriter {
+        +RecordAccess(grant) void
+        +RecordTransition(result) void
+    }
 
----
+    IStorageAccessIssuer <|.. UserDelegationSasIssuer
+    UserDelegationSasIssuer --> AuditTrailWriter
+    LifecycleTransitionEngine --> AuditTrailWriter
+    ImmutabilityPolicyEnforcer --> RedundancyDriftScanner : verified together
+```
 
-## 17. Principal Engineer Perspective
+### Module 68 — Azure: Databases — Azure SQL Database, Managed Instance & Cosmos DB Integration
+*Source: `04-Databases-AzureSQL-CosmosDB.md`*
 
-**Business impact:** a mispriced or dropped trading order during a region-failure window carries direct, quantifiable financial and regulatory consequence — the network/compute resilience decisions in this module are not an abstract infrastructure concern but a direct input to the business's actual risk exposure during a real incident, which is why the RTO/RPO figures in §12/§15 are stated as concrete numbers with explicit justification, not vague "high availability" aspirations.
+**Cosmos DB's Five Consistency Levels — a Spectrum, Not a Binary**
 
-**Engineering trade-offs:** the recurring trade throughout this module — Availability Zones vs. Sets, Application Gateway vs. Load Balancer, active-active vs. active-passive — is always a trade between a stronger guarantee's genuine engineering/cost complexity and a weaker guarantee's genuine simplicity; a Principal Engineer's job is making that trade an explicit, justified decision tied to a stated business requirement (an RTO number, a PCI-scope boundary), never a default chosen for convenience or out of unexamined habit.
+```mermaid
+graph LR
+ Strong["Strong<br/>linearizable<br/>highest latency"] --> BS["Bounded Staleness<br/>quantified lag window"]
+ BS --> Session["Session (DEFAULT)<br/>read-your-own-writes WITHIN a session<br/>-- staleness ACROSS sessions/regions"]
+ Session --> CP["Consistent Prefix<br/>no out-of-order reads"]
+ CP --> Eventual["Eventual<br/>no ordering guarantee<br/>lowest latency"]
+```
 
-**Technical leadership:** the Production Debugging incident (§14) illustrates a durable leadership lesson: infrastructure that "just works" during steady-state monitoring can hide accumulating technical debt (400+ NSG rules) that only manifests under a specific, infrequent load pattern — a Principal Engineer champions proactive hygiene reviews and threshold-based drift alerting specifically because standard dashboards, tuned for steady-state anomaly detection, are structurally unlikely to surface this class of gradually-accumulated risk on their own.
+**Azure SQL Database Business Critical — Readable Synchronous Secondaries**
 
-**Cross-team communication:** the hub-and-spoke RBAC boundary (Expert Q6) is as much an organizational-communication mechanism as a technical one — it makes explicit, structurally, which team owns which decisions (the platform team owns the shared network/security posture; application teams own their own spoke's workload) rather than leaving that ownership ambiguous and dependent on informal, undocumented convention.
+```mermaid
+graph TB
+ Primary["Primary Replica<br/>(Always On AG)"] ==>|"SYNCHRONOUS"| Sec1["Secondary Replica<br/>DIRECTLY READABLE<br/>(read-scale-out)"]
+ Primary ==>|"SYNCHRONOUS"| Sec2["Secondary Replica<br/>DIRECTLY READABLE"]
+ Note["Unlike AWS RDS Multi-AZ's standby --<br/>THIS synchronous replica IS readable"]
+```
 
-**Architecture governance:** every zone-redundancy claim, every NSG rule, and every Azure Firewall allowlist entry should be expressed as Infrastructure-as-Code and reviewed through the same change-management/PR process as application code — a manually-configured, portal-driven network change is both unauditable (no diff, no reviewer, no history) and precisely the kind of undocumented drift that both this module's incident and its production-debugging incident trace back to.
+**13. Low-Level Design**
 
-**Cost optimization:** Option B's warm-standby model (§15) is deliberately chosen partly for its lower steady-state cost — but its cost-effectiveness is contingent on the standby genuinely being drilled and validated regularly; an undrilled, silently-broken standby costs the same as a working one on the monthly bill while providing none of the actual risk-reduction value, making the drill discipline a cost-effectiveness concern, not merely a resilience one.
+```mermaid
+classDiagram
+    class ISettlementRepository {
+        <<interface>>
+        +SubmitInstruction(instruction, idempotencyKey) SubmissionResult
+        +GetStatus(settlementId) InstructionStatus
+    }
+    class CosmosSettlementRepository {
+        +SubmitInstruction(instruction, idempotencyKey) SubmissionResult
+        +GetStatus(settlementId) InstructionStatus
+    }
+    class IdempotencyGuard {
+        +CheckAndRecord(key) bool
+    }
+    class ConflictResolutionProcedure {
+        +Resolve(incoming, existing) MergedInstruction
+    }
+    class ChangeFeedProcessor {
+        +ProcessBatch(changes) void
+        +Checkpoint(token) void
+    }
+    class RiskWarehouseLoader {
+        +Load(events) void
+    }
 
-**Risk analysis:** the two incidents in this module (Availability Set misconfiguration; NSG rule-list bloat) share a structural pattern worth naming explicitly in any risk register entry for this system: both are cases where a component was individually, verifiably "working" (passing health checks, serving traffic) while carrying a latent, unexercised gap that only a specific, infrequent condition (a zone failure; a connection-churn burst) would expose — risk registers for network/compute infrastructure should explicitly track "conditions not yet exercised by current monitoring," not only "current monitored health."
+    ISettlementRepository <|.. CosmosSettlementRepository
+    CosmosSettlementRepository --> IdempotencyGuard
+    CosmosSettlementRepository --> ConflictResolutionProcedure
+    ChangeFeedProcessor --> RiskWarehouseLoader
+```
 
-**Long-term maintainability:** NSG rule sets and RBAC/network-scope boundaries both decay identically over time without active pruning discipline — each individually-reasonable incremental change (one more NSG rule, one more broad-scope role assignment) is locally justified at the time it's made, and only a standing, scheduled hygiene review (§14's quarterly audit) prevents the cumulative drift from eventually becoming a genuine production risk, rather than each individual engineer needing to independently recall and resist the temptation of every convenient shortcut under delivery pressure.
+### Module 69 — Azure: Serverless — Azure Functions, Durable Functions, API Management & Logic Apps
+*Source: `05-Serverless-Functions-APIManagement-LogicApps.md`*
 
----
+**Durable Functions Replay Model — Orchestrator Code Re-Executes, Activity Results Are Replayed**
 
-## 18. Revision
-**Key takeaways**: Azure's compute/networking fundamentals map closely to AWS's at the conceptual level, but several specific mechanisms genuinely diverge and require dedicated attention: Resource Groups have no direct AWS equivalent and represent a first-class organizational/lifecycle boundary; NSGs associate at both subnet and NIC layers, requiring both to be reviewed together; Availability Zones and Availability Sets are two distinct, non-interchangeable resilience mechanisms, and confusing them (as) silently reproduces the single-zone risk in a form that AWS experience doesn't intuitively flag as dangerous; Application Gateway bundles WAF natively, unlike AWS's separately-attached WAF. The central, generalized lesson of this module: cross-cloud risk concentrates specifically in *falsely familiar* concepts that don't trigger the scrutiny a genuinely unfamiliar concept would — the correct mitigation is both a deliberate, structured divergence review for engineers transitioning between clouds, and platform-level automated enforcement (Azure Policy) that doesn't depend on any individual engineer correctly recalling the distinction under pressure.
+```mermaid
+sequenceDiagram
+ participant Orch as Orchestrator Function (CODE, replayed)
+ participant DF as Durable Functions Runtime (history store)
+ participant Act as Activity Function (executes ONCE, checkpointed)
 
----
+ Note over Orch,DF: FIRST execution
+ Orch->>Act: await context.CallActivityAsync("ChargePayment")
+ Act-->>DF: result persisted to history
+ DF-->>Orch: result returned
 
-**Next**: Continuing to Module 66 — Azure: IAM & Security (Entra ID, RBAC, Key Vault, Managed Identities), continuing the `22-Azure` domain and mirroring Module 58's AWS IAM structure.
+ Note over Orch,DF: Orchestrator awaits something long-running -- process may be recycled/paused
+ Note over Orch,DF: RESUME: entire orchestrator function RE-EXECUTES from the top
+ Orch->>DF: (replaying) CallActivityAsync("ChargePayment") again
+ DF-->>Orch: REPLAYS the SAME persisted result -- ChargePayment NOT genuinely re-executed
+ Note over Orch: Orchestrator code MUST reach this exact same point deterministically
+```
+
+**Hosting Plan Decision Tree**
+
+```mermaid
+graph TD
+ Start{Cold starts<br/>acceptable?}
+ Start -->|Yes, cost-sensitive| Consumption[Consumption Plan]
+ Start -->|No| VNetNeed{Need VNet integration<br/>or longer execution limits?}
+ VNetNeed -->|Yes| Premium[Premium Plan]
+ VNetNeed -->|No, already have<br/>App Service compute| Dedicated[Dedicated/App Service Plan]
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+    class SettlementOrchestrator {
+        <<OrchestrationTrigger>>
+        +RunAsync(context) Task~SettlementResult~
+    }
+    class IActivityStep~TIn,TOut~ {
+        <<interface>>
+        +ExecuteAsync(input) Task~TOut~
+    }
+    class FraudScoringActivity {
+        +ExecuteAsync(input) Task~FraudScore~
+    }
+    class FxConversionActivity {
+        +ExecuteAsync(input) Task~FxResult~
+    }
+    class LedgerPostActivity {
+        +ExecuteAsync(input) Task~LedgerReceipt~
+    }
+    class IdempotencyGuard {
+        +CheckAndRecordAsync(key, step) Task~bool~
+    }
+    class CircuitBreakerPolicy {
+        +ExecuteAsync(action) Task~T~
+        -TrackFailure() void
+    }
+
+    FraudScoringActivity ..|> IActivityStep~TIn,TOut~
+    FxConversionActivity ..|> IActivityStep~TIn,TOut~
+    LedgerPostActivity ..|> IActivityStep~TIn,TOut~
+    SettlementOrchestrator --> IActivityStep~TIn,TOut~ : calls via context.CallActivityAsync
+    LedgerPostActivity --> IdempotencyGuard : checks before external call
+    FraudScoringActivity --> CircuitBreakerPolicy : wraps external call
+```
+
+**13. Low-Level Design**
+
+```mermaid
+sequenceDiagram
+    participant Client as Partner Bank
+    participant APIM as APIM (dedup + auth)
+    participant Ingest as Ingestion Function
+    participant Orch as Durable Orchestrator
+    participant Fraud as FraudScoringActivity
+    participant Fx as FxConversionActivity
+    participant Ledger as LedgerPostActivity
+
+    Client->>APIM: POST /settlement (Idempotency-Key)
+    APIM->>APIM: check dedup cache — reject if seen
+    APIM->>Ingest: forward validated request
+    Ingest->>Orch: StartNewAsync(instanceId = idempotencyKey)
+    Orch->>Fraud: CallActivityAsync
+    Fraud-->>Orch: FraudScore (checkpointed)
+    Orch->>Fx: CallActivityAsync
+    Fx-->>Orch: FxResult (checkpointed)
+    Orch->>Ledger: CallActivityAsync (idempotent, domain key)
+    Ledger-->>Orch: LedgerReceipt (checkpointed)
+    Orch-->>Ingest: SettlementResult
+```
+
+### Module 70 — Azure: Messaging & Event-Driven Architecture — Service Bus, Event Grid & Event Hubs
+*Source: `06-Messaging-ServiceBus-EventGrid-EventHubs.md`*
+
+**Service Bus Topic + Filtered Subscriptions — One Service Replacing AWS's SNS+SQS Pair**
+
+```mermaid
+graph TB
+ Producer[Order Service] -->|publish OrderPlaced| Topic[Service Bus Topic: order-events]
+ Topic --> Sub1["Subscription: high-value-orders<br/>FILTER: orderTotal > 1000"]
+ Topic --> Sub2["Subscription: all-orders-inventory<br/>NO filter"]
+ Sub1 --> FraudReview[Fraud Review Service]
+ Sub2 --> Inventory[Inventory Service]
+ Note["ONE service provides durable, per-subscription<br/>buffering AND content filtering -- no separate<br/>queue-per-consumer wiring required"]
+```
+
+**Event Grid Push-Then-Loss vs. SQS Pull-Then-Wait**
+
+```mermaid
+graph TB
+ subgraph "Event Grid: PUSH"
+ EG[Event Grid] -->|"push attempt 1...N<br/>(bounded retries, exp backoff)"| Sub["Subscriber Endpoint<br/>(DOWN for 25+ hours)"]
+ EG -->|"retries EXHAUSTED,<br/>no Dead Letter configured"| Lost["EVENT PERMANENTLY LOST"]
+ end
+ subgraph "SQS: PULL"
+ Queue["SQS Queue<br/>(message just WAITS)"] -.->|"consumer polls WHENEVER ready"| Consumer["Consumer<br/>(recovers after 25+ hours)"]
+ Consumer -->|"eventually processes --<br/>bounded only by retention period"| Done[Processed successfully]
+ end
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+    class OrderExecutionPublisher {
+        +PublishAsync(event) Task
+    }
+    class IEventSink {
+        <<interface>>
+        +DeliverAsync(event) Task
+    }
+    class EventGridRealtimeSink {
+        +DeliverAsync(event) Task
+    }
+    class ServiceBusSettlementSink {
+        +DeliverAsync(event) Task
+    }
+    class EventHubsAnalyticsSink {
+        -PartitionKeyStrategy strategy
+        +DeliverAsync(event) Task
+    }
+    class IdempotentConsumer {
+        +ProcessAsync(message) Task
+        -CheckAndRecordAsync(domainKey) Task~bool~
+    }
+    class DeadLetterMonitor {
+        +OnDepthChanged(depth) void
+    }
+
+    OrderExecutionPublisher --> IEventSink : fans out to all
+    EventGridRealtimeSink ..|> IEventSink
+    ServiceBusSettlementSink ..|> IEventSink
+    EventHubsAnalyticsSink ..|> IEventSink
+    ServiceBusSettlementSink --> IdempotentConsumer : downstream
+    EventGridRealtimeSink --> DeadLetterMonitor
+    ServiceBusSettlementSink --> DeadLetterMonitor
+```
+
+**13. Low-Level Design**
+
+```mermaid
+sequenceDiagram
+    participant Exec as Order Execution Service
+    participant EG as Event Grid Topic
+    participant RT as Realtime Notification (webhook)
+    participant SB as Service Bus (settlement queue)
+    participant Settle as Settlement Processor
+    participant EH as Event Hubs (analytics)
+
+    Exec->>EG: publish OrderExecuted
+    EG->>RT: push (bounded retry)
+    EG->>SB: route to settlement queue
+    SB-->>Settle: pull, at own pace
+    Settle->>Settle: CheckAndRecordAsync(domainKey) — idempotent write
+    Exec->>EH: publish OrderExecuted (composite partition key)
+    Note over EH: multiple consumer groups read independently
+```
+
+### Module 71 — Azure: Containers & Microservices — AKS, Container Apps, KEDA & Dapr
+*Source: `07-Containers-Microservices-AKS-ContainerApps-Dapr.md`*
+
+**The Three-Tier Azure Container Decision Framework**
+
+```mermaid
+graph TD
+ Start{Need direct K8s API access,<br/>custom operators/CRDs, or<br/>org-wide K8s standardization?}
+ Start -->|Yes| AKS[AKS]
+ Start -->|No| ScaleNeed{Need orchestration/scaling<br/>at all, or just a single<br/>short-lived container run?}
+ ScaleNeed -->|Single run, no scaling| ACI[Azure Container Instances]
+ ScaleNeed -->|Yes, event-driven scaling| ContainerApps["Container Apps -- DEFAULT<br/>(KEDA scaling, scale-to-zero,<br/>Dapr integration, NO K8s ops burden)"]
+```
+
+**Dapr's Broader Scope vs. App Mesh's Network-Only Scope**
+
+```mermaid
+graph TB
+ subgraph "App Mesh -- NETWORK LAYER ONLY, transparent"
+ AppMeshScope["Retries, mTLS, circuit-breaking<br/>ZERO application code changes"]
+ end
+ subgraph "Dapr -- APPLICATION-LEVEL building blocks, explicit API calls"
+ DaprState["State Management API<br/>(Cosmos DB / Redis / Postgres...)"]
+ DaprPubSub["Pub/Sub API<br/>(Service Bus / Event Grid / Kafka...)"]
+ DaprInvoke["Service Invocation API<br/>(retries + mTLS, like App Mesh, but EXPLICITLY called)"]
+ DaprSecrets["Secrets API<br/>(Key Vault / other backends)"]
+ end
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class IPaymentStep {
+ <<interface>>
+ +ExecuteAsync(context) StepResult
+ +CompensateAsync(context) void
+ }
+ class OrderIntakeStep {
+ +ExecuteAsync(context) StepResult
+ }
+ class RiskCheckStep {
+ +ExecuteAsync(context) StepResult
+ +CompensateAsync(context) void
+ }
+ class FundingStep {
+ +ExecuteAsync(context) StepResult
+ +CompensateAsync(context) void
+ }
+ class LedgerStep {
+ +ExecuteAsync(context) StepResult
+ }
+ class SagaOrchestrator {
+ -List~IPaymentStep~ steps
+ +RunAsync(authorizationRequest) SagaResult
+ }
+ class DaprClient {
+ +InvokeMethodAsync(appId, method, data) T
+ +SaveStateAsync(store, key, value) void
+ }
+
+ SagaOrchestrator --> IPaymentStep
+ OrderIntakeStep ..|> IPaymentStep
+ RiskCheckStep ..|> IPaymentStep
+ FundingStep ..|> IPaymentStep
+ LedgerStep ..|> IPaymentStep
+ SagaOrchestrator --> DaprClient
+```
+
+**13. Low-Level Design**
+
+```mermaid
+sequenceDiagram
+ participant Client
+ participant Orchestrator as order-intake (Orchestrator)
+ participant Risk as risk-check
+ participant Funding as funding
+ participant Ledger as ledger
+ participant Notify as notification (async)
+
+ Client->>Orchestrator: POST /authorize (Idempotency-Key: xyz)
+ Orchestrator->>Risk: InvokeMethodAsync("risk-check", "score")
+ Risk-->>Orchestrator: risk score: LOW
+ Orchestrator->>Funding: InvokeMethodAsync("funding", "charge")
+ Funding-->>Orchestrator: charge: SUCCESS
+ Orchestrator->>Ledger: InvokeMethodAsync("ledger", "post")
+ Ledger-->>Orchestrator: posted: SUCCESS
+ Orchestrator-->>Client: 200 APPROVED
+ Orchestrator--)Notify: PublishEventAsync("payment-approved") — off critical path
+```
+
+### Module 72 — Azure: Observability, Cost & the Well-Architected Framework — Azure Monitor, Application Insights & Multi-Region DR
+*Source: `08-Observability-Cost-WellArchitectedFramework.md`*
+
+**Application Insights: Unified Metrics/Logs/Traces via One KQL Query**
+
+```mermaid
+gantt
+ dateFormat X
+ axisFormat %Lms
+ section API Management
+ Request routing:0, 15
+ section Function: checkout
+ Cold start (if any):15, 160
+ Handler logic:160, 230
+ section Function: charge-payment
+ Invocation:230, 400
+ section Azure SQL
+ Query: debit balance:250, 290
+ section Cosmos DB
+ Write: audit log:400, 430
+```
+
+**Paired Regions: Platform-Level Maintenance Isolation & Recovery Priority**
+
+```mermaid
+graph LR
+ subgraph "Geography: United States"
+ EastUS["East US<br/>(primary)"] <-->|"paired -- sequential maintenance,<br/>data-residency-aligned,<br/>prioritized recovery order"| WestUS["West US<br/>(paired secondary)"]
+ end
+ EastUS -.->|"NO platform pairing --<br/>fully independent"| OtherRegion["Any non-paired region<br/>(self-designed DR only)"]
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class ICostAnomalyDetector {
+ <<interface>>
+ +DetectAsync(subscriptionId) AnomalyResult
+ }
+ class BaselinedAnomalyDetector {
+ -Dictionary~string,CostBaseline~ baselines
+ +DetectAsync(subscriptionId) AnomalyResult
+ }
+ class DiagnosticCoverageCanary {
+ +CheckCoverageAsync() List~CoverageGap~
+ }
+ class CostAllocationEngine {
+ -AllocationMethodology methodology
+ +Allocate(rawCostData) Dictionary~string,decimal~
+ }
+ class AnomalyAlertRouter {
+ +Route(result) void
+ }
+
+ BaselinedAnomalyDetector..|> ICostAnomalyDetector
+ AnomalyAlertRouter --> ICostAnomalyDetector
+ CostAllocationEngine --> AllocationMethodology
+```
+
+**13. Low-Level Design**
+
+```mermaid
+sequenceDiagram
+ participant CM as Cost Management (40 subscriptions)
+ participant Detector as BaselinedAnomalyDetector
+ participant Router as AnomalyAlertRouter
+ participant FinOps
+ participant Security
+
+ CM->>Detector: DetectAsync(subscriptionId) — nightly
+ Detector->>Detector: compare against THIS subscription's own baseline
+ alt Anomaly exceeds baseline threshold
+ Detector-->>Router: AnomalyResult(severity, resourceIds)
+ Router->>FinOps: notify (always)
+ Router->>Security: notify (if resource category plausibly security-relevant)
+ else Within baseline
+ Detector-->>Router: no action
+ end
+```

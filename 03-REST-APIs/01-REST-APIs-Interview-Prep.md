@@ -908,3 +908,158 @@ Consumer-oriented resources (not database tables), consistent conventions, expli
 - [ ] Per-instance rate limiter state · limiting by IP only · 429 without `Retry-After`
 - [ ] Unsigned webhooks · assuming webhook ordering or exactly-once delivery
 - [ ] Hand-maintained specs that drift · contract tests asserting entire responses · no can-i-deploy gate
+
+---
+
+## Architecture Diagrams (preserved from the original modules)
+
+> All 6 Mermaid/ASCII diagrams from the original `03-REST-APIs/` files, kept verbatim and grouped by source module. Originals: `git show ebb2d5c:03-REST-APIs/<file>.md`.
+
+### Module 16 — REST APIs: API Security & Rate Limiting Patterns
+*Source: `02-API-Security-Rate-Limiting.md`*
+
+**3. Visual Architecture**
+
+```mermaid
+graph LR
+ Client -->|request + API key| Gateway["API Gateway / Rate Limiter"]
+ Gateway -->|check token bucket| Redis[(Shared Redis Store)]
+ Redis -->|tokens available| Gateway
+ Gateway -->|within limit| App[Application]
+ Gateway -->|exceeded| Reject["429 + Retry-After"]
+ App --> AuthZ["Resource-based Authorization<br/>(BOLA prevention)"]
+ AuthZ --> DTO["Narrow response DTO<br/>(excessive-exposure prevention)"]
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class IResourceAuthorizationHelper {
+ <<interface>>
+ +AuthorizeAsync(resourceId, callerIdentity) AuthorizationResult
+ }
+ class InvoiceAuthorizationHelper {
+ +AuthorizeAsync(resourceId, callerIdentity) AuthorizationResult
+ }
+ class IRateLimiter {
+ <<interface>>
+ +TryAcquireAsync(clientKey) RateLimitResult
+ }
+ class RedisTokenBucketLimiter {
+ +TryAcquireAsync(clientKey) RateLimitResult
+ }
+ class IWebhookSignatureVerifier {
+ <<interface>>
+ +Verify(rawBody, signatureHeader, secret) bool
+ }
+ class HmacWebhookVerifier {
+ +Verify(rawBody, signatureHeader, secret) bool
+ -CheckReplayNonce(nonce) bool
+ }
+
+ InvoiceAuthorizationHelper..|> IResourceAuthorizationHelper
+ RedisTokenBucketLimiter..|> IRateLimiter
+ HmacWebhookVerifier..|> IWebhookSignatureVerifier
+```
+
+**13. Low-Level Design**
+
+```mermaid
+sequenceDiagram
+ participant Partner
+ participant Gateway as API Gateway
+ participant RL as RedisTokenBucketLimiter
+ participant AuthZ as InvoiceAuthorizationHelper
+ participant Svc as PaymentService
+
+ Partner->>Gateway: POST /payments (Bearer token)
+ Gateway->>Gateway: Validate JWT signature + expiry
+ Gateway->>RL: TryAcquireAsync(partnerId)
+ RL-->>Gateway: Allowed (token available)
+ Gateway->>AuthZ: AuthorizeAsync(resourceId, partnerId)
+ AuthZ-->>Gateway: Authorized (ownership confirmed)
+ Gateway->>Svc: InitiatePayment(request)
+ Svc-->>Gateway: PaymentResponse (narrow DTO)
+ Gateway-->>Partner: 201 Created
+```
+
+### Module 17 — REST APIs: API Documentation, Contract Testing & OpenAPI
+*Source: `03-API-Documentation-Contract-Testing.md`*
+
+**3. Visual Architecture**
+
+```mermaid
+graph LR
+ A[Code-first: TypedResults endpoints] -->|reflection-free, compile-time-accurate| B[Generated OpenAPI spec]
+ B --> C[Swagger UI / Client SDK generation]
+ D[Consumer A writes Pact contract] --> E[Provider CI runs ALL consumer contracts]
+ F[Consumer B writes Pact contract] --> E
+ E -->|any contract fails| G[Build FAILS -- breaking change caught before deploy]
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class IBreakingChangeDetector {
+ <<interface>>
+ +Diff(previousSpec, candidateSpec) DiffResult
+ }
+ class StructuralDiffDetector {
+ +Diff(previousSpec, candidateSpec) DiffResult
+ }
+ class SemanticSnapshotDetector {
+ +Diff(previousSpec, candidateSpec) DiffResult
+ }
+ class IContractVerifier {
+ <<interface>>
+ +Verify(consumerContract, candidateBuild) VerificationResult
+ }
+ class PactContractVerifier {
+ +Verify(consumerContract, candidateBuild) VerificationResult
+ }
+ class RecordedTrafficVerifier {
+ +Verify(syntheticContract, candidateBuild) VerificationResult
+ }
+ class VerificationHealthCanary {
+ +CheckLiveness(consumerId) CanaryResult
+ }
+ class ApiGovernanceGate {
+ +Evaluate(candidateBuild) GateDecision
+ }
+
+ StructuralDiffDetector ..|> IBreakingChangeDetector
+ SemanticSnapshotDetector ..|> IBreakingChangeDetector
+ PactContractVerifier ..|> IContractVerifier
+ RecordedTrafficVerifier ..|> IContractVerifier
+ ApiGovernanceGate --> IBreakingChangeDetector
+ ApiGovernanceGate --> IContractVerifier
+ ApiGovernanceGate --> VerificationHealthCanary
+```
+
+**13. Low-Level Design**
+
+```mermaid
+sequenceDiagram
+ participant Dev as Developer PR
+ participant CI as Provider CI
+ participant Diff as Breaking-Change Diff Gate
+ participant Broker as Pact Broker
+ participant Canary as Verification Canary
+
+ Dev->>CI: open PR (candidate spec)
+ CI->>Diff: diff(lastReleasedSpec, candidateSpec)
+ Diff-->>CI: structural + semantic result
+ CI->>Broker: pull currently-deployed consumer contracts
+ Broker-->>CI: N contracts
+ par verify each consumer contract
+ CI->>CI: replay contract 1..N against candidate build
+ end
+ CI->>Canary: confirm verification infra fired within window
+ alt any check failed, no override
+ CI-->>Dev: BLOCK merge
+ else all pass, or explicit sign-off + version bump
+ CI-->>Dev: ALLOW merge
+ end
+```

@@ -1,6 +1,6 @@
 # Module 87 — DevOps: Release & Deployment Strategies — Blue-Green, Canary & Progressive Delivery
 
-> Domain: DevOps | Level: Beginner → Expert | Prerequisite: [[01-InfrastructureAsCode-Terraform-State-Drift]], [[02-ConfigurationManagement-Secrets-EnvironmentPromotion]] (build-once/promote-by-digest), [[../23-Kubernetes/01-Architecture-ControlPlane-Pods-Deployments]] (Deployment rolling-update mechanics, `maxSurge`/`maxUnavailable`), [[../23-Kubernetes/02-Networking-Services-Ingress-CNI-DNS-NetworkPolicies]] (Service/Ingress traffic routing), [[../23-Kubernetes/08-Observability-Multicluster-GitOps]] (GitOps continuous reconciliation)
+> Domain: DevOps | Level: Beginner → Expert | Prerequisite: [[01-InfrastructureAsCode-Terraform-State-Drift]], [[02-ConfigurationManagement-Secrets-EnvironmentPromotion]] (build-once/promote-by-digest), [[../23-Kubernetes/01-Kubernetes-Interview-Prep]] (Deployment rolling-update mechanics, `maxSurge`/`maxUnavailable`), [[../23-Kubernetes/01-Kubernetes-Interview-Prep]] (Service/Ingress traffic routing), [[../23-Kubernetes/01-Kubernetes-Interview-Prep]] (GitOps continuous reconciliation)
 
 ---
 

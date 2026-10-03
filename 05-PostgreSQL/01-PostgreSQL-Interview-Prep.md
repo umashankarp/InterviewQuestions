@@ -1,236 +1,620 @@
-# Module 21 — PostgreSQL: Fundamentals, MVCC & Comparison with SQL Server
+# PostgreSQL — Complete Interview Prep (All Topics, One File)
 
-> Domain: PostgreSQL | Level: Beginner → Expert | Prerequisite: [[../04-SQL-Server/02-Transactions-Isolation-Locking]] (isolation levels, locking), [[../04-SQL-Server/01-Indexing-Query-Execution-Plans]]
+> Domain: PostgreSQL | Level: Beginner → Expert | Prerequisite: [[../04-SQL-Server/01-SQL-Server-Interview-Prep]] (indexing, isolation, locking — this file focuses on what's different)
+> **Quick-prep edition** (consolidated 2026-10-03). This one file replaces Modules 21–22. Originals: `git show ebb2d5c:05-PostgreSQL/<file>.md`
+> Each topic has: **Key concepts → Code example → Most common interview questions with answers.**
 
----
-
-## 1. Topic Description
-
-### Definition
-
-PostgreSQL implements MVCC by storing **row versions in the table itself**: an update writes a new tuple and marks the previous one dead, with visibility decided by transaction IDs (`xmin`/`xmax`) stamped on each tuple. SQL Server, by contrast, copies prior versions into `tempdb`. That single difference generates most of PostgreSQL's distinctive operational surface — dead tuples, **bloat**, **vacuum**, and **transaction ID wraparound** — none of which has a SQL Server equivalent. The other structural divergence is storage: PostgreSQL tables are always **heaps** with a `ctid` row locator and no clustered index, so physical ordering is never maintained and index-only scans depend on the visibility map.
-
-### Core sub-concepts
-
-- **In-table MVCC** — tuple versions, `xmin`/`xmax`, dead tuples, and readers never blocking writers by default.
-- **Vacuum and autovacuum** — reclaiming dead-tuple space, updating the visibility map, freezing transaction IDs; `VACUUM` versus `VACUUM FULL`.
-- **The vacuum horizon** — long-running transactions, idle-in-transaction sessions, abandoned replication slots and prepared transactions holding back cleanup database-wide.
-- **Transaction ID wraparound** — the finite 32-bit XID space, freezing, and the forced shutdown that protects against it.
-- **Bloat** — live bytes flat while table and index size grow; per-table autovacuum tuning (scale factor, cost limit, workers).
-- **Heap storage and the absence of a clustered index** — `ctid`, `CLUSTER` as a one-time reorder, and what replaces clustering-key design.
-- **HOT updates and `fillfactor`** — same-page updates that skip index maintenance, and why updating an indexed column is disproportionately expensive.
-- **Index types** — B-tree, GIN (arrays, `jsonb`, full-text), GiST (geometric, range, nearest-neighbour), BRIN (block summaries for naturally-ordered large tables), hash.
-- **Index maintenance** — index bloat, `REINDEX CONCURRENTLY`, `CREATE INDEX CONCURRENTLY` and its invalid-index failure mode.
-- **Transactional DDL** — atomic multi-statement migrations, and the operations that cannot participate.
-- **Migration lock behaviour** — `ALTER TABLE` lock levels, `NOT VALID` then `VALIDATE`, lock queuing behind long-running queries, `lock_timeout`.
-- **SSI `SERIALIZABLE`** — serialization failures and mandatory application retry, versus SQL Server's blocking key-range locks.
-- **`INSERT ... ON CONFLICT`** — atomic, concurrency-safe upsert requiring a unique constraint.
-- **Process-per-connection and pooling** — connection cost, PgBouncer, and what transaction-mode pooling breaks.
-- **`jsonb`** — binary JSON with GIN indexing, and the boundary between genuine schema flexibility and avoided schema design.
-- **Visible-tuple counting** — why `COUNT(*)` cannot be answered from metadata.
-- **Diagnostics** — `EXPLAIN (ANALYZE, BUFFERS)`, `pg_stat_statements`, `pg_stat_activity`, `pg_locks`.
-
-### Where it fits
-
-This is the engine layer beneath the application's data access, and the comparative frame matters because engineers moving from SQL Server carry assumptions that are silently wrong here. It connects downward to storage and connection management, and upward to schema-migration safety, replica routing and multi-tenancy strategy. It also expands architectural options: extensions such as PostGIS, `pgvector` and TimescaleDB can remove entire systems from an architecture, at the cost of checking availability on managed platforms.
-
-### Why it matters at scale
-
-Neglected vacuum is the failure mode that takes PostgreSQL databases fully offline. Bloat grows quietly — a table five times its live size means every query reads five times the pages for the same rows, so performance degrades with no plan change and no code change. If freezing falls far enough behind, the database refuses new transactions outright to prevent wraparound corruption, which is a total outage requiring maintenance to resolve. One forgotten `idle in transaction` session or one replication slot for a decommissioned replica is sufficient to cause both, database-wide. Separately, because each connection is an OS process, an autoscaling application that opens connections liberally exhausts the server's limit and presents as complete unavailability rather than gradual slowdown.
-
-### Common pitfalls / anti-patterns
-
-- **Treating autovacuum as optional housekeeping** — it is the mechanism that reclaims space *and* prevents wraparound; leaving default thresholds on a large high-churn table means it effectively never runs in time.
-- **Long-running transactions or `idle in transaction` sessions** — they hold back the vacuum horizon, so dead tuples across the whole database cannot be reclaimed no matter how well autovacuum is tuned.
-- **An abandoned replication slot** — retains WAL and pins the horizon indefinitely; a decommissioned replica silently bloats the primary and fills its disk.
-- **Porting SQL Server's `SERIALIZABLE` usage without retry logic** — PostgreSQL aborts with a serialization failure instead of blocking, so the ported code simply errors under concurrency.
-- **Expecting clustered-index physical ordering** — `CLUSTER` is a one-time reorder that is not maintained, so designs relying on a clustering key do not transfer.
-- **Opening connections without a pooler** — each is a process; hundreds consume substantial memory and thousands destabilise the server.
-- **`CREATE INDEX` without `CONCURRENTLY` on a live table** — takes a lock that blocks writes for the duration of the build.
-- **A migration statement queued behind a long-running query** — the pending `ALTER TABLE` lock blocks every subsequent query on that table, so a "fast" migration causes an outage; `lock_timeout` plus retry is the mitigation.
-- **Using `jsonb` for core queried business attributes** — forfeits type checking, constraints, foreign keys and efficient targeted indexes, and pushes structural validation into every consumer.
-- **`COUNT(*)` in pagination code** — visibility is per-tuple, so there is no maintained row count; this scans.
-
-> Scope note: partitioning, replication topologies, logical decoding and CDC belong to `02-Partitioning-Replication-Logical-Decoding`. SQL Server's own indexing, isolation and query-tuning material lives in `04-SQL-Server`.
+| # | Topic | # | Topic |
+|---|---|---|---|
+| 1 | Architecture & PostgreSQL vs SQL Server | 7 | Partitioning |
+| 2 | MVCC, VACUUM, bloat & XID wraparound | 8 | WAL, replication, failover & backups |
+| 3 | Storage, HOT updates & index types | 9 | Logical replication, logical decoding & CDC |
+| 4 | Query plans & performance diagnostics | 10 | Extensions, multi-tenancy, PG for queues/search |
+| 5 | Transactions, isolation, locking & upserts | 11 | Top 30 rapid-fire + Principal questions |
+| 6 | Schema migrations, JSONB & connection pooling | 12 | Mistakes checklist |
 
 ---
 
-## 2. Beginner (10 Q&A)
+## 1. Architecture & PostgreSQL vs SQL Server
 
+**Key concepts**
+- **Process per connection** (the postmaster forks a backend per client) → connections are expensive → use a **pooler (PgBouncer, RDS Proxy)**.
+- Shared buffers + OS page cache; **WAL** (write-ahead log) for durability; background workers (autovacuum, checkpointer, WAL writer).
+- **MVCC inside the table:** updates write a *new tuple version*; old versions stay until VACUUM removes them (SQL Server keeps versions in tempdb only when RCSI/SNAPSHOT is on).
+- **Heap tables:** no clustered index; every index points to a tuple location (`ctid`).
+- **Transactional DDL:** `CREATE/ALTER/DROP` can be rolled back (except a few, e.g. `CREATE INDEX CONCURRENTLY`, `VACUUM`).
+- **Default isolation is READ COMMITTED with snapshots** (readers never block writers) — like SQL Server's RCSI.
+- **Extensions:** PostGIS, pgvector, pg_partman, pg_stat_statements, TimescaleDB, Citus.
+- Open source, no licence cost; very rich types: `jsonb`, arrays, ranges, enums, UUID, `inet`.
 
-**Q1. How does PostgreSQL's MVCC differ from SQL Server's, and why does the difference matter?**
-**A:** PostgreSQL keeps old row versions *in the table itself*: an update writes a new tuple and marks the old one as dead, with visibility determined by transaction IDs stored on each tuple. SQL Server's snapshot isolation instead copies old versions into `tempdb`. The consequence is that in PostgreSQL, updates and deletes generate garbage in the heap that must be reclaimed by vacuum, so tables and indexes bloat if vacuum cannot keep up — an entire operational concern that has no SQL Server equivalent. It also means readers never block writers by default, without opting into anything.
-*Follow-up: What happens to the index entries when a row is updated?*
+| Topic | SQL Server | PostgreSQL |
+|---|---|---|
+| Row versions | tempdb version store (if RCSI/SNAPSHOT) | in the table (dead tuples) → VACUUM |
+| Clustered index | yes (the table is sorted) | no (heap; `CLUSTER` is a one-off reorder) |
+| Default reads | locking READ COMMITTED (unless RCSI) | snapshot READ COMMITTED |
+| SERIALIZABLE | key-range locks (blocking) | SSI — no blocking, **serialization failures → retry** |
+| Upsert | MERGE / UPDATE+INSERT | `INSERT ... ON CONFLICT` |
+| Identity | `IDENTITY` | `GENERATED ALWAYS AS IDENTITY` / sequences |
+| Connections | threads, cheap | processes, expensive → pooler |
+| Case sensitivity | collation-dependent (often insensitive) | identifiers fold to lowercase; text comparison case-sensitive (`citext`/`ILIKE`) |
+| Top N | `TOP` | `LIMIT/OFFSET` (or `FETCH FIRST`) |
+| Plans | estimated/actual plan, Query Store | `EXPLAIN (ANALYZE, BUFFERS)`, `pg_stat_statements` |
 
-**Q2. What does `VACUUM` actually do, and why is autovacuum critical?**
-**A:** It marks space occupied by dead tuples as reusable, updates the visibility map so index-only scans become possible, and — crucially — advances the frozen transaction ID horizon to prevent wraparound. Autovacuum runs it automatically based on change thresholds. It is critical because without it, tables grow indefinitely with dead rows, queries read more pages for the same live data, indexes bloat, and eventually the database enters a forced shutdown to prevent transaction ID wraparound corruption. Treating it as background housekeeping rather than as a core mechanism is the most common PostgreSQL operational mistake.
-*Follow-up: What's the difference between `VACUUM` and `VACUUM FULL`, and when would you ever run the latter?*
-
-**Q3. Why is there no clustered index in PostgreSQL, and what follows from that?**
-**A:** All tables are heaps; the primary key is an ordinary B-tree index containing a pointer (`ctid`) to the heap tuple. So there is no equivalent of SQL Server's guarantee that data is physically ordered by a key, and every index lookup is followed by a heap fetch unless an index-only scan is possible. `CLUSTER` reorders a table by an index once, but the ordering is not maintained as rows change. Practically this means the SQL Server habit of designing around the clustering key does not transfer, and covering indexes plus a well-maintained visibility map matter more.
-*Follow-up: What conditions must hold for an index-only scan to actually avoid heap access?*
-
-**Q4. What is a HOT update and why should you care?**
-**A:** A heap-only-tuple update places the new row version on the same page as the old one and avoids updating the indexes, provided no indexed column changed and there is free space on the page. It is much cheaper — no index writes, and the dead tuple can be cleaned up by page-level pruning rather than a full vacuum. You care because it is why updating an indexed column is disproportionately expensive, and why `fillfactor` below 100 on an update-heavy table can materially improve write performance by leaving room for HOT updates.
-*Follow-up: How would you tell whether your updates are actually going down the HOT path?*
-
-**Q5. What are the main index types and when is each right?**
-**A:** B-tree is the default and right for equality and range on scalar values. GIN suits values containing many elements you search *within* — arrays, `jsonb`, full-text vectors — with fast lookups and slower writes. GiST supports geometric, range and nearest-neighbour queries. BRIN stores per-block summaries and is tiny, excellent for very large tables where data is naturally correlated with physical order such as an append-only time series. Hash indexes are narrow-purpose and rarely worth choosing over B-tree. The richness here is a genuine PostgreSQL advantage over SQL Server, and knowing which to reach for is the differentiator.
-*Follow-up: When is a BRIN index worse than useless?*
-
-**Q6. What does transactional DDL give you?**
-**A:** Schema changes participate in transactions, so you can wrap a multi-statement migration in a transaction and have it roll back atomically if any step fails — no half-applied migration to clean up by hand. That is a significant operational advantage over SQL Server for deployment safety. The caveats are that some operations cannot run inside a transaction (notably `CREATE INDEX CONCURRENTLY`), and that a long DDL transaction holds locks that block everything touching the object, so atomicity does not remove the need to think about lock duration.
-*Follow-up: You need to add an index without downtime. What do you use, and what's the trade-off?*
-
-**Q7. How does PostgreSQL's `SERIALIZABLE` differ from SQL Server's?**
-**A:** SQL Server implements it with range locks, so conflicting transactions *block*. PostgreSQL uses Serializable Snapshot Isolation, which detects dangerous dependency patterns and *aborts* one transaction with a serialization failure rather than blocking. The practical implication is significant: on PostgreSQL, `SERIALIZABLE` requires the application to catch the error and retry the whole transaction, and code ported from SQL Server without that retry logic will simply fail under concurrency. In exchange, you get much better concurrency because nothing waits.
-*Follow-up: What does the application have to guarantee for a retry to be safe?*
-
-**Q8. Why is `COUNT(*)` on a large table expensive?**
-**A:** Because visibility is per-tuple, so PostgreSQL cannot trust a stored row count — it must check each tuple's visibility to your transaction, which means scanning the table or an index. There is no maintained row-count metadata as in SQL Server. For approximate answers, `pg_class.reltuples` is cheap and usually good enough; for exact ones on large tables, a maintained counter or a materialised aggregate is the practical answer. Engineers coming from SQL Server frequently write `COUNT(*)` into pagination code and discover this at scale.
-*Follow-up: How would you implement an approximate but reasonably fresh row count for a dashboard?*
-
-**Q9. Why does PostgreSQL need a connection pooler?**
-**A:** Each connection is a separate OS process with its own memory, so connections are expensive — hundreds of them consume substantial memory and context-switching, and thousands will destabilise the server. Unlike SQL Server's thread-based model, you cannot simply open connections liberally. A pooler such as PgBouncer multiplexes many client connections onto a small number of server connections, which is close to mandatory for any application with a large number of application instances. The pooling mode matters: transaction pooling gives the best reuse but breaks session-level features such as prepared statements and advisory locks.
-*Follow-up: Your ORM uses session-level prepared statements and you're on transaction pooling. What breaks?*
-
-**Q10. What is `jsonb` good for, and where is it misused?**
-**A:** It stores JSON in a binary form with indexing support, which is genuinely useful for sparse or genuinely variable attributes, for storing an external payload verbatim, and for evolving schemas where the shape is not yet known. It is misused as a way to avoid schema design — putting core, queried, constrained business attributes into a document because it feels flexible. That costs you type checking, foreign keys, efficient targeted indexes, and query clarity, and it makes every consumer parse structure the database could have enforced. The rule I apply is that anything you filter, join or constrain on belongs in a column.
-*Follow-up: How would you index a `jsonb` column for a specific frequently-queried key?*
-
----
-
-## 3. Intermediate (10 Q&A)
-
-
-**Q1. A table's disk usage is five times its live data and queries have slowed. Diagnose it.**
-**A:** Bloat from dead tuples that vacuum has not reclaimed. The usual causes are autovacuum being unable to keep up with a high update rate, autovacuum settings tuned too conservatively for the table's churn, or — most commonly — something holding back the vacuum horizon: a long-running transaction, an idle-in-transaction session, an abandoned replication slot, or a prepared transaction left behind. Vacuum cannot remove tuples that might still be visible to an old transaction, so one forgotten session can block cleanup database-wide. I would check the oldest transaction age first, since that single query usually identifies the cause.
-*Follow-up: You find a replication slot for a decommissioned replica. What has been happening?*
-
-**Q2. What is transaction ID wraparound and how do you avoid meeting it?**
-**A:** Transaction IDs are a finite 32-bit space, and visibility is determined by comparing them, so old tuples must be "frozen" before the counter wraps and old data appears to be from the future. Autovacuum performs this freezing; if it cannot keep up, PostgreSQL first warns and eventually refuses new transactions to protect the data. Avoiding it means keeping autovacuum healthy — enough workers, appropriate thresholds, and no long-lived transactions holding back the horizon — and monitoring the age of the oldest unfrozen transaction as a first-class alert. It is the failure mode most likely to cause a full outage on a neglected PostgreSQL database.
-*Follow-up: What would you alert on, and at what threshold?*
-
-**Q3. How do you tune autovacuum for a high-churn table?**
-**A:** Set per-table settings rather than changing the global defaults, since one hot table's needs should not reshape the whole cluster: lower the scale factor so vacuum triggers on a smaller proportion of changes, raise the cost limit so it does more work per cycle, and ensure enough autovacuum workers exist that a large table does not starve the others. On very large tables the default scale factor means vacuum triggers only after enormous accumulation, which is the common misconfiguration. I would monitor last-vacuum time and dead-tuple counts per table to verify the settings are actually working rather than assuming.
-*Follow-up: Autovacuum keeps getting cancelled on this table. Why, and what do you do?*
-
-**Q4. How do you read a PostgreSQL execution plan, and what differs from SQL Server?**
-**A:** `EXPLAIN (ANALYZE, BUFFERS)` gives you actual versus estimated rows, actual timing per node, and — importantly — buffer counts, which are the equivalent of logical reads and the right measure of work. The comparison to make is the same as in SQL Server: find the node with the largest estimate-versus-actual discrepancy. What differs is the vocabulary and some operator behaviour, plus the presence of vacuum-related effects: a plan can be slow purely because bloat means more pages hold the same rows. Loops counts also matter, since a node's reported time is per-loop.
-*Follow-up: A node shows `actual rows=1 loops=50000`. What's the real cost?*
-
-**Q5. When would you choose `INSERT ... ON CONFLICT` over other upsert approaches?**
-**A:** Almost always, for single-row or small-batch upserts: it is atomic, concurrency-safe, and expresses intent directly, without the race conditions that a read-then-write or a `MERGE` can have. It requires a unique constraint or index to conflict against, which is a healthy forcing function since the invariant becomes a database guarantee. For large-scale merges of many rows, a staging table plus set-based `INSERT`/`UPDATE` is usually more efficient. Coming from SQL Server, this is one of the places where the PostgreSQL idiom is genuinely simpler and safer than `MERGE`.
-*Follow-up: Two concurrent inserts with the same key — walk me through what each session experiences.*
-
-**Q6. How does index maintenance differ, and what is `REINDEX CONCURRENTLY` for?**
-**A:** Indexes bloat too, since dead index entries accumulate alongside dead tuples, and a heavily-updated index can grow well beyond its useful size. `REINDEX` rebuilds it but takes a lock that blocks writes; `REINDEX CONCURRENTLY` builds a replacement alongside and swaps it, avoiding the outage at the cost of more time, more disk, and the possibility of leaving an invalid index behind if it fails. `CREATE INDEX CONCURRENTLY` is the equivalent for new indexes and cannot run inside a transaction. Knowing the concurrent variants exist is what separates a safe production change from a self-inflicted outage.
-*Follow-up: `CREATE INDEX CONCURRENTLY` fails partway. What state are you in and what do you do?*
-
-**Q7. How do you decide between a normalised column and a `jsonb` attribute?**
-**A:** By whether the attribute participates in the relational model. If you filter, sort, join, constrain or aggregate on it, it belongs in a column where the type system, constraints and B-tree indexes work properly. `jsonb` earns its place for genuinely sparse attributes across heterogeneous entities, for verbatim external payloads you must retain, and for shapes that vary per tenant or per integration. The failure I would guard against is a core entity whose important fields live in a document, which produces slow queries, no referential integrity, and application code doing the database's job.
-*Follow-up: A tenant-specific custom-fields feature — columns, `jsonb`, or an EAV table?*
-
-**Q8. What operational differences bite when migrating from SQL Server to PostgreSQL?**
-**A:** Vacuum and bloat as an ongoing concern with no SQL Server equivalent; connection management requiring a pooler; `SERIALIZABLE` aborting instead of blocking, so retry logic becomes mandatory; case sensitivity and identifier folding differences that break ported queries subtly; different `NULL` and collation behaviour in sorting and comparison; no clustered index so physical ordering assumptions fail; and different tooling for backup, monitoring and high availability that the operations team must learn. The technical translation of schema and queries is usually the easy part; the operational model is what teams underestimate.
-*Follow-up: Which of those would you address first in a migration plan, and why?*
-
-**Q9. How do you handle schema migrations safely on a live PostgreSQL database?**
-**A:** By knowing which operations take which locks and for how long. Adding a nullable column without a default is instant in modern versions; adding a `NOT NULL` column with a default is fast in recent versions but was a full rewrite in older ones; adding a check constraint or foreign key can be done in two steps with `NOT VALID` then `VALIDATE` to avoid a long exclusive lock. Index creation must be `CONCURRENTLY`. The most important practical detail is lock queuing: a migration waiting for a lock blocks every subsequent query on that table, so a short statement behind a long-running query becomes an outage — which is why `lock_timeout` and retry are essential in migration tooling.
-*Follow-up: Your `ALTER TABLE` is waiting behind a long-running report. What actually happens to incoming traffic?*
-
-**Q10. When would you choose PostgreSQL over SQL Server for a new system, or vice versa?**
-**A:** PostgreSQL for cost (no licensing), for its extension ecosystem where `PostGIS`, `pgvector`, `TimescaleDB` or full-text search remove the need for a separate system, for rich types including `jsonb` and arrays, and for cloud portability. SQL Server where the organisation already has the licences, the operational expertise and the tooling; where deep .NET and Windows integration matters; or where specific features such as Always On availability groups fit the existing operational model. The decisive factor in practice is rarely the engine's capability and usually the team's ability to operate it well — an engine your team can tune and recover beats a marginally better one they cannot.
-*Follow-up: The team knows SQL Server well but the licensing cost is now material. How do you frame the decision?*
-
----
-
-## 4. Expert / Architect (10 Q&A)
-
-
-**Q1. How would you plan a migration of a large production system from SQL Server to PostgreSQL?**
-**A:** In phases, with the operational model tackled first rather than last. Assess incompatibilities early — T-SQL-specific constructs, stored procedures, identity and sequence behaviour, collation and case sensitivity, and any feature with no direct equivalent — because those determine the true scope. Then build the target with realistic data volume, run the workload against it, and compare behaviour rather than assuming translation preserves performance. For cutover, dual-write or CDC-based replication with a period of parallel running and comparison gives a reversible path; a big-bang cutover on a large system rarely survives contact with reality. And the operations team needs to be running PostgreSQL competently — backup, restore, failover, vacuum tuning — before it holds production data, not after.
-*Follow-up: The application has 300 stored procedures. How do you decide what to port versus rewrite?*
-
-**Q2. How do you set the operational baseline for PostgreSQL in an organisation new to it?**
-**A:** Monitoring and alerting on the things that actually cause PostgreSQL outages: transaction ID age, bloat per table, autovacuum activity and cancellations, long-running and idle-in-transaction sessions, replication lag and slot retention, and connection counts against limits. Then standard configuration — a pooler in front of every database, per-table autovacuum settings for high-churn tables, `lock_timeout` and `statement_timeout` defaults so a runaway query cannot hold locks indefinitely, and tested backup and restore. I would treat "restore has been tested this quarter" as a hard requirement, since an untested backup is a belief rather than a capability.
-*Follow-up: Which single alert would you add first if you could only have one?*
-
-**Q3. How does the extension ecosystem change architectural decisions?**
-**A:** It can remove entire systems from your architecture: `PostGIS` for geospatial, `pgvector` for embedding search, `TimescaleDB` for time series, full-text search built in, and `pg_partman` for partition management. Each one you can use inside the transactional database means one fewer system to operate, one fewer consistency boundary, and one fewer failure mode. The counterweight is that a general-purpose engine will not match a specialist at extreme scale, and managed cloud services often restrict which extensions are available — which is a real constraint to check before designing around one. My default is to use the extension until measured scale demands a specialist, because the operational simplicity is worth a lot.
-*Follow-up: At what point would you move vector search out of `pgvector` into a dedicated store?*
-
-**Q4. How do you design for high write throughput given the MVCC and vacuum model?**
-**A:** Minimise the garbage you create: prefer inserts over updates where the model allows (append-only with a current-view projection), avoid updating indexed columns so HOT updates apply, set `fillfactor` to leave room on pages, and partition high-churn data so vacuum works on smaller units and old partitions can be dropped rather than deleted. Bulk deletes are particularly damaging because they create enormous dead-tuple volumes at once — partition-drop is dramatically cheaper. I would also size autovacuum deliberately for the write rate rather than leaving defaults, because the default settings assume a much gentler workload than a high-throughput system produces.
-*Follow-up: A table receives 50 million deletes a month. How would you model it instead?*
-
-**Q5. How do you handle multi-tenancy in PostgreSQL?**
-**A:** Three models, chosen by tenant count and isolation requirements: a shared schema with a tenant column plus row-level security, a schema per tenant, or a database per tenant. Shared-schema scales to many tenants and is operationally simplest, with RLS providing enforcement below the application so a missed filter is not a breach — which is a genuine PostgreSQL advantage worth using. Schema-per-tenant gives cleaner isolation and easier per-tenant operations but degrades as the object count grows into the tens of thousands, affecting catalog performance and migrations. Database-per-tenant gives the strongest isolation and the worst operational scaling. I would default to shared-schema with RLS and isolate individual large or regulated tenants as exceptions.
-*Follow-up: With 5,000 tenants on shared schema, one tenant's report is degrading everyone. What's your response?*
-
-**Q6. How would you approach connection management for a large microservices estate?**
-**A:** Centralised pooling is essential, and the design question is where it sits: a pooler per application instance limits blast radius but multiplies the total server connections, while a shared pooler tier gives the best multiplexing but becomes critical infrastructure needing its own HA. I would generally run a pooler tier with transaction-mode pooling, having first verified that no service depends on session-level features it would break. The organisational constraint to enforce is a per-service connection budget, because without one, autoscaling application instances will happily exhaust the database's connection limit — and that failure presents as total unavailability rather than as gradual degradation.
-*Follow-up: A service scales to 200 instances during a spike and the database refuses connections. What do you change?*
-
-**Q7. What's your view on using PostgreSQL for workloads it is not classically suited to — queues, caching, search, analytics?**
-**A:** Favourable up to a point, because avoiding an extra system has real operational and consistency value, and PostgreSQL is genuinely capable at each: `SKIP LOCKED` makes it a reasonable queue, full-text search is decent, and columnar extensions handle moderate analytics. The point at which it stops being right is when the workload's characteristics start damaging the primary transactional job — a queue table generating bloat that starves vacuum, analytical scans evicting the buffer cache, or search indexes dominating write cost. My guidance is to start in PostgreSQL, instrument the interference, and move a workload out when it is measurably harming the others rather than on principle.
-*Follow-up: What specific metric would tell you the queue workload is now harming OLTP?*
-
-**Q8. How do you approach performance troubleshooting differently on PostgreSQL than on SQL Server?**
-**A:** The additional dimension is always bloat and vacuum: a query that has degraded without a plan change is frequently reading more pages for the same rows, which has no SQL Server analogue. So the diagnostic sequence starts with table and index bloat and the vacuum horizon before moving to plans and statistics. Beyond that, `pg_stat_statements` for workload-level ranking replaces the plan-cache DMVs, `EXPLAIN (ANALYZE, BUFFERS)` replaces the actual plan, and lock diagnosis uses `pg_locks` and `pg_stat_activity`. The other habit to change is that a long-running read is *not* harmless here, because it holds back cleanup for the whole database.
-*Follow-up: A read-only analytics session runs for six hours nightly. What damage might it be doing?*
-
-**Q9. How do you evaluate managed PostgreSQL services versus self-managed?**
-**A:** Managed removes backup, patching, failover and much of the availability engineering, which is most of the operational cost for most organisations — that is usually decisive. The constraints to check before committing are which extensions are available, whether superuser-requiring operations you need are permitted, what the failover behaviour and RTO actually are (tested, not documented), whether logical replication out is supported for future migration, and the cost model at your I/O profile. Self-managed makes sense at scale where the cost delta is large and you have genuine expertise, or where a required extension is unavailable. I would treat lock-in through unavailable logical replication as a specific risk to check, since it determines whether the decision is reversible.
-*Follow-up: The managed service doesn't support an extension you need. What are the options?*
-
-**Q10. What would tell you an organisation is running PostgreSQL well rather than just running it?**
-**A:** Whether they monitor and act on the PostgreSQL-specific signals — transaction age, bloat, autovacuum effectiveness, replication slot retention, idle-in-transaction sessions — rather than only CPU and disk. Whether per-table autovacuum tuning exists for their hot tables. Whether migrations use the concurrent variants and lock timeouts. Whether restores are tested. And whether the application handles serialization failures and retries correctly. A team that only monitors generic infrastructure metrics is running PostgreSQL on borrowed time: it will work fine until the day it stops entirely, and the failure will be one of the specific mechanisms they were not watching.
-*Follow-up: You join a team with none of that in place and a production database. What's your first week?*
-
----
-
-## 5. Reference Material
-
-> Retained from the original module: deep-dive internals, diagrams, production examples, exercises, system/low-level design, debugging walkthroughs and the Principal Engineer perspective.
-
-### 1. Fundamentals
-
-#### What is PostgreSQL, and how does its concurrency model fundamentally differ from SQL Server's?
-PostgreSQL is an open-source, object-relational database with a fundamentally different **concurrency-control architecture** from SQL Server's default: PostgreSQL uses **MVCC (Multi-Version Concurrency Control) natively and universally** for every transaction — there is no "opt into row versioning" setting (RCSI) the way SQL Server has, because MVCC **is** how PostgreSQL always works, for every isolation level. This single architectural difference cascades into nearly every other practical distinction between the two engines.
-
-#### Why does this matter?
-Engineers moving between SQL Server and PostgreSQL (or designing a system to support both) frequently carry over locking-model assumptions that don't hold — PostgreSQL's default Read Committed behavior already provides much of what SQL Server needs RCSI specifically enabled to achieve, but PostgreSQL introduces its own distinctive operational concern (`VACUUM`) that SQL Server has no direct equivalent of.
-
-#### When does this matter?
-Any team choosing between the two engines, or migrating between them; the depth matters for correctly reasoning about concurrency behavior differences and for understanding `VACUUM`/bloat, PostgreSQL's most distinctive operational concept with no SQL Server analog.
-
-#### How does it work (30,000-ft view)?
 ```sql
--- PostgreSQL: every UPDATE creates a NEW row version (a "tuple"), the old one marked dead but not
--- immediately removed -- MVCC is the ALWAYS-ON mechanism, not an opt-in setting.
-UPDATE orders SET status = 'shipped' WHERE id = 123;
--- The old row version remains on disk until VACUUM reclaims it.
+-- Identity, rich types, constraints
+CREATE TABLE orders (
+    order_id     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    customer_id  BIGINT NOT NULL REFERENCES customers(customer_id),
+    amount       NUMERIC(19,4) NOT NULL CHECK (amount > 0),
+    currency     CHAR(3) NOT NULL,
+    tags         TEXT[] NOT NULL DEFAULT '{}',
+    attrs        JSONB NOT NULL DEFAULT '{}',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Transactional DDL: all or nothing
+BEGIN;
+ALTER TABLE orders ADD COLUMN status TEXT NOT NULL DEFAULT 'NEW';   -- fast since PG 11 (no rewrite)
+CREATE INDEX ix_orders_status ON orders(status);
+COMMIT;   -- or ROLLBACK and both disappear
 ```
 
-### 2. Deep Dive
+**Common interview questions**
 
-#### 2.1 MVCC Implementation Differences — Tuple Versions vs Row Versioning in tempdb
-SQL Server's Snapshot Isolation/RCSI stores **old row versions in tempdb**, separate from the main data files — the "current" row is still a single physical row updated in place, with old versions temporarily elsewhere. PostgreSQL's MVCC instead keeps **multiple physical tuple (row) versions directly in the table's own heap file** — an `UPDATE` doesn't modify a row in place at all; it inserts an entirely new tuple and marks the old one as expired (via transaction-ID-based visibility metadata, `xmin`/`xmax` system columns), leaving the dead tuple physically present in the table until cleaned up.
+**Q1. How does PostgreSQL's MVCC differ from SQL Server's?**
+PostgreSQL stores row versions in the table itself: an UPDATE creates a new tuple and marks the old one dead (`xmax`), and readers see the version valid for their snapshot. So readers never block writers by default — but dead tuples accumulate and must be removed by VACUUM. SQL Server uses locking by default and keeps versions in tempdb only with RCSI/SNAPSHOT.
 
-#### 2.2 `VACUUM` — the Concept with No SQL Server Equivalent
-Because dead tuples accumulate directly in the table's heap, PostgreSQL requires **`VACUUM`** — a maintenance process reclaiming space from dead tuples once no active transaction could still need to see them (based on the oldest active transaction's snapshot). Without regular vacuuming (`autovacuum` runs this automatically by default, but can fall behind under heavy write load or misconfiguration), tables suffer **bloat** — accumulating dead tuples that inflate table/index size, degrade scan performance (more physical pages to read for the same logical data), and, in the extreme, risk **transaction ID wraparound** (PostgreSQL's transaction IDs are a finite 32-bit counter; if vacuuming falls far enough behind, the database can be forced into single-user, read-only emergency mode to prevent ID reuse from causing data corruption) — a genuinely severe, PostgreSQL-specific operational failure mode with no direct SQL Server analog.
+**Q2. Why is there no clustered index, and what follows?**
+Tables are heaps; indexes point to tuple IDs. There's no physical ordering to design around, no clustered-key choice, and secondary indexes don't carry a clustering key — but range scans on unordered data can be slower. `CLUSTER` reorders once (not maintained); BRIN indexes and partitioning help naturally ordered data.
 
-#### 2.3 Isolation Levels — Where PostgreSQL and SQL Server Diverge
-PostgreSQL's **Read Committed** (its default, same name as SQL Server's default) already behaves similarly to SQL Server's **RCSI** — readers never block writers and vice versa, since MVCC is always active — meaning PostgreSQL doesn't have SQL Server's specific "reporting query blocks OLTP writes" failure mode under its default configuration at all. PostgreSQL's **Repeatable Read** is stricter than SQL Server's same-named level — it prevents phantom reads too (closer to SQL Server's Serializable in practical effect for many workloads), and its **Serializable** uses a distinctive technique (**Serializable Snapshot Isolation**, SSI) detecting genuine serialization anomalies and aborting one transaction with a retryable error, rather than SQL Server's range-locking approach.
+**Q3. Why does PostgreSQL need a connection pooler?**
+Each connection is an OS process using several MB plus per-backend caches; thousands of connections waste memory and cause context switching. PgBouncer in transaction mode multiplexes many clients over few server connections. Caveat: transaction pooling breaks session state (session-level prepared statements, `SET`, advisory locks held across transactions, `LISTEN/NOTIFY`).
 
-#### 2.4 Indexing Differences — Partial, Expression, and GIN/GiST Indexes
-PostgreSQL supports several index types with no direct SQL Server equivalent (or a much more limited one): **partial indexes** (`CREATE INDEX... WHERE status = 'active'` — indexing only a subset of rows matching a condition, dramatically smaller and faster for queries that always filter on that condition); **expression indexes** (`CREATE INDEX ON orders (LOWER(email))` — directly solving the non-sargable-predicate problem by indexing the *transformed* value itself, rather than requiring the query to avoid the transformation); **GIN** (Generalized Inverted Index, ideal for full-text search and JSONB containment queries) and **GiST** (Generalized Search Tree, for geometric/range-type queries) indexes, supporting query patterns B+ trees fundamentally can't serve efficiently.
+**Q4. When would you choose PostgreSQL over SQL Server (or vice versa)?**
+PostgreSQL: no licence cost, cloud portability, extensions (PostGIS, pgvector), excellent JSONB, strong community, cloud-managed everywhere (RDS, Aurora, Azure Flexible Server). SQL Server: deep Windows/.NET/SSIS/SSRS ecosystem, existing DBA skills, built-in features (Always On AGs, columnstore, Query Store, temporal tables), enterprise support contracts. Total cost of ownership and team skills usually decide it.
 
-#### 2.5 `JSONB` — Native, Indexable Semi-Structured Data
-PostgreSQL's `JSONB` type (binary-parsed, indexable JSON) lets a column hold semi-structured data queryable and indexable (via GIN) nearly as efficiently as a proper relational column — a genuinely distinctive PostgreSQL strength for hybrid relational/document workloads, with no equivalently mature native equivalent in SQL Server (which offers JSON functions operating on plain `nvarchar` text, without JSONB's binary storage/native indexing support).
+**Q5. What bites teams migrating from SQL Server to PostgreSQL?**
+Vacuum and bloat operations, connection pooling, case-sensitive text comparison, identifier folding to lowercase, no clustered index, different SERIALIZABLE semantics (retries), different date/time types (`timestamptz`), T-SQL procedures to rewrite in PL/pgSQL, `NOLOCK`-style hints don't exist, and query plans with no hints (use pg_hint_plan or rewrite the query).
 
-### 3. Visual Architecture
+---
+
+## 2. MVCC, VACUUM, Bloat & Transaction ID Wraparound
+
+**Key concepts**
+- Each tuple has `xmin` (the creating transaction) and `xmax` (the deleting/updating transaction). An UPDATE = new tuple + old tuple marked dead.
+- **VACUUM** removes dead tuples (making the space reusable — not returned to the OS), updates the **visibility map** (enables index-only scans), and **freezes** old XIDs. **VACUUM FULL** rewrites the table to shrink it (exclusive lock! → use `pg_repack` online). **ANALYZE** updates statistics.
+- **Autovacuum** triggers after `autovacuum_vacuum_scale_factor` (default 20%) + threshold of rows change → too lazy for big, hot tables → tune per table.
+- **Vacuum horizon:** VACUUM can't remove tuples still visible to the **oldest running transaction**. Blockers: long-running queries, **idle-in-transaction** sessions, **abandoned replication slots**, forgotten prepared transactions, hot_standby_feedback from replicas.
+- **Bloat:** table and index size grow while live data stays flat → slower scans, more I/O.
+- **Transaction ID wraparound:** XIDs are 32-bit (~2 billion usable in each direction). Rows must be **frozen** before old XIDs wrap; if freezing falls behind, PostgreSQL forces aggressive anti-wraparound vacuums and eventually **stops accepting writes** to protect data. Monitor `age(datfrozenxid)`.
+- `COUNT(*)` must check tuple visibility → it scans (no metadata shortcut); use estimates (`reltuples`) for dashboards.
+
+```sql
+-- Find tables with the most dead tuples and the last autovacuum
+SELECT relname, n_live_tup, n_dead_tup, last_autovacuum, last_autoanalyze
+FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 10;
+
+-- Who is holding back the vacuum horizon?
+SELECT pid, state, xact_start, now() - xact_start AS age, query
+FROM pg_stat_activity WHERE xact_start IS NOT NULL ORDER BY xact_start LIMIT 5;
+SELECT slot_name, active, restart_lsn FROM pg_replication_slots;          -- abandoned slots?
+
+-- Wraparound risk
+SELECT datname, age(datfrozenxid) FROM pg_database ORDER BY 2 DESC;      -- alert well before ~200M+ … 2B
+
+-- Per-table autovacuum tuning for a hot table
+ALTER TABLE events SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_cost_limit = 2000);
+
+-- Kill idle-in-transaction sessions automatically
+ALTER DATABASE app SET idle_in_transaction_session_timeout = '60s';
+
+-- Fast approximate count
+SELECT reltuples::BIGINT FROM pg_class WHERE relname = 'events';
+```
+
+**Common interview questions**
+
+**Q1. What does VACUUM actually do?**
+It removes dead tuple versions no longer visible to any transaction, so the space can be reused; updates the free-space and visibility maps (enabling index-only scans); and freezes old transaction IDs to prevent wraparound. It doesn't shrink files (except trailing empty pages) — `VACUUM FULL` or `pg_repack` does.
+
+**Q2. A table is 5× its live data size and queries have slowed. Diagnose it.**
+Bloat. Check `n_dead_tup` and `last_autovacuum`; then find what's blocking cleanup — long or idle-in-transaction sessions, an inactive replication slot, standby feedback. Fix the blocker, run VACUUM, tune autovacuum for that table (lower scale factor, higher cost limit), and reclaim space online with `pg_repack` if needed. Prevent it with timeouts and slot monitoring.
+
+**Q3. What is transaction ID wraparound?**
+PostgreSQL compares 32-bit XIDs circularly; after about 2 billion transactions, old rows would appear to be "in the future" and become invisible. Freezing marks old rows as visible to everyone. If freezing can't keep up (autovacuum blocked or disabled), the database warns and eventually refuses writes until a vacuum completes. Avoid it with healthy autovacuum, monitoring `age(datfrozenxid)`, and no long transactions.
+
+**Q4. How do you tune autovacuum for a high-churn table?**
+Lower `autovacuum_vacuum_scale_factor` (e.g., 0.01–0.05) so it runs more often in smaller chunks; raise `autovacuum_vacuum_cost_limit` so it finishes faster; add workers if many tables are hot; for append-only tables, rely on insert-triggered vacuum (PG 13+). Make sure nothing holds back the horizon.
+
+**Q5. Why is `COUNT(*)` slow on a big table?**
+MVCC means visibility differs per transaction, so PostgreSQL must check each tuple (or use an index-only scan with a mostly all-visible visibility map). Use `pg_class.reltuples` estimates, counter tables, or cached counts when exact numbers aren't needed.
+
+---
+
+## 3. Storage, HOT Updates & Index Types
+
+**Key concepts**
+- **HOT (Heap-Only Tuple) updates:** if no **indexed column** changes and the page has free space, the new version stays on the same page and **indexes aren't touched** → much cheaper. Set `fillfactor` (e.g., 80–90) on update-heavy tables; avoid indexing frequently updated columns.
+- **Index types**
+
+| Type | Use for |
+|---|---|
+| **B-tree** (default) | equality, ranges, sorting, uniqueness |
+| **Hash** | equality only (rarely better than B-tree) |
+| **GIN** | `jsonb` containment, arrays, full-text search (`tsvector`) |
+| **GiST** | geometry (PostGIS), ranges, nearest neighbour, exclusion constraints |
+| **SP-GiST** | partitioned spaces (IP ranges, quadtrees) |
+| **BRIN** | huge, naturally ordered tables (time-series) — tiny index of block ranges |
+| **pgvector HNSW/IVFFlat** | vector similarity search |
+
+- **Partial indexes** (`WHERE status = 'PENDING'`), **expression indexes** (`lower(email)`), **covering indexes** (`INCLUDE`), **multicolumn** (leftmost prefix).
+- **Index-only scans** need the visibility map to be up to date (VACUUM).
+- `CREATE INDEX CONCURRENTLY` (no write lock; can't run in a transaction; on failure leaves an **INVALID** index to drop and retry). `REINDEX CONCURRENTLY` (PG 12+) to rebuild bloated indexes online.
+- **Exclusion constraints** (GiST) prevent overlapping ranges (bookings).
+
+```sql
+-- Expression index for case-insensitive lookups
+CREATE UNIQUE INDEX ux_users_email ON users (lower(email));
+SELECT * FROM users WHERE lower(email) = lower('Ana@Example.com');
+
+-- Partial index for a hot subset
+CREATE INDEX ix_payments_pending ON payments (created_at) WHERE status = 'PENDING';
+
+-- Covering index
+CREATE INDEX ix_orders_cust ON orders (customer_id, created_at DESC) INCLUDE (amount, status);
+
+-- GIN for JSONB and arrays
+CREATE INDEX ix_orders_attrs ON orders USING GIN (attrs jsonb_path_ops);
+SELECT * FROM orders WHERE attrs @> '{"channel": "mobile"}';
+CREATE INDEX ix_orders_tags ON orders USING GIN (tags);
+SELECT * FROM orders WHERE tags @> ARRAY['vip'];
+
+-- BRIN for a time-ordered append-only table
+CREATE INDEX ix_events_time ON events USING BRIN (event_time);
+
+-- No double booking (exclusion constraint)
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+CREATE TABLE bookings (room_id INT, during TSTZRANGE,
+    EXCLUDE USING GIST (room_id WITH =, during WITH &&));
+
+-- Online index creation
+CREATE INDEX CONCURRENTLY ix_orders_status ON orders(status);
+-- If it fails: DROP INDEX CONCURRENTLY ix_orders_status; then retry
+
+-- HOT-friendly fill factor
+ALTER TABLE accounts SET (fillfactor = 85);
+```
+
+**Common interview questions**
+
+**Q1. What is a HOT update and why does it matter?**
+When an update doesn't change any indexed column and there's room on the same page, PostgreSQL creates the new tuple version on that page without updating any index. That avoids index write amplification and bloat. Enable it with a lower fillfactor and by not indexing frequently updated columns.
+
+**Q2. Which index type when?**
+B-tree for most lookups and ranges; GIN for JSONB, arrays and full-text; GiST for geospatial, ranges and exclusion constraints; BRIN for huge time-ordered tables where a tiny index is enough; pgvector for embeddings.
+
+**Q3. What can go wrong with `CREATE INDEX CONCURRENTLY`?**
+It takes longer (two table scans), can't run inside a transaction, waits for existing transactions, and if it fails (deadlock, uniqueness violation) it leaves an INVALID index that still adds write overhead — drop it and retry.
+
+**Q4. When is an index-only scan possible?**
+When the index covers all needed columns and the visibility map shows the pages are all-visible (so no heap check is needed). Frequent VACUUM keeps the visibility map current.
+
+---
+
+## 4. Query Plans & Performance Diagnostics
+
+**Key concepts**
+- `EXPLAIN` (estimates) vs **`EXPLAIN (ANALYZE, BUFFERS)`** (actually runs it: real rows, time, and shared hits vs reads). Compare `rows=` estimated vs actual.
+- Nodes: Seq Scan, Index Scan, Index Only Scan, Bitmap Heap/Index Scan (many rows from an index), Nested Loop, Hash Join, Merge Join, Sort (watch "external merge Disk" → raise `work_mem`), HashAggregate, Gather (parallel).
+- **`pg_stat_statements`:** the top queries by total time, calls and rows — the equivalent of Query Store's top consumers (no automatic plan forcing).
+- **`pg_stat_activity`** (what's running and waiting: `wait_event_type`), **`pg_locks`** (blocking), `pg_stat_user_tables/indexes` (scans, unused indexes).
+- Statistics: `ANALYZE`; raise `default_statistics_target` or set per column; **extended statistics** (`CREATE STATISTICS`) for correlated columns.
+- **Generic vs custom plans** for prepared statements: after 5 executions PG may switch to a generic plan (parameter-sniffing-like issues) → `plan_cache_mode = force_custom_plan` if needed.
+- No query hints in core (pg_hint_plan extension) → fix with statistics, indexes and query rewrites.
+- Key settings: `shared_buffers` (~25% RAM), `effective_cache_size`, `work_mem` (per sort/hash node!), `maintenance_work_mem`, `random_page_cost` (lower on SSD).
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM orders WHERE customer_id = 42 AND created_at >= now() - interval '30 days';
+-- Look for: Seq Scan on large tables, rows estimated vs actual, "Sort Method: external merge Disk"
+
+-- Top queries by total time
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+SELECT query, calls, total_exec_time, mean_exec_time, rows
+FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 10;
+
+-- Who blocks whom
+SELECT blocked.pid AS blocked_pid, blocking.pid AS blocking_pid, blocked.query AS blocked_query, blocking.query AS blocking_query
+FROM pg_stat_activity blocked
+JOIN pg_stat_activity blocking ON blocking.pid = ANY(pg_blocking_pids(blocked.pid));
+
+-- Unused indexes
+SELECT relname, indexrelname, idx_scan FROM pg_stat_user_indexes WHERE idx_scan = 0;
+
+-- Correlated columns statistics
+CREATE STATISTICS st_city_zip (dependencies) ON city, zip FROM addresses; ANALYZE addresses;
+```
+
+**Common interview questions**
+
+**Q1. How do you read a PostgreSQL plan, and how does it differ from SQL Server's?**
+A text tree read from the innermost node outward; each node shows estimated cost and rows, and with ANALYZE the actual rows, loops and time; BUFFERS shows cache hits vs disk reads. Differences: no graphical plan by default, no Query Store–style plan forcing, no hints; Bitmap scans are common; sort/hash memory is `work_mem` per node.
+
+**Q2. How do you troubleshoot a slow PostgreSQL system?**
+`pg_stat_statements` for the top consumers; `pg_stat_activity` for current waits (Lock, IO, LWLock); `EXPLAIN (ANALYZE, BUFFERS)` on the worst queries; check bloat and vacuum health, stale statistics, missing or unused indexes, connection count and pooling, checkpoints and WAL volume, and replication lag.
+
+**Q3. What's the generic plan problem?**
+Prepared statements switch to a generic (parameter-independent) plan after several executions if it looks no worse; with skewed data that plan can be bad for some values — similar to parameter sniffing. Set `plan_cache_mode = force_custom_plan` for those statements, or restructure the query.
+
+---
+
+## 5. Transactions, Isolation, Locking & Upserts
+
+**Key concepts**
+- Isolation levels: READ COMMITTED (default, a snapshot per statement), REPEATABLE READ (a snapshot per transaction; update conflicts → error), **SERIALIZABLE = SSI** (detects dangerous read/write dependencies and aborts one transaction with **SQLSTATE 40001** → the app **must retry**). READ UNCOMMITTED behaves like READ COMMITTED.
+- Row locks: `SELECT ... FOR UPDATE` / `FOR NO KEY UPDATE` / `FOR SHARE`; **`SKIP LOCKED`** for queue workers; `NOWAIT`.
+- **Advisory locks** (`pg_advisory_xact_lock(key)`) for application-level mutual exclusion.
+- **Deadlocks** are detected after `deadlock_timeout` (1 s) → one transaction aborted (40P01) → retry.
+- **`INSERT ... ON CONFLICT (key) DO UPDATE/DO NOTHING`** = an atomic upsert (requires a unique constraint or index). `RETURNING` gives back the generated or updated rows. `MERGE` exists since PG 15.
+- Lock levels for DDL matter (§6).
+
+```sql
+-- Atomic, concurrency-safe upsert
+INSERT INTO balances (account_id, amount) VALUES (42, 100)
+ON CONFLICT (account_id) DO UPDATE SET amount = balances.amount + EXCLUDED.amount
+RETURNING amount;
+
+-- Idempotent insert
+INSERT INTO processed_messages (message_id) VALUES ($1) ON CONFLICT DO NOTHING;   -- 0 rows → duplicate
+
+-- Queue worker: claim jobs without blocking other workers
+WITH next AS (
+    SELECT id FROM jobs WHERE status = 'NEW' ORDER BY id
+    FOR UPDATE SKIP LOCKED LIMIT 10)
+UPDATE jobs j SET status = 'RUNNING', started_at = now()
+FROM next WHERE j.id = next.id
+RETURNING j.*;
+
+-- Overdraft-safe debit
+UPDATE accounts SET balance = balance - 50 WHERE id = 1 AND balance >= 50 RETURNING balance;
+
+-- SERIALIZABLE with retry (pseudo)
+-- BEGIN ISOLATION LEVEL SERIALIZABLE; ...; COMMIT;  on SQLSTATE 40001 → retry the whole transaction
+```
+
+**Common interview questions**
+
+**Q1. How does PostgreSQL's SERIALIZABLE differ from SQL Server's?**
+SQL Server uses key-range locks (pessimistic, blocking). PostgreSQL uses Serializable Snapshot Isolation: transactions run on snapshots without extra blocking, and the engine aborts one when it detects a cycle of dependencies that could produce a non-serializable result (40001). Applications must be written to retry.
+
+**Q2. When would you use `ON CONFLICT` over other upsert approaches?**
+Whenever you have a unique key — it's atomic and race-free under concurrency, unlike SELECT-then-INSERT. Use `DO NOTHING` for idempotent inserts and `DO UPDATE` with `EXCLUDED` for merges. `MERGE` (PG 15+) handles more complex multi-action logic but isn't immune to concurrent-insert races without a unique constraint.
+
+**Q3. How do you build a job queue on PostgreSQL?**
+A jobs table plus `SELECT ... FOR UPDATE SKIP LOCKED LIMIT n` so workers claim different rows without blocking; status, attempts and visibility timeout columns; indexes on status; and `LISTEN/NOTIFY` to wake workers. It works well up to moderate throughput — move to a broker for high-volume streams.
+
+**Q4. What are advisory locks for?**
+Application-defined locks on arbitrary keys (e.g., "only one instance runs the nightly job", "serialize operations per account") without locking table rows. Use the transaction-scoped variant so locks release automatically, and note they don't work with transaction-mode poolers if session-scoped.
+
+---
+
+## 6. Schema Migrations, JSONB & Connection Pooling
+
+**Key concepts — safe migrations**
+- Many `ALTER TABLE` forms take an **ACCESS EXCLUSIVE** lock. Worse: a DDL statement **waiting** for a lock blocks every later query (lock queue) → always `SET lock_timeout = '5s'` and retry.
+- Safe patterns: add a nullable column or one with a constant default (no rewrite since PG 11); `CREATE INDEX CONCURRENTLY`; add constraints as **`NOT VALID`** then **`VALIDATE CONSTRAINT`** (a weaker lock); add NOT NULL via a CHECK constraint `NOT VALID` → validate → `SET NOT NULL` (PG 12+ uses the check); avoid type changes that rewrite the table (use a new column + backfill).
+- Backfill in batches; expand–contract for renames.
+
+**Key concepts — JSONB**
+- Binary JSON, indexable with GIN (`@>`, `?`, `jsonb_path_ops`), operators `->`, `->>`, `#>`, `jsonb_set`, `jsonb_path_query`.
+- Good for: genuinely variable attributes, external payloads, metadata. Bad for: core relational data you filter, join or constrain (lost types, constraints and statistics).
+- Expression or generated columns for frequently queried JSON fields.
+
+**Key concepts — pooling**
+- **PgBouncer** modes: session (safe, little benefit), **transaction** (most common — breaks session features), statement.
+- Size: total server connections ≈ a small multiple of CPU cores; many app instances × pool size can exceed `max_connections` → central pooler or RDS Proxy.
+
+```sql
+-- Safe migration session settings
+SET lock_timeout = '5s';
+SET statement_timeout = '15min';
+
+-- Add a FK without a long lock
+ALTER TABLE orders ADD CONSTRAINT fk_orders_customer FOREIGN KEY (customer_id) REFERENCES customers(customer_id) NOT VALID;
+ALTER TABLE orders VALIDATE CONSTRAINT fk_orders_customer;     -- SHARE UPDATE EXCLUSIVE, allows reads/writes
+
+-- Add NOT NULL safely
+ALTER TABLE orders ADD CONSTRAINT ck_orders_currency_nn CHECK (currency IS NOT NULL) NOT VALID;
+ALTER TABLE orders VALIDATE CONSTRAINT ck_orders_currency_nn;
+ALTER TABLE orders ALTER COLUMN currency SET NOT NULL;         -- uses the validated check (PG 12+)
+ALTER TABLE orders DROP CONSTRAINT ck_orders_currency_nn;
+
+-- JSONB
+SELECT attrs->>'channel' AS channel, (attrs->'risk'->>'score')::INT AS risk
+FROM orders WHERE attrs @> '{"channel":"mobile"}';
+UPDATE orders SET attrs = jsonb_set(attrs, '{risk,score}', '42') WHERE order_id = 1;
+ALTER TABLE orders ADD COLUMN channel TEXT GENERATED ALWAYS AS (attrs->>'channel') STORED;  -- promote a hot field
+```
+
+```ini
+; pgbouncer.ini essentials
+[pgbouncer]
+pool_mode = transaction
+max_client_conn = 5000
+default_pool_size = 40
+server_idle_timeout = 600
+```
+
+**Common interview questions**
+
+**Q1. How do you run schema migrations safely on a live PostgreSQL database?**
+Set `lock_timeout` so DDL can't queue behind long queries and freeze traffic; use non-rewriting changes (nullable columns, constant defaults); `CREATE INDEX CONCURRENTLY`; `NOT VALID` + `VALIDATE` for constraints; batch backfills; expand–contract for renames and type changes; and test on production-sized data.
+
+**Q2. Normalized column or a JSONB attribute?**
+If you filter, join, aggregate, constrain or need statistics on it, make it a column. Use JSONB for sparse, evolving or externally defined attributes. Promote hot JSON fields to generated columns. JSONB as a way to "avoid schema design" leads to unvalidated data and slow queries.
+
+**Q3. What does PgBouncer's transaction mode break?**
+Anything relying on a stable session: `SET` variables, session-level prepared statements (supported in newer PgBouncer versions with configuration), temporary tables across transactions, session advisory locks, and `LISTEN/NOTIFY`. Design the app to be session-stateless.
+
+**Q4. How do you manage connections for 200 microservice pods?**
+Small per-pod pools; a central pooler (PgBouncer/RDS Proxy) in front of the database; cap `max_connections` sensibly; use read replicas for read traffic; and alert on connection saturation and idle-in-transaction sessions.
+
+---
+
+## 7. Partitioning
+
+**Key concepts**
+- **Declarative partitioning:** `PARTITION BY RANGE` (time), `LIST` (region/tenant), `HASH` (even spread); sub-partitioning is possible.
+- **Pruning:** at plan time (constant predicates) or at execution time (parameters, joins). Functions on the partition key or non-immutable expressions defeat pruning.
+- **The partition key must be part of every PRIMARY KEY/UNIQUE constraint** (uniqueness is enforced per partition — there are no global unique indexes).
+- **ATTACH PARTITION** validates rows (a scan) unless a matching CHECK constraint already exists; **DETACH PARTITION CONCURRENTLY** (PG 14+).
+- **Retention:** drop or detach old partitions instead of `DELETE` (instant, no bloat). Pre-create future partitions (pg_partman). A DEFAULT partition catches strays (but makes attaching slower).
+- Too many partitions → planning overhead; aim for partitions of manageable size (GBs) and a count in the hundreds, not tens of thousands.
+- Partition-wise joins and aggregates (`enable_partitionwise_join`).
+- Partitioning ≠ sharding (one server) → Citus for distributed PostgreSQL.
+
+```sql
+CREATE TABLE transactions (
+    txn_id      BIGINT GENERATED ALWAYS AS IDENTITY,
+    account_id  BIGINT NOT NULL,
+    txn_time    TIMESTAMPTZ NOT NULL,
+    amount      NUMERIC(19,4) NOT NULL,
+    PRIMARY KEY (txn_time, txn_id)                  -- must include the partition key
+) PARTITION BY RANGE (txn_time);
+
+CREATE TABLE transactions_2026_10 PARTITION OF transactions
+    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+CREATE INDEX ON transactions (account_id, txn_time);   -- created on every partition
+
+-- Retention: instant, no bloat
+ALTER TABLE transactions DETACH PARTITION transactions_2025_10 CONCURRENTLY;
+DROP TABLE transactions_2025_10;      -- or archive it first
+
+-- Pruning works only when the key is constrained directly
+EXPLAIN SELECT * FROM transactions WHERE txn_time >= '2026-10-01' AND txn_time < '2026-10-08';
+```
+
+**Common interview questions**
+
+**Q1. What does partitioning give you, and what doesn't it?**
+It gives partition pruning for queries filtered on the key, cheap retention (drop a partition), smaller indexes and vacuums per partition, and maintenance per partition. It doesn't give more write capacity than one server, global unique constraints, or faster queries that don't filter on the key.
+
+**Q2. Why must the partition key be part of every unique constraint?**
+Indexes are per partition, so PostgreSQL can only guarantee uniqueness within each partition; including the partition key makes per-partition uniqueness equal to global uniqueness. For a global unique business key, use a separate lookup table or enforce it upstream.
+
+**Q3. How do you choose the partition key and granularity?**
+The column most queries filter on and that drives retention (usually time); granularity sized so each partition is manageable (daily, weekly or monthly), with a total count in the hundreds. Use HASH when there's no natural range and you need even spread (e.g., by tenant).
+
+**Q4. How would you migrate a big, live table to a partitioned one?**
+Create the partitioned table; attach the existing table as one (old) partition after adding a matching CHECK constraint (validated online) so ATTACH doesn't scan; route new data to new partitions; split or migrate old data gradually. Or use logical replication or dual writes into the new structure and switch over.
+
+---
+
+## 8. WAL, Replication, Failover & Backups
+
+**Key concepts**
+- **WAL** = the ordered log of all changes. Used for crash recovery, physical replication, PITR and logical decoding. `wal_level`: replica / logical.
+- **Streaming (physical) replication:** a byte-for-byte copy of the whole cluster; hot standbys serve **read-only** queries; asynchronous by default.
+- **`synchronous_commit` + `synchronous_standby_names`:** with sync replicas, a commit waits for standby confirmation (RPO≈0, more latency; `ANY 1 (s1, s2)` quorum).
+- **Replication lag** → stale reads on replicas; read-your-own-writes needs the primary or LSN-based waiting.
+- **Hot standby conflicts:** replay (e.g., vacuum cleanup) can conflict with long queries on the standby → query cancelled; `hot_standby_feedback = on` prevents that but causes bloat on the primary; or `max_standby_streaming_delay`.
+- **Replication slots** guarantee WAL is kept for a consumer → an **abandoned slot fills the primary's disk** and holds back vacuum. Monitor slots; set `max_slot_wal_keep_size`.
+- **Failover:** PostgreSQL itself has no built-in automatic failover → **Patroni** (with etcd/Consul), repmgr, or managed services. Need fencing (avoid split brain), and `pg_rewind` to rejoin the old primary.
+- **Backups:** base backup + continuous **WAL archiving** → **PITR** (pgBackRest, WAL-G, Barman). Replication is not a backup (a `DROP TABLE` replicates instantly).
+- **Major upgrades:** `pg_upgrade --link` (minutes of downtime) or logical replication to the new version (near-zero downtime).
+
+```sql
+-- Replication lag on the primary
+SELECT client_addr, state, sent_lsn, replay_lsn,
+       pg_wal_lsn_diff(sent_lsn, replay_lsn) AS bytes_lag, replay_lag
+FROM pg_stat_replication;
+
+-- WAL retained by slots (disk-fill risk)
+SELECT slot_name, active, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS retained
+FROM pg_replication_slots;
+
+-- Synchronous replication: commit waits for any one of two standbys
+ALTER SYSTEM SET synchronous_standby_names = 'ANY 1 (standby_a, standby_b)';
+-- per-transaction relaxation for non-critical writes:
+SET LOCAL synchronous_commit = 'local';
+```
+
+**Common interview questions**
+
+**Q1. What is the WAL and why is it central?**
+Every change is written to the WAL before the data files. It enables crash recovery (replay), physical replication (ship the WAL), point-in-time recovery (archive the WAL), and logical decoding/CDC (decode the WAL into row changes).
+
+**Q2. Synchronous vs asynchronous replication?**
+Async: lowest commit latency, but a failover can lose the last few transactions (RPO > 0). Sync: commits wait for a standby, so acknowledged writes survive failover (RPO≈0), at the cost of latency and availability (if the sync standby is down, commits wait — use quorum `ANY 1` with two standbys).
+
+**Q3. The primary's disk is filling up. Diagnose it.**
+Check `pg_wal` size: inactive replication slots retaining WAL, a failing `archive_command`, or a lagging replica or CDC consumer. Also table bloat, temp files from big sorts, and log files. Fix the slot (drop it if abandoned), fix archiving, and set `max_slot_wal_keep_size` and alerts.
+
+**Q4. What makes automated failover safe?**
+Consensus-based leader election (Patroni + etcd), fencing the old primary (so it can't accept writes — split brain), a defined RPO (sync vs async), clients reconnecting via a stable endpoint (DNS/VIP/HAProxy), and regularly rehearsed failovers. Rejoin the old primary with `pg_rewind`.
+
+**Q5. How do you set RPO and RTO for PostgreSQL?**
+RPO: synchronous replicas (≈0) or async + WAL archiving every few seconds or minutes. RTO: automated failover (seconds to minutes) vs restore from backup (hours, depending on size). Make it real with regular restore tests, PITR drills, and measured failover times.
+
+**Q6. How do you upgrade a major version with minimal downtime?**
+Logical replication from the old version to a new-version cluster, catch up, briefly stop writes, cut over the connection endpoint, then advance sequences (they aren't replicated). Or `pg_upgrade --link` with a short maintenance window. Test extensions and query plans on the new version first.
+
+---
+
+## 9. Logical Replication, Logical Decoding & CDC
+
+**Key concepts**
+- **Logical replication:** publications (on the source) + subscriptions (on the target) replicate **row changes for selected tables**, across versions and platforms; it includes an initial copy.
+- **Doesn't replicate:** DDL (apply schema changes on both sides first), sequence values, `TRUNCATE` in old versions, large objects.
+- **Replica identity:** UPDATE/DELETE need a primary key (or `REPLICA IDENTITY FULL`, which is expensive) to identify rows.
+- **Logical decoding:** output plugins (`pgoutput`, `wal2json`) decode the WAL into change events via a **logical replication slot** — the basis for **Debezium CDC** into Kafka.
+- CDC delivery is **at-least-once** (resume from the last confirmed LSN) → consumers must be idempotent; large transactions are emitted only after commit (memory/disk spill in the reorder buffer).
+- CDC as an integration backbone couples consumers to your internal schema → prefer an **outbox table** published via CDC (a stable event contract).
+
+```sql
+-- Source
+CREATE PUBLICATION orders_pub FOR TABLE orders, order_items;
+-- Target
+CREATE SUBSCRIPTION orders_sub CONNECTION 'host=src dbname=app user=repl' PUBLICATION orders_pub;
+
+-- Tables without a PK need a replica identity for UPDATE/DELETE
+ALTER TABLE audit_log REPLICA IDENTITY FULL;
+
+-- Peek at logical decoding output (testing)
+SELECT * FROM pg_create_logical_replication_slot('test_slot', 'wal2json');
+SELECT data FROM pg_logical_slot_peek_changes('test_slot', NULL, NULL);
+SELECT pg_drop_replication_slot('test_slot');      -- never leave test slots behind!
+```
+
+**Common interview questions**
+
+**Q1. Physical vs logical replication?**
+Physical copies the whole cluster byte-for-byte (same major version, read-only standbys) — for HA and read scaling. Logical replicates selected tables' row changes — across versions, to writable targets, for upgrades, migrations and integration — but it doesn't carry DDL or sequences.
+
+**Q2. How would you set up CDC from PostgreSQL into Kafka?**
+`wal_level = logical`, a Debezium connector with `pgoutput` using a dedicated replication slot and publication, an initial snapshot then streaming, and LSN offsets stored in Kafka Connect. Monitor slot lag (the disk-fill risk), handle schema evolution (a schema registry), make consumers idempotent, and preferably publish an outbox table instead of raw tables.
+
+**Q3. What are the risks of making CDC the event backbone?**
+Consumers bind to internal table schemas (refactors break them), events are row diffs rather than business events, slot failures can fill disks or stop replication, and ordering is per transaction rather than per business entity. The outbox pattern + CDC gives explicit, versioned events while keeping CDC's reliability.
+
+**Q4. How do you handle schema changes across logical replication or CDC?**
+Additive changes first: add the column on the subscriber and the consumers before the publisher; never drop or rename on the source until consumers have migrated; use a schema registry with compatibility rules for Debezium events; coordinate via expand–contract.
+
+---
+
+## 10. Extensions, Multi-Tenancy & PostgreSQL for Other Workloads
+
+**Key concepts**
+- **Extensions:** PostGIS (geospatial), **pgvector** (embeddings/RAG), TimescaleDB (time series), Citus (distributed/sharded), pg_partman, pg_cron, pg_stat_statements, `pgcrypto`, `uuid-ossp`. Check managed-service support before designing around one.
+- **Multi-tenancy:** shared tables + `tenant_id` + **Row-Level Security (RLS)** policies; schema per tenant (thousands of schemas hurt catalogs and migrations); database per tenant (strong isolation, high ops cost); Citus for distributing by tenant.
+- **PostgreSQL as a queue** (SKIP LOCKED), **search** (full-text `tsvector`, `pg_trgm`), **cache** (UNLOGGED tables), **analytics** (BRIN, partitioning, parallel query) — fine at moderate scale, and fewer moving parts; move to specialized systems when scale or requirements exceed it.
+
+```sql
+-- Row-level security per tenant
+ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON invoices USING (tenant_id = current_setting('app.tenant_id')::BIGINT);
+-- per request/transaction:
+SET LOCAL app.tenant_id = '42';
+-- Note: table owners and superusers bypass RLS unless FORCE ROW LEVEL SECURITY
+
+-- Full-text search
+ALTER TABLE articles ADD COLUMN tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || body)) STORED;
+CREATE INDEX ix_articles_tsv ON articles USING GIN (tsv);
+SELECT id, title FROM articles WHERE tsv @@ plainto_tsquery('english', 'payment reconciliation');
+
+-- Vector similarity (pgvector)
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE TABLE docs (id BIGSERIAL PRIMARY KEY, content TEXT, embedding VECTOR(1536));
+CREATE INDEX ON docs USING hnsw (embedding vector_cosine_ops);
+SELECT id, content FROM docs ORDER BY embedding <=> $1 LIMIT 5;
+```
+
+**Common interview questions**
+
+**Q1. How do you handle multi-tenancy in PostgreSQL?**
+Usually shared tables with `tenant_id` leading the indexes and RLS policies enforcing isolation in the database (with `SET LOCAL` per transaction, compatible with transaction pooling), plus per-tenant rate limits. Big or regulated tenants can get dedicated databases. Citus distributes tenants across nodes at scale.
+
+**Q2. Should we use PostgreSQL for queues, search and caching?**
+At moderate scale, yes — fewer systems, transactional consistency with your data (e.g., enqueue a job in the same transaction as the business write). Switch when you need high-throughput streaming (Kafka), advanced relevance and ranking (OpenSearch), or sub-millisecond caching (Redis). Decide on measured needs.
+
+**Q3. Managed PostgreSQL (RDS/Aurora/Azure) or self-managed?**
+Managed by default: automated backups/PITR, patching, failover and monitoring. Trade-offs: limited superuser access and extensions, version lag, cost at scale, vendor-specific behaviour (Aurora's storage layer). Self-manage only with a strong DBA team and special requirements.
+
+---
+
+## 11. Top 30 Rapid-Fire Questions + Principal Questions
+
+1. **MVCC storage?** In-table tuple versions (`xmin`/`xmax`).
+2. **Readers block writers?** No (snapshots).
+3. **VACUUM?** Removes dead tuples, updates the visibility map, freezes XIDs.
+4. **VACUUM FULL?** Rewrites the table with an exclusive lock → prefer `pg_repack`.
+5. **Autovacuum default trigger?** ~20% of rows changed → tune hot tables.
+6. **What blocks vacuum?** Long or idle transactions, stale slots, standby feedback.
+7. **XID wraparound?** 32-bit XIDs → freeze or the DB stops writes.
+8. **Clustered index?** None (heap).
+9. **HOT update?** No indexed column changed + free space on the page → no index writes.
+10. **GIN?** JSONB, arrays, full-text.
+11. **BRIN?** Huge, naturally ordered tables.
+12. **GiST?** Geospatial, ranges, exclusion constraints.
+13. **Index without blocking writes?** `CREATE INDEX CONCURRENTLY`.
+14. **Upsert?** `INSERT ... ON CONFLICT`.
+15. **Queue pattern?** `FOR UPDATE SKIP LOCKED`.
+16. **SERIALIZABLE?** SSI → retry on 40001.
+17. **Transactional DDL?** Yes (mostly).
+18. **Safe constraint add?** `NOT VALID` then `VALIDATE`.
+19. **Migration lock safety?** `lock_timeout`.
+20. **Top queries?** `pg_stat_statements`.
+21. **Real plan?** `EXPLAIN (ANALYZE, BUFFERS)`.
+22. **Connection cost?** A process each → PgBouncer.
+23. **Partition key rule?** Must be in every PK/unique constraint.
+24. **Retention?** Detach/drop partitions.
+25. **WAL?** The log behind durability, replication, PITR and CDC.
+26. **Abandoned slot?** Fills the disk, blocks vacuum.
+27. **Automatic failover?** Patroni or managed services.
+28. **Logical replication misses?** DDL, sequences.
+29. **CDC tool?** Debezium via `pgoutput`.
+30. **Tenant isolation?** RLS + `tenant_id`.
+
+**Principal-level questions**
+
+**P1. Plan a migration of a large production system from SQL Server to PostgreSQL.**
+Assess the T-SQL surface (procedures, functions, triggers, SQL Agent jobs, SSIS), data types and collations; convert the schema (AWS SCT or similar) and fix behaviour differences (case sensitivity, identity, dates); port code and test functional and performance parity on production-sized data; migrate data with an initial load + CDC (AWS DMS/Debezium) to keep in sync; dual-run with comparison of results; cut over during a short window with a rollback path (reverse replication); then train the team on vacuum, pooling and monitoring.
+
+**P2. What operational baseline would you mandate for PostgreSQL across the organisation?**
+Managed service or Patroni; PgBouncer; `pg_stat_statements`; autovacuum tuning guidance and bloat monitoring; alerts on XID age, slot retention, replication lag, connection saturation and idle-in-transaction; `lock_timeout`/`statement_timeout` defaults; pgBackRest/WAL archiving with monthly restore tests; migration linting (e.g., squawk); and a runbook for failover.
+
+**P3. How do you design for very high write throughput given MVCC?**
+Minimize indexes on hot tables; HOT-friendly design (fillfactor, don't index churny columns); batch inserts (COPY); partition by time so vacuum works per partition and old data is dropped; tune autovacuum aggressively; separate WAL on fast disks; consider `synchronous_commit = off` for non-critical data; and shard with Citus or by application if one node isn't enough.
+
+**P4. Multi-region PostgreSQL — how?**
+Usually one writable primary region + async read replicas in other regions (stale reads and a regional-failover RPO > 0), with promotion during disaster recovery. Multi-writer needs conflict handling (logical replication bi-directional, EDB/pgEdge, or app-level partitioning by region/home region). Or choose a distributed SQL database (Aurora Global, CockroachDB, YugabyteDB) when you truly need multi-region writes.
+
+---
+
+## 12. Mistakes Checklist (say why each is wrong)
+- [ ] Ignoring autovacuum · `VACUUM FULL` in business hours · disabling autovacuum
+- [ ] Long-running or idle-in-transaction sessions · abandoned replication slots · no XID-age alerts
+- [ ] Indexing frequently updated columns (kills HOT) · non-concurrent index builds on live tables · leaving INVALID indexes
+- [ ] Migrations without `lock_timeout` · `ADD CONSTRAINT` without `NOT VALID` · column type changes that rewrite huge tables
+- [ ] Thousands of direct connections without a pooler · session state under transaction pooling
+- [ ] SELECT-then-INSERT upserts · SERIALIZABLE without retry logic
+- [ ] JSONB for core relational data · `COUNT(*)` for dashboards on huge tables
+- [ ] Partition keys not used in queries · unique constraints without the partition key · too many partitions
+- [ ] Treating replicas as backups · never testing PITR restores · failover without fencing
+- [ ] CDC on raw tables as a public contract · forgetting sequences in logical-replication cutovers
+- [ ] RLS bypassed by table owners (no `FORCE ROW LEVEL SECURITY`)
+
+---
+
+## Architecture Diagrams (preserved from the original modules)
+
+> All 6 Mermaid/ASCII diagrams from the original `05-PostgreSQL/` files, kept verbatim and grouped by source module. Originals: `git show ebb2d5c:05-PostgreSQL/<file>.md`.
+
+### Module 21 — PostgreSQL: Fundamentals, MVCC & Comparison with SQL Server
+*Source: `01-PostgreSQL-Fundamentals-vs-SQLServer.md`*
+
+**3. Visual Architecture**
+
 ```mermaid
 graph TB
  subgraph "SQL Server RCSI"
@@ -243,85 +627,8 @@ graph TB
  end
 ```
 
-### 4. Production Example
-**Scenario**: A team migrated a moderately write-heavy service from SQL Server (with RCSI enabled) to PostgreSQL, expecting equivalent behavior "since both use MVCC now" — after a few weeks in production, query performance degraded steadily, and table sizes grew far beyond expected data volume. **Investigation**: `autovacuum` was running, but its default cost-based throttling settings (tuned for a much lower write-volume workload than this service's actual traffic) meant it consistently fell behind the table's dead-tuple accumulation rate — `pg_stat_user_tables`'s `n_dead_tup` showed dead-tuple counts far exceeding live rows for the hottest tables. **Fix**: tuned `autovacuum_vacuum_cost_limit`/`autovacuum_naptime` more aggressively for the specific high-churn tables (via per-table `ALTER TABLE... SET (autovacuum_vacuum_scale_factor =...)` overrides), and ran a one-time manual `VACUUM (VERBOSE, ANALYZE)` to catch up the existing backlog. **Lesson**: "PostgreSQL uses MVCC just like SQL Server's RCSI" is true for concurrency-model *behavior* but conceals a genuinely distinctive PostgreSQL-specific operational responsibility (vacuum tuning) that SQL Server's tempdb-based version store simply doesn't require in the same way — assuming full behavioral equivalence between the two engines' MVCC implementations is a real, demonstrated migration risk.
+**13. Low-Level Design**
 
-### 11. Coding Exercises
-
-#### Easy — Expression index solving a non-sargable predicate
-```sql
--- Query: SELECT * FROM users WHERE LOWER(email) = 'alice@example.com';
-CREATE INDEX idx_users_email_lower ON users (LOWER(email));
--- The predicate now uses the index directly -- no query rewrite needed, unlike the typical
--- SQL Server fix of avoiding the function wrapper entirely.
-```
-
-#### Medium — Partial index for a highly selective, frequently-filtered condition
-```sql
--- Most queries filter WHERE status = 'active', and active rows are a small fraction of the table.
-CREATE INDEX idx_orders_active ON orders (customer_id) WHERE status = 'active';
--- Smaller, faster index than indexing customer_id across ALL rows regardless of status.
-```
-
-#### Hard — Row-Level Security multi-tenant policy (Advanced Q8)
-```sql
-ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY tenant_isolation_select ON invoices FOR SELECT
- USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
-
-CREATE POLICY tenant_isolation_modify ON invoices FOR ALL
- USING (tenant_id = current_setting('app.current_tenant_id')::uuid)
- WITH CHECK (tenant_id = current_setting('app.current_tenant_id')::uuid);
--- WITH CHECK additionally prevents an INSERT/UPDATE from setting a DIFFERENT tenant_id
--- than the current session's -- closing the write-side equivalent of the read-side USING clause.
-```
-
-#### Expert — Autovacuum per-table tuning for a high-churn table (the fix)
-```sql
-ALTER TABLE orders SET (
- autovacuum_vacuum_scale_factor = 0.02, -- trigger vacuum at 2% dead tuples instead of the 20% default
- autovacuum_vacuum_cost_limit = 2000 -- allow more I/O throughput per vacuum cycle for this specific table
-);
-
--- One-time catch-up for existing backlog:
-VACUUM (VERBOSE, ANALYZE) orders;
-```
-**Discussion**: Lowering `autovacuum_vacuum_scale_factor` specifically for this one high-churn table (rather than globally) means autovacuum triggers proportionally more often for it without affecting the vacuum cadence of every other, lower-churn table in the database — a targeted fix matching Advanced Q9's guidance to tune the specific hot table's own settings rather than a blanket, database-wide change.
-
-### 12. System Design
-
-**Scenario:** Design the core PostgreSQL data layer for a multi-tenant payments-authorization platform (think a card-issuing processor's real-time authorization service) migrating off SQL Server, expected to handle 2,000 authorization requests/second sustained, with regulatory requirements for point-in-time auditability and strict per-tenant data isolation.
-
-**Functional requirements:** Authorize/decline a card transaction against a live balance/limit check; record every authorization attempt immutably; support per-tenant (issuing-bank) data isolation; support 30-day point-in-time restorability for audit (Expert Q9).
-
-**Non-functional requirements:** p99 authorization-decision latency under 150ms; zero committed-authorization data loss on primary failure (informs the synchronous-replication trade-off, Module 22 §2.3); horizontal read-scaling for a separate, high-volume reporting workload without impacting authorization-path latency.
-
-**Back-of-the-envelope estimation:** 2,000 TPS sustained authorization writes, each a small row (~200 bytes) plus one `JSONB` audit-detail column (~1KB average) → roughly 2,400 KB/s of new tuple data, before WAL amplification (MVCC writes both the heap tuple and a WAL record for it, roughly doubling the physical write volume for the same logical change, §7). At this churn rate, the authorization table's dead-tuple generation rate is exactly the kind of workload the Production Example's vacuum-tuning incident describes — the numbers tell us this table needs proactive, tuned `autovacuum`, not default settings, from day one, not discovered reactively.
-
-**Architecture:** A single, vertically-scaled primary (write-authoritative, since authorization decisions require a strongly-consistent, immediately-visible balance check — an eventually-consistent read here risks a double-authorization) with synchronous replication to one standby in a separate availability zone (Module 22 §2.3, sized against the zero-committed-loss requirement) plus one or more asynchronous read replicas serving the reporting workload, isolated from authorization-path latency entirely.
-
-**Components:** `authorizations` table (range-partitioned by day, Module 22 §2.1, for efficient archival and per-partition vacuum); Row-Level Security policies scoping every query to the requesting tenant (§8, §10 Advanced Q8); pgbouncer in transaction pooling mode in front of the authorization service's connection-heavy request pattern (§7), with prepared-statement usage audited against pooling mode per Expert Q4; WAL archiving to immutable object storage for PITR (Expert Q9).
-
-**Database selection:** PostgreSQL over SQL Server here specifically for `JSONB`'s native indexable storage of variable-shape authorization-detail payloads (§2.5) and RLS as a database-enforced tenant-isolation layer (§8) — both directly informing this migration's design, not incidental choices.
-
-**Caching:** A short-TTL, per-account balance/limit cache (Redis) in front of the authorization hot path reduces read load on the primary for the common case, with the primary remaining the strongly-consistent source of truth for the actual authorize/decline decision — cache is an optimization for the read, never the decision itself.
-
-**Messaging:** Post-authorization events (approved/declined) published via an outbox table (§10 Advanced Q2's `FOR UPDATE SKIP LOCKED` pattern) to downstream fraud-scoring and notification consumers, avoiding the dual-write problem between the authorization commit and the event publish.
-
-**Scaling:** Read replicas absorb reporting load; range partitioning bounds per-partition vacuum/index-maintenance cost as the table grows; `Citus` sharding (§9) is deliberately deferred unless the single primary's vertical write ceiling becomes a demonstrated constraint, not adopted preemptively.
-
-**Failure handling:** Synchronous-replica unavailability blocks primary commits under strict `synchronous_commit`, a deliberate consistency-over-availability choice for authorization data (mirroring Module 22 Expert Q1's ledger DR posture) — mitigated via quorum-based `ANY 1 (...)` synchronous-standby configuration (Module 22 Advanced Q3) rather than a single named standby.
-
-**Monitoring:** Dead-tuple ratio per table (Production Example), replication lag on both the synchronous standby and async read replicas, pgbouncer pool saturation, and authorization-path p99 latency as the primary business-facing SLO.
-
-**Trade-offs:** Strong consistency (synchronous replication, single-writer authorization) is chosen over multi-region write availability, because a lost or duplicated authorization decision is a worse business outcome than added commit latency — the same reasoning Module 22's ledger DR design applies, now at the schema/system-design level rather than only the replication-configuration level.
-
-### 13. Low-Level Design
-
-**Requirements:** Model an authorization request/decision atomically and idempotently; enforce per-tenant isolation at the data layer; avoid lock-ordering deadlocks (Expert Q8) when a single authorization touches both a balance row and a limit-counter row.
-
-**Class diagram:**
 ```mermaid
 classDiagram
  class AuthorizationRequest {
@@ -350,7 +657,8 @@ classDiagram
  PostgresAuthorizationRepository ..|> IAuthorizationRepository
 ```
 
-**Sequence diagram:**
+**13. Low-Level Design**
+
 ```mermaid
 sequenceDiagram
  participant Client
@@ -371,59 +679,65 @@ sequenceDiagram
  end
 ```
 
-**Design patterns used:** Repository (isolates SQL/RLS-session-variable concerns behind `IAuthorizationRepository`); Idempotent-Receiver (the `ON CONFLICT DO NOTHING` unique-key insert, the database-native realization of the idempotency-key discipline named in Module 22 Expert Q1's ledger framing); Unit of Work (the whole authorization decision commits or rolls back as one transaction).
+### Module 22 — PostgreSQL: Partitioning, Replication & Logical Decoding
+*Source: `02-Partitioning-Replication-Logical-Decoding.md`*
 
-**SOLID mapping:** Single Responsibility (`AuthorizationService` orchestrates; `PostgresAuthorizationRepository` owns SQL/locking specifics); Open/Closed (a new persistence backend implements `IAuthorizationRepository` without changing `AuthorizationService`); Liskov (any `IAuthorizationRepository` implementation must genuinely honor the lock-ordering contract — a naive implementation that locks rows in request-arrival order rather than a canonical order would silently reintroduce Expert Q8's deadlock risk despite satisfying the interface's method signature); Interface Segregation (idempotent-insert, row-locking, and decision-recording are separable methods); Dependency Inversion (`AuthorizationService` depends on the abstraction, never on `Npgsql`/SQL directly).
+**3. Visual Architecture**
 
-**Concurrency/thread safety:** Idempotency is enforced by a unique constraint at the database layer (safe under arbitrary concurrent duplicate requests, not merely application-layer deduplication); lock ordering (always lock the lower `account_id` first, Expert Q8) is enforced inside `LockAccountRowsInOrder`, a single, audited chokepoint every code path touching multiple account rows must go through — not left to each caller to individually get right.
+```mermaid
+graph LR
+ subgraph "Physical Replication"
+ P1[Primary] -->|raw WAL bytes| R1[Physical Replica -- byte-identical, same version]
+ end
+ subgraph "Logical Replication / CDC"
+ P2[Primary] -->|logical decoding of WAL| Slot[Replication Slot]
+ Slot --> Sub[Logical Subscriber -- different version/schema OK]
+ Slot --> CDC[CDC Consumer e.g. Debezium] --> Kafka[Message Queue]
+ end
+```
 
-### 14. Production Debugging
+**13. Low-Level Design**
 
-**Incident:** Three weeks after the authorization platform (§12) went live, p99 authorization latency spiked from 80ms to 1.2 seconds during a daily peak-traffic window, correlating with a spike in `40P01` (deadlock) errors in the application logs — a distinct incident from, but downstream of, the same lock-ordering discipline Expert Q8 establishes.
+```mermaid
+classDiagram
+ class IPartitionMaintainer {
+ <<interface>>
+ +AttachFuturePartition(bounds) void
+ +DetachConcurrently(partitionName) void
+ }
+ class PostgresPartitionMaintainer {
+ +AttachFuturePartition(bounds) void
+ +DetachConcurrently(partitionName) void
+ }
+ class IReplicationSlotRegistry {
+ <<interface>>
+ +RegisterConsumer(slotName, consumerId) void
+ +DeregisterConsumer(slotName) void
+ +AuditOrphans() List~string~
+ }
+ class ReadRouter {
+ -maxAcceptableLagMs int
+ +RouteRead(query, staleness) Target
+ }
+ IPartitionMaintainer <|.. PostgresPartitionMaintainer
+ ReadRouter --> IReplicationSlotRegistry
+```
 
-**Root cause:** A new "linked-account limit pooling" feature had been added, where a single authorization could touch a *variable-length list* of linked account rows (a family/corporate card pooling arrangement), and the feature's implementation locked accounts in the order they appeared in the linked-account list returned by an upstream service — an order that was **not** canonically sorted, and in fact varied per request depending on that upstream service's own non-deterministic result ordering. Two concurrent authorizations against overlapping linked-account sets, each locking in a different order, produced exactly the circular-wait deadlock pattern Expert Q8 describes structurally — except this time the discipline (canonical lock ordering) had been correctly applied to the *original* single-pair transfer code path and never re-applied when the linked-account feature introduced a new, variable-cardinality locking pattern.
+**13. Low-Level Design**
 
-**Investigation:** `pg_stat_activity` joined against `pg_locks` during the incident window showed multiple backends blocked waiting on `RowExclusiveLock` for overlapping sets of account rows; PostgreSQL's server log (deadlock detail logged automatically, §10 Expert Q8) confirmed the specific query pattern — the linked-account authorization path — as the consistent source of every deadlock in the window, not the original single-account authorization path.
+```mermaid
+sequenceDiagram
+ participant Ops as Ops/Scheduler
+ participant PM as PartitionMaintainer
+ participant DB as PostgreSQL Primary
 
-**Tools:** `pg_locks`/`pg_stat_activity` join query for real-time lock-wait visibility; server log deadlock detail for retrospective analysis; `pg_stat_statements` to confirm the linked-account query's `40P01` error count specifically, isolating it from background noise.
-
-**Fix:** The linked-account authorization path was changed to sort the account-ID list canonically (`ORDER BY account_id`) immediately before the locking step, regardless of the order the upstream linked-account-resolution service returned — restoring the same "always lock in canonical order" invariant the original single-pair code path already honored. A code-review checklist item was added: any new code path acquiring locks on more than one row from the same table within a transaction must explicitly document and justify its lock-acquisition order.
-
-**Prevention:** The checklist item generalizes Expert Q8's fix beyond the specific code path it was originally applied to — the recurring lesson (echoing the CRDT-composition and cross-field-invariant pattern this course documents elsewhere) is that a correctly-applied discipline on one code path provides no guarantee a *new* code path touching the same shared resource will inherit it; the discipline must be re-verified explicitly at every new multi-row-locking code path, not assumed to propagate automatically from the original fix.
-
-### 15. Architecture Decision
-
-**Context:** Choosing a connection-management strategy for the authorization platform's PostgreSQL primary under 2,000 TPS sustained load.
-
-**Option A — Direct application-to-database connections (no pooler):** *Advantages:* No additional infrastructure component; full session-state fidelity (prepared statements, advisory locks behave exactly as documented, no Expert Q4/Q5-style surprises). *Disadvantages:* PostgreSQL's per-connection memory overhead and connection-establishment cost make thousands of concurrent application-instance connections directly against the primary both expensive and a real risk of exhausting `max_connections` under a traffic spike or a connection-leak bug. *Cost:* Low infrastructure cost, high risk cost. *Risk:* High — a connection-storm (e.g., a redeploy causing every application instance to reconnect simultaneously) can itself take the primary down.
-
-**Option B — pgbouncer, session pooling mode:** *Advantages:* Full session-state fidelity preserved (no Expert Q4-style prepared-statement breakage); still reduces raw TCP/auth overhead versus direct connections. *Disadvantages:* Each logical client still holds a physical backend for its entire session's duration, so the connection-scaling benefit relative to Option A is modest — doesn't meaningfully reduce backend count under genuinely high concurrent-session volume. *Cost:* Low-moderate (one additional lightweight component). *Risk:* Low, but doesn't solve the actual scaling problem at 2,000 TPS.
-
-**Option C — pgbouncer, transaction pooling mode, with session-scoped features explicitly audited:** *Advantages:* Genuine connection-scaling benefit — many logical sessions multiplexed onto a small, bounded pool of physical backends, directly addressing Option A's connection-storm risk. *Disadvantages:* Requires explicit auditing and adaptation of every session-scoped feature (prepared statements, advisory locks, `SET`-level GUCs) per Expert Q4/Q5 — a real, non-zero engineering cost, and a source of production incidents (Expert Q4) if skipped. *Cost:* Moderate (audit effort upfront) but low ongoing. *Risk:* Low, contingent on the audit being genuinely thorough and re-run whenever a new session-scoped feature is introduced.
-
-**Recommendation: Option C**, specifically because the authorization platform's 2,000 TPS scale makes Option A's connection-storm risk unacceptable and Option B's marginal scaling benefit insufficient — but only paired with an explicit, standing audit (mirroring §14's checklist-generalization lesson) of every session-scoped feature against transaction-pooling semantics, re-run on every new feature addition, not performed once at initial pgbouncer adoption and assumed to remain valid.
-
-### 17. Principal Engineer Perspective
-
-**Business impact:** An authorization-path outage or elevated-latency incident directly blocks revenue-generating transactions in real time — unlike a reporting-pipeline delay, which degrades a downstream, non-blocking capability, the authorization path's failure modes (§14's deadlock incident, the original vacuum-bloat incident) have immediate, visible business cost, which is why this module's monitoring recommendations (§7, §12) treat dead-tuple ratio and lock-wait visibility as first-class, not secondary, operational signals.
-
-**Engineering trade-offs:** The consistent thread across this module — MVCC's always-on tuple-versioning, RLS's engine-enforced isolation, synchronous replication's consistency-over-availability choice — is that PostgreSQL's defaults trade some operational complexity (vacuum tuning, replication-slot/lock-order discipline) for stronger baseline correctness guarantees than an engineer coming from SQL Server's more locking/tempdb-centric model might expect; a Principal Engineer's job in a migration is making these trades *explicit* in the design review, not letting them surface first as production incidents.
-
-**Technical leadership:** §14's deadlock incident illustrates a durable leadership lesson: a correctly-applied discipline (canonical lock ordering) on one code path does not automatically propagate to a structurally similar but distinct new code path — technical leadership here means encoding the discipline as a reviewable, checkable rule (the checklist item) rather than trusting it to be independently rediscovered by whoever writes the next multi-row-locking feature.
-
-**Cross-team communication:** The linked-account feature team (§14) built a structurally correct feature in isolation but didn't know to ask whether their new locking pattern needed the same discipline the original authorization-transfer code already had — surfacing exactly the kind of cross-team knowledge-transfer gap a Principal Engineer's design-review process exists to close, by making implicit invariants (canonical lock ordering) explicit, documented, and part of any new code's review checklist rather than tribal knowledge held only by the original implementers.
-
-**Architecture governance:** Every table with meaningfully high write churn should have its `autovacuum` tuning, dead-tuple monitoring, and (where multi-row transactions touch it) documented lock-ordering convention recorded as part of its schema's own governance documentation — not left to be independently rediscovered per incident, mirroring this course's recurring "convert hard-won incident lessons into fleet-wide structural safeguards" pattern (Module 22 §17).
-
-**Cost optimization:** pgbouncer's transaction-pooling mode (§15 Option C) is chosen specifically because it avoids the higher infrastructure cost of scaling `max_connections`/primary memory to accommodate direct high-concurrency connections (Option A) — a deliberate cost-vs-audit-effort trade, not a default reached for without comparing the alternatives.
-
-**Risk analysis:** The recurring risk pattern across this module is the same shape repeatedly: a mechanism that is individually, provably correct (MVCC, RLS, a lock-ordering discipline, an advisory lock) fails specifically at a boundary — a migration assumption, a new code path, a connection-pooling mode's session-state contract — rather than at its own core correctness. Risk registers for a PostgreSQL-backed platform should explicitly track these boundary conditions (pooling-mode/session-state audits, lock-ordering coverage across all multi-row-locking code paths, PITR restore-drill currency) as standing, periodically-re-verified items, not one-time checks.
-
-**Long-term maintainability:** What decays over time, across this module's incidents and the Production Example, is the correspondence between an original design assumption (a table's expected churn rate, a code path's lock order, a session's connection-pooling compatibility) and the system's current, evolved reality as new features and traffic patterns are added — the practice that keeps this from compounding indefinitely is the same one this course applies elsewhere: periodic, structural re-audit of these assumptions against actual current behavior, not a one-time validation at initial design time.
-
-### 18. Revision
-**Key takeaways**: PostgreSQL's MVCC is always-on (not an opt-in setting like SQL Server's RCSI) — every UPDATE creates a new tuple, requiring `VACUUM` to reclaim old ones. Unvacuumed bloat degrades performance and, in the extreme, risks transaction ID wraparound (a severe, PostgreSQL-specific failure mode). Partial and expression indexes solve problems (non-sargable predicates, small selective subsets) differently than typical SQL Server approaches. `JSONB` (not `JSON`) is the right choice for queryable/indexable semi-structured data. Row-Level Security provides database-enforced, code-path-independent access control as a genuine defense-in-depth layer.
-
----
-
-**Next**: Continuing autonomously to Module 22 — PostgreSQL Advanced Features (partitioning, replication, logical decoding) to complete the `05-PostgreSQL` domain before advancing to `06-MongoDB`.
+ Ops->>PM: AttachFuturePartition(next_month_bounds)
+ PM->>DB: CREATE TABLE trades_2026_10 (CHECK constraint pre-set)
+ PM->>DB: ALTER TABLE trades ATTACH PARTITION trades_2026_10 ...
+ Note over DB: CHECK constraint lets planner skip full validation scan — minimal lock duration
+ DB-->>PM: attached
+ Ops->>PM: DetachConcurrently(trades_2024_01)
+ PM->>DB: ALTER TABLE trades DETACH PARTITION trades_2024_01 CONCURRENTLY
+ Note over DB: SHARE UPDATE EXCLUSIVE only — live reads/writes continue against rest of table
+ DB-->>PM: detach in progress (async)
+```

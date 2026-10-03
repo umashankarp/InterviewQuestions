@@ -1,6 +1,6 @@
 # Module 94 — Observability: SLOs, SLIs, Error Budgets & Alerting Design
 
-> Domain: Observability | Level: Beginner → Expert | Prerequisite: [[01-ObservabilityFundamentals-MetricsLogsTraces-OpenTelemetry]] (SLIs are computed directly from the metrics/traces; this module formalizes the alert-liveness-canary need §Advanced Q7 explicitly foreshadowed), [[../17-Microservices/02-Resilience-Observability-Sidecar-Patterns]] (the resilience patterns error budgets govern release velocity against)
+> Domain: Observability | Level: Beginner → Expert | Prerequisite: [[01-ObservabilityFundamentals-MetricsLogsTraces-OpenTelemetry]] (SLIs are computed directly from the metrics/traces; this module formalizes the alert-liveness-canary need §Advanced Q7 explicitly foreshadowed), [[../17-Microservices/00-Microservices-Interview-Master-Guide-DotNet-TechLead-Architect]] (the resilience patterns error budgets govern release velocity against)
 
 ---
 

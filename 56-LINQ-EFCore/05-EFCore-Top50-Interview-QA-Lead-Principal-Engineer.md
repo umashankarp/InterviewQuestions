@@ -769,4 +769,4 @@ Lead and Principal answers are graded on **judgement under trade-offs**, not rec
 | Production | Reads generated SQL and migrations | Owns the pipeline, evidence, identities, upgrade runbook |
 | Leverage | — | Converts each lesson into a **test, analyzer, or gate** and rolls it out across teams |
 
-**Next:** none — this closes the `56-LINQ-EFCore` domain (Modules 194–198). For LINQ language internals see `01-CSharp/01-CSharp-Interview-Prep`; for the distributed-systems half of Q9/Q37/Q42 see `16-Distributed-Systems/02-Failure-Detection-Idempotency-Outbox` and `37-Outbox/01`.
+**Next:** none — this closes the `56-LINQ-EFCore` domain (Modules 194–198). For LINQ language internals see `01-CSharp/01-CSharp-Interview-Prep`; for the distributed-systems half of Q9/Q37/Q42 see `16-Distributed-Systems/01-Distributed-Systems-Interview-Prep` and `37-Outbox/01`.

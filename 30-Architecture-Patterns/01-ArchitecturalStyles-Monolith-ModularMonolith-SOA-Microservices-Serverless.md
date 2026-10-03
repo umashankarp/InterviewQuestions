@@ -1,6 +1,6 @@
 # Module 105 — Architecture Patterns: Architectural Styles — Monolith, Modular Monolith, SOA, Microservices & Serverless — Trade-off Synthesis
 
-> Domain: Architecture Patterns | Level: Beginner → Expert | Prerequisite: [[../17-Microservices/01-Decomposition-Communication-Strangler-Fig]] (decomposition/communication mechanics this module compares at the style-selection level), [[../17-Microservices/02-Resilience-Observability-Sidecar-Patterns]] (this module doesn't re-derive resilience mechanics, only when they become necessary); connects forward to the dedicated [[../31-Domain-Driven-Design]], [[../32-Clean-Architecture]], [[../33-Hexagonal-Architecture]] domains for internal-structure patterns this module deliberately doesn't duplicate
+> Domain: Architecture Patterns | Level: Beginner → Expert | Prerequisite: [[../17-Microservices/00-Microservices-Interview-Master-Guide-DotNet-TechLead-Architect]] (decomposition/communication mechanics this module compares at the style-selection level), [[../17-Microservices/00-Microservices-Interview-Master-Guide-DotNet-TechLead-Architect]] (this module doesn't re-derive resilience mechanics, only when they become necessary); connects forward to the dedicated [[../31-Domain-Driven-Design]], [[../32-Clean-Architecture]], [[../33-Hexagonal-Architecture]] domains for internal-structure patterns this module deliberately doesn't duplicate
 
 ---
 

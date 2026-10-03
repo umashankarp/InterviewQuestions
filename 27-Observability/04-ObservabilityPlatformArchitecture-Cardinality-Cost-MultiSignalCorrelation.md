@@ -1,6 +1,6 @@
 # Module 96 — Observability: Platform Architecture — Cardinality, Cost & Multi-Signal Correlation at Scale (Capstone)
 
-> Domain: Observability | Level: Beginner → Expert | Prerequisite: All prior Observability modules (93–95) — this is the synthesizing capstone closing the `27-Observability` domain, Modules 93–96; [[../25-DevOps/04-DevSecOps-PolicyAsCode-PlatformEngineering]] (the golden-path-template-drift finding this capstone's central incident directly recurs); [[../21-AWS/08-Observability-Cost-WellArchitectedFramework]], [[../22-Azure/08-Observability-Cost-WellArchitectedFramework]], [[../23-Kubernetes/08-Observability-Multicluster-GitOps]] (this entire domain has gone underneath these three vendor-specific capstones with vendor-neutral instrumentation; this module is the domain-level capstone counterpart to all three)
+> Domain: Observability | Level: Beginner → Expert | Prerequisite: All prior Observability modules (93–95) — this is the synthesizing capstone closing the `27-Observability` domain, Modules 93–96; [[../25-DevOps/04-DevSecOps-PolicyAsCode-PlatformEngineering]] (the golden-path-template-drift finding this capstone's central incident directly recurs); [[../21-AWS/01-AWS-Interview-Prep]], [[../22-Azure/01-Azure-Interview-Prep]], [[../23-Kubernetes/01-Kubernetes-Interview-Prep]] (this entire domain has gone underneath these three vendor-specific capstones with vendor-neutral instrumentation; this module is the domain-level capstone counterpart to all three)
 
 ---
 

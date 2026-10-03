@@ -1,125 +1,492 @@
-# Module 52 — Event-Driven Architecture: Event Notification vs Event-Carried State Transfer, Choreography vs Orchestration & Pub/Sub Foundations
+# Event-Driven Architecture — Complete Interview Prep (All Topics, One File)
 
-> Domain: Event-Driven Architecture | Level: Beginner → Expert | Prerequisite: [[../17-Microservices/01-Decomposition-Communication-Strangler-Fig]] (asynchronous communication), [[../16-Distributed-Systems/02-Failure-Detection-Idempotency-Outbox]] (Outbox pattern, the reliable-publishing mechanism this entire domain depends on)
-> Forward references: dedicated later modules cover Kafka (`19-Kafka`) and RabbitMQ (`20-RabbitMQ`) broker internals, CQRS (`34-CQRS`), Event Sourcing (`35-Event-Sourcing`), Saga (`36-Saga`), and Outbox (`37-Outbox`, expanding on the introduction) in full depth — this module establishes the architectural vocabulary and decision framework those later modules build on.
+> Domain: Event-Driven Architecture | Level: Beginner → Expert | Prerequisite: [[../17-Microservices/00-Microservices-Interview-Master-Guide-DotNet-TechLead-Architect]] (async communication), [[../16-Distributed-Systems/01-Distributed-Systems-Interview-Prep]] (outbox, idempotency, consistency)
+> **Quick-prep edition** (consolidated 2026-10-03). This one file replaces Modules 52, 53, 140–145. Originals: `git show ebb2d5c:18-Event-Driven-Architecture/<file>.md`. Brokers: [[../19-Kafka/01-Kafka-Interview-Prep]] · [[../20-RabbitMQ/01-RabbitMQ-Interview-Prep]]
+> Each topic has: **Key concepts → code/diagram → Most common interview questions with answers.**
 
----
-
-## 1. Fundamentals
-
-### What is Event-Driven Architecture, and why is it a distinct architectural discipline from simply "using a message queue"?
-Event-Driven Architecture (EDA) is an architectural style where services communicate primarily by producing and reacting to **events** — immutable facts about something that has already happened (`OrderPlaced`, `PaymentProcessed`, `InventoryReserved`) — rather than by direct request/response calls. It is a distinct discipline from merely adopting a message queue as a transport detail because EDA requires deliberate decisions about **event semantics** (what does an event actually represent — a notification, or the full state?), **workflow coordination** (who decides what happens next — a central coordinator, or the services themselves reacting independently?), and **delivery guarantees** (can an event be processed twice? does order matter?) — get these decisions wrong, and a message-queue-based system inherits distributed-systems complexity (48) without gaining EDA's actual benefits (loose coupling, independent scalability, natural audit trail).
-
-### Why does this matter?
-Because already established that asynchronous, event-based communication decouples publisher and subscriber availability — this module goes one level deeper: **not all events are the same kind of event**, and conflating them (using a lightweight notification where full state transfer was needed, or vice versa) is a common, costly architectural mistake; similarly, **not all multi-step workflows should be coordinated the same way** (choreography vs. orchestration), and choosing incorrectly produces either an untraceable, tangled web of implicit dependencies or an unnecessarily centralized bottleneck.
-
-### When does this matter?
-Any system where a single business action triggers multiple downstream effects across services (an order placement triggering inventory reservation, payment processing, shipping notification, and analytics) — precisely the multi-service coordination problem the Amazon case study and the Outbox pattern already introduced in outline; this module provides the deeper conceptual toolkit for those scenarios.
-
-### How does it work (30,000-ft view)?
-```
-Event types: Event Notification (thin: "something happened, go fetch details if you need them")
- vs Event-Carried State Transfer (fat: "something happened, here's ALL the data you need")
- vs Event Sourcing (events ARE the source of truth, not just a notification of a state change --
- full depth in the dedicated)
-Coordination: Choreography (each service reacts to events independently, no central coordinator)
- vs Orchestration (a central coordinator explicitly directs each step of a workflow)
-Pub/Sub: Topics/Exchanges (many subscribers can independently receive the same event) vs
- Queues (competing consumers, each message processed by exactly one consumer)
-```
+| # | Topic | # | Topic |
+|---|---|---|---|
+| 1 | EDA fundamentals: events, commands, messages | 9 | Stream processing: event time, windows, watermarks, state |
+| 2 | Event styles: notification vs state transfer vs sourcing | 10 | Backpressure, flow control & consumer lag |
+| 3 | Choreography vs orchestration | 11 | Cross-region & multi-cluster distribution |
+| 4 | Topics vs queues (pub/sub vs competing consumers) | 12 | Testing, contract testing & chaos for event pipelines |
+| 5 | Reliable publishing: outbox, CDC | 13 | Observability & tracing through async flows |
+| 6 | Schema design, registry & evolution | 14 | Capstone: firm-wide event backbone (fintech) |
+| 7 | Ordering, partitioning & delivery semantics | 15 | Top 30 rapid-fire + Principal questions |
+| 8 | Idempotency, deduplication, DLQs & replay | 16 | Mistakes checklist |
 
 ---
 
-## 2. Deep Dive
+## 1. EDA Fundamentals: Events, Commands, Messages
 
-### 2.1 Event Notification — Thin Events, Fetch-on-Demand
-An Event Notification carries the **minimum information necessary** to identify what happened (`{ "eventType": "OrderPlaced", "orderId": "12345" }`) — subscribers interested in more detail must make a **separate, synchronous call back** to the publishing service's API to fetch the full data they need. This keeps events small and keeps the publishing service as the single, authoritative source of current data (no staleness risk — a subscriber always fetches the current state at the moment it needs it) — but reintroduces a synchronous dependency on the publisher's availability at the exact moment a subscriber processes the event, partially undermining the availability-decoupling benefit attributed to asynchronous communication in the first place.
+**Key concepts**
+- **Event:** a fact that **happened** (past tense, immutable): `OrderPlaced`, `PaymentCaptured`. The producer doesn't know or care who consumes it.
+- **Command:** a request to **do** something (imperative): `CapturePayment` — directed at one handler, which may refuse.
+- **Query:** a request for data (usually synchronous).
+- **Benefits:** loose coupling (temporal and spatial), independent scaling, extensibility (new consumers without changing the producer — OCP at architecture level), audit trail, resilience (consumers can be down and catch up).
+- **Costs:** eventual consistency, harder debugging and tracing, duplicate and out-of-order messages, schema governance, "where is the business process?" visibility, operational overhead of brokers.
+- **When not to use it:** a user needs an immediate answer (validation, read-your-writes), simple CRUD, or strong consistency across steps without compensation.
 
-### 2.2 Event-Carried State Transfer — Fat Events, Full Self-Sufficiency
-An Event-Carried State Transfer event carries **all the data a subscriber is likely to need** embedded directly in the event payload (`{ "eventType": "OrderPlaced", "orderId": "12345", "customerId": "...", "items": [...], "totalAmount":... }`) — subscribers can process the event entirely from its payload, with **no follow-up call back to the publisher required**, fully preserving the availability decoupling asynchronous communication is meant to provide (directly addressing the reintroduced synchronous-dependency weakness). The cost: subscribers now hold a **copy** of data that can become stale if the source changes after the event was published (an eventual-consistency risk requiring the same explicit business-stakeholder communication discipline §Advanced Q6 established), and event payloads grow larger, with schema-evolution discipline (applied to event schemas specifically) becoming more consequential as more subscribers depend on more embedded fields.
+```csharp
+// Event: past tense, immutable, carries an ID, a version and a timestamp
+public sealed record OrderPlaced(Guid EventId, Guid OrderId, string CustomerId, decimal Total, string Currency,
+                                 DateTimeOffset OccurredAt, int SchemaVersion = 1);
 
-### 2.3 Choosing Between Notification and State Transfer
-The deciding question: **does the subscriber need the data to be perfectly current at the moment of processing, or is "current as of when the event was published" acceptable?** A Shipping service reacting to `OrderPlaced` to begin fulfillment planning generally only needs the order's contents as they existed at placement time (state transfer is appropriate — the order won't retroactively change once placed) — but a Fraud-Detection service that needs the customer's *current* account-standing/risk-score (which may have changed independently since the order was placed) may need to fetch that specific piece of current data itself rather than trusting a potentially-stale embedded value (notification, or a hybrid: state transfer for immutable facts about the event itself, notification/fetch for genuinely mutable, time-sensitive context).
+// Command: imperative, one handler
+public sealed record CapturePayment(Guid CommandId, Guid PaymentId, decimal Amount);
+```
 
-### 2.4 Choreography — Decentralized, Independent Reaction
-In a choreographed workflow, each service independently subscribes to the events it cares about and reacts autonomously, with **no central coordinator** dictating the overall sequence — Order Service publishes `OrderPlaced`; Inventory Service, subscribed independently, reacts by reserving stock and publishing `InventoryReserved`; Payment Service, subscribed to `InventoryReserved`, reacts by charging the customer and publishing `PaymentProcessed`; and so on, each service knowing only about the events immediately relevant to itself, with the overall workflow's shape emerging implicitly from the sum of these independent, local reactions rather than being explicitly written down anywhere as a single artifact.
+**Common interview questions**
 
-### 2.5 Orchestration — Centralized, Explicit Workflow Control
-In an orchestrated workflow, a **single, explicit coordinator** (an orchestrator, directly related to the Saga-orchestrator pattern) directs each step: it calls Inventory Service to reserve stock, then calls Payment Service to charge the customer, then calls Shipping Service to schedule fulfillment, explicitly sequencing every step and explicitly handling failure/compensation logic (the Saga compensating-transaction pattern) at each stage — the entire workflow's logic is visible in one place (the orchestrator's own code/state machine), rather than implicitly distributed across many independently-reacting services' subscription logic.
+**Q1. Event vs command?**
+An event states a fact that has already happened and is broadcast to any interested consumers; the producer doesn't expect a response. A command asks a specific component to do something and can be rejected. Naming reflects this: `OrderPlaced` vs `PlaceOrder`.
 
-### 2.6 Choreography vs Orchestration — the Trade-off
-Choreography's strength is loose coupling (no service needs to know about the overall workflow, only its own immediate reaction) and natural extensibility (adding a new reacting service requires no change to any existing service — it simply subscribes to the relevant existing event) — but its weakness, at scale, is **workflow invisibility**: as the number of participating services and events grows, understanding "what is the actual, current end-to-end order-fulfillment workflow?" requires mentally reconstructing it from many independently-deployed services' subscription logic, with no single artifact describing the whole picture, making debugging a stuck/failed workflow (the partial-failure ambiguity, now at the workflow level) genuinely difficult. Orchestration's strength is exactly this visibility (the whole workflow is one artifact, directly readable, directly debuggable, with explicit failure/compensation handling defined centrally) — but its weakness is the orchestrator becoming a **central point of coupling** (every participating service's interface is now known to, and depended upon by, the orchestrator) and a potential bottleneck/single point of failure if not itself built resiliently (the resilience patterns apply directly to the orchestrator's own calls to each participating service).
+**Q2. When is EDA the wrong choice?**
+When the caller needs the result synchronously, when the flow is simple CRUD, when strong cross-service consistency is required and compensation isn't acceptable, or when the team lacks the tooling and operational maturity for brokers, schema governance and async debugging.
 
-### 2.7 Topics vs Queues — Fan-out vs Competing Consumers
-A **topic** (or exchange, in AMQP terminology) delivers a copy of each published event to **every** independent subscriber — appropriate for choreography, where multiple, independent services each need to react to the same event in their own way (Inventory, Analytics, and Notifications all independently subscribing to `OrderPlaced`). A **queue** delivers each individual message to **exactly one** consumer among a pool of competing consumers (multiple instances of the same service, load-balancing the processing of a single logical stream of work) — appropriate when a single logical unit of work should be processed exactly once by any one available worker, not once per subscriber type (a pool of `OrderProcessor` worker instances competing to pull from a single order-processing queue, where the goal is distributing load across workers, not fanning the same event out to multiple different subscriber types).
+---
 
-## 3. Visual Architecture
+## 2. Event Styles: Notification vs State Transfer vs Sourcing
 
-### Event-Driven Architecture — the Core Shape
+| Style | Payload | Pros | Cons |
+|---|---|---|---|
+| **Event notification** (thin) | IDs + type ("Order 42 changed") | small, no data duplication, always-fresh fetch | consumers call back the producer (coupling, load, availability dependency) |
+| **Event-carried state transfer** (fat) | the full relevant state | consumers are self-sufficient (local copies), no callbacks | bigger messages, duplicated data, schema coupling, PII spread |
+| **Event sourcing** | the event stream *is* the system of record | full history, replay, audit | complexity (see [[../35-Event-Sourcing]]) |
+| **Domain vs integration events** | internal model events vs public, stable contract events | — | don't publish internal domain events as external contracts |
 
-Instead of calling services directly, the **Order Service** publishes an event to an event bus. Any interested services subscribe to that event and react independently.
+**Common interview questions**
+
+**Q1. Thin or fat events?**
+Thin when consumers need fresh data or rarely need it, payloads are sensitive, or the producer can handle callbacks. Fat when consumers must work independently of the producer's availability (e.g., read models, other regions), and you can govern the schema. A hybrid is common: the key fields consumers usually need + a link for details.
+
+**Q2. Domain events vs integration events?**
+Domain events are internal to a bounded context and may change with the model. Integration events are a published, versioned contract for other contexts. Translate domain events into integration events at the boundary (often via the outbox) so internal refactoring doesn't break consumers.
+
+---
+
+## 3. Choreography vs Orchestration
+
+**Key concepts**
+- **Choreography:** each service reacts to events and emits new ones; there's no central coordinator. Loose coupling and easy to add consumers — but the business flow is implicit and spread across services (hard to see, debug and change), with risk of cyclic dependencies.
+- **Orchestration:** a central orchestrator (saga/workflow engine) sends commands and tracks state. The flow is explicit, timeouts and compensations are easy to manage — but the orchestrator is a dependency and can become a "god service".
+- **Rule of thumb:** choreography for simple, few-step, loosely related reactions (notifications, analytics, cache updates); orchestration for business-critical, multi-step flows with compensation and SLAs (payments, order fulfilment, onboarding/KYC).
+- Tools: MassTransit/NServiceBus sagas, Temporal, Azure Durable Functions, AWS Step Functions, Camunda.
 
 ```text
-                            Order Service
-                                  |
-                       publishes OrderCreated
-                                  |
-                                  v
-                       +---------------------+
-                       | Amazon EventBridge  |
-                       +---------------------+
-                                  |
-        +-----------------+-------+--------+----------------+
-        |                 |                |                |
-        v                 v                v                v
- Payment Service  Inventory Service  Email Service  Analytics Service
+Choreography:
+ Order ──OrderPlaced──► Inventory ──StockReserved──► Payment ──PaymentCaptured──► Shipping
+                         (on failure: StockReservationFailed → Order cancels)
+
+Orchestration:
+ OrderSaga ──ReserveStock──► Inventory ──StockReserved──► OrderSaga
+           ──CapturePayment──► Payment ──PaymentFailed──► OrderSaga ──ReleaseStock──► Inventory (compensate)
 ```
 
-### Event-Driven Architecture Using AWS
+```csharp
+// MassTransit state machine (orchestration) — abbreviated
+public sealed class OrderStateMachine : MassTransitStateMachine<OrderState>
+{
+    public State AwaitingStock { get; private set; } = null!;
+    public State AwaitingPayment { get; private set; } = null!;
+    public Event<OrderPlaced> Placed { get; private set; } = null!;
+    public Event<StockReserved> Reserved { get; private set; } = null!;
+    public Event<PaymentFailed> PaymentFailed { get; private set; } = null!;
 
-In an **AWS Event-Driven Architecture (EDA)**, microservices do **not** communicate by calling each other directly. Instead, they communicate through **events** using services such as **Amazon EventBridge**, **Amazon SNS**, and **Amazon SQS**.
+    public OrderStateMachine()
+    {
+        InstanceState(x => x.CurrentState);
+        Event(() => Placed, x => x.CorrelateById(m => m.Message.OrderId));
+        Initially(When(Placed).Send(ctx => new ReserveStock(ctx.Message.OrderId)).TransitionTo(AwaitingStock));
+        During(AwaitingStock, When(Reserved).Send(ctx => new CapturePayment(ctx.Message.OrderId)).TransitionTo(AwaitingPayment));
+        During(AwaitingPayment, When(PaymentFailed).Send(ctx => new ReleaseStock(ctx.Message.OrderId)).Finalize());
+    }
+}
+```
 
-The service that produces the event is called the **Producer**, and the services that react to the event are called **Consumers**.
+**Common interview questions**
+
+**Q1. Choreography or orchestration for a payment flow?**
+Orchestration: payments need an explicit, auditable state machine, timeouts, compensations (void authorization, refund) and clear ownership of the outcome. Side effects like notifications, analytics and loyalty points can still be choreographed off the final events.
+
+**Q2. What goes wrong with choreography at scale?**
+Nobody can see the end-to-end flow; changes require coordinating many teams; event chains create hidden coupling and loops; failures stall silently. Mitigate with distributed tracing, process monitoring (a "process view" built from events) and promoting complex flows to an orchestrator.
 
 ---
 
-### AWS Architecture — Producer, Bus, Consumers, and Each Consumer's Own Store
+## 4. Topics vs Queues (Pub/Sub vs Competing Consumers)
+
+**Key concepts**
+- **Queue (point-to-point):** each message is processed by **one** consumer instance; consumers compete → work distribution (commands, jobs). Examples: SQS, RabbitMQ queue, Azure Service Bus queue.
+- **Topic (pub/sub):** each **subscription/consumer group** gets every message; within a group, instances share the work. Examples: Kafka topic + consumer groups, SNS → SQS fan-out, Service Bus topics, RabbitMQ fanout/topic exchanges.
+- **Log-based (Kafka, Kinesis, Event Hubs):** retained, replayable, ordered per partition; consumers track offsets.
+- **Broker-based (RabbitMQ, SQS, Service Bus):** messages are deleted after acknowledgement; rich routing, per-message TTL and priorities.
+
+| Need | Choose |
+|---|---|
+| work queue / commands / per-message retries | queue (RabbitMQ, SQS, Service Bus) |
+| many independent consumers of the same events, replay | log (Kafka, Event Hubs, Kinesis) |
+| fan-out to a few subscribers, managed and simple | SNS → SQS / Service Bus topics / EventBridge |
+| complex routing rules | RabbitMQ exchanges, EventBridge rules |
+
+**Common interview question**
+
+**Q. Kafka or a queue like RabbitMQ/SQS?**
+Kafka for high-throughput event streams with many consumers, replay and long retention, and per-key ordering (events as a log). RabbitMQ/SQS for task queues with per-message acknowledgement, routing, delays and priorities, where messages are consumed once and deleted. Many systems use both.
+
+---
+
+## 5. Reliable Publishing: Outbox & CDC
+
+**Key concepts**
+- **Dual-write problem:** saving to the DB and publishing to the broker aren't atomic.
+- **Transactional outbox:** write the event to an outbox table in the same DB transaction; a relay publishes it (at-least-once).
+- **CDC** (Debezium) can publish outbox rows or table changes from the transaction log.
+- **Publish ordering** per aggregate: partition by aggregate ID; publish outbox rows in order.
+- Details and SQL: [[../37-Outbox]] and [[../16-Distributed-Systems/01-Distributed-Systems-Interview-Prep]] §11.
+
+```csharp
+// EF Core: business change + outbox row in ONE SaveChanges (one transaction)
+order.Place();
+db.Outbox.Add(new OutboxMessage
+{
+    Id = Guid.NewGuid(), AggregateId = order.Id.ToString(), Type = nameof(OrderPlaced),
+    Payload = JsonSerializer.Serialize(new OrderPlaced(Guid.NewGuid(), order.Id, order.CustomerId, order.Total, "EUR", DateTimeOffset.UtcNow)),
+    CreatedAt = DateTimeOffset.UtcNow
+});
+await db.SaveChangesAsync(ct);
+// MassTransit / NServiceBus / Wolverine provide built-in EF Core outboxes.
+```
+
+**Common interview question**
+
+**Q. Why not publish to Kafka inside the same `try` block as `SaveChanges`?**
+If the process crashes between the two, or the DB commit fails after publishing, the systems diverge — lost events or phantom events. The outbox makes the event part of the same commit; publishing becomes a retryable background step.
+
+---
+
+## 6. Schema Design, Registry & Evolution
+
+**Key concepts**
+- Events are **contracts**; consumers you don't know about depend on them.
+- **Formats:** JSON (readable, no schema enforcement by default), **Avro** (compact, schema registry, strong evolution rules), **Protobuf** (field numbers, compact), JSON Schema.
+- **Schema registry** (Confluent, Apicurio, AWS Glue, Azure Schema Registry) validates compatibility **at publish time**.
+- **Compatibility modes:**
+  - **Backward:** new consumers can read old events (you can add optional fields, remove fields) → upgrade consumers first.
+  - **Forward:** old consumers can read new events (add fields that old consumers ignore) → upgrade producers first.
+  - **Full:** both.
+  - Event streams that are replayed or consumed by many teams usually need **full (transitive)** compatibility.
+- **Rules:** add optional fields with defaults; never change types or meanings; never reuse names or field numbers; for breaking changes publish a **new event type/version** (`OrderPlaced.v2`) and run both in parallel.
+- **Envelope metadata:** `eventId`, `type`, `version`, `occurredAt`, `source`, `correlationId`/`traceparent`, `causationId`. **CloudEvents** is a standard envelope.
+
+```json
+{
+  "specversion": "1.0",
+  "id": "6f1c2a3e-...",
+  "type": "com.acme.payments.PaymentCaptured.v1",
+  "source": "/payments-service",
+  "time": "2026-10-03T10:15:00Z",
+  "subject": "payment/pay_7a2b",
+  "traceparent": "00-4bf92f35...-00f067aa0ba902b7-01",
+  "datacontenttype": "application/json",
+  "data": { "paymentId": "pay_7a2b", "amount": "125.50", "currency": "EUR" }
+}
+```
+
+**Common interview questions**
+
+**Q1. Backward vs forward compatibility?**
+Backward: the new schema can read data written with the old schema (consumers upgrade first). Forward: the old schema can read data written with the new one (producers upgrade first). Choose based on who deploys first; for long-retained, replayable topics require full transitive compatibility.
+
+**Q2. How do you evolve an event schema across many teams?**
+A schema registry with enforced compatibility in CI and at publish time, additive changes only, deprecation by adding new fields or event versions, consumer-driven contract tests, documented ownership per event, and usage telemetry before removing anything.
+
+**Q3. How do you make a breaking change to an event?**
+Publish a new versioned event type (or topic) alongside the old one, dual-publish during migration, move consumers over, monitor that the old version has no consumers, then retire it.
+
+---
+
+## 7. Ordering, Partitioning & Delivery Semantics
+
+**Key concepts**
+- **Global ordering doesn't scale**; you get **ordering per partition/key** (Kafka partition, Service Bus session, SQS FIFO message group).
+- Choose the **partition key** = the entity whose events must stay ordered (`accountId`, `orderId`). A hot key limits throughput (one partition, one consumer).
+- **Increasing the partition count changes the key→partition mapping** → ordering breaks for in-flight keys; plan partitions up front or migrate carefully.
+- Retries can reorder (a failed message retried after later ones) → per-key sequencing, version checks (ignore older versions), or blocking retries on that key.
+- **Delivery semantics:** **at-most-once** (commit before processing — may lose), **at-least-once** (commit after processing — may duplicate; the default choice), **"exactly-once"** = at-least-once + idempotent processing (or Kafka transactions inside Kafka).
+
+```csharp
+// Kafka producer: key = accountId → all events of an account are ordered in one partition
+await producer.ProduceAsync("payments", new Message<string, string> { Key = payment.AccountId, Value = json });
+
+// Consumer: ignore stale events per entity using a version
+if (evt.Version <= readModel.Version) return;          // out-of-order or duplicate → skip
+readModel.Apply(evt); readModel.Version = evt.Version;
+```
+
+**Common interview questions**
+
+**Q1. How do you guarantee ordering?**
+Only per key: route all events of an entity to the same partition (key = entity ID) and process each partition sequentially. For cross-entity ordering, redesign (one aggregate) or use a single partition (no parallelism). Handle retries without reordering (version checks, per-key retry topics).
+
+**Q2. We increased partitions and ordering broke. Why?**
+The default partitioner maps `hash(key) % partitionCount`; changing the count moves keys to different partitions, so new events for a key can be consumed before older ones still in the old partition. Over-provision partitions initially, or migrate to a new topic with a controlled cutover.
+
+**Q3. At-least-once or at-most-once?**
+At-least-once almost always (losing financial events is unacceptable), paired with idempotent consumers. At-most-once only for disposable data (metrics samples, presence pings).
+
+---
+
+## 8. Idempotency, Deduplication, DLQs & Replay
+
+**Key concepts**
+- **Idempotency key design:** use a stable business identifier (`paymentId + operation`) or the event ID; it must identify the *logical operation*, not the delivery attempt.
+- **Dedup store co-located with the effect:** record the processed ID in the **same transaction** as the business change (inbox table). A dedup check in Redis + a write to SQL is not atomic.
+- **Dedup retention:** keep keys at least as long as messages can be redelivered or replayed.
+- **External effects** (emails, payment providers) need the provider's idempotency keys or an outbox of commands.
+- **Retry strategy:** immediate retries for transient errors → **retry topics/queues with delays** (5 s, 1 min, 10 min) → **DLQ** after N attempts. Classify errors: transient (retry) vs poison/permanent (DLQ immediately — e.g., deserialization failure, validation error).
+- **DLQ operations:** alert on DLQ depth, a dashboard, tooling to inspect, fix and **redrive**; an owner for each DLQ. An unmonitored DLQ = silent data loss.
+- **Replay:** retained logs let you rebuild read models, backfill new consumers and recover from bugs — requires idempotent consumers and awareness of side effects (don't re-send emails on replay).
+
+```csharp
+// Idempotent consumer with an inbox table (EF Core)
+public async Task HandleAsync(PaymentCaptured evt, CancellationToken ct)
+{
+    await using var tx = await db.Database.BeginTransactionAsync(ct);
+    db.Inbox.Add(new InboxMessage { MessageId = evt.EventId, Consumer = "ledger", ProcessedAt = DateTimeOffset.UtcNow });
+    try { await db.SaveChangesAsync(ct); }
+    catch (DbUpdateException ex) when (IsUniqueViolation(ex)) { return; }      // duplicate → already processed
+    ledger.Post(evt.PaymentId, evt.Amount);                                     // business effect
+    await db.SaveChangesAsync(ct);
+    await tx.CommitAsync(ct);
+}
+```
+
+**Common interview questions**
+
+**Q1. Where must the dedup record live?**
+In the same transactional store as the side effect, written in the same transaction. Otherwise a crash between the two leaves either a processed-but-not-recorded message (duplicate on retry) or a recorded-but-not-processed one (lost).
+
+**Q2. How do you handle poison messages?**
+Classify errors: deserialization/validation failures go straight to a DLQ; transient errors retry with backoff via delayed retry topics; after max attempts go to the DLQ. Alert on DLQ depth, provide inspection and redrive tooling, and make sure the poison message doesn't block the partition.
+
+**Q3. What do you need before replaying events?**
+Idempotent consumers, a way to suppress external side effects during replay (or idempotency keys downstream), enough retention, capacity for the catch-up load, and a plan for consumers that changed their logic since (replay with the new logic intentionally).
+
+---
+
+## 9. Stream Processing: Event Time, Windows, Watermarks, State
+
+**Key concepts**
+- **Event time** (when it happened, in the event) vs **processing time** (when you saw it). Use event time for correctness (late or out-of-order events, replays).
+- **Windows:** **tumbling** (fixed, non-overlapping: per-minute totals), **hopping/sliding** (overlapping: 5-min window every 1 min), **session** (activity bursts separated by gaps), **global**.
+- **Watermarks:** "we believe we've seen all events up to time T" → when to close a window. Too aggressive → dropped late data; too conservative → latency.
+- **Late data strategies:** drop (with a metric), **allowed lateness** (update emitted results), or side-output for reconciliation.
+- **State stores** (RocksDB in Kafka Streams/Flink) + **checkpointing/changelog topics** for fault tolerance; exactly-once state updates within the framework.
+- **Stream-stream joins** must be windowed (bounded state); stream-table joins enrich events with reference data.
+- Tools: Kafka Streams, ksqlDB, Apache Flink, Spark Structured Streaming, Azure Stream Analytics, Kinesis Data Analytics.
 
 ```text
-                                       Customer
-                                           |
-                                           v
-                                  Amazon API Gateway
-                                           |
-                                           v
-                               Amazon ECS / EKS / Lambda
-                                           |
-                                           v
-                                     Order Service
-                                           |
-                                Save Order in Database
-                                           |
-                              Publish OrderCreated Event
-                                           |
-                                           v
-                                +---------------------+
-                                | Amazon EventBridge  |
-                                +---------------------+
-                                           |
-        +-----------------+----------------+----------------+-----------------+
-        |                 |                |                |                 |
-        v                 v                v                v                 v
- Payment Service  Inventory Service  Email Service  Analytics Service  Loyalty Service
-        |                 |                |                |                 |
-        v                 v                v                v                 v
-     Aurora           DynamoDB        Amazon SES         Redshift          DynamoDB
+Tumbling 1-min windows on event time, watermark = max event time − 30 s
+10:00:00–10:01:00  closes when watermark ≥ 10:01:00, i.e., after seeing an event at 10:01:30
+Event with event time 10:00:45 arriving at 10:02:10 → late → allowed-lateness update or side output
 ```
 
-Read the bottom two rows together: each consumer owns **its own** datastore, chosen for its own access pattern (Aurora for the payments ledger's relational integrity, DynamoDB for key-lookup loyalty balances, Redshift for analytical scans). That per-consumer store ownership is not incidental to the diagram — it is the property that makes the consumers genuinely independent, and it is what would be lost if they shared a database behind the event bus.
+**Common interview questions**
+
+**Q1. Event time vs processing time — why does it matter?**
+Network delays, retries, offline devices and replays deliver events out of order. Aggregating by processing time puts events in the wrong buckets and gives different results on replay. Event time with watermarks gives correct, reproducible results.
+
+**Q2. How do you handle late events in a real-time risk or fraud aggregate?**
+Define a watermark from observed lateness, allow lateness for corrections (emit updated aggregates), route very late events to a side output for reconciliation, and expose metrics for late-event rates. For regulatory numbers, reconcile against a batch computation.
+
+**Q3. What happens to stream state when a node fails?**
+Frameworks checkpoint state (snapshots plus a changelog topic) and restore it on another node, then resume from the matching offsets — giving exactly-once state updates inside the framework; external sinks still need idempotent writes.
 
 ---
 
-### Event Notification vs Event-Carried State Transfer
+## 10. Backpressure, Flow Control & Consumer Lag
+
+**Key concepts**
+- **Consumer lag** = latest offset − committed offset: a **position**, not an error. It matters relative to the **SLA** (time lag) and the **retention boundary** — if lag exceeds retention, data is **lost**.
+- Monitor **time lag** (how old the oldest unprocessed event is), not just message count.
+- **Why consumers fall behind:** producer burst, a slow downstream (DB, API), poison messages or retries blocking a partition, rebalancing storms, under-provisioned partitions or consumers, GC pauses.
+- **Scaling consumers:** at most one consumer per partition in a group → more partitions for more parallelism; or parallel processing within a partition by key (ordering per key preserved).
+- **Flow control:** bounded in-memory buffers, `max.poll.records`, pause/resume partitions, rate limiting downstream calls, batching writes.
+- **Head-of-line blocking:** one slow message blocks its partition → retry topics, per-key parallelism, priority separation (separate topics for urgent vs bulk).
+- **Catch-up after an outage:** the thundering herd of backlog on downstream systems → throttle catch-up, autoscale on lag (KEDA), protect downstream with bulkheads.
+
+```text
+Lag-based autoscaling (KEDA ScaledObject for Kafka)
+  trigger: kafka, lagThreshold: 1000 per partition, max replicas = partition count
+```
+
+**Common interview questions**
+
+**Q1. Consumer lag is growing at 2 a.m. How do you diagnose it?**
+Check whether lag is growing on all partitions (throughput problem: a slower downstream, fewer consumers, a producer spike) or on one (a hot key or a poison message blocking the partition); check rebalances, consumer errors and retries, downstream latency, and GC/CPU. Compare time lag with the retention window to see how urgent it is. Mitigate: scale consumers (up to the partition count), skip or DLQ poison messages, throttle or batch downstream, and alert before retention is threatened.
+
+**Q2. Why can't you just add more consumers?**
+In a consumer group, each partition goes to at most one consumer; consumers beyond the partition count sit idle. Add partitions (with ordering implications) or process in parallel within a consumer while keeping per-key order.
+
+**Q3. What's the danger in lag approaching retention?**
+Kafka deletes old segments by time or size regardless of consumption; if a consumer's position falls behind the earliest retained offset, those events are gone (the consumer jumps to `earliest`/`latest` per `auto.offset.reset`). That's silent data loss — alert on time lag versus retention.
+
+---
+
+## 11. Cross-Region & Multi-Cluster Event Distribution
+
+**Key concepts**
+- Replication (MirrorMaker 2, Confluent Cluster Linking/Replicator, Event Hubs geo-replication) is **a second, asynchronous pipeline** with its own lag, failures and monitoring.
+- **Ordering survives only per partition** if partitions map 1:1; offsets differ between clusters → failover consumers resume **by timestamp or by content** (translated offsets via checkpoints), expecting duplicates.
+- **RPO** = replication lag at the moment of failure.
+- **Active-passive** (simpler) vs **active-active** (requires conflict rules, entity home regions, idempotency).
+- **Replication loops:** tag events with their origin region and don't re-replicate them.
+- **Data residency:** replicate selectively (EU data stays in the EU; only aggregates or anonymized events cross).
+
+**Common interview questions**
+
+**Q1. How do consumers fail over to another region's Kafka cluster?**
+Use MirrorMaker 2 checkpoint/offset translation or resume by timestamp, reprocess a safety window, and rely on idempotent consumers for the resulting duplicates. Test it regularly — failover by offset copying alone is wrong because offsets differ across clusters.
+
+**Q2. Active-active event distribution — what must you design?**
+An entity home region (single writer per key) or conflict resolution rules, origin tagging to avoid loops, idempotent cross-region consumers, per-region topics with aggregate views, and data residency filters.
+
+---
+
+## 12. Testing, Contract Testing & Chaos for Event Pipelines
+
+**Key concepts**
+- Mock-based tests miss the real failures (duplicates, reordering, rebalances, schema drift, poison messages, lag).
+- **Testcontainers** (real Kafka/RabbitMQ in tests), **consumer-driven contract tests** for events (Pact message pacts) + schema registry compatibility checks in CI.
+- **Replay-based testing:** run new consumer versions against recorded production event streams (sanitized) and compare outputs.
+- **Chaos:** inject duplicates, reordering, delays, broker restarts, consumer crashes mid-batch, network partitions; verify the invariants (no double posting, eventual correctness).
+- **Production verification:** reconciliation jobs, synthetic events (canaries) flowing end-to-end, and business-level invariants (orders placed = orders fulfilled + cancelled).
+
+```csharp
+// Duplicate-delivery test: the same event twice must produce one ledger entry
+[Fact]
+public async Task Duplicate_event_is_applied_once()
+{
+    var evt = new PaymentCaptured(Guid.NewGuid(), Guid.NewGuid(), 100m);
+    await handler.HandleAsync(evt, default);
+    await handler.HandleAsync(evt, default);
+    Assert.Equal(1, await db.LedgerEntries.CountAsync(e => e.PaymentId == evt.PaymentId));
+}
+```
+
+**Common interview question**
+
+**Q. How do you test a choreographed flow end-to-end without a central coordinator?**
+Correlation IDs on every event; test harnesses that publish the initiating event and assert on the final events or state within a timeout; contract tests per hop; synthetic canary transactions in production with alerts if they don't complete; and a process-monitoring view built from the event stream.
+
+---
+
+## 13. Observability & Tracing Through Async Flows
+
+- Propagate **W3C `traceparent`** in message headers; OpenTelemetry instrumentations for Kafka, RabbitMQ, MassTransit and Service Bus create producer and consumer spans (with links).
+- **Correlation ID** (business flow) + **causation ID** (which message caused this one).
+- **Key metrics:** publish rate and errors, consumer lag (time), processing latency, retry and DLQ counts, rebalance frequency, end-to-end latency (event time → processed time), outbox backlog.
+- Structured logs with event IDs; avoid logging full payloads (PII).
+
+**Common interview question**
+
+**Q. A trace stops halfway at the message broker. Why?**
+The trace context wasn't propagated in message headers (custom serializer, manual producer without instrumentation, or a consumer starting a new root span). Fix: OpenTelemetry instrumentation or explicit injection/extraction of `traceparent`, and span links for batches.
+
+---
+
+## 14. Capstone: Firm-Wide Event Backbone (FinTech)
+
+**Scenario:** order capture → execution → risk → settlement → regulatory reporting.
+
+- **Order capture:** an orchestrated saga at the point of truth (validation, limits, routing), the outbox publishing `OrderAccepted`.
+- **Backbone:** Kafka with a schema registry (full compatibility), partitioned by account or instrument, retention sized for replay plus regulatory needs, tiered storage for long history.
+- **Real-time risk:** stream processing on event time (exposure per account per window), state stores with checkpoints, late-event reconciliation.
+- **Money movement:** idempotency at the point where money actually moves (ledger posting with an inbox and a unique key; payment provider idempotency keys).
+- **Regulatory reporting:** derived from the immutable log; batch reconciliation against stream results and external confirmations; lineage from report back to source events.
+- **Standing verification:** reconciliation jobs, synthetic trades, DLQ ownership, lag SLOs, chaos drills.
+
+**Common interview question**
+
+**Q. How do you make an event backbone auditable for regulators?**
+Immutable, retained events with schemas and versions; event IDs and correlation IDs end to end; lineage from regulatory reports to source events; reconciliation evidence; access control and encryption; documented retention; and the ability to replay and reproduce a report as of a date.
+
+---
+
+## 15. Top 30 Rapid-Fire Questions + Principal Questions
+
+1. **Event vs command?** Fact (past) vs request (imperative).
+2. **Thin vs fat event?** Notification + callback vs self-contained state.
+3. **Domain vs integration event?** Internal vs public contract.
+4. **Choreography?** Services react to events; no coordinator.
+5. **Orchestration?** A central state machine sends commands.
+6. **Payments flow?** Orchestration.
+7. **Queue vs topic?** One consumer vs every subscription.
+8. **Log vs queue?** Retained and replayable vs deleted on ack.
+9. **Dual write fix?** Transactional outbox / CDC.
+10. **Schema registry?** Compatibility checks before publishing.
+11. **Backward compatible?** New readers read old data.
+12. **Forward compatible?** Old readers read new data.
+13. **Breaking change?** A new event version in parallel.
+14. **Ordering scope?** Per partition/key.
+15. **Partition key?** The entity needing order.
+16. **Partition increase risk?** Key remapping breaks ordering.
+17. **Default delivery?** At-least-once.
+18. **Exactly-once?** At-least-once + idempotency.
+19. **Dedup store location?** Same transaction as the effect.
+20. **Poison message?** DLQ, don't block the partition.
+21. **Retry topics?** Delayed retries without blocking.
+22. **DLQ must-haves?** Alerts, owner, redrive tooling.
+23. **Replay needs?** Idempotency + side-effect suppression.
+24. **Event time?** When it happened → correct windows.
+25. **Watermark?** When to close a window.
+26. **Window types?** Tumbling, hopping, session.
+27. **Lag metric?** Time lag vs SLA and retention.
+28. **Max consumers?** Partition count.
+29. **Cross-region offsets?** Not portable → translate or use timestamps.
+30. **Async tracing?** `traceparent` in headers.
+
+**Principal-level questions**
+
+**P1. How do you govern events across 100 teams?**
+An event catalogue (AsyncAPI) with owners, a schema registry with enforced compatibility, naming and envelope standards (CloudEvents), topic provisioning via IaC with retention and ACL policies, contract tests in CI, DLQ ownership and lag SLOs on shared dashboards, and a lightweight design review for public integration events.
+
+**P2. What are the organisational risks of EDA?**
+Invisible coupling through shared events, unclear ownership of business processes spread across choreographed services, schema sprawl, DLQs nobody owns, and "eventual" becoming "never" without reconciliation. Counter them with explicit process ownership (orchestrators for critical flows), catalogues, SLOs and reconciliation.
+
+**P3. Explain eventual consistency of an event-driven UI to the business.**
+"Your action is accepted immediately and completes within a few seconds; during that time the screen shows 'processing'. Balances and confirmations update when processing completes; if something fails, we reverse it and notify you." Back it with UX patterns (pending states, optimistic updates, notifications) and SLAs on completion time.
+
+**P4. What can't your event pipeline detect, and how do you fix that?**
+Silent drops (a consumer filter bug), semantic schema changes, events stuck in DLQs, lag hidden behind averages, and cross-system divergence. Detectors: end-to-end reconciliation counts, synthetic canary events, DLQ alerts, time-lag SLOs, and business invariant monitors.
+
+---
+
+## 16. Mistakes Checklist (say why each is wrong)
+- [ ] Publishing to the broker and DB without an outbox (dual write)
+- [ ] Choreographing business-critical, multi-step flows with compensations
+- [ ] Publishing internal domain events as external contracts · fat events full of PII
+- [ ] Breaking schema changes without a new version · no schema registry
+- [ ] Assuming global ordering · increasing partitions casually · retries that reorder
+- [ ] Claiming exactly-once delivery · dedup in Redis while the effect is in SQL
+- [ ] Unmonitored DLQs · poison messages blocking partitions · infinite retries
+- [ ] Processing-time windows for financial aggregates · no late-data strategy
+- [ ] Alerting on lag message counts only · ignoring the retention boundary
+- [ ] Copying offsets across clusters on failover · replication loops
+- [ ] Mock-only tests for event flows · no trace propagation through messages
+
+---
+
+## Architecture Diagrams (preserved from the original modules)
+
+> All 40 Mermaid/ASCII diagrams from the original `18-Event-Driven-Architecture/` files, kept verbatim and grouped by source module. Originals: `git show ebb2d5c:18-Event-Driven-Architecture/<file>.md`.
+
+### Module 52 — Event-Driven Architecture: Event Notification vs Event-Carried State Transfer, Choreography vs Orchestration & Pub/Sub Foundations
+*Source: `01-EDA-Fundamentals-Choreography-vs-Orchestration.md`*
+
+**Event Notification vs Event-Carried State Transfer**
+
 ```mermaid
 graph LR
  subgraph "Event Notification (thin)"
@@ -132,7 +499,8 @@ graph LR
  end
 ```
 
-### Choreography vs Orchestration
+**Choreography vs Orchestration**
+
 ```mermaid
 graph TB
  subgraph "Choreography: no central coordinator"
@@ -148,7 +516,8 @@ graph TB
  end
 ```
 
-### Topics (Fan-out) vs Queues (Competing Consumers)
+**Topics (Fan-out) vs Queues (Competing Consumers)**
+
 ```mermaid
 graph LR
  subgraph "Topic: every subscriber gets a copy"
@@ -163,220 +532,8 @@ graph LR
  end
 ```
 
-## 4. Production Example
-**Scenario**: An order-fulfillment system originally used choreography — Order Service published `OrderPlaced`; Inventory, Payment, Shipping, and Notification services each independently subscribed and reacted, publishing their own downstream events in turn. This worked well for the first year with four participating services. As the system grew to twelve independently-reacting services (fraud checks, loyalty-points accrual, tax calculation, personalized-recommendation-refresh, and others added incrementally over time, each simply subscribing to whichever existing event was relevant), a customer complaint about a stuck order (payment succeeded, but shipping never triggered) took an on-call engineer **over three hours** to diagnose — there was no single artifact describing the full, current workflow; the engineer had to manually inspect the subscription configuration of all twelve services to reconstruct which service was supposed to react to which event, eventually discovering that a recently-added Fraud-Check service had been inserted **between** `PaymentProcessed` and the event Shipping subscribed to, was silently failing for this specific order's currency (an edge case), and Shipping was simply never receiving the event it expected because Fraud-Check's failure meant its downstream event was never published — with distributed tracing only partially helping, since a choreographed workflow's "trace" isn't a single call chain but a scattered set of independent event-processing spans with no obvious way to know which one *should* have happened next. **Root cause**: choreography's implicit, distributed workflow logic (the stated weakness) had scaled from "manageable" at 4 services to "genuinely undebuggable without extensive tribal knowledge" at 12, and — critically — no one had explicitly decided this growth threshold warranted revisiting the architectural choice; each new participating service was added incrementally, individually reasonably, with the cumulative complexity never explicitly evaluated as a whole. **Fix**: migrated the core order-fulfillment workflow (the ordered sequence: inventory → payment → fraud-check → shipping) to an explicit **orchestrator** (the Saga-orchestrator pattern), while leaving genuinely independent, non-sequential reactions (analytics, loyalty-points accrual, recommendation-refresh — services that react to events but don't gate or depend on each other's completion) as choreography, since forcing those into the orchestrator would have added unnecessary central coupling for interactions that were genuinely fine being decentralized. **Lesson**: this is precisely the trade-off playing out concretely — choreography's loose coupling and easy extensibility are real benefits at a small scale, but the workflow-invisibility cost grows with the number of participating services and the presence of any genuine sequential/conditional dependency between steps; the corrected architecture uses a **hybrid** (orchestration for the sequential, failure-sensitive core workflow; choreography for the independent, non-gating side reactions), directly the pattern most mature EDA systems converge on rather than treating choreography-vs-orchestration as a single, system-wide, one-time choice.
-## 10. Interview Questions
+**13. Low-Level Design**
 
-### Basic (10)
-1. **Q: What is an event, in the EDA sense?** **A:** An immutable fact about something that has already happened.
-2. **Q: What is Event Notification?** **A:** A thin event carrying minimal data, requiring subscribers to fetch full details separately if needed.
-3. **Q: What is Event-Carried State Transfer?** **A:** A fat event carrying all the data a subscriber is likely to need, requiring no follow-up call.
-4. **Q: What is the main trade-off between Event Notification and Event-Carried State Transfer?** **A:** Notification preserves data freshness but reintroduces a synchronous dependency; state transfer preserves availability decoupling but risks staleness.
-5. **Q: What is choreography?** **A:** A workflow coordination style where each service independently subscribes to and reacts to events, with no central coordinator.
-6. **Q: What is orchestration?** **A:** A workflow coordination style where a central coordinator explicitly directs each step of a multi-service workflow.
-7. **Q: What is the main weakness of choreography at scale?** **A:** Workflow invisibility — no single artifact describes the overall, current workflow.
-8. **Q: What is the main weakness of orchestration?** **A:** The orchestrator becomes a central point of coupling and a potential bottleneck/single point of failure.
-9. **Q: What is the difference between a topic and a queue?** **A:** A topic delivers a copy of each event to every subscriber (fan-out); a queue delivers each message to exactly one consumer among competing consumers.
-10. **Q: Why must events be published via the Outbox pattern rather than as a separate, non-transactional step?** **A:** To avoid the dual-write problem — an event could otherwise be lost or duplicated relative to the state change it describes.
-
-### Intermediate (10)
-1. **Q: Why does Event Notification reintroduce a synchronous dependency that partially undermines asynchronous communication's benefit?** **A:** A subscriber must call back to the publisher to fetch full details, meaning the subscriber's processing now depends on the publisher's availability at that moment — exactly the availability coupling asynchronous communication was meant to avoid.
-2. **Q: Why is Event-Carried State Transfer generally preferred for immutable facts but risky for mutable, time-sensitive context?** **A:** Immutable facts (what an order contained at placement time) can't become stale since they never change; mutable context (a customer's current risk score) embedded in an event can drift from the source's actual current value, creating a staleness risk for subscribers relying on it.
-3. **Q: Why does choreography's extensibility advantage (adding a new reacting service requires no change to existing services) not fully offset its workflow-invisibility weakness at scale?** **A:** Extensibility only addresses how easy it is to *add* a new reaction; it doesn't address the separate, growing cost of *understanding and debugging* the increasingly complex aggregate workflow that results from many independently-added reactions (the incident).
-4. **Q: Why does an orchestrator need to apply the resilience patterns to its own calls to participating services?** **A:** The orchestrator sits directly in the critical path of every workflow step it coordinates; an unprotected, unbounded call to any participating service could cascade into the orchestrator itself becoming unavailable, affecting every in-flight workflow.
-5. **Q: Why would using a queue instead of a topic cause only one of several intended subscriber types to receive an event?** **A:** A queue delivers each message to exactly one consumer among competing consumers by design — if Inventory, Analytics, and Notifications are all attached as competing consumers on the same queue rather than independent topic subscribers, only one of them will receive any given event, not all three.
-6. **Q: Why did distributed tracing only partially help diagnose the incident?** **A:** A choreographed workflow's trace is a scattered set of independent event-processing spans, not a single call chain — tracing shows what *did* happen in each span but doesn't inherently show what *should have* happened next, since no single artifact defines the expected overall workflow.
-7. **Q: Why is a hybrid choreography/orchestration approach (the fix) often more appropriate than choosing one style system-wide?** **A:** Different interactions within the same system have different actual coordination needs — genuinely sequential, failure-sensitive workflows benefit from orchestration's visibility and compensation handling, while genuinely independent side reactions benefit from choreography's loose coupling, and forcing either style onto interactions that don't fit it adds unnecessary complexity or coupling.
-8. **Q: Why does fat-event payload size matter for capacity planning at high event volume, when it might seem negligible at low volume?** **A:** Serialization, network transfer, and broker storage costs scale with payload size multiplied by event volume — a per-event cost that's negligible at low throughput can become a significant, measurable capacity constraint at high throughput.
-9. **Q: Why should event-schema design apply data-minimization discipline even for Event-Carried State Transfer's "include what subscribers need" philosophy?** **A:** Convenience-driven inclusion of an entire source record (rather than deliberately selected needed fields) can inadvertently propagate sensitive data to subscribers that don't actually need it, unnecessarily expanding the data's exposure surface.
-10. **Q: Why does compromising an orchestrator represent a larger security blast radius than compromising a single choreographed service?** **A:** The orchestrator holds centralized control over an entire multi-service workflow's steps; compromising it could allow manipulation of the whole business process, whereas compromising one choreographed service's independent reaction logic affects only that service's own narrow scope.
-
-### Advanced (10)
-1. **Q: Diagnose the incident from first principles, and design the specific, ongoing architectural governance practice that would have caught the choreography-to-orchestration threshold being crossed before a three-hour diagnostic incident occurred.**
- **A:** Root cause: choreography was extended incrementally, service by service, with no explicit checkpoint evaluating whether the workflow's aggregate complexity still justified the decentralized style. Governance practice: maintain a **living, explicit workflow diagram/registry** (even for a choreographed workflow — generated or manually maintained, showing every event and every subscribing service's reaction) as a first-class, reviewed artifact whenever a new service subscribes to an existing event in a known business workflow, with an explicit review trigger ("does this workflow now have a genuine sequential/conditional dependency between steps, or exceed N participating services?") prompting a deliberate choreography-vs-orchestration re-evaluation — converting an implicit, never-revisited architectural choice into one with an explicit, periodic checkpoint, directly this course's recurring "convert tribal, incrementally-accumulated risk into an explicit, governed checkpoint" pattern.
-2. **Q: A team argues that since choreography is "more decoupled," it should always be preferred over orchestration as a default, with orchestration used only as an exception when explicitly justified. Evaluate this as a Principal Engineer.**
- **A:** Push back on treating decoupling as an unconditional good, independent of whether a genuine sequential/conditional/compensating-transaction dependency actually exists between the workflow's steps — a workflow with real ordering and failure-handling requirements (the Saga pattern: if payment fails, inventory reservation must be released) forced into choreography doesn't eliminate that dependency, it merely makes it **implicit** (embedded in the specific sequence of events each service happens to subscribe to) rather than **explicit** (visible in an orchestrator's code) — implicit dependencies are not less real, only harder to see and debug, so "always prefer choreography" is optimizing for a superficial decoupling metric at the cost of genuine workflow visibility precisely where visibility matters most (failure-sensitive, multi-step business processes).
-3. **Q: Design a strategy for evolving a chosen orchestrator's own workflow definition (the explicit sequence of steps) over time, without breaking already-in-flight workflow instances that started under a previous version of the workflow definition.**
- **A:** This directly parallels the API-versioning discipline, now applied to workflow *definitions* rather than API contracts: an in-flight workflow instance must continue executing against the **version of the workflow definition it started under**, not be silently migrated mid-flight to a new definition version (which could skip steps it already should have completed under the old definition, or duplicate/misalign compensation logic) — persist the workflow-definition version alongside each workflow instance's own state, and only apply new workflow-definition versions to newly-started instances, directly the same "don't retroactively change the contract underneath something already relying on the old one" principle, now applied to a stateful, in-flight process rather than a stateless request/response contract.
-4. **Q: Explain how you would decide, for a specific piece of data, whether to embed it in an Event-Carried State Transfer payload versus relying on Event Notification's fetch-back, when the data's mutability is ambiguous (neither obviously immutable nor obviously highly time-sensitive).**
- **A:** Apply the deciding question rigorously: explicitly identify the **business tolerance** for staleness of that specific piece of data at the specific point a subscriber will use it — if the answer is "a value slightly out of date by the time this subscriber processes the event would not change any correct business decision" (embed it, state transfer), versus "an out-of-date value here could cause an incorrect business decision with real consequence" (fetch fresh, notification) — this reframes an ambiguous mutability question into a concrete, business-consequence-driven question that's answerable even when the data's abstract "mutability" isn't obviously one extreme or the other.
-5. **Q: A choreographed system experiences a partial failure where one service in a multi-step reaction chain fails to process an event and never publishes its own downstream event, silently stalling the workflow with no error surfaced anywhere (directly the failure mode, generalized). Design a systemic detection mechanism, independent of any specific incident's manual diagnosis.**
- **A:** Implement **workflow-completion monitoring** as a standing observability practice: for any known, important choreographed business workflow, define its expected terminal event (e.g., `OrderShipped`) and expected maximum time-to-completion from its triggering event (`OrderPlaced`); a background monitor tracks triggering events without a corresponding terminal event within the expected window and alerts proactively — converting workflow-stall detection from "a customer complains, then a multi-hour manual investigation begins" into an automated, proactive signal, directly the golden-signals monitoring philosophy applied at the cross-service workflow level rather than the single-service level.
-6. **Q: How would you decide whether a specific side-effect service (like the Fraud-Check service inserted) should be a gating step in an orchestrated sequence or an independent, non-gating choreographed reaction?**
- **A:** The deciding question: does the overall business workflow's correctness *require* this step's successful completion before subsequent steps proceed (a true gate — fraud-check failing should legitimately halt/reverse the order, making it an orchestrated, sequential, compensable step) or is it a valuable-but-non-essential side effect that shouldn't block the core workflow if it fails (in which case it should be choreographed, reacting independently, with its own failure handled/monitored separately without stalling shipping) — the incident occurred precisely because Fraud-Check was *implicitly* treated as a gate (Shipping's event depended on it) without ever being *explicitly* designed as one, exactly the ambiguity this deciding question resolves.
-7. **Q: Design an approach for testing a choreographed workflow's overall correctness end-to-end, given that already established that full end-to-end tests don't scale well across many services.**
- **A:** Reuse the contract-testing philosophy at the *event* level rather than the API level: each service publishes a documented, versioned contract describing which events it consumes and which events it produces in response (including under specific failure conditions), and a lightweight, narrow integration test verifies each individual service's contract compliance in isolation (given event X, does this service correctly produce event Y, without needing every other participating service running) — combined with Advanced Q5's workflow-completion monitoring in production as the ongoing, live verification that the assembled, whole workflow (the sum of every service's individually-contract-tested behavior) still functions correctly end-to-end, since no practical test suite can fully substitute for observing the real, assembled system's behavior at scale.
-8. **Q: A Principal Engineer is asked to decide the broker technology for a new EDA initiative before the dedicated Kafka/RabbitMQ modules are covered. What conceptual criteria from this module alone should drive that decision, independent of specific broker feature comparisons?**
- **A:** From this module's concepts alone: does the system's dominant pattern favor topics/fan-out (many independent choreographed subscribers per event, favoring a broker with strong native pub/sub-with-independent-subscriber-offset support) or queues/competing-consumers (load-balanced processing of a single logical work stream, favoring simpler queue semantics)? Does the system need long-lived, replayable event history (supporting late-joining subscribers or Event Sourcing's full-history-as-source-of-truth model, previewed in the opening) or only transient, consume-once delivery? These two questions alone meaningfully narrow the field before any broker-specific feature comparison (covered in full in Modules 53's Kafka-adjacent depth and the dedicated `19-Kafka`/`20-RabbitMQ` modules) becomes necessary.
-9. **Q: Critique this claim: "Since orchestration gives us full visibility and centralized failure handling, we should orchestrate every multi-service interaction in our system, including simple, independent side effects like sending a confirmation email."** 
- **A:** Push back — orchestrating a simple, non-gating, independent side effect (sending a confirmation email, which doesn't need to block or be blocked by any other step, and whose failure doesn't require compensating any other service's action) adds unnecessary central coupling (the orchestrator now explicitly depends on and calls the email service) for a step that gains nothing from centralized visibility or compensation logic, since there's nothing to compensate and no sequencing dependency to make visible — directly Advanced Q6's gating-vs-non-gating distinction misapplied in the opposite direction from Advanced Q2's critique: just as forcing a genuinely sequential workflow into choreography hides real dependencies, forcing a genuinely independent reaction into orchestration adds coupling with no corresponding benefit; match the coordination style to each interaction's actual coordination need, not a single, system-wide default in either direction.
-10. **Q: As a Principal Engineer establishing EDA standards for a large organization, design the decision framework (a concise, applicable checklist) you would provide to teams for choosing event type (notification vs. state transfer) and coordination style (choreography vs. orchestration) for a new workflow, synthesizing this entire module.**
- **A:** Event type: (1) does the subscriber need guaranteed-current data at processing time, or is data current-as-of-publish-time acceptable? — Notification if the former, State Transfer if the latter; (2) does the data being embedded carry sensitive information beyond what most subscribers need? — apply data-minimization regardless of choice. Coordination style: (3) does this specific step have a genuine sequential/conditional dependency on another step's outcome, or a genuine compensating-action need if it fails? — Orchestration if yes (Advanced Q6), Choreography if no (Advanced Q9); (4) as the workflow's participating-service count or complexity grows, is there a periodic, explicit re-evaluation checkpoint (Advanced Q1) rather than indefinite, unexamined accretion? This four-question checklist directly operationalizes the and the conceptual distinctions into a repeatable, applicable team-level decision process, avoiding both the "always choreograph" and "always orchestrate" false-default failure modes Advanced Q2 and Q9 each critique from opposite directions.
-
-### Expert (10)
-1. **Q: A team proposes a third coordination style — a "process manager" that observes a choreographed workflow's events for monitoring and alerting purposes only, without ever calling a participating service directly or gating any step. Is this genuinely a third style, and when is it warranted over the binary choreography/orchestration choice?**
- **A:** It is not a third coordination style in the structural sense — the workflow's actual control flow remains fully choreographed, since no component directs or gates any step — but it is a genuinely useful hybrid *observability* layer: a passive subscriber to every event in a known business workflow, purpose-built to reconstruct and expose the workflow's current state for monitoring (directly generalizing Advanced Q5's workflow-completion monitor into a first-class component) without taking on orchestration's control-flow coupling or blast-radius risk. It's warranted whenever a team wants choreography's decoupling and extensibility preserved but needs orchestration's visibility for debugging and SLA tracking — a "watch but don't touch" role that captures much of orchestration's observability benefit at a fraction of its coupling cost, though it never gains centralized compensation handling, since it has no authority to act.
-2. **Q: In a multi-region, multi-tenant platform where different tenants have different data-residency requirements, how does Event-Carried State Transfer's fat-payload design interact with that constraint, and how would you adapt the notification-vs-state-transfer decision framework?**
- **A:** A fat event published to a region-spanning topic carries its embedded tenant data wherever the topic itself is replicated or wherever subscribers are deployed — if a EU tenant's data is embedded in an ECST event and a US-region subscriber independently subscribes to that topic for an unrelated reason, the embedded data has now crossed a residency boundary the moment the event was published, regardless of whether that subscriber ever reads the specific field. The adapted framework: for any event type carrying tenant-scoped data subject to residency constraints, either (a) partition the event bus itself by region/tenant so subscribers physically cannot receive events outside their permitted scope, or (b) default to Event Notification for residency-constrained fields specifically, with the fetch-back call itself enforcing residency-aware access control at the point of retrieval — treating residency as a per-field decision layered on top of, not replacing, the staleness-driven notification/state-transfer decision.
-3. **Q: Design a zero-downtime migration of a live, in-production workflow from choreography to orchestration, specifically addressing workflow instances that are already partially complete under the old choreographed model at the moment of cutover.**
- **A:** Do not attempt to migrate in-flight instances at all — apply the same principle Advanced Q3 established for workflow-definition versioning, now applied to a coordination-style change rather than a step-sequence change: every workflow instance already in flight when the new orchestrator is deployed continues under the **old choreographed reactions**, which must remain fully deployed and functional until the last pre-cutover instance completes (tracked via the workflow-completion monitor, Advanced Q5, repurposed as a cutover-readiness gate). The new orchestrator only accepts **newly-triggering** events from the cutover point forward. This requires a deliberate, temporary period of running both models simultaneously — more operational complexity than a single atomic cutover, but the only way to avoid either abandoning in-flight customer workflows or building bespoke, error-prone mid-flight state-translation logic between two structurally different coordination models.
-4. **Q: Critique the claim: "An orchestrator is inherently a single point of failure, and therefore must never be used in a highly-available financial system." Evaluate as a Staff Engineer, and describe the HA patterns that address the concern.**
- **A:** The claim conflates "centralized" with "unavailable" — an orchestrator is a single point of *logical* control, not necessarily a single point of *physical* failure, provided it's built with the same HA discipline any other stateful, critical-path service requires: durable, replicated persistence of workflow state (§9's requirement) so a crashed orchestrator instance's in-flight workflows can be picked up by another instance rather than lost; leader election or consistent-hash sharding across multiple orchestrator instances so no single process is the literal runtime bottleneck; and idempotent step re-execution (this course's idempotent-consumer discipline, applied to the orchestrator's own outbound calls) so a workflow instance recovered by a new orchestrator instance after a crash can safely resume without risk of double-executing a step that already completed. An orchestrator built this way is no more a genuine single point of failure than any other horizontally-scaled, state-persisting service — the "never use orchestration" conclusion mistakes an easy-to-build-badly pattern for an inherently fragile one.
-5. **Q: How could an attacker exploit choreography's implicit, distributed workflow logic that they could not as easily exploit in an orchestrated equivalent, and how does the attack surface differ?**
- **A:** In choreography, any service with publish access to a topic another service subscribes to can trigger that subscriber's reaction simply by publishing a well-formed event — if event authenticity/origin isn't independently verified (versus merely trusting "this arrived on the expected topic"), a compromised low-privilege service could forge an `InventoryReserved` event to trigger Payment Service's charge logic without ever having gone through the legitimate `OrderPlaced` → `InventoryReserved` sequence, since no component holds authority over whether the *sequence* was actually followed — choreography has no natural place to enforce "this event should only exist as a consequence of that prior event genuinely having occurred." An orchestrator, by contrast, is the sole authority that decides when each step fires, so forging an event that only a legitimate orchestrator step would normally trigger doesn't bypass sequencing the way it does in choreography — but compromising the orchestrator itself grants an attacker authority over the *entire* workflow at once (§8's blast-radius asymmetry), a categorically worse single-point compromise than forging one event in one choreographed link. Mitigation for choreography specifically: message-level authentication (signed events, verified producer identity) so a subscriber can verify not just "this event's schema is valid" but "this event actually originated from the legitimate publishing service," closing the forgery gap without requiring a coordinator.
-6. **Q: Design the observability instrumentation required to make a choreographed workflow's debuggability genuinely equivalent to an orchestrator's built-in visibility, and name the specific standard this should be built on.**
- **A:** Every event must carry a **propagated correlation ID** (a single workflow-instance identifier, generated at the workflow's triggering event and passed through every subsequent event in the chain, distinct from any individual event's own ID) plus **causation metadata** (which specific prior event this one was produced in reaction to) — built on the W3C Trace Context standard (`traceparent`/`tracestate` headers) so that OpenTelemetry-compatible tracing tooling can reconstruct the full, scattered choreographed chain as a single distributed trace, exactly the reconstruction the on-call engineer in §4 had to do manually. Without both correlation (which events belong to the same workflow instance) and causation (which event caused which), the trace reconstruction is either incomplete (correlation alone tells you *what* happened but not *why* in what order) or must be inferred *post hoc*, exactly the failure mode the incident exhibited — this instrumentation is what should have existed before the incident, not merely a mitigation applied after.
-7. **Q: Model, for a CFO-level cost review, the concrete cost trade-off between a fat-event, topic-based choreographed architecture and an orchestrator-based architecture for the same workflow, at a stated scale.**
- **A:** For a workflow at 10M events/day with 5 average subscribers per topic and a 2KB average ECST payload: choreography's broker cost scales as `events × subscribers × payload size` for storage/egress (roughly 100GB/day of egress alone at this scale, independent of processing compute, which each subscriber provisions and pays for independently) — cost is distributed across teams' budgets, harder to see in aggregate but individually smaller per team. Orchestration's cost concentrates differently: the orchestrator's own compute/instance cost scales with concurrent in-flight workflow count (not event fan-out) and its outbound API Gateway/call costs scale with `workflow instances × steps`, typically far smaller in raw broker egress terms but concentrated in one team's budget line and requiring that team to provision for peak concurrent-workflow load explicitly (§7's benchmarking point). The honest CFO framing: choreography tends to have a *lower, more distributed* infrastructure bill that's harder to attribute to one workflow's true cost; orchestration has a *more visible, concentrated* bill that's easier to attribute and forecast but requires deliberate capacity planning for one component — neither is unconditionally cheaper, and the right comparison requires modeling both at the organization's actual projected scale, not assuming either style's cost profile from first principles alone.
-8. **Q: A regulator requires a complete, tamper-evident audit trail of the exact sequence and outcome of every step in a multi-step settlement workflow. Which coordination style natively provides this, and what specific additional instrumentation does the other style require to reach parity?**
- **A:** Orchestration natively provides this — the orchestrator's own persisted workflow-instance state (§9, §Advanced Q3's versioned definition) is, by construction, a single, authoritative, sequential record of exactly which steps executed, in what order, with what outcome, requiring no additional reconstruction. Choreography does *not* natively provide this — its "audit trail" is scattered across every participating service's own independent event log, with no single record confirming the *actual* sequence versus the *expected* sequence, and no native guarantee that a compliance auditor can reconstruct one from many; reaching parity requires exactly Expert Q6's correlation/causation-tagged distributed tracing, persisted durably (not just held transiently in a tracing backend's retention window) and treated as a first-class, retained compliance artifact — effectively building, after the fact, the same authoritative sequential record orchestration provides natively, at additional engineering and storage cost. This is a concrete, decision-relevant point in favor of orchestration specifically for regulator-facing, audit-critical workflows, independent of the other trade-offs already covered.
-9. **Q: Could an orchestrator itself be implemented using Event Sourcing (persisting the orchestrator's own state purely as an append-only log of the events that drove its decisions, rather than as mutable current-state rows), and what would that trade off?**
- **A:** Yes — this is a well-established pattern (an "event-sourced saga/process manager"): rather than persisting the orchestrator's workflow-instance state as a mutable row updated in place at each step, persist an append-only log of every decision/step-outcome event, with the orchestrator's *current* state derived by replaying that log. This gains Event Sourcing's full benefits at the orchestrator layer specifically: a complete, replayable audit trail natively satisfying Expert Q8's regulator requirement with no additional instrumentation, and the ability to reconstruct the orchestrator's exact reasoning at any point in a workflow's history for debugging. The trade-off: replay cost grows with a long-running workflow's event history (mitigated by periodic snapshotting, the standard Event Sourcing technique), and the orchestrator's own internal complexity increases meaningfully versus a simple mutable-state-row implementation — a trade-off worth making specifically when the audit/replay benefit is a genuine, stated requirement (regulated settlement workflows), and likely not worth it for a low-stakes, short-lived workflow where a mutable state row is simpler to build and reason about.
-10. **Q: Deliver the closing synthesis: what is the single deepest, most easily overlooked failure mode connecting Event Notification/State-Transfer, Choreography/Orchestration, and Topic/Queue design, and how does a Principal Engineer institutionalize protection against it across an organization?**
- **A:** Every one of this module's core distinctions is, underneath its surface framing, the same question asked at a different layer: **"is this design decision still valid at the current scale and complexity, or was it made once, for a smaller/simpler version of this system, and never revisited?"** — a notification-vs-state-transfer choice made when a data field was genuinely low-stakes becomes wrong silently as that field's downstream consequences grow; a choreography choice reasonable at four services becomes wrong silently at twelve (§4's incident); a topic/queue choice reasonable at one subscriber type becomes wrong silently when a second, different-purpose subscriber is added to what should have stayed a queue. None of these failures announce themselves — each produces correct-looking behavior right up until the specific condition that exposes the now-stale assumption occurs, exactly why the incident took three hours to diagnose rather than being caught earlier. The institutional protection is the same pattern this course applies recurrently: convert each of these implicit, point-in-time architectural choices into an **explicit, periodically-reviewed, owned artifact** (Advanced Q1's living workflow registry, generalized to event-schema and topic/queue design decisions too) with a stated re-evaluation trigger tied to a concrete, measurable signal (subscriber count, payload size, workflow step count, data-sensitivity classification) — not a one-time design-review checkbox, but a standing governance practice that assumes every architectural decision in this module has a shelf life determined by the system's growth, and builds in the checkpoint that catches it before a customer complaint does.
-
----
-
-## 11. Coding Exercises
-
-### Easy — Event Notification with fetch-back
-```csharp
-public class ThinOrderPlacedEvent
-{
-    public string OrderId { get; set; } = default!; // minimal payload -- just enough to identify the event
-}
-
-public class InventoryEventHandler
-{
-    private readonly IOrderServiceClient _orderClient; // synchronous fetch-back REQUIRED
-    public async Task HandleAsync(ThinOrderPlacedEvent evt)
-    {
-        var order = await _orderClient.GetOrderAsync(evt.OrderId); // reintroduces availability dependency
-        await _inventoryReservation.ReserveAsync(order.Items);
-    }
-}
-```
-
-### Medium — Event-Carried State Transfer (availability-decoupled)
-```csharp
-public class FatOrderPlacedEvent
-{
-    public string OrderId { get; set; } = default!;
-    public string CustomerId { get; set; } = default!;
-    public List<OrderItem> Items { get; set; } = new; // full data embedded -- immutable fact about placement
-    public decimal TotalAmount { get; set; }
-    // Deliberately OMITS current customer risk-score -- that's mutable, time-sensitive context
-    // fetched fresh by Fraud-Check if/when it needs it, NOT embedded here.
-}
-
-public class ShippingEventHandler
-{
-    public Task HandleAsync(FatOrderPlacedEvent evt)
-    {
-        // NO call back to Order Service needed -- fully self-sufficient, even if Order Service is down.
-        return _shippingScheduler.ScheduleAsync(evt.OrderId, evt.Items);
-    }
-}
-```
-
-### Hard — Choreographed reaction chain with a workflow-completion monitor (§Advanced Q5, mitigating)
-```csharp
-public class WorkflowCompletionMonitor: BackgroundService
-{
-    protected override async Task ExecuteAsync(CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            var stalledOrders = await _repository.FindOrdersWithoutTerminalEventAsync(
-                triggeringEvent: "OrderPlaced",
-                    terminalEvent: "OrderShipped",
-                    maxAge: TimeSpan.FromHours(2)); // expected completion window for this workflow
-
-            foreach (var stalled in stalledOrders)
-                await _alerting.RaiseAsync($"Order {stalled.OrderId} stalled: OrderPlaced at " +
-                $"{stalled.PlacedAt}, no OrderShipped after 2h -- workflow likely stuck mid-chain");
-
-            await Task.Delay(TimeSpan.FromMinutes(5), ct);
-        }
-        // Converts the "customer complains, 3-hour manual investigation" into a proactive alert
-        // WITHOUT requiring a full migration to orchestration for workflows staying choreographed.
-    }
-}
-```
-
-### Expert — Orchestrated Saga with explicit, versioned workflow definition (§Advanced Q3)
-```csharp
-public class OrderFulfillmentOrchestrator
-{
-    public async Task<WorkflowResult> ExecuteAsync(OrderPlacedEvent trigger)
-    {
-        var instance = new WorkflowInstance(trigger.OrderId, workflowDefinitionVersion: "v2"); // PINNED at start
-
-        try
-        {
-            await _inventoryClient.ReserveAsync(trigger.OrderId, instance.DefinitionVersion);
-            await _paymentClient.ChargeAsync(trigger.OrderId, instance.DefinitionVersion);
-            await _fraudCheckClient.VerifyAsync(trigger.OrderId, instance.DefinitionVersion); // explicit GATE
-            await _shippingClient.ScheduleAsync(trigger.OrderId, instance.DefinitionVersion);
-            return WorkflowResult.Success(instance);
-        }
-        catch (FraudCheckFailedException)
-        {
-            // Explicit compensation -- visible HERE, not scattered across independently-reacting services.
-            await _paymentClient.RefundAsync(trigger.OrderId);
-            await _inventoryClient.ReleaseReservationAsync(trigger.OrderId);
-            return WorkflowResult.Compensated(instance, reason: "Fraud check failed");
-        }
-        // A NEW workflow definition (e.g., "v3", adding a loyalty-points step) only applies to
-        // NEWLY-STARTED instances -- this in-flight instance stays on "v2" for its entire lifecycle.
-    }
-}
-```
-**Discussion**: this orchestrator makes Fraud-Check an explicit **gate** with explicit compensation (directly resolving Advanced Q6's gating-vs-non-gating ambiguity that caused the incident) — had the original system used this pattern instead of choreography for the sequential core workflow, Shipping's dependency on Fraud-Check's outcome would have been visible in one place, and the on-call engineer would have found the stuck workflow in minutes by reading this one method, not three hours reconstructing implicit subscription relationships across twelve independently-deployed services.
-
----
-
-## 12. System Design
-
-**Scenario:** Design the event backbone coordinating a multi-tenant institutional trade-settlement platform's core workflow — trade capture → risk check → counterparty confirmation → settlement instruction generation — used by both a low-latency, high-volume equities desk and a lower-volume, higher-value fixed-income desk on the same platform.
-
-**Functional requirements:**
-- Coordinate the four-step settlement workflow with an explicit, auditable record of each step's outcome (regulator-facing, per §Expert Q8).
-- Support independent, non-gating side reactions (analytics, client notifications, regulatory-reporting feed population) without coupling them to the core workflow's critical path.
-- Allow the equities and fixed-income desks' materially different volume/latency profiles to scale independently.
-
-**Non-functional requirements:**
-- Every settlement-affecting step must be traceable to a specific, ordered sequence — no ambiguity about what happened and in what order (directly Expert Q8's regulator requirement).
-- The core workflow must tolerate a single downstream service (e.g., a slow counterparty-confirmation integration) being degraded without silently stalling with no visibility, the exact failure mode in §4.
-- Side reactions must never be able to block or delay the core settlement path.
-
-**Back-of-the-envelope estimation:** Equities desk: ~500,000 trades/day, sub-second settlement-instruction generation target. Fixed-income desk: ~8,000 trades/day, minutes-scale acceptable. At 500,000/day the equities workflow is firmly in "many, cheap, latency-sensitive" territory; at 8,000/day fixed-income is "few, individually higher-value, correctness-over-latency" territory — this asymmetry is the deciding input for the architecture below, not an incidental detail.
-
-**Architecture (hybrid, per §Advanced Q10's framework):** The four-step core workflow (trade capture → risk check → confirmation → settlement-instruction generation) is **orchestrated** — it has a genuine sequential/gating dependency at every step (a failed risk check must halt settlement-instruction generation and trigger compensating trade-cancellation, exactly Advanced Q6's gating criterion) and is exactly the kind of regulator-facing, audit-critical workflow Expert Q8 identifies as favoring orchestration natively. Side reactions (client notification, analytics ingestion, regulatory-reporting feed population) are **choreographed** — each independently subscribes to the orchestrator's step-completion events via a topic, with no gating relationship to the core workflow.
-
-**Components:** `SettlementOrchestrator` (sharded by trade ID, per §9); `RiskCheckClient`, `ConfirmationClient`, `SettlementInstructionClient` (the three downstream services the orchestrator calls, each behind the resilience patterns per Intermediate Q4); `WorkflowInstanceStore` (durable, replicated persistence of in-flight orchestrator state, per §Expert Q4); a fan-out topic (`SettlementStepCompleted`) for the choreographed side reactions; `WorkflowCompletionMonitor` (per §Advanced Q5) watching for trades that enter the workflow but never reach a terminal state within the expected window, separately calibrated per desk (equities: minutes; fixed-income: hours).
-
-**Database selection:** `WorkflowInstanceStore` on a strongly-consistent, low-latency relational store (trade ID as primary/shard key) — the orchestrator's state is exactly the kind of narrow, high-integrity, moderate-volume data a boring relational database is well-suited for, not a scale-driven NoSQL choice. The fan-out topic uses a broker sized for the equities desk's higher event volume, since it must absorb both desks' side-reaction traffic without the equities desk's throughput starving fixed-income's (mitigated by desk-specific partition keys, per the sibling module's ordering discipline).
-
-**Caching:** None on the orchestrator's authoritative workflow-state path (correctness-critical, per §9's CP-leaning default); a short-lived read cache is acceptable for the choreographed analytics/notification consumers, which tolerate eventual consistency by nature.
-
-**Messaging:** Orchestrator-to-downstream-service calls are synchronous within a resilience-pattern envelope (timeout, retry, circuit breaker) since the orchestrator needs each step's outcome before deciding the next; orchestrator-to-side-reaction is asynchronous fan-out via topic, since no side reaction's outcome gates anything.
-
-**Scaling:** Orchestrator instances sharded by trade ID (consistent hashing) so equities' higher volume scales via more orchestrator shards without touching fixed-income's shard allocation; side-reaction subscribers scale independently per subscriber type, unaffected by orchestrator scaling.
-
-**Failure handling:** A failed risk check triggers the orchestrator's own explicit compensation (trade cancellation, counterparty notification of cancellation) — visible in one place, per §11's Expert coding exercise. A downstream service outage (e.g., ConfirmationClient degraded) is contained by the resilience-pattern envelope around that specific call, not allowed to cascade into orchestrator unavailability for other in-flight workflows.
-
-**Monitoring:** Per-desk workflow-completion-monitor SLA (§Advanced Q5, desk-specific thresholds); orchestrator shard-level throughput and in-flight-instance-count dashboards (§7's benchmarking concern, watched continuously rather than only at load-test time); side-reaction topic lag as a separate, lower-severity signal, since side-reaction delay doesn't affect settlement correctness.
-
-**Trade-offs:** The hybrid adds the operational overhead of running and understanding two coordination styles simultaneously rather than one uniform style — accepted deliberately because forcing the side reactions into the orchestrator would add unnecessary coupling (§Advanced Q9) and forcing the core workflow into choreography would hide exactly the gating dependencies a regulator needs to see explicitly (§Expert Q8).
-
----
-
-## 13. Low-Level Design
-
-**Requirements:** The core settlement workflow's steps are explicit and centrally coordinated; side reactions are decoupled; the orchestrator's state survives a crash without losing or duplicating in-flight workflow progress; a new side reaction can be added without touching the orchestrator.
-
-**Class diagram:**
 ```mermaid
 classDiagram
     class IWorkflowOrchestrator~TTrigger~ {
@@ -417,7 +574,8 @@ classDiagram
     SideReactionHandler <|.. RegulatoryFeedHandler
 ```
 
-**Sequence diagram:**
+**13. Low-Level Design**
+
 ```mermaid
 sequenceDiagram
     participant T as Trade Capture
@@ -441,85 +599,661 @@ sequenceDiagram
     O->>O: mark WorkflowInstance Complete
 ```
 
-**Design patterns used:** **Mediator** (the orchestrator centralizes and mediates all inter-service calls for the core workflow, exactly the Mediator pattern's shape); **Observer/Pub-Sub** (choreographed side reactions independently observing the step-completed topic); **Command** (each orchestrator step — `CheckRisk`, `Confirm`, `GenerateInstruction` — is an encapsulated, individually retriable command); **Saga** (the orchestrator's compensation path on risk-check failure is a textbook orchestrated Saga, detailed in full in the later dedicated `36-Saga` module).
+### Module 53 — Event-Driven Architecture: Schema Evolution, Ordering & Partitioning, Delivery Semantics & Dead Letter Queues
+*Source: `02-Schema-Evolution-Ordering-DeliverySemantics-DLQ.md`*
 
-**SOLID mapping:** **Single Responsibility** — the orchestrator owns sequencing and compensation only, delegating the actual risk/confirmation/settlement logic to their respective clients. **Open/Closed** — a new side reaction implements `SideReactionHandler` and subscribes to the topic without any change to `SettlementOrchestrator`. **Liskov** — every `SideReactionHandler` implementation must tolerate receiving `StepCompleted` events out of its own control and process them without assuming a specific upstream ordering guarantee the topic doesn't provide across different side-reaction types. **Interface Segregation** — `IWorkflowOrchestrator` and `SideReactionHandler` are separate, narrow interfaces; a side-reaction implementer never depends on orchestrator-internal methods. **Dependency Inversion** — the orchestrator depends on `IEventPublisher` and the downstream clients as abstractions, not concrete broker or service implementations, allowing the broker technology to be swapped (the deferred `19-Kafka`/`20-RabbitMQ` decision) without touching orchestration logic.
+**Schema Registry Enforcement Flow**
 
-**Extensibility:** A new gating step (e.g., a sanctions-screening step) is added by extending `SettlementOrchestrator`'s sequence and its compensation logic explicitly — visible in one reviewable diff, per §Advanced Q6's gating criterion. A new non-gating side reaction requires zero orchestrator changes.
+```mermaid
+sequenceDiagram
+ participant Producer
+ participant Registry as Schema Registry
+ participant Broker
+ participant Consumer
+ Producer->>Registry: Register/validate new schema version against compatibility rule
+ Registry-->>Producer: REJECTED (breaking change) or APPROVED
+ Producer->>Broker: Publish event (only if APPROVED)
+ Consumer->>Registry: Fetch schema version to deserialize
+ Registry-->>Consumer: Schema definition
+```
 
-**Concurrency/thread safety:** `WorkflowInstance` persistence must use optimistic concurrency (a version column) or per-trade-ID locking, since a crash-recovered orchestrator instance picking up an in-flight workflow (§Expert Q4's HA pattern) must never race against a still-live instance also believing it owns that same workflow — enforced by sharding (only one orchestrator shard owns a given trade ID at a time) plus a persisted version check on every state write as a second, structural line of defense.
+**Partition Key and Ordering**
 
----
+```mermaid
+graph TB
+ subgraph "CORRECT: partition key = OrderId -- all events for Order 123 land in Partition 0, strictly ordered"
+ E1["OrderPlaced (Order 123)"] --> P0[Partition 0]
+ E2["OrderItemAdded (Order 123)"] --> P0
+ E3["OrderCancelled (Order 123)"] --> P0
+ end
+ subgraph "WRONG: no consistent key -- events for Order 456 scattered, NO ordering guarantee"
+ E4["OrderPlaced (Order 456)"] --> P1[Partition 1]
+ E5["OrderCancelled (Order 456)"] --> P2["Partition 2 (may be processed BEFORE E4!)"]
+ end
+```
 
-## 14. Production Debugging
+**Dead Letter Queue Flow**
 
-**Incident:** Six months after the orchestrator migration (§4's fix), the settlement-instruction orchestrator began silently losing in-flight workflow state during rolling deployments — trades that had passed risk-check and confirmation, but not yet reached settlement-instruction generation, occasionally never completed, with no compensation ever triggered and no error surfaced. Detection came from the same `WorkflowCompletionMonitor` built for the original choreographed system (§Advanced Q5) — repurposed, correctly, to watch the orchestrated workflow too — flagging trades stuck mid-sequence for longer than the desk-specific SLA.
+```mermaid
+graph LR
+ Stream[Main Event Stream] --> Consumer
+ Consumer -->|"success"| Ack[Acknowledge, continue]
+ Consumer -->|"failure, retry 1..N"| Retry[Retry with backoff]
+ Retry -->|"still failing after N retries"| DLQ[Dead Letter Queue]
+ DLQ -.->|"manual inspection / fix / reprocess"| Ops[Ops/Engineering]
+ Consumer -->|"meanwhile: next message"| Stream
+```
 
-**Root cause:** The orchestrator had been built holding each in-flight `WorkflowInstance`'s state **in memory**, persisting to the durable store only on workflow *completion*, as a latency optimization to avoid a database write on every intermediate step. During a rolling deployment, an orchestrator instance handling in-flight workflows was terminated by the deployment process before those workflows completed — their in-memory state was lost entirely, with nothing in the durable store to indicate they had ever reached risk-check-approved/confirmed status, since the "persist on completion only" design meant intermediate progress was never durably recorded.
+**13. Low-Level Design**
 
-**Investigation:** Correlating the stalled trades' timestamps against deployment logs showed every stalled trade's last-known state transition occurred within seconds of a rolling deployment event — narrowing the search immediately from "somewhere in three downstream integrations" to "the orchestrator's own state-handling." Reviewing the orchestrator's persistence code confirmed the in-memory-only intermediate-state design, made originally as a deliberate performance trade-off (avoiding a database round trip per step) without an explicit review of what happens to that in-memory state across a deployment or crash.
+```mermaid
+classDiagram
+    class ISchemaCache {
+        <<interface>>
+        +GetOrResolveAsync(schemaId) SchemaDefinition
+    }
+    class SchemaRegistryClient {
+        +RegisterAsync(schema) SchemaId
+        +ResolveAsync(schemaId) SchemaDefinition
+    }
+    class CachingSchemaResolver {
+        -ISchemaCache _cache
+        -SchemaRegistryClient _registry
+        +DeserializeAsync(message) TEvent
+    }
+    class IPartitionKeySelector~TEvent~ {
+        <<interface>>
+        +SelectKey(evt) string
+    }
+    class InstrumentIdKeySelector
+    class TradeIdKeySelector
+    class ResilientEventConsumer {
+        -IPartitionKeySelector~TEvent~ _keySelector
+        -IDeadLetterQueue _dlq
+        +HandleAsync(message) Task
+    }
+    class DlqCoverageValidator {
+        +ValidateReplayWindow(replayFrom, retention) CoverageResult
+    }
 
-**Tools:** `WorkflowCompletionMonitor` alerts (the detection signal); deployment-event timeline cross-referenced against workflow-instance last-transition timestamps; code review of the orchestrator's state-persistence layer, specifically searching for exactly which state transitions triggered a durable write versus which stayed in memory only.
+    CachingSchemaResolver --> ISchemaCache
+    CachingSchemaResolver --> SchemaRegistryClient
+    IPartitionKeySelector~TEvent~ <|.. InstrumentIdKeySelector
+    IPartitionKeySelector~TEvent~ <|.. TradeIdKeySelector
+    ResilientEventConsumer --> IPartitionKeySelector~TEvent~
+    ResilientEventConsumer --> DlqCoverageValidator
+```
 
-**Fix:** Changed persistence to durably write `WorkflowInstance` state on **every** step transition, not only on completion — exactly the HA pattern §Expert Q4 describes as a prerequisite for treating an orchestrator as genuinely highly available, which this implementation had never actually satisfied despite superficially appearing to (it persisted *something*, just not frequently enough to survive the actual failure mode that occurred). Added a deployment-time drain: new deployments stop accepting new workflow triggers on the terminating instance and wait for its in-flight workflows to either complete or reach a durably-persisted checkpoint before the instance is terminated, rather than relying on persistence-on-every-step alone to fully close the gap.
+**13. Low-Level Design**
 
-**Prevention:** The original performance trade-off (durability on every step vs. avoiding a database write per step) was made without an explicit trade-off review weighing correctness risk against the latency savings — added as a standing architecture-review checklist item: any stateful, in-flight-critical-path component's persistence strategy must explicitly state what state is lost under an unplanned instance termination, and that answer must be reviewed and consciously accepted, not left as an implicit consequence of a latency-motivated implementation choice. This is the same "declared ≠ actual" pattern recurring at the orchestrator-HA layer: the orchestrator was declared durable/HA (§Expert Q4's design intent) without the specific persistence-frequency detail that would have made that declaration actually true.
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant Reg as Schema Registry
+    participant B as Broker
+    participant C as ResilientEventConsumer
+    participant Cache as SchemaCache
+    participant DLQ as Dead Letter Queue
 
----
+    P->>Reg: register/validate schema (compatibility check)
+    Reg-->>P: APPROVED, schemaId
+    P->>B: publish(key=InstrumentId, schemaId, payload)
+    B->>C: deliver message
+    C->>Cache: GetOrResolveAsync(schemaId)
+    alt cache hit
+        Cache-->>C: SchemaDefinition (no registry call)
+    else cache miss
+        Cache->>Reg: ResolveAsync(schemaId)
+        Reg-->>Cache: SchemaDefinition
+        Cache-->>C: SchemaDefinition (now cached)
+    end
+    C->>C: deserialize + process
+    alt processing fails after N retries
+        C->>DLQ: publish(message, failureReason)
+        C->>B: acknowledge (unblock stream)
+    else success
+        C->>B: acknowledge
+    end
+```
 
-## 15. Architecture Decision
+### Module 140 — Event-Driven Architecture: Stream Processing — Stateful Operations, Windowing & Time Semantics
+*Source: `03-Stream-Processing-Stateful-Operations-Windowing-Time-Semantics.md`*
 
-**Context:** How should the core, gating settlement-workflow sequence (trade capture → risk check → confirmation → settlement-instruction generation) be coordinated, given the choice between choreography, pure orchestration, and the hybrid recommended in §12?
+**1. Fundamentals**
 
-**Option A — Full choreography (as originally built, §4):**
-*Advantages:* Maximum decoupling; each service scales and deploys independently; no orchestrator to build, scale, or make HA.
-*Disadvantages:* No native audit trail satisfying regulator requirements (§Expert Q8) without significant additional distributed-tracing instrumentation; workflow invisibility grows with participating-service count (§4's incident); implicit gating relationships (Fraud-Check inserted between Payment and Shipping) are easy to introduce accidentally and hard to detect until they fail.
-*Cost:* Low incremental cost per new reacting service; high, hidden cost in diagnostic/on-call time as complexity grows.
-*Complexity:* Low per-service; high in aggregate, and hard to see the aggregate at all.
-*Maintainability:* Degrades as participating-service count grows, exactly the failure mode observed.
-*Scalability:* Excellent — no coordinator bottleneck.
+```text
+Unbounded stream ──► [window: bound the unbounded] ──► [aggregate/join over the window] ──► emit result
+ ↑
+ time semantics decide which events fall in which window,
+ and watermarks decide when a window is complete enough to emit
+```
 
-**Option B — Full orchestration (every interaction, including non-gating side reactions, centralized):**
-*Advantages:* Maximum visibility and centralized compensation handling; natively satisfies audit requirements.
-*Disadvantages:* Unnecessary coupling for genuinely independent side reactions (§Advanced Q9's critique); orchestrator becomes the throughput ceiling for interactions that don't need to be gated at all (§7); orchestrator compromise has the largest possible blast radius, now including reactions that never needed centralized authority.
-*Cost:* Higher orchestrator build/scale/HA cost, paid even for low-stakes side reactions that didn't need it.
-*Complexity:* Concentrated in one component, which becomes large and harder to change safely as more interaction types are added to it regardless of whether they need gating.
-*Maintainability:* A single large orchestrator accumulates unrelated concerns over time without a forcing function to keep gating and non-gating logic separated.
-*Scalability:* Bounded by the orchestrator's own scaling ceiling for every interaction type it handles, including ones that individually would scale fine independently.
+**3. Visual Architecture**
 
-**Option C — Hybrid: orchestrate the gating core, choreograph the non-gating side reactions (recommended, per §12):**
-*Advantages:* Regulator-facing audit trail and centralized compensation exactly where genuinely needed (the gating steps); independent scaling and loose coupling preserved exactly where genuinely appropriate (the side reactions); matches Advanced Q6/Q9's gating-vs-non-gating criterion precisely rather than applying one style uniformly.
-*Disadvantages:* Requires the organization to correctly and consistently classify each interaction as gating or non-gating (§Advanced Q6) — a classification that can itself be gotten wrong, as §4's Fraud-Check incident shows; running two coordination styles simultaneously has genuine, non-zero operational-understanding overhead.
-*Cost:* Moderate — orchestrator build/HA cost is incurred, but scoped only to the interactions that need it.
-*Complexity:* Moderate, but *legibly* distributed — a team understands the core workflow by reading the orchestrator, and understands side reactions by their independent subscriptions, rather than one undifferentiated mass of coordination logic.
-*Maintainability:* Best of the three, provided the gating/non-gating classification is periodically re-reviewed (§Advanced Q1's governance checkpoint) as the workflow evolves.
-*Scalability:* Each style scales along its own natural dimension — the orchestrator scales with in-flight-workflow count, side reactions scale independently with their own subscriber pools.
+```mermaid
+graph LR
+ S[Event Stream] --> W{Windowing}
+ W -->|tumbling| T[Fixed, non-overlapping]
+ W -->|sliding| SL[Fixed size, overlapping]
+ W -->|session| SE[Gap-delimited, data-dependent]
+ T --> AGG[Aggregate]
+ SL --> AGG
+ SE --> AGG
+ AGG --> WM{Watermark passed?}
+ WM -->|yes| EMIT[Emit result]
+ WM -->|late arrival| LATE[Drop / side output / update]
+```
 
-**Recommendation: Option C, the hybrid**, for the same reason §4's actual remediation converged on it and §12's system design assumes it from the outset — it is the only option that maps coordination cost to genuine coordination need rather than applying a single style uniformly regardless of whether a given interaction has a real gating dependency. The residual risk (misclassifying an interaction) is real but is addressed structurally by Advanced Q1's living workflow registry and periodic re-evaluation checkpoint, not by defaulting to either uniform extreme.
+**3. Visual Architecture**
 
----
+```mermaid
+sequenceDiagram
+ participant Src as Source
+ participant SP as Stream Processor
+ participant Out as Downstream
 
-## 17. Principal Engineer Perspective
+ Src->>SP: event(t=10:00:03)
+ Src->>SP: event(t=10:00:01) ← out of order, fine
+ Note over SP: watermark advances to 10:00:05
+ SP->>Out: emit window [10:00:00–10:00:05)
+ Src->>SP: event(t=10:00:02) ← LATE, window already emitted
+ Note over SP: drop, side-output, or retract+re-emit
+```
 
-**Business impact:** The choice of coordination style is invisible to a customer right up until it fails visibly — a stuck order, a delayed settlement, a duplicated charge — at which point the business cost is measured in customer trust and, in a regulated financial context, potential compliance exposure (§Expert Q8). A Principal Engineer frames this decision to non-technical stakeholders not as "choreography vs. orchestration" but as "how quickly can we detect and explain what happened when something in this multi-step process goes wrong" — a framing that makes the trade-off's business consequence legible without requiring the audience to understand the underlying architecture.
+**3. Visual Architecture**
 
-**Engineering trade-offs:** The recurring trade across this entire module is **decentralized flexibility versus centralized legibility**, and no single choice wins unconditionally — the skill this module is actually teaching is recognizing which side of that trade a given interaction genuinely needs (§Advanced Q6/Q9), not memorizing "choreography is more scalable" or "orchestration is more visible" as universal truths.
+```mermaid
+graph TB
+ subgraph "Event time vs processing time divergence"
+ A["Consumer down 40 min"] --> B["Backlog drains in 30s"]
+ B --> C["Processing-time window: 40 min of events in one 5-min window"]
+ B --> D["Event-time window: events land in their correct windows"]
+ end
+```
 
-**Technical leadership:** The most valuable intervention a Principal Engineer makes here is rarely picking the style — it's installing the periodic re-evaluation checkpoint (§Advanced Q1) that catches a choice becoming wrong as the system grows, before a customer-facing incident forces the re-evaluation reactively. §4's incident and §14's follow-on incident both share this shape: a reasonable choice, made once, that quietly stopped being reasonable and had no mechanism forcing anyone to notice.
+**13. Low-Level Design**
 
-**Cross-team communication:** In a hybrid architecture, the boundary between "this is orchestrated" and "this is choreographed" must be an explicit, documented, discoverable fact — not tribal knowledge held by whoever built the orchestrator — so that a team adding a new interaction months later can correctly self-classify it as gating or non-gating without needing to ask the original architect.
+```mermaid
+classDiagram
+ class WindowResult {
+ +InstrumentId Instrument
+ +DateTimeOffset WindowStart
+ +decimal Volume
+ +IReadOnlyList~VenueId~ ContributingSources
+ }
+ class IWatermarkGenerator {
+ <<interface>>
+ +ComputeWatermark(stats, maxEventTime) DateTimeOffset
+ }
+ class AdaptiveWatermarkGenerator
+ class CompletenessEvaluator {
+ +Evaluate(window, expected) AlertDecision
+ }
+ class IQuoteBuffer {
+ <<interface>>
+ +EvictOlderThan(t) void
+ +LatestAtOrBefore(instrument, t) Quote
+ }
+ class IStateStore {
+ <<interface>>
+ +Get(key) WindowState
+ +Put(key, state) void
+ }
 
-**Architecture governance:** Require, for every new event-driven workflow crossing more than two or three services, an explicit, reviewed statement of its coordination style and the reasoning behind it (Advanced Q10's four-question checklist) as a lightweight architecture-decision-record — cheap to produce at design time, and exactly the artifact that would have made §4's Fraud-Check ambiguity visible during review instead of during an incident.
+ IWatermarkGenerator <|.. AdaptiveWatermarkGenerator
+ CompletenessEvaluator --> WindowResult
+```
 
-**Cost optimization:** §Expert Q7's CFO-level cost modeling matters here specifically because the two styles' costs are shaped completely differently (distributed-and-hidden vs. concentrated-and-visible) — a naive comparison of "which is cheaper" without modeling at the organization's actual scale risks optimizing for the wrong thing, particularly since the concentrated orchestrator cost is more visible and therefore more likely to attract cost-cutting scrutiny than the distributed, equally real choreography cost.
+### Module 141 — Event-Driven Architecture: Backpressure, Flow Control & Consumer Lag at Scale
+*Source: `04-Backpressure-Flow-Control-Consumer-Lag.md`*
 
-**Risk analysis:** The dominant risk pattern across both this module's production incidents (§4, §14) is the same: a design decision that was correct for the conditions it was made under, silently becoming incorrect as conditions changed (growing service count; a deployment pattern the original persistence design never accounted for) — risk registers for event-driven systems should track *the conditions under which each coordination-style and persistence decision remains valid*, not just the decision itself, so a changing condition is a visible trigger for re-review rather than a silent invalidation.
+**1. Fundamentals**
 
-**Long-term maintainability:** A hybrid architecture's long-term health depends entirely on the gating/non-gating classification staying accurate as the workflow gains new steps over years, not just at initial design time — the single highest-leverage maintainability investment is making that classification an explicit, versioned artifact (the living workflow registry) rather than something inferred anew, incorrectly, by each engineer who touches the workflow next.
+```text
+Producer ──► [broker: absorbs mismatch, retains for N days] ──► Consumer
+ │ │
+ lag grows ◄────── consumer slower than producer ┘
+ │
+ retention boundary ──► data loss (unrecoverable)
+```
 
-## 18. Revision
-**Key takeaways**: Event Notification (thin, fetch-on-demand) trades availability-decoupling for data freshness; Event-Carried State Transfer (fat, self-sufficient) trades data-freshness risk for full availability decoupling — choose based on each specific piece of data's actual staleness tolerance, not a blanket system-wide default. Choreography (decentralized, independently-reacting services) offers loose coupling and easy extensibility but risks workflow invisibility as complexity grows; orchestration (a central, explicit coordinator) offers visibility and centralized compensation handling but adds central coupling — most mature systems use a deliberate hybrid, orchestrating genuinely sequential/gating workflows and choreographing genuinely independent side reactions (§Advanced Q6, Q9), with an explicit, periodic re-evaluation checkpoint as either style's complexity grows (§Advanced Q1). Topics serve fan-out to independent subscribers; queues serve load-balanced competing consumers — using the wrong one silently breaks the intended delivery semantics.
+**3. Visual Architecture**
 
----
+```mermaid
+graph LR
+ P[Producer] --> B[(Broker<br/>retention: 7 days)]
+ B --> C[Consumer]
+ B -.lag in time.-> M[Lag Monitor]
+ M -.ratio vs retention.-> A[Alert]
+ C --> D[Downstream dependency]
+```
 
-**Next**: Continuing to Module 53 — Event-Driven Architecture: Event Schema Design & Versioning, Ordering & Partitioning, Delivery Semantics (At-Least-Once/Exactly-Once), Idempotent Consumers & Dead Letter Queues, completing the core `18-Event-Driven-Architecture` conceptual arc before the dedicated `19-Kafka`/`20-RabbitMQ` broker-specific modules.
+**3. Visual Architecture**
+
+```mermaid
+graph TB
+ subgraph "Lag diagnosis by signal"
+ L{Lag rising} --> U{Uniform across partitions?}
+ U -->|yes| S1[Insufficient parallelism<br/>or slow processing]
+ U -->|no| S2{One partition only?}
+ S2 -->|yes| P1[Poison message —<br/>blocked, retrying]
+ S2 -->|no| P2[Partition skew]
+ end
+```
+
+**3. Visual Architecture**
+
+```mermaid
+sequenceDiagram
+ participant C as Consumer (4h behind)
+ participant D as Downstream
+
+ Note over C: Capacity restored
+ C->>D: burst — hours of load in minutes
+ D-->>C: saturation
+ Note over C,D: Catch-up takes down dependencies<br/>that survived the outage
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class LagState {
+ +TimeSpan Lag
+ +double ConsumeRatePerSecond
+ +int SustainedRiseMinutes
+ }
+ class ConsumerPolicy {
+ +TimeSpan Retention
+ +double RetentionFraction
+ +double DownstreamBurstCapacity
+ }
+ class LagAlertEvaluator {
+ +Evaluate(state, policy) IReadOnlyList~LagAlert~
+ }
+ class IDownstreamCapacity {
+ <<interface>>
+ +CurrentSafeRate int
+ }
+ class LagDiagnoser {
+ +Diagnose(partitions) LagDiagnosis
+ }
+ class ICatchUpStatePublisher {
+ <<interface>>
+ +Publish(lag, throttled, rate) void
+ }
+
+ LagAlertEvaluator --> LagState
+ LagAlertEvaluator --> ConsumerPolicy
+```
+
+### Module 142 — Event-Driven Architecture: Cross-Region & Multi-Cluster Event Distribution
+*Source: `05-CrossRegion-MultiCluster-Event-Distribution.md`*
+
+**1. Fundamentals**
+
+```text
+Region A cluster ──(async replication, its own lag)──► Region B cluster
+ │ │
+ local offsets 0..N local offsets 0..M (different numbering)
+ │ │
+ local consumers, local ordering guaranteed local consumers, local ordering guaranteed
+ │
+ NO ordering guarantee BETWEEN regions
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph LR
+ subgraph "Region A (primary)"
+ PA[Producers] --> CA[(Cluster A<br/>offsets 0..N)]
+ end
+ subgraph "Region B (DR / secondary)"
+ CB[(Cluster B<br/>offsets 0..M — different numbering)]
+ CB --> CA2[Consumers, post-failover]
+ end
+ CA -.async replication, own lag.-> CB
+ CA --> CxA[Consumers, normal operation]
+```
+
+**3. Visual Architecture**
+
+```mermaid
+sequenceDiagram
+ participant RA as Region A (primary)
+ participant Rep as Replicator (async)
+ participant RB as Region B (DR)
+ participant Con as Consumer
+
+ RA->>RA: produce event E (ack'd)
+ Note over RA,Rep: E not yet replicated (~90s lag)
+ RA->>RA: Region A outage
+ Note over Rep,RB: Replication link dies mid-flight
+ Con->>RB: failover, resume at "latest" in B
+ Note over Con: E was never replicated —<br/>silently absent, no error anywhere
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph TB
+ subgraph "Active-active split-brain"
+ K[Same key] --> A1[Region A: local write 1, local write 2]
+ K --> B1[Region B: local write 1']
+ A1 -.replicates after partition heals.-> B1
+ B1 -.replicates after partition heals.-> A1
+ A1 --> M[Merged by arrival order,<br/>not causal order]
+ B1 --> M
+ M --> D[Divergent final values<br/>per region]
+ end
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class ReplicatedEvent {
+ +string OriginClusterId
+ +Guid EventId
+ +DateTimeOffset EventTime
+ }
+ class IReplicationGate {
+ <<interface>>
+ +ShouldReplicate(evt, localClusterId) bool
+ +TagForReplication(evt, producingClusterId) ReplicatedEvent
+ }
+ class IOwnershipDirectory {
+ <<interface>>
+ +GetOwnerAsync(entityKey) RegionOwner
+ }
+ class OwnershipRouter {
+ +ResolveWriteRegionAsync(entityKey) string
+ +RouteWriteAsync(entityKey, evt, clients) void
+ }
+ class ResidencyClassifier {
+ +IsReplicableTo(topic, region) bool
+ }
+ class ConsistencyCanary {
+ +RunConsistencyCanaryAsync(keys, clients, maxLag) ConsistencyReport
+ }
+
+ OwnershipRouter --> IOwnershipDirectory
+ IReplicationGate --> ReplicatedEvent
+```
+
+### Module 143 — Event-Driven Architecture: Idempotency, Exactly-Once Processing & Deduplication at Scale
+*Source: `06-Idempotency-ExactlyOnce-Deduplication-At-Scale.md`*
+
+**1. Fundamentals**
+
+```text
+Producer ──(at-least-once, retries on ambiguous failure)──► Broker ──► Consumer
+ │
+ Has this idempotency key
+ been processed before?
+ │ │
+ Yes No
+ │ │
+ Skip / return Process + record key
+ prior result atomically with the effect
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph LR
+ P[Producer] -->|at-least-once, retries on ambiguity| B[(Broker)]
+ B --> C[Consumer]
+ C --> DK{Dedup key seen<br/>before?}
+ DK -->|yes| Skip[Skip — return prior result]
+ DK -->|no| Tx[Single transaction:<br/>apply effect + record key]
+ Tx --> State[(State store)]
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph TB
+ subgraph "Kafka exactly-once boundary"
+ Consume[Consume] --> Process[Process/transform]
+ Process --> Produce[Produce to output topic]
+ Produce --> Commit[Commit offset]
+ end
+ Process -.side effect OUTSIDE the transaction.-> Ext[External API call —<br/>NOT covered by the guarantee]
+ style Ext fill:#f66,color:#fff
+```
+
+**3. Visual Architecture**
+
+```mermaid
+sequenceDiagram
+ participant C as Consumer (idempotent internally)
+ participant G as Payment Gateway (no idempotency-key support)
+
+ C->>G: charge card (attempt 1)
+ G--xC: timeout, ambiguous outcome
+ Note over C: Internal dedup key not yet recorded —<br/>consumer correctly retries
+ C->>G: charge card (attempt 2)
+ Note over C,G: Both attempts may have succeeded at G —<br/>internal idempotency did not prevent this
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class IdempotencyKeyGenerator {
+ +DeriveIdempotencyKey(operation) string
+ }
+ class IIdempotentProcessor~T~ {
+ <<interface>>
+ +ProcessIdempotentlyAsync(key, effect) ProcessResult
+ }
+ class DedupCoverageValidator {
+ +ValidateReplayWindow(replayFrom, retention) CoverageResult
+ }
+ class ExternalEffectReconciler {
+ +ReconcileExternalChargesAsync(attempts, gateway, windowStart) ReconciliationReport
+ }
+ class ChargeDiscrepancy {
+ +string ReferenceId
+ +DiscrepancyType Type
+ }
+
+ IIdempotentProcessor~T~ --> IdempotencyKeyGenerator
+ ExternalEffectReconciler --> ChargeDiscrepancy
+```
+
+### Module 144 — Event-Driven Architecture: Testing, Contract Testing & Chaos Engineering for Event Pipelines
+*Source: `07-Testing-ContractTesting-ChaosEngineering-EventPipelines.md`*
+
+**1. Fundamentals**
+
+```text
+Unit tests ──► verify logic in isolation (necessary, not sufficient)
+ │
+Contract tests ──► verify producer/consumer agree on schema + semantics, independently deployable
+ │
+Replay-based tests ──► verify behavior against real historical event sequences, including edge cases
+ │
+Chaos experiments ──► verify behavior under real failure: broker loss, lag, duplication, poison messages
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph TB
+ subgraph "Testing pyramid for event-driven systems"
+ U[Unit tests<br/>logic in isolation] --> CT[Contract tests<br/>producer/consumer agreement]
+ CT --> RT[Replay-based tests<br/>real historical sequences]
+ RT --> CH[Chaos experiments<br/>real broker/lag/duplication conditions]
+ end
+ CH -.does not replace.-> PV[Production verification:<br/>reconciliation, canaries, DLQ monitoring]
+```
+
+**3. Visual Architecture**
+
+```mermaid
+sequenceDiagram
+ participant Prod as Producer CI
+ participant CR as Contract Registry
+ participant Cons as Consumer's registered contract
+
+ Prod->>CR: Publish schema change
+ CR->>Cons: Verify against EVERY registered consumer contract
+ alt Contract satisfied
+ CR-->>Prod: Deploy permitted
+ else Contract violated
+ CR-->>Prod: Deploy BLOCKED — before it reaches production
+ end
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph LR
+ subgraph "Chaos experiment: inject condition, not symptom"
+ A[Kill broker node] --> B[Observe: does failover<br/>meet actual RPO?]
+ C[Inject 90s replication delay] --> D[Observe: does the alert<br/>that should fire, fire?]
+ E[Duplicate a message] --> F[Observe: is the effect<br/>applied exactly once?]
+ end
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class ConsumerContract {
+ +IReadOnlyList~FieldRequirement~ RequiredFields
+ +IReadOnlyList~StructuralAssumption~ StructuralAssumptions
+ }
+ class IContractVerifier {
+ <<interface>>
+ +VerifyContract(sample, contract) ContractVerificationResult
+ }
+ class IReplayFixtureSource {
+ <<interface>>
+ +StreamAsync(windowTag) IAsyncEnumerable~CapturedEvent~
+ }
+ class IChaosInjector {
+ <<interface>>
+ +InjectAsync(condition, blastRadius, abortAfter) Task
+ }
+ class ILivenessMonitor {
+ <<interface>>
+ +WaitForStallDetectionAsync(correlationId, timeout) StallDetection
+ }
+
+ IContractVerifier --> ConsumerContract
+```
+
+### Module 145 — Event-Driven Architecture Capstone: A Firm-Wide Event Backbone, From Order Capture to Regulatory Reporting
+*Source: `08-Capstone-FirmWide-Event-Backbone-OrderCapture-To-RegulatoryReporting.md`*
+
+**1. Fundamentals**
+
+```text
+Order Capture (choreographed/orchestrated)
+ │
+ ▼
+Execution Reports (schema-governed, ordered, DLQ-protected)
+ │
+ ├──► Stream Processing: real-time risk aggregation (windowed, watermarked)
+ │ │
+ │ ▼
+ │ Backpressure-managed consumers (lag-monitored, catch-up-throttled)
+ │
+ ├──► Cross-region replication: DR + follow-the-sun desks
+ │
+ ├──► Idempotent ledger/settlement posting (effectively-once)
+ │
+ └──► Regulatory reporting pipeline (fed by this backbone)
+
+Verified throughout by: contract tests, replay regression, chaos experiments, permanent reconciliation
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph TB
+ subgraph "Order Capture (orchestrated,/131)"
+ OMS[Order Management State Machine]
+ end
+ OMS -->|ExecutionReport, schema-governed, ordered| Backbone[(Event Backbone<br/>)]
+
+ Backbone -->|choreographed fan-out| Risk[Real-Time Risk Aggregation<br/>windowed, watermarked —]
+ Backbone -->|choreographed fan-out| Ledger[Idempotent Ledger Posting<br/>]
+ Backbone -->|choreographed fan-out| RegReport[Regulatory Reporting Pipeline<br/>]
+
+ Risk --> RiskConsumers[Backpressure-managed<br/>desk dashboards —]
+
+ Backbone -.async replication.-> DR[(DR / Follow-the-Sun Region<br/>)]
+ DR --> RiskDR[Risk Aggregation, DR region]
+ DR --> LedgerDR[Ledger Posting, DR region]
+
+ subgraph "Standing verification"
+ CT[Contract Tests] -.gates.-> Backbone
+ Chaos[Chaos Experiments] -.validates.-> Backbone
+ Recon[Permanent Reconciliation] -.catches residual.-> Ledger
+ Recon -.catches residual.-> Risk
+ end
+```
+
+**3. Visual Architecture**
+
+```mermaid
+sequenceDiagram
+ participant OMS as Order Mgmt (orchestrated)
+ participant BB as Event Backbone
+ participant Risk as Risk Stream Job (windowed)
+ participant DR as DR Region
+
+ OMS->>BB: ExecutionReport (idempotency key K)
+ BB->>Risk: consume, update window state
+ BB-->>DR: async replicate
+ Note over BB,DR: Regional failover mid-window
+ DR->>DR: resume risk job from replicated snapshot<br/>(itself lagging —)
+ DR->>DR: window re-finalizes with INCOMPLETE prior state
+ Note over DR: Event-level idempotency (K) correctly<br/>prevented re-processing E itself —<br/>but the WINDOW RESULT is a new aggregate identity
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph LR
+ subgraph "Capstone incident chain"
+ A[Cross-region failover<br/>] --> B[Stream job state<br/>reconstructed from lagging snapshot<br/>]
+ B --> C[Window re-finalizes,<br/>emits a result]
+ C --> D{Is this a duplicate?}
+ D -->|Event-level dedup checks: NO —<br/>this is a new aggregate, not a repeated event| E[Downstream double-counts exposure<br/>the exact gap]
+ end
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class BackboneStage {
+ +string Name
+ +bool RequiresSingleAuthoritativeStateTransition
+ +IReadOnlyList~ReplicatedArtifact~ ReplicatedArtifacts
+ }
+ class ReplicatedArtifact {
+ +string Name
+ +bool HasIndependentRpoValidation
+ +TimeSpan ReplicationCadence
+ }
+ class IWindowResultEmitter {
+ <<interface>>
+ +EmitWindowResultIdempotentlyAsync(result) EmissionResult
+ }
+ class DerivedArtifactAuditor {
+ +AuditComponent(component) IReadOnlyList~RpoGap~
+ }
+ class ComposedFailoverExperiment {
+ +RunAsync(job, injector, auditor, abortAfter) ExperimentResult
+ }
+
+ BackboneStage --> ReplicatedArtifact
+ IWindowResultEmitter --> BackboneStage
+```

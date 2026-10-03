@@ -1,6 +1,6 @@
 # Module 88 — DevOps: DevSecOps, Policy-as-Code & Platform Engineering (Capstone)
 
-> Domain: DevOps | Level: Beginner → Expert | Prerequisite: All prior DevOps modules (85–87) — this is the synthesizing capstone, directly paralleling [[../21-AWS/08-Observability-Cost-WellArchitectedFramework]], [[../22-Azure/08-Observability-Cost-WellArchitectedFramework]], and [[../23-Kubernetes/08-Observability-Multicluster-GitOps]]'s role in their own domains; [[01-InfrastructureAsCode-Terraform-State-Drift]] §Advanced Q10, [[02-ConfigurationManagement-Secrets-EnvironmentPromotion]] §Advanced Q10, and [[03-ReleaseDeploymentStrategies-BlueGreen-Canary-ProgressiveDelivery]] §Advanced Q10's governance frameworks are the three pillars this capstone unifies into one platform
+> Domain: DevOps | Level: Beginner → Expert | Prerequisite: All prior DevOps modules (85–87) — this is the synthesizing capstone, directly paralleling [[../21-AWS/01-AWS-Interview-Prep]], [[../22-Azure/01-Azure-Interview-Prep]], and [[../23-Kubernetes/01-Kubernetes-Interview-Prep]]'s role in their own domains; [[01-InfrastructureAsCode-Terraform-State-Drift]] §Advanced Q10, [[02-ConfigurationManagement-Secrets-EnvironmentPromotion]] §Advanced Q10, and [[03-ReleaseDeploymentStrategies-BlueGreen-Canary-ProgressiveDelivery]] §Advanced Q10's governance frameworks are the three pillars this capstone unifies into one platform
 
 ---
 

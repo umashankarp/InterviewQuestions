@@ -1,6 +1,6 @@
 # Module 195 — LINQ & EF Core: EF Core Modeling — Conventions, Keys & Properties, Relationships, Inheritance (TPH/TPT/TPC), Owned vs Complex Types, JSON, Value Conversions, Generated Values, Query Filters & Seeding
 
-> Domain: LINQ & EF Core | Level: Beginner → Expert | Prerequisite: [[01-EFCore-Foundations-DbContext-Lifetime-Pooling-Providers-Resilience-ReleaseStrategy]] (the `DbContext`, the cached model, per-instance state under pooling — assumed, not re-derived), [[../04-SQL-Server/12-Database-Design]] (normalisation, constraints, keys), [[../04-SQL-Server/01-Indexing-Query-Execution-Plans]] (what an index can and cannot do — §2.10 depends on it), [[../31-Domain-Driven-Design/02-TacticalDDD-Entities-ValueObjects-Aggregates]] (aggregates and value objects — what the model is being asked to persist), [[../01-CSharp/01-CSharp-Interview-Prep]] (records and `with` — the natural shape of a complex type)
+> Domain: LINQ & EF Core | Level: Beginner → Expert | Prerequisite: [[01-EFCore-Foundations-DbContext-Lifetime-Pooling-Providers-Resilience-ReleaseStrategy]] (the `DbContext`, the cached model, per-instance state under pooling — assumed, not re-derived), [[../04-SQL-Server/01-SQL-Server-Interview-Prep]] (normalisation, constraints, keys), [[../04-SQL-Server/01-SQL-Server-Interview-Prep]] (what an index can and cannot do — §2.10 depends on it), [[../31-Domain-Driven-Design/02-TacticalDDD-Entities-ValueObjects-Aggregates]] (aggregates and value objects — what the model is being asked to persist), [[../01-CSharp/01-CSharp-Interview-Prep]] (records and `with` — the natural shape of a complex type)
 >
 > **Scope note:** Second of four modules in `56-LINQ-EFCore`. Module 194 covered the runtime object (`DbContext`). This module covers what that object **knows**: the **model**. Every statement here is anchored to the Microsoft Learn *Modeling*, *Complex Types*, *Global Query Filters* and *What's New (EF 8/9/10)* pages and the entityframeworktutorial.net *Conventions / Configurations / Fluent API / Relationships / Inheritance / Shadow Property* pages (coverage matrix: Module 194 §1.6). Where Microsoft Learn documents a feature as **EF Core 11** — planned for November 2026 and **not released** — this module labels it as such and does not design around it.
 
@@ -771,7 +771,7 @@ Tenant filter in EF + RLS in the database; **no PAN or account numbers** in any 
 7. Microsoft Learn (SQL Server) — *Temporal tables*; *Row-Level Security*; *Index key size limits*
 8. entityframeworktutorial.net — *Conventions*, *Fluent API*, *Configure relationships*, *Inheritance (TPH/TPT/TPC)*, *Shadow Property*: https://www.entityframeworktutorial.net/efcore/entity-framework-core.aspx
 9. Martin Fowler — *ValueObject*: https://martinfowler.com/bliki/ValueObject.html
-10. This course: Module 192 (bitemporality), Module 194 (§2.6 pooled-state, §12 idempotency & RLS), `31-Domain-Driven-Design/02-TacticalDDD-Entities-ValueObjects-Aggregates`, `04-SQL-Server/12-Database-Design`
+10. This course: Module 192 (bitemporality), Module 194 (§2.6 pooled-state, §12 idempotency & RLS), `31-Domain-Driven-Design/02-TacticalDDD-Entities-ValueObjects-Aggregates`, `04-SQL-Server/01-SQL-Server-Interview-Prep`
 
 ---
 

@@ -3,7 +3,7 @@
 > Domain: Microservices | Audience: 14+ yrs, C#/.NET, interviewing for **Technical Lead / Solutions Architect / Application Architect**
 > Source: distilled from `17-Microservices/` Modules 49, 50, 51, 135, 136, 137, 138, 139, 173
 > Companion: [[../11-Design-Patterns/00-Design-Patterns-Interview-Master-Guide-DotNet-TechLead]] — the in-process GoF patterns
-> Prerequisite context: [[../16-Distributed-Systems/02-Failure-Detection-Idempotency-Outbox]], [[../36-Saga/01-Saga-Pattern-Deep-Dive]], [[../37-Outbox/01-Transactional-Outbox]], [[../31-Domain-Driven-Design/01-Strategic-Design-Bounded-Contexts]]
+> Prerequisite context: [[../16-Distributed-Systems/01-Distributed-Systems-Interview-Prep]], [[../36-Saga/01-Saga-Pattern-Deep-Dive]], [[../37-Outbox/01-Transactional-Outbox]], [[../31-Domain-Driven-Design/01-Strategic-Design-Bounded-Contexts]]
 
 ---
 
@@ -23,6 +23,11 @@
 
 **Part IV — Interview preparation**
 [§28 Forty questions](#28-forty-questions-calibrated-to-this-role) · [§29 Stories](#29-seven-stories-to-have-ready) · [§30 Design drill](#30-the-45-minute-system-design-drill) · [§31 Red flags](#31-red-flags--answers-that-lose-the-room) · [§32 .NET reference card](#32-net-reference-card) · [§33 Revision plan](#33-two-week-revision-plan)
+
+**Part V — Lead & Principal Depth** *(added 2026-10-03)*
+§34 Service-to-service security & zero trust · §35 Identity propagation & token exchange · §36 Multi-tenancy · §37 Workflow engines vs hand-rolled sagas · §38 BFF, API composition & GraphQL federation · §39 Modular monolith vs microservices · §40 Shared libraries, platforms & cross-service reporting · §41 DORA & SLOs · §42 Chaos engineering · §43 FinOps & capacity planning · §44 Regulated environments · §45 Technical strategy & governance · §46 Org design & Team Topologies · §47 Incident leadership · §48 Principal answer framework + 25 extra questions
+
+**Appendix** — Architecture diagrams preserved from the original Modules 49–51, 135–139, 173
 
 ---
 
@@ -2244,6 +2249,21 @@ The team that broke had changed nothing. The team that changed something saw not
 
 **CloudFront** is complementary, not a substitute: it terminates TLS at the edge (a genuine latency win even for uncacheable APIs) and offers origin failover groups.
 
+### 25.10 East-west traffic and load-balancer cost (added 2026-10-03 from Module 173 §2.8–2.9)
+
+**East-west options (service-to-service inside the VPC):**
+
+| Option | Strengths | Costs / risks |
+|---|---|---|
+| **Internal ALB per service** | simple ownership, L7 routing, health checks, WAF possible | one LB per service = many LCU and hourly charges; an extra network hop |
+| **Shared internal ALBs per bounded context** (host/path rules) | fewer LBs, cheaper | shared blast radius and rule limits; coordination between teams |
+| **Service mesh (Istio/Linkerd) / EKS service discovery** | client-side L7 balancing, mTLS, retries, per-request balancing for gRPC | operational complexity, sidecar overhead |
+| **VPC Lattice / Cloud Map** | managed service-to-service networking and discovery | AWS-specific, newer |
+
+**Cost as a design input:** ALB is billed by hourly charge plus **LCUs** (the max of new connections, active connections, processed bytes and rule evaluations). Clients that don't reuse connections (new TLS handshakes per request — e.g., `new HttpClient()` per call) inflate the new-connection dimension and the bill; **connection reuse via `IHttpClientFactory`/`SocketsHttpHandler` pooling is a billing lever**, not only a latency one.
+
+**Interview line:** "For east-west traffic I default to service discovery + client-side or mesh balancing for gRPC-heavy estates, internal ALBs for simple HTTP services, and I review LCU dimensions before adding per-service load balancers."
+
 ---
 
 ## 26. Blast radius
@@ -2672,4 +2692,1472 @@ dotnet-stack report   --process-id <pid>
 
 **Companion guide:** [[../11-Design-Patterns/00-Design-Patterns-Interview-Master-Guide-DotNet-TechLead]] — the fifteen in-process GoF patterns, on the same payment domain.
 
-**Source modules retained in full for depth:** `01`–`09` in this folder. This guide is the interview surface; the modules remain the reference behind it.
+**Source modules:** `01`–`09` were consolidated into this guide on 2026-10-03 (their diagrams are preserved at the end). Full originals: `git show ebb2d5c:17-Microservices/<file>.md`.
+
+---
+
+# Part V — Lead & Principal Depth
+
+> Added 2026-10-03 for **Lead / Principal Engineer / Architect** loops. Parts I–IV make you correct; Part V makes you *senior*: security across services, tenancy, workflow engines, API aggregation, the modular-monolith decision, shared code, cross-service data, delivery metrics, chaos, cost, regulated change, strategy, org design and incident leadership. Every section: **Key concepts → .NET/config example → interview questions with full answers → what a Principal adds.**
+
+| § | Topic | § | Topic |
+|---|---|---|---|
+| 34 | Service-to-service security & zero trust | 41 | DORA, SLOs & engineering effectiveness |
+| 35 | Identity propagation & token exchange | 42 | Chaos engineering & resilience verification |
+| 36 | Multi-tenancy in microservices | 43 | FinOps, capacity planning & unit economics |
+| 37 | Workflow engines vs hand-rolled sagas | 44 | Regulated environments: change, audit, DR evidence |
+| 38 | BFF, API composition & GraphQL federation | 45 | Technical strategy, roadmaps & architecture governance |
+| 39 | Modular monolith vs microservices — the decision | 46 | Org design: Conway, Team Topologies, ownership |
+| 40 | Shared libraries, platforms & cross-service data/reporting | 47 | Incident leadership & post-incident learning |
+| | | 48 | Principal answer framework + 25 extra Lead/Principal questions |
+
+---
+
+## 34. Service-to-Service Security & Zero Trust
+
+**Key concepts**
+- **Zero trust:** never trust the network location ("inside the VPC" ≠ trusted). Every call is **authenticated, authorized and encrypted**; least privilege; assume breach.
+- **Transport:** **mTLS** between services (certificates per workload, rotated automatically) — usually via a **service mesh** (Istio, Linkerd) or platform (App Mesh, Consul) so apps don't manage certificates.
+- **Workload identity:** SPIFFE/SPIRE IDs, Kubernetes service accounts + **IRSA/EKS Pod Identity** (AWS) or **Azure Workload Identity** — no long-lived secrets in pods.
+- **Authorization layers:** (1) network policy (who can connect), (2) mesh authorization policy (which workload may call which service/path), (3) **application authorization** (which *user/tenant* may act on which *object* — BOLA lives here and no mesh can do it for you).
+- **Secrets:** Key Vault / Secrets Manager via CSI driver or SDK with managed identity; automatic rotation; no secrets in config, images, env files in git, or logs.
+- **Supply chain:** signed images (Cosign/Notation), SBOMs, admission control (Kyverno/Gatekeeper), dependency scanning.
+- **Egress control:** allow-lists for outbound calls (SSRF and data-exfiltration defence).
+
+```yaml
+# Istio: require mTLS in the namespace, then allow only orders → payments on POST /payments
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata: { name: default, namespace: payments }
+spec: { mtls: { mode: STRICT } }
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata: { name: payments-allow-orders, namespace: payments }
+spec:
+  selector: { matchLabels: { app: payments-api } }
+  action: ALLOW
+  rules:
+  - from: [{ source: { principals: ["cluster.local/ns/orders/sa/orders-api"] } }]
+    to:   [{ operation: { methods: ["POST"], paths: ["/payments*"] } }]
+```
+
+```csharp
+// Secrets via managed identity — no connection-string secrets in config
+builder.Configuration.AddAzureKeyVault(new Uri(builder.Configuration["KeyVaultUri"]!), new DefaultAzureCredential());
+// AWS: AWSSDK.SecretsManager + IRSA; or the Secrets Store CSI driver mounting secrets as files
+```
+
+**Interview questions**
+
+**Q1. "Our services are inside a private VPC, so we don't need auth between them." Respond.**
+That's perimeter thinking; it fails the first time anything inside is compromised (a vulnerable dependency, an SSRF, a leaked kube credential) — lateral movement is then free. Zero trust means every call proves its identity (mTLS workload identity), is authorized against an explicit allow-list (mesh policy), and carries user context so the application can enforce object-level authorization. For PCI/SOX scope, segmentation and mutual authentication are also audit expectations.
+
+**Q2. Does a service mesh solve authorization?**
+It solves *service-level* authorization (orders may call payments' POST endpoint) and encryption. It can't decide whether *user 42 may refund payment 9* — that's domain authorization inside the service, using the propagated user/tenant identity. Principal answer: layer them, and be explicit about which layer enforces which rule.
+
+**Q3. How do you manage secrets for 200 services?**
+Workload identity to fetch from a central vault (or CSI-mounted, auto-rotated), no static credentials where the platform offers identity-based auth (RDS IAM auth, Azure AD auth for SQL, managed identities), rotation with dual-secret overlap, secret scanning in CI, and alerts on secret access anomalies.
+
+**Principal adds:** a threat model per critical flow, a "security paved road" (template with mTLS, OTel, auth, scanning) so security is the default, and evidence for auditors generated automatically.
+
+---
+
+## 35. Identity Propagation & Token Exchange
+
+**Key concepts**
+- The edge (API gateway/BFF) authenticates the **user** (OIDC). Downstream services need **who the user is** and **which service is calling**.
+- **Anti-pattern:** forwarding the user's original access token everywhere — wrong **audience**, over-broad scopes, a replayable token reaching services that shouldn't accept it.
+- **Better options:**
+  1. **OAuth 2.0 Token Exchange (RFC 8693) / On-Behalf-Of flow (Entra ID):** service A exchanges the user token for a new token scoped to service B (`aud = B`, narrow scopes, user claims preserved).
+  2. **Internal signed context token:** the gateway mints a short-lived internal JWT (user, tenant, roles) signed by an internal key; services trust only that issuer.
+  3. **Client credentials** for pure machine calls (no user), with the user ID passed as data only when auditing — never as an authorization claim.
+- **Async messages:** put the *acting principal* and *tenant* in the message envelope (signed or from a trusted producer); consumers authorize based on the producer identity + envelope.
+- Validate **audience** in every service; short token lifetimes; no tokens in logs.
+
+```csharp
+// On-Behalf-Of with Microsoft.Identity.Web: call PaymentsApi as the current user
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddMicrosoftIdentityWebApi(builder.Configuration.GetSection("AzureAd"))
+    .EnableTokenAcquisitionToCallDownstreamApi()
+    .AddDownstreamApi("PaymentsApi", builder.Configuration.GetSection("PaymentsApi"))   // scopes: api://payments/.default
+    .AddInMemoryTokenCaches();
+
+public class RefundsController(IDownstreamApi downstream) : ControllerBase
+{
+    [HttpPost("refunds")]
+    public async Task<IActionResult> Refund(RefundRequest r) =>
+        Ok(await downstream.PostForUserAsync<RefundRequest, RefundResult>("PaymentsApi", r));  // OBO token, aud = payments
+}
+```
+
+**Interview questions**
+
+**Q1. How do you propagate user identity across a chain of five services?**
+Authenticate at the edge; for each hop use token exchange/OBO so each downstream gets a token with its own audience and minimal scopes but the same subject; or have the gateway mint a short-lived internal context token from a trusted internal issuer. Each service validates issuer, audience and expiry, and enforces object-level rules itself. For async hops, carry the principal in the envelope from an authenticated producer.
+
+**Q2. Why not just pass the original token along?**
+Audience confusion (a token for the gateway accepted by payments), excessive scope, longer exposure surface, and a breach of any downstream service yields a token valid against all the others. Token exchange limits blast radius per hop.
+
+**Q3. How do you audit "who did this" in an async, multi-service flow?**
+Every command/event carries actor, tenant, correlation and causation IDs; services write audit records with those fields; an immutable audit store lets you reconstruct the chain. Machine-initiated actions record the service identity plus the originating human where applicable.
+
+---
+
+## 36. Multi-Tenancy in Microservices
+
+**Key concepts**
+- **Isolation models (per service, not just per system):**
+
+| Model | Isolation | Cost | Use for |
+|---|---|---|---|
+| **Pooled** (shared tables, `TenantId`) | logical | lowest | most SaaS tenants |
+| **Bridge** (schema/DB per tenant, shared compute) | data-level | medium | regulated or large tenants |
+| **Silo** (dedicated stack/cell per tenant) | full | highest | top-tier, data-residency, noisy tenants |
+
+- **Tenant context** comes from the token (never the request body), flows through every call and message, and scopes every query (EF Core global filter + **database RLS** as defence in depth).
+- **Noisy neighbour:** per-tenant rate limits, quotas, concurrency limits, fair queuing (per-tenant partitions or weighted scheduling), and moving heavy tenants to their own cell.
+- **Tenant routing:** a tenant directory/catalog service maps tenant → cell/region/database; cached aggressively; a critical dependency.
+- **Per-tenant operations:** onboarding automation, per-tenant config and feature flags, per-tenant backup/restore and data export/deletion (GDPR), per-tenant metrics and cost attribution.
+- **Data residency:** tenant pinned to a region; no cross-region replication of their PII.
+
+```csharp
+// Tenant context resolved once per request from claims
+public sealed class TenantContext(IHttpContextAccessor http)
+{
+    public string TenantId => http.HttpContext?.User.FindFirst("tenant_id")?.Value
+        ?? throw new UnauthorizedAccessException("No tenant");
+}
+builder.Services.AddScoped<TenantContext>();
+
+// EF Core global query filter (app-level isolation)
+public sealed class AppDb(DbContextOptions<AppDb> o, TenantContext tenant) : DbContext(o)
+{
+    public DbSet<Invoice> Invoices => Set<Invoice>();
+    protected override void OnModelCreating(ModelBuilder b) =>
+        b.Entity<Invoice>().HasQueryFilter(i => i.TenantId == tenant.TenantId);
+}
+// + SQL Server RLS / PostgreSQL RLS as the database-level guarantee; + per-tenant rate limiting partition key = tenant_id
+
+// Tenant → cell routing at the gateway (YARP)
+// route by header/claim: tenant directory lookup → cluster "cell-eu-2"
+```
+
+**Interview questions**
+
+**Q1. Design multi-tenancy for a B2B payments platform with 5,000 tenants, a few huge.**
+Pooled model for the long tail with tenant-scoped queries + RLS; bridge or silo (dedicated cells) for the largest and the regulated tenants; a tenant directory for routing; per-tenant quotas and fair scheduling; tenant ID on every event and log; per-tenant cost metering; automation for onboarding and tenant moves between cells.
+
+**Q2. How do you prevent one tenant's batch job from degrading everyone?**
+Per-tenant rate limits and concurrency caps at the gateway and in workers, separate queues or partitions per tier, weighted fair queuing, bulkheads per tier, and the ability to move a noisy tenant to a dedicated cell without code change.
+
+**Q3. How do you prove tenant isolation to an auditor?**
+Show layered controls (token-derived tenant, global filters, RLS, per-tenant encryption keys where required), automated cross-tenant access tests in CI, penetration test results, and audit logs that record tenant on every access.
+
+---
+
+## 37. Workflow Engines vs Hand-Rolled Sagas
+
+**Key concepts**
+- Long-running, multi-step business processes need **durable state, timers, retries, compensations, versioning and visibility**. Hand-rolling these in tables + background services is a common source of subtle bugs.
+- **Options:** **Temporal** (durable execution, code-as-workflow, .NET SDK), **Azure Durable Functions/Durable Task**, **AWS Step Functions** (JSON/ASL state machines), **MassTransit/NServiceBus sagas** (message-driven state machines), **Camunda/Zeebe** (BPMN, business-visible).
+- **Durable execution model** (Temporal/Durable Functions): workflow code is **replayed deterministically** from history → no `DateTime.Now`, random, or direct I/O inside workflow code; side effects live in **activities** (retried, idempotent).
+- **Versioning running workflows:** in-flight instances may run for days → patch/version APIs; never change workflow logic incompatibly without versioning.
+- **When hand-rolled is fine:** short, few-step sagas inside one team with a message bus framework (MassTransit state machines).
+
+```csharp
+// Temporal .NET SDK — durable payment workflow with compensation
+[Workflow]
+public class PayoutWorkflow
+{
+    [WorkflowRun]
+    public async Task<string> RunAsync(PayoutRequest req)
+    {
+        var opts = new ActivityOptions { StartToCloseTimeout = TimeSpan.FromMinutes(1),
+            RetryPolicy = new() { MaximumAttempts = 5, BackoffCoefficient = 2 } };
+
+        await Workflow.ExecuteActivityAsync((PayoutActivities a) => a.ReserveFundsAsync(req), opts);
+        try
+        {
+            var reference = await Workflow.ExecuteActivityAsync((PayoutActivities a) => a.SendToBankAsync(req), opts); // pivot
+            await Workflow.ExecuteActivityAsync((PayoutActivities a) => a.PostLedgerAsync(req, reference), opts);
+            return reference;
+        }
+        catch (ActivityFailureException)
+        {
+            await Workflow.ExecuteActivityAsync((PayoutActivities a) => a.ReleaseFundsAsync(req), opts);   // compensate
+            throw;
+        }
+    }
+}
+// Activities are normal, idempotent C# (DB/HTTP calls with idempotency keys). Workflow code must be deterministic.
+```
+
+**Interview questions**
+
+**Q1. Would you build sagas yourself or adopt a workflow engine?**
+For a few simple sagas, a message-bus state machine (MassTransit) is enough. Once flows are long-running (hours/days), have timers, human steps, many compensations, need visibility for operations and auditors, or exist across many teams, adopt a workflow engine — the durable-execution guarantees (retries, timers, state, history) are exactly the parts teams get wrong by hand. Weigh: operating it (or managed Temporal Cloud/Step Functions), lock-in, and the deterministic-code learning curve.
+
+**Q2. What are the pitfalls of durable workflow engines?**
+Non-deterministic workflow code (time, randomness, I/O) breaks replay; changing running workflows without versioning; huge histories (use continue-as-new); treating activities as non-idempotent; and putting business data in the workflow instead of your own stores.
+
+**Q3. How do you version a workflow that has 50,000 instances in flight?**
+Use the engine's versioning/patching API (branch on a version marker so old instances follow old logic and new ones new logic), or start new instances on a new workflow type and let old ones drain; test replay of recorded histories against the new code in CI.
+
+---
+
+## 38. BFF, API Composition & GraphQL Federation
+
+**Key concepts**
+- **API composition:** an aggregator calls several services and merges results — simple, but latency is the slowest call and availability multiplies; use parallel calls, timeouts, partial responses.
+- **BFF (Backend for Frontend):** one backend per client type (web, mobile, partner) owned by the client team — shapes responses for that UI, handles auth flows (cookie ↔ token for SPAs), reduces chattiness. Risk: business logic creeping into BFFs, duplicated across them.
+- **CQRS read model** when composition is too slow or too fragile: precompute the joined view from events.
+- **GraphQL:** clients ask for exactly what they need; **federation** (Apollo Federation, Hot Chocolate Fusion in .NET) composes subgraphs owned by services into one supergraph. Costs: query complexity limits, N+1 resolvers (DataLoader), caching is harder, field-level authorization, schema governance.
+- Choose: REST + BFF for a few well-known clients; GraphQL federation for many product teams and diverse UIs; read models for hot, complex views.
+
+```csharp
+// Aggregator/BFF endpoint: parallel calls, per-call timeouts, partial response on non-critical failure
+app.MapGet("/bff/portfolio/{accountId}", async (string accountId, PositionsClient pos, PricingClient px, NewsClient news, CancellationToken ct) =>
+{
+    var positionsTask = pos.GetAsync(accountId, ct);                                   // critical
+    var newsTask = news.GetHeadlinesAsync(accountId, ct).WaitAsync(TimeSpan.FromMilliseconds(300), ct); // optional
+    var positions = await positionsTask;
+    var prices = await px.GetPricesAsync(positions.Select(p => p.Isin), ct);           // dependent call
+    string[]? headlines = null;
+    try { headlines = await newsTask; } catch (Exception) { /* degrade: omit news */ }
+    return Results.Ok(new { positions, prices, headlines, partial = headlines is null });
+});
+
+// Hot Chocolate subgraph with DataLoader to avoid N+1
+public sealed class OrderType : ObjectType<Order> { }
+public class Query { public Task<Order?> GetOrder(Guid id, OrderByIdDataLoader loader) => loader.LoadAsync(id); }
+```
+
+**Interview questions**
+
+**Q1. A screen needs data from six services and is slow. Options?**
+Parallelize and set per-call timeouts with partial results; move to a BFF so the client makes one call; cache stable data; and if it's still slow or fragile, build a CQRS read model updated by events so the screen reads one store. Pick based on freshness requirements per field.
+
+**Q2. When would you introduce GraphQL federation?**
+When many client teams need different shapes of data spanning many services, and REST endpoints/BFFs are multiplying. Only with: schema ownership per subgraph, complexity/depth limits, DataLoader discipline, persisted queries, field-level authorization, and a platform team to run the gateway. Not for simple, stable APIs or public partner APIs that benefit from HTTP caching.
+
+**Q3. How do you keep BFFs from becoming a second monolith of business logic?**
+BFFs only aggregate, shape and handle client-specific concerns (auth flow, pagination for that UI); domain rules live in domain services; code review rules and architecture tests flag domain logic in BFFs; the client team owns its BFF.
+
+---
+
+## 39. Modular Monolith vs Microservices — the Decision
+
+**Key concepts**
+- **Microservices buy independent deployability and scaling** at the price of distributed-system complexity (network failures, eventual consistency, operational load, observability, contract governance).
+- **Modular monolith:** one deployable, strict internal module boundaries (separate projects, internal APIs, own schema per module, no cross-module table access) — gets most of the design benefit with none of the distribution cost; modules can be extracted later along proven seams.
+- **Signals you need separate services:** different scaling or availability profiles, different release cadences blocked by coordination, team count growth (Conway), regulatory isolation (PCI scope reduction), different technology needs, fault isolation requirements.
+- **Signals you over-split (distributed monolith):** lockstep deployments, chatty synchronous chains, shared databases, many services per developer, every feature touches 5 services.
+- Enforce module boundaries in a monolith with **architecture tests** (NetArchTest/ArchUnitNET), `internal` visibility, and per-module DbContexts/schemas.
+
+```csharp
+// Architecture test: Billing module must not reference Orders internals
+[Fact]
+public void Billing_does_not_depend_on_Orders_internals()
+{
+    var result = Types.InAssembly(typeof(Billing.BillingModule).Assembly)
+        .ShouldNot().HaveDependencyOn("Shop.Orders.Internal")
+        .GetResult();
+    Assert.True(result.IsSuccessful, string.Join(", ", result.FailingTypeNames ?? []));
+}
+
+// Per-module DbContext with its own schema
+public sealed class BillingDb(DbContextOptions<BillingDb> o) : DbContext(o)
+{
+    protected override void OnModelCreating(ModelBuilder b) => b.HasDefaultSchema("billing");
+}
+```
+
+**Interview questions**
+
+**Q1. A startup of 8 engineers wants microservices from day one. Advice?**
+Start with a modular monolith: clear bounded contexts as modules, separate schemas, an internal event bus, architecture tests. Deploy one unit, move fast, and extract a service only when a concrete driver appears (scaling, team autonomy, compliance). Early microservices mostly buy operational cost and premature boundaries.
+
+**Q2. We have 60 microservices and velocity is falling. Would you merge some?**
+Yes, where evidence shows a distributed monolith: services that always change and deploy together (git co-change analysis), chatty synchronous coupling, shared data. Merge them into one service with internal modules; keep separate those with genuinely independent scaling, ownership or compliance needs. Measure lead time and incident rate before and after.
+
+**Q3. How do you extract a service from a modular monolith safely?**
+Pick a module with a clean boundary (its own schema, events already used internally); put the module's API behind an interface used by callers; stand up the new service; switch calls via feature flag (Strangler Fig); migrate data (CDC or dual write then cutover); keep the old code path until the new one is proven; remove it.
+
+---
+
+## 40. Shared Libraries, Platforms & Cross-Service Data/Reporting
+
+**Key concepts — shared code**
+- **Shared libraries couple deployments** if they contain domain logic or force synchronized upgrades. Share **infrastructure plumbing** (logging, OTel, auth, resilience defaults) — not **domain models**.
+- Version with SemVer, keep them small, avoid transitive dependency hell, provide a support window, and automate upgrades (Renovate/Dependabot).
+- Prefer **platform capabilities** (sidecar/mesh, service templates, `.NET Aspire ServiceDefaults`-style packages, Dapr building blocks) over fat SDKs.
+- Contracts are shared as **schemas** (OpenAPI/Protobuf/Avro) and generated clients — not shared DTO assemblies that couple releases.
+
+**Key concepts — cross-service data and reporting**
+- Don't let reporting query service databases (that's a shared-database backdoor).
+- **Options:** events → analytics store/warehouse/lakehouse (Kafka → Snowflake/BigQuery/Databricks/Fabric), CDC from each service into a lake, **data products** owned by domains (**data mesh**) with published schemas and SLAs, operational read models for near-real-time views.
+- Reconciliation between operational truth and analytics is required for finance/regulatory numbers.
+
+```csharp
+// "Service defaults" package: shared plumbing, no domain logic (Aspire-style)
+public static class ServiceDefaults
+{
+    public static IHostApplicationBuilder AddServiceDefaults(this IHostApplicationBuilder b)
+    {
+        b.Services.AddOpenTelemetry().WithTracing(t => t.AddAspNetCoreInstrumentation().AddHttpClientInstrumentation().AddOtlpExporter())
+                                    .WithMetrics(m => m.AddAspNetCoreInstrumentation().AddRuntimeInstrumentation().AddOtlpExporter());
+        b.Services.AddHealthChecks();
+        b.Services.ConfigureHttpClientDefaults(h => h.AddStandardResilienceHandler());
+        b.Services.AddProblemDetails();
+        return b;
+    }
+}
+```
+
+**Interview questions**
+
+**Q1. Who owns the shared library, and how do you stop it becoming a coupling point?**
+A platform/enablement team owns it with SemVer, a changelog, deprecation windows and automated upgrade PRs. It contains only cross-cutting plumbing; domain types never go in. Breaking changes are rare and batched; services can lag a version within the support window. If upgrades require coordination across teams, the library is too big.
+
+**Q2. Finance wants a daily report joining data from 12 services. How?**
+Each service publishes domain events (or CDC via outbox) into an analytics platform; data engineering builds governed models in the warehouse/lakehouse; the report runs there with lineage. For regulatory figures, add reconciliation against each service's system of record. Never grant the reporting tool read access to service databases.
+
+**Q3. What is data mesh and when is it worth it?**
+Domain teams own and publish analytical data products (schema, quality, SLAs, discoverability) on a self-serve platform, with federated governance. Worth it for large organizations where a central data team is the bottleneck; overkill for small estates where a central warehouse fed by events works.
+
+---
+
+## 41. DORA, SLOs & Engineering Effectiveness
+
+**Key concepts**
+- **DORA four keys:** **deployment frequency**, **lead time for changes**, **change failure rate**, **time to restore (MTTR)** — plus reliability. Elite teams deploy on demand with lead time < 1 day, low failure rate and fast recovery. They measure the *system*, not individuals.
+- **SLI/SLO/error budget:** SLI = measured (e.g., % of payment API requests < 300 ms and successful); SLO = target (99.9% over 28 days); **error budget** = 1 − SLO (≈ 40 min/month) → spend it on change; when exhausted, prioritize reliability.
+- **Burn-rate alerts** (multi-window: e.g., 2% budget in 1 h and 5% in 6 h) instead of static thresholds.
+- Microservices-specific: per-service SLOs composed along critical user journeys; dependency SLOs; avoid alerting on every service's internal metrics.
+- **SPACE/DevEx** metrics for developer experience; avoid Goodhart's law (metrics as targets for individuals).
+
+```promql
+# Error-budget burn rate for a 99.9% SLO (fast-burn window)
+(
+  sum(rate(http_server_request_duration_seconds_count{service="payments",http_response_status_code=~"5.."}[1h]))
+/ sum(rate(http_server_request_duration_seconds_count{service="payments"}[1h]))
+) / (1 - 0.999) > 14.4
+```
+
+**Interview questions**
+
+**Q1. How do you measure whether the microservices migration is working?**
+DORA metrics per team before/after (deployment frequency, lead time, change failure rate, MTTR), SLO attainment on key user journeys, cost per transaction, incident counts by cause, and developer-experience surveys — reviewed as trends, not targets for individuals.
+
+**Q2. How do you set SLOs for a chain of services?**
+Start from user journeys (e.g., "checkout completes"), set a journey SLO, then derive service SLOs considering dependencies (a chain of 99.9% services can't deliver 99.9% end-to-end without retries/redundancy); give critical-path services tighter SLOs and add fallbacks for optional ones.
+
+**Q3. What happens when a team exhausts its error budget?**
+Feature work slows (or a freeze for risky changes), reliability work is prioritized until the budget recovers, and the post-incident actions are tracked. The policy is agreed in advance with product, so it's a data-driven trade-off, not a fight.
+
+---
+
+## 42. Chaos Engineering & Resilience Verification
+
+**Key concepts**
+- Resilience patterns are **untested hypotheses** until verified under failure. Chaos engineering: define steady state → hypothesize → inject failure in a controlled scope → observe → learn.
+- **Faults to inject:** dependency latency/errors, instance/pod kills, AZ/zone loss, network partitions, DNS failures, clock skew, broker outages, disk full, certificate expiry, throttling from cloud APIs.
+- **Tools:** AWS FIS, Azure Chaos Studio, Chaos Mesh/Litmus (Kubernetes), Gremlin, **Polly Chaos strategies** (`AddChaosLatency`, `AddChaosFault`) in .NET, Toxiproxy for tests.
+- **Blast radius control:** start in staging, then a small % of production with automatic abort on SLO breach; game days with runbooks; verify alerts fire and humans respond correctly.
+- Verify **business invariants**, not just uptime (no duplicate payments when the gateway times out).
+
+```csharp
+// Polly chaos (Microsoft.Extensions.Resilience / Polly.Core) — inject faults in non-prod or a % of prod traffic
+builder.Services.AddHttpClient<PricingClient>()
+    .AddResilienceHandler("pricing-chaos", (pipeline, ctx) =>
+    {
+        pipeline.AddChaosLatency(injectionRate: 0.05, latency: TimeSpan.FromSeconds(2));   // 5% slow calls
+        pipeline.AddChaosFault(injectionRate: 0.02, () => new HttpRequestException("chaos"));
+    });
+```
+
+**Interview questions**
+
+**Q1. How do you know your circuit breakers and timeouts actually work?**
+Inject the failures they're meant to handle (latency, errors, outages) in controlled experiments and observe: does the breaker open, do fallbacks serve, do retries stay within budget, do SLO alerts fire, does the system recover without manual steps? Then make the experiments recurring (CI or scheduled) so regressions are caught.
+
+**Q2. How do you introduce chaos engineering in a risk-averse bank?**
+Start with game days in non-production with business sign-off, document hypotheses and abort criteria, progress to tightly scoped production experiments during staffed hours with automated rollback, align with DR testing requirements (it produces the evidence auditors ask for), and report findings as risk reduction.
+
+---
+
+## 43. FinOps, Capacity Planning & Unit Economics
+
+**Key concepts**
+- **Unit economics:** cost per transaction / per tenant / per payment — the metric executives understand. Tag every resource (service, team, environment, tenant tier) for **cost allocation**.
+- **Big levers:** right-sizing requests/limits (Kubernetes over-provisioning is common), autoscaling (HPA/KEDA on real signals, scale to zero for async workers), Spot/Savings Plans/Reserved Instances, Graviton/ARM, storage tiering and log retention, **data transfer** (cross-AZ chatter, NAT gateway costs, egress), managed-service pricing models (LCUs, RCU/WCU), observability bills (cardinality, log volume).
+- **Microservices tax:** per-service baseline (pods, sidecars, load balancers, databases, monitoring) → consolidating tiny services or sharing clusters can cut cost significantly.
+- **Capacity planning:** model from business drivers (TPS at peak, growth), load-test to find saturation points per service, keep headroom (e.g., 30–50% for failover of one AZ/cell), plan for peaks (month-end, market open, Black Friday).
+
+**Interview questions**
+
+**Q1. The cloud bill grew 40% while traffic grew 10%. How do you approach it?**
+Break the bill down by service/team/resource type via tags and cost explorer; compute cost per transaction trend; find the drivers (over-provisioned pods, idle environments, cross-AZ traffic, log/metric explosion, a new managed service); fix the top items (right-size, autoscale, commitments, retention); then institutionalize: budgets and anomaly alerts per team, cost in architecture reviews, showback/chargeback.
+
+**Q2. How do you capacity-plan for a market-open spike?**
+Derive peak TPS from historical data and growth, load-test each service on the critical path to its saturation point, find the weakest link (often DB connections or a downstream API), pre-scale before the known spike (scheduled scaling), keep N+1 cell/AZ headroom, and protect with load shedding and priority queues for critical flows.
+
+**Q3. When does consolidating services save money without hurting the architecture?**
+When services share an owner, a release cadence and a scaling profile and are tiny (their baseline costs dominate) — merging them (or running them as modules in one host) cuts pods, sidecars, LBs and DBs while keeping logical boundaries.
+
+---
+
+## 44. Regulated Environments: Change Management, Audit & DR Evidence
+
+**Key concepts**
+- Banks/payments firms (SOX, PCI-DSS, DORA (EU Digital Operational Resilience Act), PRA/FCA operational resilience, MAS TRM) require: **segregation of duties**, **change approval and traceability**, **audit trails**, **tested DR/BCP with evidence**, third-party risk management, incident reporting timelines.
+- **Continuous delivery is compatible with compliance** when controls are automated: every change is a PR (peer review = approval), pipeline enforces tests/scans/policies, deployments are logged with who/what/when, production access is just-in-time and audited, artifacts are immutable and signed.
+- **PCI scope reduction:** isolate card data into a minimal set of services (tokenization vault), so the rest of the estate is out of scope.
+- **Impact tolerances / important business services** (UK/EU operational resilience): define max tolerable disruption per business service and test against severe-but-plausible scenarios.
+- **Evidence as code:** pipelines export change records, test results, SBOMs and approvals to the GRC system automatically.
+
+**Interview questions**
+
+**Q1. Auditors say continuous deployment violates change management. Respond.**
+Change management's goals — reviewed, tested, authorized, traceable, reversible changes with segregation of duties — can be met more reliably by automation than by CAB meetings: mandatory peer review (approver ≠ author), automated test and security gates, immutable signed artifacts, deployment records linked to tickets, automated rollback, and audited production access. Offer evidence samples and map each control to the pipeline step.
+
+**Q2. How do you reduce PCI-DSS scope in a microservices estate?**
+Tokenize card data at the edge (hosted fields/PSP tokenization or an internal vault service), keep PANs only inside a small, segmented cardholder-data environment, ensure no other service, log or event contains card data (DLP scanning), and enforce network segmentation and mTLS around the CDE.
+
+**Q3. What does "DR tested" mean to a regulator?**
+Regular, documented failover exercises against defined RTO/RPO with measured results, issues found and remediated, covering severe scenarios (region loss, ransomware, key third-party outage), including data restore tests — not just "we have replicas".
+
+---
+
+## 45. Technical Strategy, Roadmaps & Architecture Governance
+
+**Key concepts**
+- A **technical strategy** answers: where are we, where must we be (business drivers), what are the few big bets, what won't we do, and how will we know it's working.
+- **Roadmaps** in outcome terms (e.g., "lead time < 1 day for 80% of teams", "PCI scope reduced to 6 services") with milestones that deliver value incrementally; no big-bang rewrites.
+- **Governance that scales:** principles + **paved roads** (templates that make the right thing easy) + **ADRs** for significant decisions + lightweight **architecture review** for high-risk changes + **fitness functions** (automated checks: dependency rules, latency budgets, no shared DBs) instead of approval gates.
+- **Tech radar** (adopt/trial/assess/hold) to manage technology sprawl.
+- **Build vs buy:** buy commodity capabilities (identity, observability, workflow engine, API gateway), build differentiating domain logic; consider total cost (integration, ops, exit cost).
+
+```markdown
+# ADR-042: Adopt Temporal for long-running payment workflows
+Status: Accepted (2026-09-15)
+Context: 7 hand-rolled sagas, 3 incidents from lost timers and stuck states in 6 months; audit asks for process history.
+Decision: Temporal Cloud for workflows > 1 minute or with timers/human steps; MassTransit sagas remain for short flows.
+Consequences: + durable timers, retries, history for audit; − new skill set, vendor dependency, determinism rules.
+Alternatives: Step Functions (AWS-only, JSON DSL), keep hand-rolled (incident trend), Durable Functions (Azure-only).
+Review: after 2 workflows migrated; exit plan documented.
+```
+
+**Interview questions**
+
+**Q1. How do you set technical direction for 15 teams without being a bottleneck?**
+Publish a short strategy tied to business outcomes, codify the defaults as paved roads and templates, use ADRs for decisions with broad impact, automate guardrails as fitness functions in CI, run a lightweight architecture forum for cross-cutting decisions, and measure adoption and outcomes rather than approving every design.
+
+**Q2. How do you stop architecture from decaying over years?**
+Fitness functions in CI (dependency rules, no cross-service DB access, latency budgets, contract checks), regular architecture reviews of hotspots (churn × complexity), budgeted tech-debt work tied to measurable pain, ADRs revisited when context changes, and ownership for every service.
+
+**Q3. Build vs buy for an API gateway / identity / workflow engine?**
+Buy (or use managed/open-source) — they're commodity capabilities with security and reliability risk if built in-house. Build only what differentiates your business. Evaluate on total cost of ownership, integration fit, operability, compliance, lock-in and exit cost; record it in an ADR.
+
+---
+
+## 46. Org Design: Conway's Law, Team Topologies & Ownership
+
+**Key concepts**
+- **Conway's Law:** systems mirror the communication structure of the organizations that build them. **Inverse Conway manoeuvre:** shape teams to get the architecture you want.
+- **Team Topologies:** **stream-aligned** teams (own a business capability end to end), **platform** teams (internal products: CI/CD, Kubernetes, observability), **enabling** teams (coach/temporary help), **complicated-subsystem** teams (deep specialist areas, e.g., pricing engine). Interaction modes: collaboration, X-as-a-service, facilitating.
+- **Cognitive load** limits how much a team can own → service boundaries sized to what a team can understand and operate.
+- **You build it, you run it:** ownership includes on-call, SLOs, cost.
+- **Service ownership registry** (Backstage catalog): owner, on-call, SLO, dependencies, runbooks, data classification.
+
+**Interview questions**
+
+**Q1. How do you align team structure with service boundaries?**
+One stream-aligned team owns a cohesive set of services for a business capability (no shared ownership of a service); boundaries that need constant cross-team coordination are moved; platform teams provide self-service capabilities; changes to team structure and boundaries are planned together.
+
+**Q2. Twenty services are owned by "everyone". What do you do?**
+Assign each to a single team based on business capability and change history; publish ownership in the catalog with on-call and SLOs; retire or merge orphaned services; make ownership a prerequisite for production deployment.
+
+**Q3. How does team cognitive load affect architecture?**
+If a team owns more services or technologies than it can understand, quality and incident response suffer. Reduce load with a platform (paved roads), fewer, larger services per team, consistent tech choices, and clear interfaces between teams.
+
+---
+
+## 47. Incident Leadership & Post-Incident Learning
+
+**Key concepts**
+- **Roles:** incident commander (coordinates, decides), communications lead (stakeholders, status page, regulators), operations/subject leads (investigate and fix), scribe. The IC doesn't debug.
+- **Priorities:** mitigate first (roll back, fail over, shed load, feature-flag off), diagnose later; communicate on a cadence; declare severity early (it's cheap to downgrade).
+- **Microservices specifics:** find the first failing dependency via traces and dependency dashboards; watch for retry storms and cascading failures; use kill switches and load shedding.
+- **Blameless post-incident reviews:** timeline, contributing factors (not a single "root cause"), what went well, detection gaps, action items with owners and dates; track completion.
+- **Regulatory reporting:** many regimes require notifying regulators within hours for major incidents → the communications lead knows the thresholds.
+
+**Interview questions**
+
+**Q1. Tell me about a production incident you led.** *(structure)*
+Context and impact in business terms (e.g., "card authorizations failed for 22 minutes, ~18k transactions"), your role (IC), how you mitigated (rolled back the config, shed non-critical traffic), how you communicated, the contributing factors (missing timeout + retry storm + alert on the wrong signal), the systemic fixes (resilience defaults in the template, burn-rate alerts, chaos test), and the measurable result afterwards.
+
+**Q2. How do you prevent the same class of incident across all teams, not just the one that had it?**
+Turn the learning into a platform default or guardrail (template change, policy-as-code, fitness function), share the review widely, add a detection (alert/chaos test), and check other services for the same pattern proactively.
+
+**Q3. Mitigate or find root cause first?**
+Mitigate first — restoring service is the priority, and rollback/failover/flags are usually faster than diagnosis. Preserve evidence (logs, dumps, traces) during mitigation so root-cause analysis can follow.
+
+---
+
+## 48. Principal Answer Framework + 25 Extra Lead/Principal Questions
+
+**The answer framework (use on every design or judgment question)**
+1. **Clarify the business goal and constraints** (SLAs, regulation, team size, timeline, budget).
+2. **State the decision and the main alternatives** with trade-offs (cost, complexity, risk, time to value).
+3. **Explain how it fails and how you'd detect it** (failure modes, observability, what has no detector).
+4. **Explain how you'd roll it out** (incremental, reversible, measured).
+5. **Ownership and long-term cost** (who runs it, what it costs over years, exit strategy) — the Principal layer.
+
+**25 extra questions with short model answers**
+
+1. **How do you decide service boundaries in a domain you don't know yet?** Event storming with domain experts, start coarse (modular monolith or few services), split along observed change patterns and team ownership; boundaries are hypotheses revisited with co-change data.
+2. **What's your migration plan from a monolith with a shared Oracle/SQL DB?** Strangler Fig at the edge, extract by business capability, move data ownership with CDC → dual-write → cutover per table group, anti-corruption layers, measure each step, keep rollback paths.
+3. **How do you handle a cross-service invariant like "credit limit"?** Make one service own it (the authority checks and reserves synchronously or via a reservation saga); never enforce it from replicated copies.
+4. **How would you reduce a 9-hop synchronous call chain?** Collapse services that change together, cache or replicate reference data locally, switch non-critical hops to async events, and use read models for queries.
+5. **Sync or async for a payment authorization?** Sync for the user-facing authorize (the user waits), async for post-processing (ledger, notifications, analytics) via outbox events; idempotency keys throughout.
+6. **How do you version APIs for 40 internal consumers?** Additive changes only, consumer-driven contract tests with can-i-deploy, deprecation telemetry, and a parallel-run window for breaking changes.
+7. **How do you choose a message broker for the firm?** Workload-driven: Kafka for event streams and replay, a queue (SQS/Service Bus/RabbitMQ) for tasks; managed where possible; one default of each with justified exceptions.
+8. **What's your position on service mesh?** Adopt when you need mTLS everywhere, uniform traffic policy and telemetry across many services/languages and have a platform team to run it; otherwise libraries + platform defaults are cheaper.
+9. **How do you ensure observability is useful during incidents?** Standard OTel instrumentation via templates, journey dashboards, SLO burn alerts, exemplars linking metrics to traces, runbooks linked from alerts, and regular incident drills.
+10. **How do you handle data residency (EU/US) in microservices?** Region-pinned tenants, regional deployments/cells, residency-aware event routing, encryption keys per region, and global services only for non-personal data.
+11. **What's the role of an API gateway vs a BFF?** Gateway: cross-cutting edge concerns (auth, rate limits, routing, TLS). BFF: client-specific aggregation and shaping. Don't put business logic in either.
+12. **How do you prevent a "god orchestrator"?** One orchestrator per business process owned by the process's team; domain rules stay in domain services; keep workflows thin (coordinate, don't compute).
+13. **How do you choose between Kubernetes and serverless for new services?** Steady, long-running, latency-sensitive → containers on Kubernetes/ECS; spiky, event-driven, low-ops → serverless; consider team skills, cold starts, cost at scale and portability.
+14. **How do you manage configuration and feature flags across services?** Centralized config with environment layering, secrets in a vault, feature flags with owners and expiry, and flag changes audited like deployments.
+15. **How do you test microservices without a huge E2E suite?** Testing pyramid: unit + component tests with Testcontainers, contract tests, a few critical E2E journeys, and production verification (synthetics, canaries).
+16. **What's your approach to database migrations in independent services?** Expand–contract per service, backward-compatible schema changes deployed before code, automated migrations in the pipeline with rollback plans.
+17. **How do you handle a dependency that's frequently down (a third-party bank API)?** Anti-corruption layer, timeouts + circuit breaker + bulkhead, queue requests for later processing, idempotent retries, status monitoring, and reconciliation against their reports.
+18. **How do you evaluate a team's architecture proposal?** Problem fit, simplicity, failure modes and detection, operability, security/compliance, cost, migration path, and reversibility — ask questions rather than dictate, and record the decision.
+19. **How do you justify a reliability investment to the business?** Quantify incident cost (revenue, penalties, customer churn, regulatory exposure) vs the investment; tie it to SLOs and risk appetite; show a phased plan with measurable risk reduction.
+20. **What's your strategy for legacy integration (mainframe, SOAP)?** Anti-corruption layer, async integration via MQ/CDC where possible, caching for read-heavy calls, and gradual strangling of capabilities.
+21. **How do you make cross-team decisions stick?** Involve affected teams early, write the ADR with alternatives, get explicit buy-in from leads, encode the decision in templates/fitness functions, and review it on a schedule.
+22. **What would you do in your first 90 days as Principal?** Listen (teams, incidents, metrics), map the system and pain points, pick 1–2 high-leverage problems with visible outcomes, build relationships with product and ops, then publish a short strategy.
+23. **How do you handle disagreement with another Principal?** Clarify the shared goal, separate facts from preferences, run a small experiment or spike for data, escalate with a joint options paper if needed, and then disagree-and-commit.
+24. **How do you grow senior engineers into staff-level leaders?** Give them ownership of cross-team problems, coach on writing (ADRs, strategy), sponsor them in forums, and give feedback on influence, not just code.
+25. **What's the biggest microservices mistake you've seen, and what did you learn?** (Have a real story.) Example: splitting by technical layer created a distributed monolith; we merged services along business capabilities, cut deployment coordination by 70%, and introduced co-change analysis as a standing boundary check.
+
+---
+
+## Architecture Diagrams (preserved from the original modules)
+
+> All 40 Mermaid/ASCII diagrams from the 9 original `17-Microservices/` module files (the guide's own diagrams stay inline above), kept verbatim and grouped by source module. Originals: `git show ebb2d5c:17-Microservices/<file>.md`.
+
+### Module 49 — Microservices: Decomposition, Communication Patterns & the Strangler Fig Migration
+*Source: `01-Decomposition-Communication-Strangler-Fig.md`*
+
+**3.1 AWS Microservices Reference Architecture**
+
+```mermaid
+flowchart TB
+    Internet([Internet])
+    CF[Amazon CloudFront<br/>CDN / edge caching]
+    WAF[AWS WAF<br/>L7 filtering]
+    APIGW[Amazon API Gateway<br/>routing · throttling · authZ enforcement]
+    Cognito[Amazon Cognito<br/>token issuance / validation]
+    Compute[Compute tier<br/>ECS · EKS · Lambda]
+
+    Internet --> CF --> WAF --> APIGW
+    APIGW -. validate token .-> Cognito
+    APIGW --> Compute
+
+    Compute --> USvc[User Service]
+    Compute --> OSvc[Order Service]
+    Compute --> PSvc[Payment Service]
+    Compute --> ISvc[Inventory Service]
+    Compute --> NSvc[Notification Service]
+
+    USvc --> UDB[("Amazon RDS<br/>PostgreSQL")]
+    OSvc --> ODB[("DynamoDB")]
+    PSvc --> PDB[("Amazon Aurora")]
+    ISvc --> IDB[("DynamoDB")]
+    NSvc --> NDB[("DynamoDB")]
+
+    USvc --> Bus
+    OSvc --> Bus
+    PSvc --> Bus
+    ISvc --> Bus
+    NSvc --> Bus
+    Bus[Amazon EventBridge / SNS / SQS<br/>asynchronous fan-out]
+    Bus --> Other[Downstream consumers<br/>analytics · fulfilment · audit]
+```
+
+**Business-Capability vs Technical-Layer Decomposition**
+
+```mermaid
+graph TB
+ subgraph "WRONG: technical-layer split (distributed monolith)"
+ UI[Presentation Service] -->|"every feature touches ALL THREE"| BL[Business Rules Service]
+ BL --> DA[Data Access Service]
+ end
+ subgraph "RIGHT: business-capability split"
+ OrderSvc["Order Service<br/>(owns its OWN data + logic + API)"]
+ InventorySvc["Inventory Service<br/>(owns its OWN data + logic + API)"]
+ PaymentSvc["Payment Service<br/>(owns its OWN data + logic + API)"]
+ OrderSvc -.->|"async event: OrderPlaced"| InventorySvc
+ OrderSvc -->|"sync call: reserve stock"| InventorySvc
+ end
+```
+
+**Strangler Fig Migration**
+
+```mermaid
+graph LR
+ Client --> Router["Routing Layer (API Gateway)"]
+ Router -->|"NEW: /orders/*"| OrderMicroservice[New Order Microservice]
+ Router -->|"OLD: everything else"| Monolith[Existing Monolith]
+ Monolith -.->|"shared DB, temporarily,<br/>during transition"| SharedDB[(Legacy Database)]
+ OrderMicroservice --> OwnDB[(Order Service's OWN DB)]
+```
+
+**Class design — the Strangler Fig Routing Gateway with hash-sticky cutover**
+
+```mermaid
+classDiagram
+    class IRoutingRule {
+        <<interface>>
+        +bool Matches(HttpContext context)
+        +RouteTarget Resolve(HttpContext context)
+    }
+    class HashStickyCutoverRule {
+        -string CapabilityName
+        -IMigrationConfigStore ConfigStore
+        +bool Matches(HttpContext context)
+        +RouteTarget Resolve(HttpContext context)
+        -int ComputeBucket(string accountId)
+    }
+    class IMigrationConfigStore {
+        <<interface>>
+        +MigrationConfig GetConfig(string capability)
+        +void UpdateConfig(string capability, MigrationConfig config)
+    }
+    class CachedMigrationConfigStore {
+        -IMemoryCache LocalCache
+        -IMigrationConfigStore Source
+        +MigrationConfig GetConfig(string capability)
+    }
+    class RoutingGateway {
+        -List~IRoutingRule~ Rules
+        -RouteTarget DefaultTarget
+        +Task InvokeAsync(HttpContext context)
+    }
+    class AuditLogger {
+        +void RecordRoutingDecision(RoutingDecision decision)
+    }
+    class RouteTarget {
+        <<enumeration>>
+        NEW_SERVICE
+        LEGACY_MONOLITH
+    }
+
+    RoutingGateway --> IRoutingRule : evaluates in order
+    HashStickyCutoverRule ..|> IRoutingRule
+    HashStickyCutoverRule --> IMigrationConfigStore
+    CachedMigrationConfigStore ..|> IMigrationConfigStore
+    RoutingGateway --> AuditLogger : records every decision
+    HashStickyCutoverRule --> RouteTarget
+```
+
+**Sequence diagram — a request during a ramping cutover**
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Gateway as RoutingGateway
+    participant Rule as HashStickyCutoverRule
+    participant Cache as CachedMigrationConfigStore
+    participant New as New Microservice
+    participant Legacy as Legacy Monolith
+    participant Audit as AuditLogger
+
+    Client->>Gateway: POST /transactions (accountId=A123)
+    Gateway->>Rule: Resolve(context)
+    Rule->>Cache: GetConfig("transaction-posting")
+    Cache-->>Rule: {percentage: 25, status: RAMPING}
+    Rule->>Rule: bucket = hash("A123") % 100
+    alt bucket < 25
+        Rule-->>Gateway: RouteTarget.NEW_SERVICE
+        Gateway->>New: forward request
+        New-->>Gateway: 201 Created
+    else bucket >= 25
+        Rule-->>Gateway: RouteTarget.LEGACY_MONOLITH
+        Gateway->>Legacy: forward request
+        Legacy-->>Gateway: 201 Created
+    end
+    Gateway->>Audit: RecordRoutingDecision(capability, bucket, target)
+    Gateway-->>Client: 201 Created
+```
+
+### Module 50 — Microservices: Resilience Patterns, Distributed Observability & the Sidecar Model
+*Source: `02-Resilience-Observability-Sidecar-Patterns.md`*
+
+**Resilience Layering (a Single Outbound Call)**
+
+```mermaid
+graph TB
+ Call["Order Service calls Inventory Service"] --> BH["Bulkhead: dedicated thread/connection pool for Inventory calls"]
+ BH --> CB{"Circuit Breaker: is Inventory's recent failure rate above threshold?"}
+ CB -->|"Open: fail fast, no network call"| FastFail["Immediate failure response"]
+ CB -->|"Closed: attempt the call"| TO["Timeout: bounded wait"]
+ TO --> Retry{"Failed transiently?"}
+ Retry -->|"Yes, retries remaining"| Backoff["Exponential backoff + jitter, then retry"]
+ Retry -->|"No / retries exhausted"| Result["Success or final failure"]
+```
+
+**Distributed Tracing Across a Call Chain**
+
+```mermaid
+sequenceDiagram
+ participant Client
+ participant Gateway as API Gateway (generates Correlation ID: abc-123)
+ participant Order as Order Service
+ participant Inventory as Inventory Service
+ participant Payment as Payment Service
+ Client->>Gateway: POST /orders
+ Gateway->>Order: (header: X-Correlation-ID: abc-123)
+ Order->>Inventory: (propagates: X-Correlation-ID: abc-123)
+ Inventory-->>Order: OK (50ms)
+ Order->>Payment: (propagates: X-Correlation-ID: abc-123)
+ Payment-->>Order: OK (200ms, the slow hop -- visible in the trace waterfall)
+ Order-->>Client: 201 Created
+```
+
+**Sidecar / Service-Mesh Architecture (Preview)**
+
+```mermaid
+graph LR
+ subgraph "Order Service Pod"
+ OrderApp[Order Service code] <-->|"local call"| Sidecar1[Sidecar Proxy]
+ end
+ subgraph "Inventory Service Pod"
+ Sidecar2[Sidecar Proxy] <-->|"local call"| InvApp[Inventory Service code]
+ end
+ Sidecar1 <-->|"mTLS, retries, circuit breaking,<br/>tracing -- ALL handled here,<br/>NOT in application code"| Sidecar2
+ ControlPlane["Mesh Control Plane<br/>(configures all sidecars centrally)"] -.-> Sidecar1
+ ControlPlane -.-> Sidecar2
+```
+
+**Class design — per-dependency resilience wrapper with tiered fallback**
+
+```mermaid
+classDiagram
+    class IResilientDependencyClient~T~ {
+        <<interface>>
+        +Task~T~ CallAsync(Func~Task~T~~ operation, T fallback)
+    }
+    class ResilientDependencyClient~T~ {
+        -SemaphoreSlim Bulkhead
+        -CircuitBreaker Breaker
+        -RetryPolicy Retry
+        -TimeoutPolicy Timeout
+        -ITieredFallbackStrategy~T~ FallbackStrategy
+        +Task~T~ CallAsync(Func~Task~T~~ operation, T fallback)
+    }
+    class ITieredFallbackStrategy~T~ {
+        <<interface>>
+        +T Resolve(TimeSpan tripDuration)
+    }
+    class FraudScoringTieredFallback {
+        +T Resolve(TimeSpan tripDuration)
+        -T ShortTripFallback()
+        -T SustainedOutageFallback()
+    }
+    class CircuitBreaker {
+        -DateTime? OpenedAt
+        +bool IsOpen
+        +TimeSpan? TripDuration
+        +void RecordSuccess()
+        +void RecordFailure()
+    }
+    class SidecarTraceExporter {
+        +void ExportSpan(Span span, bool forceSample)
+    }
+
+    ResilientDependencyClient ..|> IResilientDependencyClient
+    ResilientDependencyClient --> CircuitBreaker
+    ResilientDependencyClient --> ITieredFallbackStrategy
+    FraudScoringTieredFallback ..|> ITieredFallbackStrategy
+    ResilientDependencyClient --> SidecarTraceExporter : reports failures/trips
+```
+
+**Sequence diagram — sustained-outage fallback escalation**
+
+```mermaid
+sequenceDiagram
+    participant Auth
+    participant Client as ResilientDependencyClient
+    participant CB as CircuitBreaker
+    participant Fallback as FraudScoringTieredFallback
+    participant Trace as SidecarTraceExporter
+
+    Auth->>Client: CallAsync(ScoreFraud, defaultFallback)
+    Client->>CB: IsOpen?
+    CB-->>Client: true, TripDuration=90s
+    Client->>Fallback: Resolve(90s)
+    alt tripDuration < 30s
+        Fallback-->>Client: ShortTripFallback (approve, unscored)
+    else tripDuration >= 30s
+        Fallback-->>Client: SustainedOutageFallback (local heuristic score)
+    end
+    Client->>Trace: ExportSpan(circuitOpenSpan, forceSample=true)
+    Client-->>Auth: degraded result + fallback tier used
+```
+
+### Module 51 — Microservices: Versioning & Schema Evolution, Testing Strategies, Deployment Patterns & Team Topologies
+*Source: `03-Versioning-Testing-Deployment-TeamTopologies.md`*
+
+**Testing Pyramid for Microservices**
+
+```mermaid
+graph TB
+ E2E["End-to-End Tests<br/>(few, slow, reserved for critical journeys)"]
+ Contract["Consumer-Driven Contract Tests<br/>(verify provider/consumer compatibility,<br/>WITHOUT a full integration environment)"]
+ Unit["Unit Tests<br/>(many, fast, per-service, no network calls)"]
+ E2E --- Contract --- Unit
+ style E2E fill:#f66
+ style Contract fill:#fa6
+ style Unit fill:#6c6
+```
+
+**Blue-Green vs Canary**
+
+```mermaid
+graph LR
+ subgraph "Blue-Green: instant, all-or-nothing cutover"
+ BG_LB[Load Balancer] -->|"100% traffic, instant switch"| Green[Green: new version]
+ Blue["Blue: old version<br/>(idle, ready for instant rollback)"]
+ end
+ subgraph "Canary: gradual, bounded rollout"
+ C_LB[Load Balancer] -->|"5% -> 25% -> 100%"| Canary[Canary: new version]
+ C_LB -->|"95% -> 75% -> 0%"| Stable[Stable: old version]
+ end
+```
+
+**Inverse Conway Maneuver**
+
+```mermaid
+graph TB
+ subgraph "WRONG: architecture follows accidental team structure"
+ T1[Frontend Team] --> Layer1[Presentation Layer]
+ T2[Backend Team] --> Layer2[Business Logic Layer]
+ T3[DBA Team] --> Layer3[Data Access Layer]
+ Layer1 -.->|"coordination required for EVERY feature"| Layer2 -.-> Layer3
+ end
+ subgraph "RIGHT: teams deliberately structured around desired service boundaries"
+ OrderTeam["Order Team<br/>(owns Order Service end-to-end)"]
+ InventoryTeam["Inventory Team<br/>(owns Inventory Service end-to-end)"]
+ OrderTeam -.->|"API/event contract,<br/>minimal coordination"| InventoryTeam
+ end
+```
+
+**Class design — the deployment-governance pipeline orchestrator**
+
+```mermaid
+classDiagram
+    class IDeploymentGate {
+        <<interface>>
+        +GateResult Evaluate(DeploymentContext context)
+    }
+    class BreakingChangeGate {
+        -SchemaCompatibilityChecker Checker
+        +GateResult Evaluate(DeploymentContext context)
+    }
+    class ContractVerificationGate {
+        -IContractRegistry Registry
+        +GateResult Evaluate(DeploymentContext context)
+    }
+    class CanaryAnalysisGate {
+        -ICanaryAnalysisService Analyzer
+        +GateResult Evaluate(DeploymentContext context)
+    }
+    class DeploymentPipeline {
+        -List~IDeploymentGate~ Gates
+        -IMigrationProgressTracker Tracker
+        +Task~PipelineResult~ RunAsync(DeploymentContext context)
+    }
+    class ICanaryAnalysisService {
+        <<interface>>
+        +Task~CanaryVerdict~ Analyze(string service, CohortMetrics canary, CohortMetrics stable)
+    }
+    class SequentialStatisticalCanaryAnalyzer {
+        +Task~CanaryVerdict~ Analyze(string service, CohortMetrics canary, CohortMetrics stable)
+        -bool MeetsMinimumSampleSize(CohortMetrics m)
+        -bool RegressedVsOwnBaseline(CohortMetrics canary)
+    }
+
+    DeploymentPipeline --> IDeploymentGate : evaluates in sequence
+    BreakingChangeGate ..|> IDeploymentGate
+    ContractVerificationGate ..|> IDeploymentGate
+    CanaryAnalysisGate ..|> IDeploymentGate
+    CanaryAnalysisGate --> ICanaryAnalysisService
+    SequentialStatisticalCanaryAnalyzer ..|> ICanaryAnalysisService
+```
+
+**Sequence diagram — a deployment passing through all four gates**
+
+```mermaid
+sequenceDiagram
+    participant Eng as Engineer / CI trigger
+    participant Pipe as DeploymentPipeline
+    participant BCG as BreakingChangeGate
+    participant CVG as ContractVerificationGate
+    participant CAG as CanaryAnalysisGate
+    participant Analyzer as SequentialStatisticalCanaryAnalyzer
+    participant Tracker as MigrationProgressTracker
+
+    Eng->>Pipe: RunAsync(deploymentContext)
+    Pipe->>BCG: Evaluate(context)
+    BCG-->>Pipe: Pass (additive change)
+    Pipe->>CVG: Evaluate(context)
+    CVG-->>Pipe: Pass (all registered consumers compatible)
+    Pipe->>CAG: Evaluate(context)
+    CAG->>Analyzer: Analyze(service, canaryMetrics@5%, stableMetrics)
+    Analyzer-->>CAG: Verdict.Advance
+    CAG-->>Pipe: Pass, ramp to 25%
+    Note over Pipe,CAG: repeats at 25%, 100%
+    Pipe->>Tracker: RecordGateOutcome(service, allGatesPassed=true)
+    Pipe-->>Eng: Deployment succeeded, fully governed
+```
+
+### Module 135 — Microservices: Data Consistency & Query Patterns Across Service Boundaries
+*Source: `04-Data-Consistency-Query-Patterns-Across-Service-Boundaries.md`*
+
+**3. Visual Architecture**
+
+```mermaid
+graph TB
+ subgraph "Option A: API Composition"
+ C1[Client] --> AGG[Aggregator]
+ AGG --> P1[Position Service]
+ AGG --> V1[Valuation Service]
+ AGG --> CL1[Client Service]
+ AGG -.join in memory.-> C1
+ end
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph TB
+ subgraph "Option B: Cross-Service Read Model"
+ P2[Position Service] -->|PositionChanged| BUS[(Event Bus)]
+ V2[Valuation Service] -->|ValuationUpdated| BUS
+ CL2[Client Service] -->|ClientUpdated| BUS
+ BUS --> PROJ[Projector]
+ PROJ --> RM[(Client Holdings Read Model<br/>queryable, sortable, paginable)]
+ C2[Client] --> RM
+ end
+```
+
+**3. Visual Architecture**
+
+```mermaid
+sequenceDiagram
+ participant U as User
+ participant A as Aggregator
+ participant P as Position Svc
+ participant V as Valuation Svc
+
+ U->>A: Top 10 positions by market value
+ A->>P: Get positions (page 1 of 50)
+ P-->>A: 50 positions
+ A->>V: Values for those 50
+ V-->>A: values
+ A->>A: Sort 50 by value, take 10
+ A-->>U: "Top 10" — but only of the first 50
+ Note over A,U: No error. Plausible output. Wrong answer.
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class QuerySpec {
+ +string SortBy
+ +IReadOnlyList~Filter~ Filters
+ +bool IsPaginated
+ }
+ class ICompositionValidator {
+ <<interface>>
+ +ValidateQuery(spec) void
+ }
+ class IProjector {
+ <<interface>>
+ +ProjectAsync(event) Task
+ }
+ class ClientHoldingsProjector
+ class IReadModelStore {
+ <<interface>>
+ +UpsertPositionAsync(...) Task
+ +QueryAsync(spec) Task~Page~
+ +CountPositionsAsync(clientId, asOf) Task~int~
+ }
+ class ScopeReconciler {
+ +ReconcileScopeAsync(asOf) Task~ScopeReport~
+ }
+
+ IProjector <|.. ClientHoldingsProjector
+ ClientHoldingsProjector --> IReadModelStore
+ ScopeReconciler --> IReadModelStore
+ ICompositionValidator --> QuerySpec
+```
+
+### Module 136 — Microservices: Service Discovery, Communication Infrastructure & Backpressure
+*Source: `05-Service-Discovery-Communication-Infrastructure-Backpressure.md`*
+
+**3. Visual Architecture**
+
+```mermaid
+graph TB
+ subgraph "Server-side discovery"
+ C1[Caller] --> LB[Load Balancer]
+ LB --> I1[Instance 1]
+ LB --> I2[Instance 2]
+ end
+ subgraph "Client-side discovery"
+ C2[Caller + discovery logic] --> REG[(Registry)]
+ REG -.instances.-> C2
+ C2 --> I3[Instance 1]
+ C2 --> I4[Instance 2]
+ end
+```
+
+**3. Visual Architecture**
+
+```mermaid
+sequenceDiagram
+ participant C as Caller (deadline 2s)
+ participant A as Service A
+ participant B as Service B
+
+ C->>A: Request (deadline: 2000ms)
+ Note over A: elapsed 800ms
+ A->>B: Request (deadline: 1200ms) ← remaining budget propagated
+ Note over B: at 1200ms, B abandons
+ B-->>A: DeadlineExceeded
+ A-->>C: DeadlineExceeded
+ Note over C,B: Without propagation, B works 2000ms more<br/>for a response nobody reads
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph LR
+ subgraph "Congestive collapse without backpressure"
+ L[Load ↑] --> Q[Queue grows]
+ Q --> LAT[Latency ↑]
+ LAT --> TO[Callers time out]
+ TO --> R[Retries]
+ R --> L
+ end
+ Note1["Throughput DECREASES as offered load increases"]
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class IServiceResolver {
+ <<interface>>
+ +ResolveAsync(serviceName) Task~IReadOnlyList~Endpoint~~
+ }
+ class CachingResolver {
+ -lastKnownGood
+ +ResolveAsync(name) Task
+ }
+ class ILoadBalancer {
+ <<interface>>
+ +Choose(endpoints) Endpoint
+ }
+ class LeastOutstandingBalancer
+ class DeadlineMiddleware {
+ +HandleAsync(req, ct) Task~Result~
+ }
+ class BoundedWorkQueue {
+ +TryEnqueue(item) bool
+ }
+ class RetryBudget {
+ +TryConsumeRetry bool
+ }
+
+ IServiceResolver <|.. CachingResolver
+ ILoadBalancer <|.. LeastOutstandingBalancer
+ DeadlineMiddleware --> BoundedWorkQueue
+```
+
+### Module 137 — Microservices: Multi-Region & Cell-Based Architecture — Containing Blast Radius
+*Source: `06-MultiRegion-Cell-Based-Architecture-Blast-Radius.md`*
+
+**3. Visual Architecture**
+
+```mermaid
+graph TB
+ U[Users] --> R{Cell Router<br/>simple, highly available}
+ R -->|customers A-F| C1[Cell 1]
+ R -->|customers G-M| C2[Cell 2]
+ R -->|customers N-Z| C3[Cell 3]
+
+ subgraph C1[Cell 1 — complete stack]
+ S1[Services] --> D1[(Database)]
+ S1 --> Q1[Queue]
+ S1 --> K1[Cache]
+ end
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph TB
+ subgraph "Region A"
+ RA[Router A] --> A1[Cell A1]
+ RA --> A2[Cell A2]
+ end
+ subgraph "Region B"
+ RB[Router B] --> B1[Cell B1]
+ RB --> B2[Cell B2]
+ end
+ GLB[Global Routing] --> RA
+ GLB --> RB
+ CP[(Control Plane<br/>shared — must not be on the request path)] -.config, deploy.-> A1
+ CP -.-> B1
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph LR
+ subgraph "Blast radius comparison"
+ M["Monolithic: 1 failure = 100% impact"]
+ C["5 cells: 1 failure = 20% impact"]
+ C50["50 cells: 1 failure = 2% impact"]
+ end
+ Note["Smaller cells contain more, cost more to operate"]
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class CellRouter {
+ +Route(customer) CellId
+ +ApplyRefresh(assignments) void
+ }
+ class IConfigurationCache {
+ <<interface>>
+ +Current Configuration
+ +TryRefresh(payload) bool
+ }
+ class ValidatedConfigCache {
+ -lastGood
+ -diskCache
+ }
+ class CorrelationDetector {
+ +Evaluate(cellHealth) CorrelationVerdict
+ }
+ class MigrationOrchestrator {
+ +MigrateAsync(customer, from, to) Task
+ }
+ class ICellHealthSource {
+ <<interface>>
+ +CurrentWindows IReadOnlyDictionary~CellId,HealthWindow~
+ }
+
+ IConfigurationCache <|.. ValidatedConfigCache
+ CorrelationDetector --> ICellHealthSource
+ MigrationOrchestrator --> CellRouter
+```
+
+### Module 138 — Microservices: Decomposition Failures & Service Right-Sizing
+*Source: `07-Decomposition-Failures-Service-Right-Sizing.md`*
+
+**3. Visual Architecture**
+
+```mermaid
+graph TB
+ subgraph "Distributed monolith — separately deployed, not independently deployable"
+ A[Service A] -->|sync| B[Service B]
+ B -->|sync| C[Service C]
+ C -->|sync| D[Service D]
+ A -.must release together.-> B
+ B -.must release together.-> C
+ end
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph LR
+ subgraph "Co-change heatmap"
+ M["Position ↔ Valuation: 68% co-change → merge candidate"]
+ M2["Position ↔ Client: 4% co-change → boundary healthy"]
+ M3["Reporting ↔ Valuation: 11% co-change → boundary healthy"]
+ end
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph TB
+ subgraph "Correction options"
+ S[Symptom observed] --> D{Diagnosis}
+ D -->|invariant split| MOVE[Move capability<br/>to the owning service]
+ D -->|always changed together| MERGE[Merge services]
+ D -->|service does two things| SPLIT[Split service]
+ D -->|too small to justify overhead| MERGE
+ end
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class CoChangeAnalyzer {
+ +Analyze(releases) IReadOnlyList~CoChangePair~
+ }
+ class IndependenceMeasurer {
+ +Measure(releases) IndependenceReport
+ }
+ class SplitInvariantDetector {
+ +Detect(sagas) IReadOnlyList~SplitInvariant~
+ }
+ class MergeAssessor {
+ +Assess(a, b) MergeAssessment
+ }
+ class IOwnershipRegistry {
+ <<interface>>
+ +Owner(service) TeamId
+ }
+ class IRoadmapSource {
+ <<interface>>
+ +PlannedChangesTouching(a, b) int
+ }
+
+ MergeAssessor --> CoChangeAnalyzer
+ MergeAssessor --> IOwnershipRegistry
+ MergeAssessor --> IRoadmapSource
+ MergeAssessor --> SplitInvariantDetector
+```
+
+### Module 139 — Microservices: Capstone — Platform Engineering at Scale
+*Source: `08-Capstone-Microservices-Platform-Engineering-At-Scale.md`*
+
+**1. Fundamentals**
+
+```text
+Without a platform: 19 teams × (pipeline + observability + resilience + deployment) = 19 divergent implementations
+With a platform: platform team builds paved paths → teams consume → consistency without gatekeeping
+ ↑ ↓
+ └────────── feedback: what teams actually need ──────┘
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph TB
+ subgraph "Platform (paved path)"
+ SCAF[Service Scaffolding] --> LIB[Versioned Platform Libraries]
+ LIB --> RES[Resilience defaults:<br/>deadlines, retry budgets, bounded queues]
+ LIB --> OBS[Observability instrumentation]
+ PIPE[CI/CD Templates] --> FIT[Fitness functions]
+ CAT[(Service Catalog<br/>authoritative)] --> DEP[Deployment]
+ CAT --> ALERT[Alert routing]
+ CAT --> ANALYSIS[Co-change / dependency analysis]
+ end
+ T1[Team 1] -.self-service.-> SCAF
+ T2[Team 2] -.self-service.-> SCAF
+ T19[Team 19] -.self-service.-> SCAF
+ T2 -.off-path: feedback.-> PLATFORM_TEAM[Platform team]
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph LR
+ subgraph "Golden path drift"
+ TPL_V1[Template v1] -->|copy| S1[Services 1-40<br/>frozen at v1]
+ TPL_V2[Template v2] -->|copy| S2[Services 41-90<br/>frozen at v2]
+ TPL_V3[Template v3] -->|copy| S3[Services 91-140<br/>current]
+ end
+ Note["Oldest services = most critical = least platform capability"]
+```
+
+**3. Visual Architecture**
+
+```mermaid
+graph TB
+ subgraph "Governance mechanisms, descending preference"
+ A[Structurally impossible] --> B[Default-correct]
+ B --> C[Automatically verified]
+ C --> D[Reviewed — novel decisions only]
+ end
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class ServiceRecord {
+ +string Name
+ +Criticality Criticality
+ +Version PlatformVersion
+ +IReadOnlySet~CapabilityId~ ConsumedCapabilities
+ }
+ class CurrencyReporter {
+ +Report(services, current) CurrencyReport
+ }
+ class OffPathDetector {
+ +Detect(services) IReadOnlyList~OffPathFinding~
+ }
+ class UpgradeProposer {
+ +ProposeUpgradeAsync(service, target) Task~UpgradeResult~
+ }
+ class IncidentPatternAnalyzer {
+ +AnalyzePatterns(incidents, window) IReadOnlyList~PlatformGap~
+ }
+ class IServiceCatalog {
+ <<interface>>
+ +AllAsync Task~IReadOnlyList~ServiceRecord~~
+ }
+
+ CurrencyReporter --> IServiceCatalog
+ OffPathDetector --> IServiceCatalog
+ UpgradeProposer --> IServiceCatalog
+```
+
+### Module 173 — Microservices: Load Balancing on AWS — ALB, NLB, Target Groups, Route 53 & Global Accelerator
+*Source: `09-LoadBalancing-AWS-ALB-NLB-TargetGroups-Route53-GlobalAccelerator.md`*
+
+**Regional topology: north-south and east-west**
+
+```mermaid
+graph TB
+    C[Clients / Acquirer networks]
+    GA[Global Accelerator<br/>2 static anycast IPs]
+    C --> GA
+
+    subgraph REGION["Region: eu-west-1"]
+        WAF[AWS WAF]
+        ALB["Public ALB<br/>idle_timeout=60s<br/>SG attached"]
+        GA --> WAF --> ALB
+
+        subgraph AZA["AZ a"]
+            NA[ALB node]
+            TA1[Task a1]
+            TA2[Task a2]
+        end
+        subgraph AZB["AZ b"]
+            NB[ALB node]
+            TB1[Task b1]
+            TB2[Task b2]
+        end
+
+        ALB --> NA
+        ALB --> NB
+        NA --> TA1
+        NA --> TA2
+        NA -.cross-zone.-> TB1
+        NB --> TB1
+        NB --> TB2
+        NB -.cross-zone.-> TA1
+
+        IALB["Internal ALB / mesh<br/>east-west"]
+        TA1 --> IALB
+        TB1 --> IALB
+        IALB --> LEDGER[Ledger service TG]
+        IALB --> FRAUD[Fraud service TG]
+    end
+```
+
+**The 502 keep-alive race (Pair 1 in §2.4)**
+
+```mermaid
+sequenceDiagram
+    participant Cl as Client
+    participant LB as ALB node
+    participant T as Target (keep-alive 130s)
+    Note over LB,T: LB idle_timeout raised to 300s for a reporting endpoint
+    Cl->>LB: POST /authorize
+    LB->>T: forward on pooled connection
+    T-->>LB: 200 OK
+    Note over LB,T: connection pooled; LB will reuse for up to 300s
+    Note over T: at t=130s target closes the idle connection
+    T-->>LB: FIN
+    Cl->>LB: POST /authorize (new request)
+    LB->>T: forward on the (now closing) pooled connection
+    T--xLB: RST / no response
+    LB-->>Cl: HTTP 502 (TargetConnectionErrorCount++)
+    Note over Cl,T: application logs show nothing — the request never arrived
+```
+
+**Class diagram**
+
+```mermaid
+classDiagram
+    class IReadinessGate {
+        <<interface>>
+        +bool IsReady
+        +void Close(string reason)
+    }
+    class ReadinessGate {
+        -volatile bool _ready
+        -string _reason
+        +bool IsReady
+        +void Close(string reason)
+    }
+    class IInFlightTracker {
+        <<interface>>
+        +int Count
+        +IDisposable Enter()
+        +Task WaitForDrainAsync(TimeSpan, CancellationToken)
+    }
+    class InFlightTracker {
+        -int _count
+        -TaskCompletionSource _drained
+    }
+    class DrainOptions {
+        +TimeSpan LbObservationDelay
+        +TimeSpan MaxDrainDuration
+    }
+    class DrainCoordinator {
+        -IReadinessGate _gate
+        -IInFlightTracker _tracker
+        -DrainOptions _options
+        +Task DrainAsync(CancellationToken)
+    }
+    class InFlightTrackingMiddleware
+    class ReadinessEndpoint
+    class LivenessEndpoint
+
+    IReadinessGate <|.. ReadinessGate
+    IInFlightTracker <|.. InFlightTracker
+    DrainCoordinator --> IReadinessGate
+    DrainCoordinator --> IInFlightTracker
+    DrainCoordinator --> DrainOptions
+    InFlightTrackingMiddleware --> IInFlightTracker
+    ReadinessEndpoint --> IReadinessGate
+```
+
+**Sequence diagram**
+
+```mermaid
+sequenceDiagram
+    participant O as Orchestrator (ECS/K8s)
+    participant A as App
+    participant G as ReadinessGate
+    participant LB as ALB target group
+    O->>A: SIGTERM
+    A->>G: Close("shutdown")
+    Note over LB: next readiness probe fails
+    LB-->>LB: unhealthyThreshold reached -> draining
+    Note over A,LB: app KEEPS SERVING throughout
+    A->>A: wait LbObservationDelay
+    LB->>A: in-flight requests only
+    A->>A: WaitForDrainAsync(MaxDrainDuration)
+    A-->>O: exit 0 (before stopTimeout SIGKILL)
+```

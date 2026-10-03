@@ -1,46 +1,749 @@
-# Module 35 — Algorithms: Sorting, Searching & Complexity Analysis
+# Algorithms — Complete Interview Prep (All Topics, One File)
 
-> Domain: Algorithms | Level: Beginner → Expert | Prerequisite: [[../12-Data-Structures/01-Core-Data-Structures]], [[../12-Data-Structures/02-Graphs-Tries-Union-Find]]
+> Domain: Algorithms | Level: Beginner → Expert | Prerequisite: [[../12-Data-Structures/01-Data-Structures-Interview-Prep]] (structures, graphs, heaps, union-find)
+> **Quick-prep edition** (consolidated 2026-10-03). This one file replaces Modules 35–36. Originals: `git show ebb2d5c:13-Algorithms/<file>.md`
+> Each topic has: **Key concepts → C# code → Most common interview questions with answers.**
+
+| # | Topic | # | Topic |
+|---|---|---|---|
+| 1 | Complexity analysis (Big-O) | 8 | Recursion & backtracking |
+| 2 | Sorting algorithms & .NET's sort | 9 | Graph algorithms recap |
+| 3 | Binary search (and on the answer space) | 10 | Dynamic programming |
+| 4 | Two pointers | 11 | Greedy algorithms |
+| 5 | Sliding window | 12 | Bit manipulation & math tricks |
+| 6 | Prefix sums & hashing patterns | 13 | Pattern recognition table + interview execution |
+| 7 | Divide & conquer | 14 | Top 30 rapid-fire + Principal · 15 Mistakes checklist |
 
 ---
 
-## 1. Fundamentals
+## 1. Complexity Analysis (Big-O)
 
-### What is complexity analysis, and why does sorting/searching remain a foundational interview topic?
-**Complexity analysis** (Big-O notation) describes how an algorithm's running time/space grows as input size grows, abstracting away hardware-specific constants to focus on **asymptotic** behavior — the property that determines whether an algorithm remains viable as data scales, directly the same underlying concern as the data-structure-choice discussion, now applied to the *algorithms* operating over those structures. Sorting/searching remain foundational specifically because they're the simplest possible vehicle for teaching and testing the core skill of *reasoning about complexity trade-offs precisely* — a skill that generalizes far beyond sorting itself.
+| Class | Name | Example | n = 1,000,000 feasible? |
+|---|---|---|---|
+| O(1) | constant | hash lookup, array index | ✅ |
+| O(log n) | logarithmic | binary search, balanced BST | ✅ (~20 steps) |
+| O(n) | linear | single scan | ✅ |
+| O(n log n) | linearithmic | sorting, heap of n items | ✅ (~20M ops) |
+| O(n²) | quadratic | nested loops, naive pair checks | ❌ (10¹² ops) |
+| O(2ⁿ) | exponential | all subsets | ❌ beyond n ≈ 25 |
+| O(n!) | factorial | all permutations | ❌ beyond n ≈ 10 |
 
-### Why does this matter?
-Understanding *why* a given sorting algorithm has its specific complexity (not just memorizing "quicksort is O(n log n) average case") is what lets an engineer reason correctly about novel algorithmic problems they haven't seen before — the actual skill Staff/Principal interviews are testing via sorting/searching questions, not sorting-algorithm trivia for its own sake.
+**Key concepts**
+- Big-O = upper bound on growth; Θ = tight bound; Ω = lower bound. Interviews mean "worst case unless stated".
+- **Drop constants and lower terms**: O(3n + 10) = O(n). Different inputs keep separate variables: O(n + m), O(n·m).
+- **Amortized** cost: average over a sequence (`List.Add`). **Average vs worst case**: quicksort O(n log n) average, O(n²) worst.
+- **Space complexity** includes recursion stack depth.
+- Rough guide: ~10⁸ simple operations per second → choose an algorithm from the input size.
+- **Master theorem** for divide & conquer: T(n) = aT(n/b) + f(n) → e.g., merge sort T(n)=2T(n/2)+O(n) = O(n log n).
 
-### When does this matter?
-Any performance-sensitive code processing collections; the depth matters for correctly choosing between.NET's built-in sort (and understanding its actual hybrid algorithm) versus a specialized approach, and for recognizing when binary search's O(log n) applies (and its surprisingly common precondition violations).
+**Common interview questions**
 
-### How does it work (30,000-ft view)?
+**Q1. What's the complexity of this nested loop: `for i in n: for j in i..n`?**
+About n²/2 iterations → O(n²). Constants drop; the shape still grows quadratically.
+
+**Q2. What does amortized O(1) mean?**
+Occasional expensive operations (resizing an array) are spread across many cheap ones, so the average per operation over any sequence is constant, even though one call may be O(n).
+
+**Q3. How do you pick an algorithm from the input size?**
+n ≤ 20 → exponential or backtracking is OK; n ≤ 10⁴ → O(n²) can work; n ≤ 10⁶ → need O(n log n) or O(n); n ≥ 10⁸ → O(n) streaming or O(log n), or distribute the work.
+
+---
+
+## 2. Sorting Algorithms & .NET's Sort
+
+| Algorithm | Best | Average | Worst | Space | Stable | Notes |
+|---|---|---|---|---|---|---|
+| Bubble / insertion | O(n) | O(n²) | O(n²) | O(1) | ✅ | insertion sort is great for tiny or nearly sorted data |
+| Selection | O(n²) | O(n²) | O(n²) | O(1) | ❌ | minimal swaps |
+| **Merge sort** | O(n log n) | O(n log n) | O(n log n) | O(n) | ✅ | external sorting, linked lists, LINQ `OrderBy` (stable) |
+| **Quicksort** | O(n log n) | O(n log n) | O(n²) | O(log n) | ❌ | in place, cache-friendly; bad pivots → worst case |
+| **Heapsort** | O(n log n) | O(n log n) | O(n log n) | O(1) | ❌ | guaranteed bound |
+| **Introsort** (.NET `Array.Sort`/`List.Sort`) | — | O(n log n) | O(n log n) | O(log n) | ❌ | quicksort → heapsort if recursion is too deep → insertion sort for small partitions |
+| Counting / radix / bucket | O(n + k) | O(n + k) | O(n + k) | O(n + k) | ✅ | integers/keys in a small range; not comparison-based |
+
+**Key concepts**
+- **Stability:** equal keys keep their original relative order — matters for multi-key sorts (sort by date, then stably by customer).
+- `Array.Sort`/`List<T>.Sort` are **unstable** (introsort); **LINQ `OrderBy`/`ThenBy` are stable**.
+- The comparison-sort lower bound is Ω(n log n).
+- **External merge sort** for data larger than memory: sort chunks that fit in RAM, write runs to disk, k-way merge with a heap.
+
 ```csharp
-Array.Sort(items); // O(n log n) --.NET's introsort: quicksort, falling back to heapsort if recursion gets too deep
-int index = Array.BinarySearch(sortedItems, target); // O(log n) -- REQUIRES items already sorted
+// Merge sort (stable)
+int[] MergeSort(int[] a)
+{
+    if (a.Length <= 1) return a;
+    int mid = a.Length / 2;
+    var left = MergeSort(a[..mid]); var right = MergeSort(a[mid..]);
+    var res = new int[a.Length]; int i = 0, j = 0, k = 0;
+    while (i < left.Length && j < right.Length) res[k++] = left[i] <= right[j] ? left[i++] : right[j++]; // <= keeps it stable
+    while (i < left.Length) res[k++] = left[i++];
+    while (j < right.Length) res[k++] = right[j++];
+    return res;
+}
+
+// Quicksort (Lomuto partition, random pivot to avoid the worst case)
+void QuickSort(int[] a, int lo, int hi)
+{
+    if (lo >= hi) return;
+    int p = Random.Shared.Next(lo, hi + 1); (a[p], a[hi]) = (a[hi], a[p]);
+    int pivot = a[hi], i = lo;
+    for (int j = lo; j < hi; j++) if (a[j] < pivot) { (a[i], a[j]) = (a[j], a[i]); i++; }
+    (a[i], a[hi]) = (a[hi], a[i]);
+    QuickSort(a, lo, i - 1); QuickSort(a, i + 1, hi);
+}
+
+// Multi-key sort in .NET: stable LINQ
+var sorted = trades.OrderBy(t => t.Date).ThenByDescending(t => t.Amount).ToList();
+
+// Custom comparer
+trades.Sort((a, b) => a.Date.CompareTo(b.Date) is var c and not 0 ? c : b.Amount.CompareTo(a.Amount));
+
+// Quickselect: k-th smallest in O(n) average (no full sort)
 ```
 
+**Common interview questions**
+
+**Q1. Which algorithm does .NET's `Array.Sort` use?**
+Introsort: quicksort with median-of-three pivots, switching to heapsort when the recursion depth exceeds ~2·log n (guaranteeing O(n log n)), and insertion sort for small partitions. It's unstable. LINQ `OrderBy` uses a stable sort.
+
+**Q2. What is sort stability and when does it matter?**
+A stable sort keeps equal elements in their original order. It matters when sorting by multiple keys in passes, or when the existing order carries meaning (e.g., arrival time). A bug example: sorting payments by status with an unstable sort scrambles their prior time order.
+
+**Q3. Merge sort vs quicksort?**
+Merge sort: guaranteed O(n log n), stable, needs O(n) extra space; good for linked lists and external sorting. Quicksort: in place and usually faster thanks to cache locality, but O(n²) worst case without good pivots, and unstable.
+
+**Q4. How do you sort 100 GB of data with 4 GB of RAM?**
+External merge sort: read 4 GB chunks, sort each in memory, write sorted runs to disk, then k-way merge the runs with a min-heap, streaming the output. Or use a distributed sort (Spark).
+
+**Q5. When can you beat O(n log n)?**
+When keys have a limited range or structure: counting sort (small integer ranges), radix sort (fixed-width keys), bucket sort (uniformly distributed values) — O(n + k).
+
 ---
 
-## 2. Deep Dive
+## 3. Binary Search (and on the Answer Space)
 
-### 2.1.NET's Built-In Sort — Introsort, Not "Just Quicksort"
-`Array.Sort`/`List<T>.Sort` use **introsort** (introspective sort) — a hybrid algorithm starting with quicksort (fast average case, O(n log n)), but **switching to heapsort** if the recursion depth exceeds a threshold based on `log n` (detecting quicksort's pathological O(n²) worst case, typically triggered by an already-sorted or adversarially-crafted input against a naive pivot-selection strategy), and switching to **insertion sort** for small subarrays (below a size threshold, since insertion sort's low constant-factor overhead outperforms quicksort's recursive overhead for small n) — this three-algorithm hybrid is precisely why "is `Array.Sort` O(n log n) worst-case or O(n²) worst-case" has a nuanced, correct answer (O(n log n) worst-case, specifically **because** of the heapsort fallback closing quicksort's classic worst-case vulnerability) that a candidate reciting "quicksort is O(n²) worst case" without knowing about introsort would get wrong for.NET's actual behavior.
+**Key concepts**
+- Requires a **sorted** (or monotonic) search space → O(log n).
+- Classic bugs: `mid = (lo + hi) / 2` overflow → `lo + (hi - lo) / 2`; off-by-one loop conditions; infinite loops.
+- Variants: first/last occurrence (lower/upper bound), insertion point, rotated sorted array, peak element.
+- **Binary search on the answer:** when you can check "is answer x feasible?" and feasibility is monotonic (min capacity to ship in D days, min rate, max minimal distance) → search over x.
+- .NET: `Array.BinarySearch` returns the bitwise complement of the insertion point when not found; `List<T>.BinarySearch`.
 
-### 2.2 Stability — a Frequently-Overlooked Sorting Property
-A **stable** sort preserves the relative order of elements considered equal by the comparison — critical for multi-key sorting (sort by last name, then by first name among ties, expecting the first-name sort to preserve the already-established last-name grouping) and for any UI "sort by column, click again to sort by a different column while preserving prior grouping" feature. `List<T>.Sort`/`Array.Sort` are **not guaranteed stable** (their introsort implementation can reorder equal elements) — `OrderBy`/`OrderByDescending` (LINQ) **are** guaranteed stable — this is a genuine, practical, easy-to-get-wrong distinction between superficially-similar sorting APIs in the same framework.
+```csharp
+// Lower bound: first index with a[i] >= target
+int LowerBound(int[] a, int target)
+{
+    int lo = 0, hi = a.Length;                    // [lo, hi)
+    while (lo < hi)
+    {
+        int mid = lo + (hi - lo) / 2;             // overflow-safe
+        if (a[mid] < target) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+}
 
-### 2.3 Binary Search — the Precondition Everyone Forgets, and the Off-By-One Everyone Gets Wrong
-Binary search's O(log n) guarantee has **exactly one precondition**: the input must already be **sorted** (with respect to the comparison being used) — running binary search on unsorted data produces a silently incorrect result (not an exception), a genuinely dangerous failure mode since it doesn't fail loudly. The classic implementation bug: `mid = (low + high) / 2` can **overflow** for very large arrays (`low + high` exceeding `int.MaxValue` before the division) — the standard, correct fix is `mid = low + (high - low) / 2`, avoiding the intermediate overflow entirely — a small, specific detail that's a genuine, real historical bug class (famously discussed in a well-known Google Research blog post about this exact bug persisting undetected in binary search implementations for decades across many codebases).
+// Search in a rotated sorted array
+int SearchRotated(int[] a, int t)
+{
+    int lo = 0, hi = a.Length - 1;
+    while (lo <= hi)
+    {
+        int mid = lo + (hi - lo) / 2;
+        if (a[mid] == t) return mid;
+        if (a[lo] <= a[mid]) { if (t >= a[lo] && t < a[mid]) hi = mid - 1; else lo = mid + 1; }   // left half sorted
+        else { if (t > a[mid] && t <= a[hi]) lo = mid + 1; else hi = mid - 1; }                   // right half sorted
+    }
+    return -1;
+}
 
-### 2.4 Divide-and-Conquer — the Recurring Pattern Underlying Merge Sort, Quicksort, and Binary Search
-All three algorithms share the **divide-and-conquer** paradigm: split the problem into smaller subproblems, solve recursively, combine results — merge sort splits unconditionally in half and does its "work" during the **combine** (merge) step (making it stable and O(n log n) *worst-case*, at the cost of O(n) auxiliary space); quicksort splits based on a pivot and does its "work" during the **divide** (partition) step (making it in-place, O(1) auxiliary space beyond the recursion stack, but average-case O(n log n) with a possible O(n²) worst case absent introsort's safeguard); binary search is divide-and-conquer degenerated to **always discarding one half entirely** rather than recursing into both. Recognizing this shared structural pattern — not memorizing three unrelated algorithms — is what lets an engineer derive a new divide-and-conquer algorithm for a novel problem in an interview, rather than only recognizing the three canonical examples.
+// Binary search on the answer: minimum daily capacity to ship all packages within D days
+int ShipWithinDays(int[] weights, int days)
+{
+    int lo = weights.Max(), hi = weights.Sum();
+    while (lo < hi)
+    {
+        int cap = lo + (hi - lo) / 2;
+        int need = 1, load = 0;
+        foreach (var w in weights) { if (load + w > cap) { need++; load = 0; } load += w; }
+        if (need <= days) hi = cap; else lo = cap + 1;
+    }
+    return lo;
+}
+```
 
-### 2.5 Time-Space Trade-offs — Merge Sort's Space Cost vs Quicksort's In-Place Advantage
-Merge sort's guaranteed O(n log n) worst-case and stability come at the cost of O(n) auxiliary space (needing a temporary array during merging) — a genuine, real trade-off against quicksort's O(1) auxiliary space (beyond the recursion call stack, itself O(log n) for a well-balanced partition) but weaker (average-case-only, without introsort's fallback) worst-case guarantee — precisely why introsort's hybrid design exists: it seeks quicksort's typical in-place efficiency while structurally eliminating its worst-case vulnerability via the heapsort fallback, rather than simply always using merge sort's safer-but-more-memory-hungry guarantee.
+**Common interview questions**
 
-## 3. Visual Architecture
+**Q1. What's the most common binary search bug?**
+Overflow in `(lo + hi) / 2` for large indices, and inconsistent bounds (`<` vs `<=`, `hi = mid` vs `mid - 1`) causing infinite loops or missed elements. Pick one convention (half-open `[lo, hi)`) and stick to it.
+
+**Q2. What does "binary search on the answer" mean?**
+If you can test whether a candidate answer x works, and feasibility is monotonic in x, binary-search x over its possible range instead of searching the data — e.g., the minimum server capacity that meets an SLA, or the minimum ship capacity.
+
+**Q3. Binary search on unsorted data?**
+It doesn't work — the precondition is monotonicity. Sort first (O(n log n)) only if you'll search many times; for a single search, a linear scan is O(n) and better.
+
+---
+
+## 4. Two Pointers
+
+**Key concepts**
+- Two indices moving through data (from both ends or at different speeds) → often turns O(n²) into O(n).
+- Uses: pair sums in sorted arrays, removing duplicates in place, palindromes, merging sorted arrays, container with most water, 3-sum (sort + two pointers → O(n²)), linked-list fast/slow pointers.
+
+```csharp
+// Pair with a target sum in a sorted array
+(int, int)? PairSum(int[] a, int target)
+{
+    int i = 0, j = a.Length - 1;
+    while (i < j)
+    {
+        int s = a[i] + a[j];
+        if (s == target) return (i, j);
+        if (s < target) i++; else j--;
+    }
+    return null;
+}
+
+// Remove duplicates from a sorted array in place, return the new length
+int Dedupe(int[] a)
+{
+    if (a.Length == 0) return 0;
+    int w = 1;
+    for (int r = 1; r < a.Length; r++) if (a[r] != a[w - 1]) a[w++] = a[r];
+    return w;
+}
+
+// Valid palindrome ignoring non-alphanumerics
+bool IsPalindrome(string s)
+{
+    int i = 0, j = s.Length - 1;
+    while (i < j)
+    {
+        if (!char.IsLetterOrDigit(s[i])) { i++; continue; }
+        if (!char.IsLetterOrDigit(s[j])) { j--; continue; }
+        if (char.ToLowerInvariant(s[i++]) != char.ToLowerInvariant(s[j--])) return false;
+    }
+    return true;
+}
+
+// 3-sum (unique triplets summing to 0): sort + two pointers, O(n²)
+List<int[]> ThreeSum(int[] a)
+{
+    Array.Sort(a); var res = new List<int[]>();
+    for (int i = 0; i < a.Length - 2; i++)
+    {
+        if (i > 0 && a[i] == a[i - 1]) continue;
+        int l = i + 1, r = a.Length - 1;
+        while (l < r)
+        {
+            int s = a[i] + a[l] + a[r];
+            if (s == 0) { res.Add([a[i], a[l], a[r]]); while (l < r && a[l] == a[l + 1]) l++; l++; r--; }
+            else if (s < 0) l++; else r--;
+        }
+    }
+    return res;
+}
+```
+
+**Common interview question**
+
+**Q. When does two pointers apply?**
+When the data is sorted (or can be) and a monotonic decision tells you which pointer to move, or when you're processing a sequence in place with a read and a write cursor. It removes the inner loop of a brute-force pair search.
+
+---
+
+## 5. Sliding Window
+
+**Key concepts**
+- Maintain a window `[left, right]` over an array or string, expanding right and shrinking left while maintaining a condition → O(n).
+- **Fixed size** (moving average, max sum of k elements) vs **variable size** (longest substring without repeats, smallest subarray with sum ≥ target, at most k distinct characters).
+- State in the window: running sum, frequency map, counts, a deque for the max.
+- Real systems: rate limiting (sliding-window counters), streaming analytics (moving averages), fraud velocity checks (transactions in the last 10 minutes).
+
+```csharp
+// Max sum of any k consecutive elements (fixed window)
+int MaxSumK(int[] a, int k)
+{
+    int sum = a.Take(k).Sum(), best = sum;
+    for (int i = k; i < a.Length; i++) { sum += a[i] - a[i - k]; best = Math.Max(best, sum); }
+    return best;
+}
+
+// Smallest subarray length with sum >= target (variable window, positive numbers)
+int MinLen(int[] a, int target)
+{
+    int left = 0, sum = 0, best = int.MaxValue;
+    for (int right = 0; right < a.Length; right++)
+    {
+        sum += a[right];
+        while (sum >= target) { best = Math.Min(best, right - left + 1); sum -= a[left++]; }
+    }
+    return best == int.MaxValue ? 0 : best;
+}
+
+// Longest substring with at most k distinct characters
+int LongestKDistinct(string s, int k)
+{
+    var count = new Dictionary<char, int>(); int left = 0, best = 0;
+    for (int right = 0; right < s.Length; right++)
+    {
+        count[s[right]] = count.GetValueOrDefault(s[right]) + 1;
+        while (count.Count > k)
+        {
+            if (--count[s[left]] == 0) count.Remove(s[left]);
+            left++;
+        }
+        best = Math.Max(best, right - left + 1);
+    }
+    return best;
+}
+```
+
+**Common interview question**
+
+**Q. How do you recognise a sliding-window problem?**
+"Longest/shortest/maximum **contiguous** subarray or substring satisfying a condition", where the condition can be updated incrementally as the window grows and shrinks. It turns O(n²) "check every subarray" into O(n). It doesn't work for variable windows when negative numbers break monotonicity (use prefix sums + a hash map instead).
+
+---
+
+## 6. Prefix Sums & Hashing Patterns
+
+**Key concepts**
+- **Prefix sum** `P[i] = a[0] + … + a[i-1]` → range sums in O(1); 2D prefix sums for matrices.
+- **Subarray sum equals k** (with negatives): count prefix sums in a hash map → O(n).
+- **Difference arrays** for many range updates in O(1) each.
+- Hashing patterns: complements (two-sum), frequency counting, grouping by a canonical key (anagrams), seen sets for duplicates and cycles.
+
+```csharp
+// Count subarrays summing to k (works with negative numbers)
+int SubarraySum(int[] a, int k)
+{
+    var counts = new Dictionary<int, int> { [0] = 1 };
+    int sum = 0, result = 0;
+    foreach (var x in a)
+    {
+        sum += x;
+        result += counts.GetValueOrDefault(sum - k);
+        counts[sum] = counts.GetValueOrDefault(sum) + 1;
+    }
+    return result;
+}
+
+// Difference array: apply many +v to ranges, then materialize
+int[] ApplyRanges(int n, (int L, int R, int V)[] updates)
+{
+    var diff = new int[n + 1];
+    foreach (var (l, r, v) in updates) { diff[l] += v; diff[r + 1] -= v; }
+    var res = new int[n]; int run = 0;
+    for (int i = 0; i < n; i++) res[i] = run += diff[i];
+    return res;
+}
+```
+
+**Common interview question**
+
+**Q. Why does "subarray sum equals k" need a hash map instead of a sliding window?**
+With negative numbers, growing the window doesn't monotonically increase the sum, so you can't decide when to shrink it. Using prefix sums, a subarray (i, j] sums to k exactly when `P[j] − P[i] = k`; counting previously seen prefix sums gives the answer in one pass.
+
+---
+
+## 7. Divide & Conquer
+
+**Key concepts**
+- Split the problem into independent subproblems, solve them recursively, combine the results: merge sort, quicksort, binary search, closest pair of points, Karatsuba multiplication, fast exponentiation.
+- Analyse with the master theorem. Parallelizes naturally (fork/join, MapReduce).
+- Differs from DP: subproblems **don't overlap** (no memoization needed).
+
+```csharp
+// Fast exponentiation: O(log n)
+long Pow(long b, long e, long mod)
+{
+    long result = 1; b %= mod;
+    while (e > 0) { if ((e & 1) == 1) result = result * b % mod; b = b * b % mod; e >>= 1; }
+    return result;
+}
+
+// Count inversions with merge sort: O(n log n)
+long CountInversions(int[] a)
+{
+    if (a.Length < 2) return 0;
+    int m = a.Length / 2; var l = a[..m]; var r = a[m..];
+    long inv = CountInversions(l) + CountInversions(r);
+    int i = 0, j = 0, k = 0;
+    while (i < l.Length && j < r.Length)
+        if (l[i] <= r[j]) a[k++] = l[i++]; else { a[k++] = r[j++]; inv += l.Length - i; }
+    while (i < l.Length) a[k++] = l[i++];
+    while (j < r.Length) a[k++] = r[j++];
+    return inv;
+}
+```
+
+**Common interview question**
+
+**Q. How does divide & conquer relate to distributed processing?**
+The same idea scales out: partition the data (map), process the partitions independently on many machines, then combine (reduce) — e.g., distributed sort, per-partition top-k merged at the end, or parallel aggregation.
+
+---
+
+## 8. Recursion & Backtracking
+
+**Key concepts**
+- **Recursion:** base case + reduction toward it. Each call uses stack space → deep recursion can overflow (C# has no tail-call guarantee) → use an explicit stack or iteration for deep inputs.
+- **Backtracking:** build candidates incrementally; abandon ("prune") partial candidates that can't succeed. Template: choose → explore → un-choose.
+- Problems: subsets, permutations, combinations, combination sum, N-Queens, Sudoku, word search, generating parentheses.
+- Complexity is usually exponential → pruning matters.
+
+```csharp
+// All subsets (power set): O(2ⁿ · n)
+List<List<int>> Subsets(int[] nums)
+{
+    var res = new List<List<int>>(); var cur = new List<int>();
+    void Backtrack(int start)
+    {
+        res.Add([.. cur]);
+        for (int i = start; i < nums.Length; i++) { cur.Add(nums[i]); Backtrack(i + 1); cur.RemoveAt(cur.Count - 1); }
+    }
+    Backtrack(0);
+    return res;
+}
+
+// Permutations
+List<List<int>> Permute(int[] nums)
+{
+    var res = new List<List<int>>(); var used = new bool[nums.Length]; var cur = new List<int>();
+    void Go()
+    {
+        if (cur.Count == nums.Length) { res.Add([.. cur]); return; }
+        for (int i = 0; i < nums.Length; i++)
+        {
+            if (used[i]) continue;
+            used[i] = true; cur.Add(nums[i]); Go(); cur.RemoveAt(cur.Count - 1); used[i] = false;
+        }
+    }
+    Go();
+    return res;
+}
+
+// Combination sum with pruning (candidates can be reused)
+List<List<int>> CombinationSum(int[] c, int target)
+{
+    Array.Sort(c); var res = new List<List<int>>(); var cur = new List<int>();
+    void Go(int start, int remain)
+    {
+        if (remain == 0) { res.Add([.. cur]); return; }
+        for (int i = start; i < c.Length && c[i] <= remain; i++)   // prune: sorted, stop early
+        { cur.Add(c[i]); Go(i, remain - c[i]); cur.RemoveAt(cur.Count - 1); }
+    }
+    Go(0, target);
+    return res;
+}
+```
+
+**Common interview questions**
+
+**Q1. Recursion vs iteration?**
+Recursion is natural for trees, graphs and divide & conquer; iteration avoids stack overflow and call overhead. Any recursion can be converted with an explicit stack; prefer iteration for unbounded depth (deep linked structures, large graphs).
+
+**Q2. How do you make backtracking feasible?**
+Prune early (sort and stop when the remaining budget is exceeded; check constraints before recursing), order choices to fail fast, memoize repeated states (which turns it into DP), and bound the search space.
+
+---
+
+## 9. Graph Algorithms Recap
+
+| Problem | Algorithm | Complexity |
+|---|---|---|
+| Traverse / connected components | BFS / DFS | O(V + E) |
+| Shortest path, unweighted | BFS | O(V + E) |
+| Shortest path, non-negative weights | Dijkstra (heap) | O((V + E) log V) |
+| Shortest path, negative weights | Bellman-Ford | O(V·E) |
+| All-pairs shortest paths | Floyd-Warshall | O(V³) |
+| Dependency ordering | Topological sort (Kahn / DFS) | O(V + E) |
+| Minimum spanning tree | Kruskal (sort + Union-Find) / Prim (heap) | O(E log E) |
+| Cycle detection | DFS colours (directed), Union-Find (undirected) | O(V + E) |
+| Bipartite check | BFS 2-colouring | O(V + E) |
+| Strongly connected components | Tarjan / Kosaraju | O(V + E) |
+
+Code for BFS, Dijkstra, topological sort and Union-Find: [[../12-Data-Structures/01-Data-Structures-Interview-Prep]] §9–§10.
+
+**Common interview question**
+
+**Q. How would you detect circular dependencies between microservices or build steps?**
+Model them as a directed graph and run a topological sort (Kahn); leftover nodes with non-zero in-degree form cycles — or DFS with grey/black colouring to report the actual cycle path. Run it in CI on service manifests.
+
+---
+
+## 10. Dynamic Programming
+
+**Key concepts**
+- Use DP when a problem has **optimal substructure** (an optimal solution is built from optimal sub-solutions) **and overlapping subproblems** (the same subproblems recur).
+- **Top-down (memoization):** recursion + cache; computes only needed states; easier to write; recursion depth limits.
+- **Bottom-up (tabulation):** fill a table in dependency order; no recursion; easier to **optimize space** (keep only the last row).
+- Recipe: **define the state** → **recurrence** → **base cases** → **order of computation** → **answer location** → optimize space.
+- Archetypes:
+  - 1D: Fibonacci/climbing stairs, house robber, coin change (min coins / number of ways), longest increasing subsequence (O(n log n) with patience sorting).
+  - 2D grid: unique paths, minimum path sum.
+  - Two sequences: **LCS**, **edit distance**, diff tools.
+  - Knapsack: 0/1 knapsack, subset sum, partition equal subset.
+  - Intervals: matrix-chain, burst balloons; DP on trees/graphs (longest path in a DAG).
+
+```csharp
+// Top-down memoization
+long Fib(int n, Dictionary<int, long>? memo = null)
+{
+    memo ??= new();
+    if (n <= 1) return n;
+    if (memo.TryGetValue(n, out var v)) return v;
+    return memo[n] = Fib(n - 1, memo) + Fib(n - 2, memo);
+}
+
+// Coin change: minimum coins (bottom-up), O(amount × coins)
+int CoinChange(int[] coins, int amount)
+{
+    var dp = Enumerable.Repeat(int.MaxValue, amount + 1).ToArray(); dp[0] = 0;
+    for (int x = 1; x <= amount; x++)
+        foreach (var c in coins)
+            if (c <= x && dp[x - c] != int.MaxValue) dp[x] = Math.Min(dp[x], dp[x - c] + 1);
+    return dp[amount] == int.MaxValue ? -1 : dp[amount];
+}
+
+// 0/1 knapsack with a space-optimized 1D table (iterate capacity downward!)
+int Knapsack(int[] w, int[] v, int cap)
+{
+    var dp = new int[cap + 1];
+    for (int i = 0; i < w.Length; i++)
+        for (int c = cap; c >= w[i]; c--)
+            dp[c] = Math.Max(dp[c], dp[c - w[i]] + v[i]);
+    return dp[cap];
+}
+
+// Longest common subsequence
+int Lcs(string a, string b)
+{
+    var dp = new int[a.Length + 1, b.Length + 1];
+    for (int i = 1; i <= a.Length; i++)
+        for (int j = 1; j <= b.Length; j++)
+            dp[i, j] = a[i - 1] == b[j - 1] ? dp[i - 1, j - 1] + 1 : Math.Max(dp[i - 1, j], dp[i, j - 1]);
+    return dp[a.Length, b.Length];
+}
+
+// Edit distance (Levenshtein): fuzzy matching of names, e.g. sanctions screening
+int EditDistance(string a, string b)
+{
+    var dp = new int[a.Length + 1, b.Length + 1];
+    for (int i = 0; i <= a.Length; i++) dp[i, 0] = i;
+    for (int j = 0; j <= b.Length; j++) dp[0, j] = j;
+    for (int i = 1; i <= a.Length; i++)
+        for (int j = 1; j <= b.Length; j++)
+            dp[i, j] = a[i - 1] == b[j - 1] ? dp[i - 1, j - 1]
+                     : 1 + Math.Min(dp[i - 1, j - 1], Math.Min(dp[i - 1, j], dp[i, j - 1]));
+    return dp[a.Length, b.Length];
+}
+
+// Longest increasing subsequence in O(n log n)
+int Lis(int[] a)
+{
+    var tails = new List<int>();
+    foreach (var x in a)
+    {
+        int i = tails.BinarySearch(x); if (i < 0) i = ~i;
+        if (i == tails.Count) tails.Add(x); else tails[i] = x;
+    }
+    return tails.Count;
+}
+```
+
+**Common interview questions**
+
+**Q1. DP vs divide & conquer vs greedy?**
+Divide & conquer: independent subproblems. DP: overlapping subproblems, solved once and reused. Greedy: make the locally best choice without reconsidering — correct only when the greedy-choice property is proven.
+
+**Q2. Memoization or tabulation?**
+Memoization is quicker to write and only computes reachable states, but has recursion overhead and depth limits. Tabulation is iterative, often faster, and enables space optimization (rolling arrays). Use tabulation for large state spaces.
+
+**Q3. How do you approach a new DP problem?**
+Brute-force recursion first; spot repeated subproblems; define the state (what parameters identify a subproblem); write the recurrence and base cases; add memoization; convert to bottom-up and reduce space if needed; state the time = states × transitions.
+
+**Q4. Why iterate capacity downward in the 1D knapsack?**
+Each item may be used once. Going downward means `dp[c - w]` still holds the previous item's row; going upward would reuse the current item multiple times (that's the unbounded knapsack).
+
+**Q5. Where does DP appear in real systems?**
+Diff and merge tools (LCS), fuzzy name matching and spell check (edit distance), route and cost optimization, resource allocation (knapsack-like budgeting), and query optimizers choosing join orders.
+
+---
+
+## 11. Greedy Algorithms
+
+**Key concepts**
+- Make the best local choice at each step, never revisiting it. Correct only with the **greedy-choice property** + optimal substructure — **prove it** (exchange argument) or find a counterexample.
+- Classic correct greedy: interval scheduling (sort by **end** time), activity selection, Huffman coding, Dijkstra, Prim/Kruskal, fractional knapsack, jump game, gas station, meeting rooms (min-heap of end times).
+- Classic failure: coin change with arbitrary denominations ({1, 3, 4} for 6: greedy gives 4+1+1 = 3 coins, optimal is 3+3 = 2) and 0/1 knapsack.
+- Verify greedy empirically against brute force on small random inputs.
+
+```csharp
+// Maximum non-overlapping meetings: sort by end time
+int MaxMeetings((int Start, int End)[] m)
+{
+    int count = 0, lastEnd = int.MinValue;
+    foreach (var (s, e) in m.OrderBy(x => x.End))
+        if (s >= lastEnd) { count++; lastEnd = e; }
+    return count;
+}
+
+// Minimum meeting rooms: min-heap of end times
+int MinRooms((int Start, int End)[] m)
+{
+    var ends = new PriorityQueue<int, int>();
+    foreach (var (s, e) in m.OrderBy(x => x.Start))
+    {
+        if (ends.Count > 0 && ends.Peek() <= s) ends.Dequeue();
+        ends.Enqueue(e, e);
+    }
+    return ends.Count;
+}
+
+// Merge overlapping intervals
+List<(int, int)> Merge((int S, int E)[] iv)
+{
+    var res = new List<(int S, int E)>();
+    foreach (var cur in iv.OrderBy(x => x.S))
+        if (res.Count > 0 && cur.S <= res[^1].E) res[^1] = (res[^1].S, Math.Max(res[^1].E, cur.E));
+        else res.Add(cur);
+    return res.Select(x => (x.S, x.E)).ToList();
+}
+```
+
+**Common interview questions**
+
+**Q1. How do you know a greedy solution is correct?**
+Prove the greedy-choice property, typically with an exchange argument: take any optimal solution and show it can be transformed to include the greedy choice without getting worse. If you can't, test against brute force on small inputs — and look for counterexamples.
+
+**Q2. Why sort by end time for interval scheduling?**
+Choosing the meeting that ends earliest leaves the most room for the rest; any optimal schedule can swap its first meeting for the earliest-ending one without losing a meeting.
+
+**Q3. Give a case where greedy fails.**
+Coin change with denominations {1, 3, 4} for amount 6, or the 0/1 knapsack (taking the best value/weight ratio first can miss the optimum). Both need DP.
+
+---
+
+## 12. Bit Manipulation & Math Tricks
+
+```csharp
+bool IsPowerOfTwo(long n) => n > 0 && (n & (n - 1)) == 0;
+int CountBits(uint x) => System.Numerics.BitOperations.PopCount(x);
+int SingleNumber(int[] a) => a.Aggregate(0, (acc, x) => acc ^ x);       // every other number appears twice
+bool HasFlag(int perms, int flag) => (perms & flag) != 0;                // bitmask permissions
+int SetBit(int x, int i) => x | (1 << i);  int ClearBit(int x, int i) => x & ~(1 << i);
+long Gcd(long a, long b) => b == 0 ? a : Gcd(b, a % b);
+// Modular arithmetic for large results: (a * b) % mod using long; fast exponentiation (§7)
+// Reservoir sampling: pick k random items from a stream of unknown length in O(k) memory
+```
+
+**Common interview question**
+
+**Q. Where is bit manipulation useful outside puzzles?**
+Permission flags (`[Flags]` enums), Bloom filters and bitmaps (Redis `SETBIT` for daily-active users), hashing, compact state encoding in DP (bitmask DP over subsets), and low-level protocol parsing.
+
+---
+
+## 13. Pattern Recognition Table + Interview Execution
+
+| If the problem says… | Think… |
+|---|---|
+| sorted array, find a target or boundary | binary search |
+| min/max value satisfying a monotonic condition | binary search on the answer |
+| pair/triplet with a sum, in place, palindrome | two pointers |
+| longest/shortest contiguous subarray or substring | sliding window |
+| subarray sum with negatives, range sums | prefix sums + hash map |
+| top/bottom k, k-th largest, merge k sorted | heap (or quickselect) |
+| next greater/smaller element | monotonic stack |
+| all combinations/permutations/subsets | backtracking |
+| count ways / min cost / optimal, with overlapping choices | dynamic programming |
+| intervals, scheduling | sort + greedy (or heap) |
+| shortest path, unweighted grid | BFS |
+| dependencies, ordering | topological sort |
+| connectivity, grouping, cycles (undirected) | union-find |
+| prefix matching, autocomplete | trie |
+| frequency, duplicates, complements | hash map/set |
+
+**Interview execution (what's actually graded)**
+1. **Clarify:** inputs, sizes, edge cases (empty, duplicates, negatives, overflow), expected output format.
+2. **Example:** walk through a small example by hand.
+3. **Brute force first**, state its complexity, then **optimize** with a pattern above.
+4. **Talk while coding**; name variables clearly; handle edge cases.
+5. **Test** with your example and edge cases; trace the code.
+6. **State time and space complexity**, and mention trade-offs or production concerns (streaming input, memory limits, concurrency).
+
+---
+
+## 14. Top 30 Rapid-Fire Questions + Principal Questions
+
+1. **Big-O of binary search?** O(log n).
+2. **Comparison sort lower bound?** Ω(n log n).
+3. **.NET `Array.Sort`?** Introsort, unstable.
+4. **Stable sort in .NET?** LINQ `OrderBy`.
+5. **Quicksort worst case?** O(n²) with bad pivots.
+6. **Merge sort space?** O(n).
+7. **Heapsort?** O(n log n), O(1) space, unstable.
+8. **Data bigger than RAM?** External merge sort.
+9. **Linear-time sorts?** Counting, radix, bucket.
+10. **Binary search overflow fix?** `lo + (hi - lo) / 2`.
+11. **Lower bound?** First index ≥ target.
+12. **Two pointers precondition?** Usually sorted data.
+13. **Sliding window use?** Contiguous ranges with incremental conditions.
+14. **Negatives + subarray sum?** Prefix sums + hash map.
+15. **Top-k?** Heap of size k.
+16. **k-th smallest, average O(n)?** Quickselect.
+17. **Backtracking template?** Choose, explore, un-choose.
+18. **Recursion risk?** Stack overflow → iterate.
+19. **DP conditions?** Optimal substructure + overlapping subproblems.
+20. **Memoization vs tabulation?** Top-down cache vs bottom-up table.
+21. **LCS / edit distance?** 2D DP, O(n·m).
+22. **LIS fast?** O(n log n) with binary search.
+23. **0/1 knapsack?** DP, iterate capacity downward.
+24. **Greedy proof?** Exchange argument.
+25. **Interval scheduling?** Sort by end time.
+26. **Unweighted shortest path?** BFS.
+27. **Dijkstra limitation?** No negative weights.
+28. **Cycle in dependencies?** Topological sort fails.
+29. **Power of two?** `n & (n-1) == 0`.
+30. **Interview first step?** Clarify, then brute force, then optimize.
+
+**Principal-level questions**
+
+**P1. When is the "optimal" algorithm the wrong choice?**
+When n is small and a simpler O(n²) solution is clearer and fast enough; when the optimal algorithm is hard to maintain or verify; when constant factors and cache behaviour dominate; when data arrives as a stream (you need online algorithms); or when an approximate answer (sampling, sketches) meets the business need far more cheaply.
+
+**P2. How do algorithms show up in production systems you'd design?**
+Rate limiters (sliding windows, token buckets), schedulers (heaps), dependency resolution (topological sort), fraud rings (graph components), fuzzy matching in sanctions screening (edit distance), reconciliation (sort-merge joins of large files), pagination (keyset with binary-search-like seeks), and consistent hashing for sharding.
+
+**P3. How do you evaluate a candidate in a coding round at senior level?**
+Clarifying questions, structured approach (brute force → optimization), correct complexity analysis, clean readable code, self-testing with edge cases, and the ability to discuss production concerns — not memorized trick solutions.
+
+---
+
+## 15. Mistakes Checklist (say why each is wrong)
+- [ ] Jumping into code without clarifying requirements and edge cases
+- [ ] Not stating complexity · confusing average with worst case
+- [ ] Binary search overflow and off-by-one errors · binary search on unsorted data
+- [ ] Assuming `Array.Sort` is stable · sorting the whole dataset for top-k
+- [ ] Sliding window with negative numbers · forgetting to shrink the window
+- [ ] Deep recursion without considering stack depth
+- [ ] Greedy without proof (coin change with odd denominations) · DP without defining the state clearly
+- [ ] Iterating capacity upward in a 0/1 knapsack · not optimizing DP space when needed
+- [ ] Not testing with empty input, a single element, duplicates or large values
+
+---
+
+## Architecture Diagrams (preserved from the original modules)
+
+> All 8 Mermaid/ASCII diagrams from the original `13-Algorithms/` files, kept verbatim and grouped by source module. Originals: `git show ebb2d5c:13-Algorithms/<file>.md`.
+
+### Module 35 — Algorithms: Sorting, Searching & Complexity Analysis
+*Source: `01-Sorting-Searching-Complexity.md`*
+
+**3. Visual Architecture**
+
 ```mermaid
 graph TB
  Sort["Array.Sort call"] --> Check{Recursion depth<br/>exceeds log(n) threshold?}
@@ -51,188 +754,8 @@ graph TB
  Small -->|No| QS
 ```
 
-## 4. Production Example
-**Scenario**: A reporting feature displaying a paginated, sortable grid (sort by date, then click a column header to sort by a secondary field) exhibited a confusing bug: sorting by "status" after already having sorted by "date" appeared to **discard** the date-based grouping entirely, scrambling records that should have remained grouped by date within each status — QA initially assumed the sort logic itself was buggy. **Investigation**: traced to the reporting code using `list.Sort((a, b) => a.Status.CompareTo(b.Status))` (an in-place `List<T>.Sort` call) for the secondary sort, rather than `list.OrderBy(x => x.Status)` — `List<T>.Sort`'s underlying introsort implementation is **not stable**, so elements with equal `Status` values were reordered arbitrarily relative to each other, destroying the previously-established date-based ordering among status-tied records. **Fix**: replaced `List<T>.Sort` with LINQ's `OrderBy`/`ThenBy` (`list = list.OrderBy(x => x.Date).ThenBy(x => x.Status).ToList`), both guaranteed stable, correctly preserving intended multi-key sort semantics. **Lesson**: `List<T>.Sort`/`Array.Sort`'s lack of stability is a genuine, easy-to-miss functional bug source for any multi-key sorting requirement, not merely a performance/style consideration — always use `OrderBy`/`ThenBy` (or verify a specific stability guarantee) whenever preserving relative order among equal elements is a genuine requirement, exactly the kind of subtle API-behavior distinction (directly paralleling the Controllers-vs-Minimal-APIs binding-inference mismatch) that silently produces wrong output rather than an obvious error.
-## 10. Interview Questions
+**12. System Design**
 
-### Basic (10)
-1. **Q: What is Big-O notation used for?** **A:** Describing how an algorithm's running time/space grows as input size grows, abstracting away hardware-specific constants.
-2. **Q: What is the average-case time complexity of quicksort?** **A:** O(n log n) average with excellent constants (in-place, cache-friendly partitioning), but O(n²) worst case on adversarial/sorted input with poor pivot choice — which is why production sorts (introsort) switch to heapsort when recursion depth signals the degenerate case.
-3. **Q: What is a stable sort?** **A:** One that preserves the relative order of elements considered equal by the comparison.
-4. **Q: Is `Array.Sort` stable?** **A:** No — it uses introsort (quicksort/heapsort/insertion-sort hybrid), which does not preserve the relative order of equal elements; if stability matters, use LINQ's `OrderBy` or sort by a composite key that breaks ties explicitly.
-5. **Q: Is LINQ's `OrderBy` stable?** **A:** Yes — equal keys preserve their source order (documented behavior, implemented via original-index tiebreaking), which is what makes incremental `OrderBy(...).ThenBy(...)` composition and "sort by one column, keep prior order within ties" UI behavior correct.
-6. **Q: What is the precondition for binary search to work correctly?** **A:** The input must already be sorted with respect to the comparison used.
-7. **Q: What is the time complexity of binary search?** **A:** O(log n) — each comparison halves the remaining search space; the precondition is a *sorted* input with random access, which is why binary search over an unsorted or linked structure is either wrong or loses its advantage.
-8. **Q: What sorting algorithm does.NET's `Array.Sort` actually use?** **A:** Introsort — a hybrid of quicksort, heapsort, and insertion sort.
-9. **Q: What is merge sort's auxiliary space complexity?** **A:** O(n) — the merge step needs a temporary buffer the size of the input; that extra space is the price of merge sort's guaranteed O(n log n) worst case and natural stability, versus quicksort's in-place partitioning.
-10. **Q: What is the classic integer-overflow bug in binary search implementations?** **A:** Computing `mid = (low + high) / 2`, where `low + high` can overflow for large arrays.
-
-### Intermediate (10)
-1. **Q: Why is quicksort's worst case O(n²), and what input triggers it for a naive implementation?** **A:** A poor pivot choice (e.g., always picking the first/last element) against already-sorted or adversarially-crafted input produces maximally-unbalanced partitions (one side empty, the other n-1 elements), degenerating recursion depth to O(n) and total work to O(n²).
-2. **Q: How does introsort close quicksort's worst-case vulnerability without sacrificing its typical-case performance?** **A:** It monitors recursion depth during quicksort's execution and falls back to heapsort (guaranteed O(n log n) regardless of input) only if depth exceeds a threshold indicating the pathological case has been triggered — retaining quicksort's fast, in-place typical-case behavior while eliminating its O(n²) worst case entirely.
-3. **Q: Why does `List<T>.Sort`'s lack of stability matter for correctness, not just performance?** **A:** For any multi-key sort relying on a prior sort's ordering being preserved among ties, an unstable sort can silently scramble the intended secondary ordering, producing functionally incorrect output rather than merely a slower-than-optimal one.
-4. **Q: Why does `low + (high - low) / 2` avoid the overflow that `(low + high) / 2` risks?** **A:** `high - low` is bounded by the array's actual size (never exceeding it), so adding it to `low` (already a valid, in-bounds index) cannot overflow, whereas `low + high` can exceed `int.MaxValue` if both are large, independent of the array's actual bounded size.
-5. **Q: Why is merge sort's O(n) auxiliary space a genuine trade-off, not a strictly inferior property compared to quicksort's in-place approach?** **A:** It buys merge sort a guaranteed O(n log n) worst case and stability — properties quicksort alone doesn't have (without introsort's added complexity) — a real, deliberate trade-off between guaranteed complexity/stability versus memory footprint, not simply "quicksort is better."
-6. **Q: Why would you choose insertion sort for small subarrays even though it's O(n²) in general?** **A:** For small n, insertion sort's low constant-factor overhead (simple, cache-friendly, no recursive call overhead) outperforms the recursive overhead of quicksort/merge sort at that scale — exactly why introsort switches to it below a size threshold rather than recursing all the way down.
-7. **Q: Why is running binary search on unsorted data dangerous specifically because it fails silently?** **A:** It doesn't throw an exception or produce an obviously-wrong result pattern — it simply may or may not find an existing element, and may report an incorrect "not found" or return the wrong index, with no signal indicating the precondition was violated, unlike many other API misuses that fail loudly.
-8. **Q: Why does recognizing the shared "divide, conquer, combine" structure across merge sort, quicksort, and binary search matter beyond memorizing each algorithm individually?** **A:** It's a transferable problem-solving template applicable to novel problems an interview or real system might present that don't match any of the three canonical named algorithms exactly, but can still be solved by applying the same underlying divide-and-conquer reasoning.
-9. **Q: Why might a counting sort or radix sort outperform a comparison-based sort (quicksort, merge sort) for specific input types?** **A:** Comparison-based sorts have a proven Ω(n log n) lower bound in the general case, but counting/radix sort achieve O(n+k) (k being the key range) by exploiting additional structure (bounded integer keys) that general comparison-based sorting can't assume — a genuine complexity-class improvement available specifically when the input has this additional exploitable structure.
-10. **Q: Why is "quicksort is O(n²) worst case" an incomplete answer specifically for.NET's `Array.Sort`?** **A:**.NET's actual implementation is introsort, which structurally eliminates the O(n²) worst case via its heapsort fallback — reciting quicksort's textbook worst case without acknowledging.NET's specific hybrid implementation gives an answer that's correct for "pure quicksort" but incorrect for what `Array.Sort` actually guarantees.
-
-### Advanced (10)
-1. **Q: Diagnose the multi-key-sort stability bug from first principles, and design a code-review/testing practice preventing recurrence.**
- **A:** Root cause: choosing `List<T>.Sort` (unstable) for a scenario with an implicit multi-key-ordering requirement (secondary sort must preserve primary sort's grouping among ties), without recognizing that stability was a genuine, load-bearing requirement rather than an incidental nicety. Safeguard: a code-review heuristic specifically flagging any `.Sort` call preceded or followed by another sort/grouping operation on the same collection as requiring explicit justification for why stability isn't needed (or a switch to `OrderBy`/`ThenBy` by default for any multi-key scenario) — paired with a unit test explicitly constructing input with intentional ties on the secondary key and asserting the primary key's grouping is preserved in the output, directly, mechanically catching this exact bug class.
-2. **Q: Explain why merge sort is frequently the default choice for external sorting (sorting data too large to fit in memory), and describe the mechanism.**
- **A:** Merge sort's divide-and-combine structure naturally maps onto external sorting: split the data into chunks small enough to fit in memory, sort each chunk in memory (via any in-memory sort) and write it to disk as a sorted "run," then repeatedly merge pairs of sorted runs (an operation requiring only sequential, streaming reads from each run plus a small in-memory buffer, never needing the full datasets in memory simultaneously) until one fully-sorted output remains — quicksort's in-place, random-access partitioning approach doesn't translate to this streaming-merge-friendly external-sorting model nearly as naturally, which is precisely why merge sort (not quicksort) is the standard algorithmic basis for large-scale external/distributed sorting (e.g., much of the reasoning underlying MapReduce-style sort-and-shuffle phases).
-3. **Q: Design a test suite specifically targeting the binary-search overflow bug and its associated off-by-one boundary conditions, generalizing beyond a single "does it find the element" test.**
- **A:** Test: (a) finding an element at the very first and very last index (boundary correctness); (b) searching for a value not present, both below the minimum and above the maximum (correct "not found" handling at both extremes); (c) an empty array (correct handling of the degenerate zero-element case); (d) — specifically for the overflow bug — an array large enough that `low + high` could plausibly overflow `int` if computed naively (requiring a very large array, or a deliberately-constructed test using `int.MaxValue`-adjacent index values to exercise the calculation directly without needing an actually gigantic array) — each of these represents a distinct class of boundary condition binary search implementations commonly get wrong, directly mirroring this course's recurring "test the boundaries explicitly, not just the happy path" discipline (the approval-tier boundary test is the direct analog).
-4. **Q: Explain how you would decide between.NET's built-in `Array.Sort`/`List<T>.Sort` and a custom, hand-rolled sorting implementation for a specific, performance-critical scenario.**
- **A:** Default strongly to the built-in implementation — it's extensively tested, hybrid-optimized (introsort), and almost certainly outperforms a hand-rolled general-purpose comparison sort; a custom implementation is justified only when the input has **exploitable additional structure** the built-in comparison-based sort can't leverage (bounded-range integer keys enabling counting/radix sort, Intermediate Q9; a specific, known-in-advance near-sortedness enabling a specialized adaptive sort) — directly the same "don't hand-roll what the framework already provides well, unless a specific, demonstrated, structural advantage justifies it" discipline recurring throughout this course.
-5. **Q: Explain why a comparison-based sort cannot beat O(n log n) in the general case, and what this means for evaluating a proposed "faster" sorting algorithm claim.**
- **A:** Any comparison-based sort can be modeled as a decision tree where each comparison branches the possible orderings — since there are n! possible orderings of n elements, and each comparison can at best halve the remaining possibilities, the tree's minimum depth (and thus the algorithm's minimum number of comparisons in the worst case) is Ω(log(n!)) = Ω(n log n) by Stirling's approximation — this is a **proven lower bound**, meaning any claimed "faster than O(n log n)" comparison-based sorting algorithm for the *general* case is either exploiting additional structure (making it not a general comparison sort, like counting sort) or is simply incorrect; evaluating such a claim requires immediately asking "what additional structure/assumption does this algorithm rely on" rather than accepting a bare "faster" claim about general-purpose comparison sorting at face value.
-6. **Q: Design a scenario where using `OrderBy`/`ThenBy`'s guaranteed stability has a measurable performance cost compared to `Array.Sort`, and explain the trade-off.**
- **A:** LINQ's `OrderBy` typically has higher constant-factor overhead than `Array.Sort` (additional allocation for the ordering infrastructure, iterator-based deferred execution machinery) even before considering the stability guarantee itself — for a very high-frequency, performance-critical sort where stability is provably unnecessary (verified, not assumed), `Array.Sort`/`List<T>.Sort` is the appropriate, deliberately-chosen faster option; the trade-off is explicit: pay `OrderBy`'s overhead when stability is a genuine requirement, accept `Array.Sort`'s speed when it's verified unnecessary — never choose based on habit alone in either direction.
-7. **Q: Explain how you would detect, via automated testing, whether a codebase has any latent binary-search-on-unsorted-data bugs, given that such bugs fail silently rather than throwing.**
- **A:** Add a debug-build-only (or a dedicated, opt-in diagnostic mode) assertion inside any custom binary-search helper verifying the input collection is actually sorted (an O(n) check, acceptable in debug/testing builds despite negating the O(log n) benefit there, specifically to catch precondition violations during testing before they reach production) — this trades debug-build performance for catching exactly this silent-failure bug class during the testing phase, where the O(n) verification cost is a worthwhile investment, removed entirely from release builds where the performance cost would be unacceptable.
-8. **Q: A team proposes replacing `Array.Sort` with a hand-rolled "optimized" quicksort implementation across their codebase "for better performance." Evaluate this as a Principal Engineer.**
- **A:** Request concrete, measured evidence (BenchmarkDotNet comparison, this course's recurring measure-first discipline) before approving — a hand-rolled quicksort, absent introsort's worst-case-detection fallback, reintroduces the O(n²) vulnerability.NET's built-in sort specifically engineered away, a real regression risk for any input that happens to trigger the pathological case (including, a deliberately-adversarial one) — recommend rejecting the replacement unless the team can demonstrate both a measured performance win **and** an equivalent worst-case safeguard, since "hand-rolled and unguarded against a well-known, previously-solved vulnerability class" is a worse trade than the built-in implementation's already-excellent, extensively-hardened default.
-9. **Q: Explain the relationship between binary search and the broader "monotonic predicate" search pattern (finding the boundary where a predicate flips from false to true over a sorted/monotonic sequence), and why recognizing this generalization matters for interview problem-solving.**
- **A:** Classic binary search is a specific instance of a more general pattern: given a monotonic boolean predicate over a sorted range (true for all elements from some boundary point onward, false before it), binary search finds that boundary in O(log n) — many seemingly-unrelated interview problems ("find the minimum value satisfying some condition," "find the first day a stock price exceeds a threshold") are actually this same generalized pattern in disguise, solvable via binary search over the *answer space* (not necessarily the original array) once the underlying predicate's monotonicity is recognized — this generalization, not the narrow "search for X in a sorted array" textbook framing, is what lets an engineer recognize and apply binary search to genuinely novel problems.
-10. **Q: As a Principal Engineer, how would you build organizational awareness of subtle, correctness-relevant (not just performance-relevant) API distinctions like sort stability, generalizing beyond this specific incident?**
- **A:** Maintain a shared, documented list of "commonly-confused, correctness-relevant API pairs" (directly this course's recurring shared-reference-documentation governance pattern) — `Array.Sort` vs. `OrderBy` (stability), `IEnumerable` vs. `IQueryable` semantics (the client-side-evaluation trap), Controllers vs. Minimal API binding inference — each entry documenting the specific, non-obvious behavioral difference and a concrete example of the bug it can cause if conflated; this converts a class of "looks similar, behaves subtly differently" API-misuse risk (which recurs across many different technology areas in this course, not just sorting) into a discoverable, referenceable resource rather than tribal knowledge each team must independently rediscover via their own incident.
-
-### Expert (10)
-1. **Q: Explain the algorithmic-complexity DoS vulnerability class as it applies to comparison-based sorting, and how you'd remediate a public endpoint sorting user-supplied data.**
- **A:** Any sort routine with a deterministic, input-triggerable worst case (a naive fixed-pivot quicksort's O(n²) on adversarially-crafted input) turns a public endpoint accepting user-controlled data into a resource-exhaustion vector — a modest, crafted payload can consume disproportionate CPU. Remediation: use an implementation with a *guaranteed* worst-case bound regardless of input (.NET's introsort, via its heapsort fallback, already provides this — never replace it with a hand-rolled sort lacking the same safeguard), and independently bound input size before sorting (an unbounded n is a DoS surface even under a guaranteed-O(n log n) algorithm).
-2. **Q: Why is a naive, early-exit string/array comparison a timing side-channel when used to compare secret values, and what's the correct mitigation?**
- **A:** Early-exit comparison (returning as soon as a differing element is found) leaks timing information proportional to the number of leading matching elements — an attacker measuring response-time variance can incrementally recover a secret byte-by-byte. Mitigation: a constant-time comparison (`CryptographicOperations.FixedTimeEquals` in.NET) that always examines the full length regardless of where a mismatch occurs, used specifically for any comparison over secret material (API keys, signatures, PINs) — never a general-purpose comparer optimized for speed.
-3. **Q: Explain sample-based partitioning in distributed sort (e.g., MapReduce's shuffle-and-sort/TeraSort), and why it avoids a final cross-partition merge.**
- **A:** Each node samples a subset of its local keys; the samples are aggregated and used to compute partition boundaries dividing the full key space into roughly-equal, contiguous, non-overlapping ranges. Each node's data is then shuffled so every key lands on the node owning its range, each node sorts its own (now-bounded) partition locally, and since partitions are already globally ordered relative to each other (partition 1's keys are all less than partition 2's, by construction), concatenating the sorted partitions in order yields a fully-sorted global result with no final merge step needed.
-4. **Q: Compare radix sort's performance characteristics against introsort for a large array of bounded-range integer keys (e.g., trade IDs), explaining the branch-prediction angle specifically.**
- **A:** Radix sort processes digits via arithmetic bucket-index computation, avoiding data-dependent comparison branches entirely; comparison-based introsort's partition/merge steps branch on every comparison, and for near-random data the branch predictor achieves close to 50% accuracy (near worst-case for prediction), costing 10-20 cycles per misprediction. For suitably-shaped data (bounded integer range), radix sort's O(n+k) complexity combined with its branch-free inner loop can outperform introsort's O(n log n) by a large constant factor — but only when k (the key range) is small relative to n; for a wide or sparse key range, radix sort's bucket overhead can erase this advantage.
-5. **Q: Design a parallel quicksort and explain where its speedup saturates.**
- **A:** After the first partition step produces two independent subarrays, recursively sort each concurrently (`Parallel.Invoke` or a work-stealing thread pool); this yields near-linear speedup for large arrays where partition cost dominates, but saturates once subarray size drops below a threshold where thread-scheduling/synchronization overhead exceeds the work being parallelized — exactly the same size-dependent trade-off that motivates introsort's insertion-sort-for-small-n switch, now recurring at the parallelization-overhead layer instead of the recursion-overhead layer.
-6. **Q: A team wants to sort a dataset too large for one machine's memory but small enough to fit across a cluster's aggregate RAM. Compare a cluster-wide external (disk-based) merge sort against an in-memory distributed sort, and recommend one.**
- **A:** An in-memory distributed sort (sample-partition, shuffle, local in-memory sort, concatenate — Expert Q3) avoids disk I/O entirely and is dramatically faster when the aggregate cluster RAM genuinely accommodates the dataset with headroom for shuffle buffers; a disk-based external merge sort is the necessary fallback when even the cluster's aggregate memory is insufficient, or when node failures mid-sort must be recoverable from checkpointed, durable intermediate state (§9) rather than restarting from scratch. Recommendation: default to the in-memory distributed approach for the stated scenario (fits in aggregate RAM), reserving external-sort's higher I/O cost and recovery complexity for genuinely memory-constrained or long-running/failure-prone jobs.
-7. **Q: Explain how Timsort (Python/Java's default sort) exploits nearly-sorted real-world data differently from introsort, and why this matters for choosing a sort algorithm for production data.**
- **A:** Timsort detects existing ascending/descending "runs" in the input and merges these naturally-occurring runs (via an adaptive merge strategy with a proven-optimal merge-cost bound) rather than blindly partitioning as if the data were random — for real-world data that's frequently partially pre-sorted (e.g., a daily trade log mostly appended in timestamp order with a few late corrections), Timsort's run-detection can approach O(n) rather than O(n log n)..NET's introsort does not perform this run-detection (though its insertion-sort fallback for small subarrays incidentally helps somewhat with local near-sortedness) — for a workload known to be frequently nearly-sorted, this is a genuine, measurable reason to consider an alternative (or to pre-check "is this already sorted or nearly so" and skip sorting/use a cheaper adaptive path) rather than assuming introsort is always the fastest available option.
-8. **Q: Explain the historical algorithmic-complexity-attack disclosure (hash-table and sort-routine worst-case exploits) and its lasting influence on standard-library sort design.**
- **A:** A well-publicized 2011 disclosure demonstrated that several language runtimes' default hash-table implementations (and, for related comparison-routine worst cases, some sort implementations) had deterministic, attacker-triggerable worst-case behavior that crafted, adversarial input could exploit for denial-of-service — the disclosure drove widespread adoption of randomized hashing (to prevent predictable hash-collision crafting) and hardened comparison-sort implementations with worst-case safeguards (introsort's heapsort fallback being exactly this class of hardening for sorting specifically) as a standard, expected property of any production-grade standard library, not an optional enhancement.
-9. **Q: Design a benchmarking methodology that would correctly reveal the cache-locality-driven performance gap between an in-place quicksort/introsort and a naive merge-sort implementation, given both share O(n log n) complexity.**
- **A:** Benchmark (BenchmarkDotNet, with hardware counters if available) across a range of array sizes crossing typical cache-tier boundaries (small enough to fit in L1/L2 cache, versus large enough to spill to L3/main memory), measuring wall-clock time *and* cache-miss counts if the tooling exposes them — a naive Big-O-only comparison would miss the divergence entirely, since both algorithms are O(n log n); only a sizing sweep crossing cache boundaries, paired with allocation/GC metrics for the merge-sort variant's auxiliary buffer, reveals the real, hardware-driven constant-factor gap §7 describes.
-10. **Q: As a Principal Engineer, how would you decide whether a regulated financial system's batch sort/reconciliation pipeline needs a custom, hardened sort implementation versus trusting the platform default?**
- **A:** Default to the platform's built-in sort (introsort, already hardened against algorithmic-complexity DoS and extensively tested) unless a specific, demonstrated requirement isn't met — e.g., the pipeline processes external, untrusted, adversarially-crafted input at a scale where even O(n log n)'s constant factor is a measured bottleneck (justifying a radix/counting-sort specialization for bounded-range keys, Expert Q4), or the dataset exceeds single-machine memory (justifying an external or distributed sort, §9); require any custom replacement to demonstrate, via BenchmarkDotNet and adversarial-input testing, both a measured performance win and an equivalent-or-better worst-case safety guarantee before approving it for a regulated pipeline where an unbounded-worst-case sort routine is itself an availability and audit risk, not merely a performance one.
-
----
-
-## 11. Coding Exercises
-
-### Easy — Fix an overflow-prone binary search
-```csharp
-public int BinarySearch(int[] sortedArray, int target)
-{
-    int low = 0, high = sortedArray.Length - 1;
-    while (low <= high)
-    {
-        int mid = low + (high - low) / 2; // overflow-safe
-        if (sortedArray[mid] == target) return mid;
-        if (sortedArray[mid] < target) low = mid + 1;
-        else high = mid - 1;
-    }
-    return -1;
-}
-```
-
-### Medium — Fix a multi-key sort stability bug
-```csharp
-// BEFORE: List<T>.Sort is unstable -- secondary sort scrambles primary sort's grouping
-list.Sort((a, b) => a.Status.CompareTo(b.Status));
-
-// AFTER: OrderBy/ThenBy, guaranteed stable
-list = list.OrderBy(x => x.Date).ThenBy(x => x.Status).ToList;
-```
-
-### Hard — Binary search over the "answer space" (Advanced Q9's generalization)
-```csharp
-// Problem: find the minimum "capacity" such that a set of packages can be shipped within D days
-// given a per-day capacity limit -- NOT a search over a sorted array, but over a MONOTONIC predicate
-// (higher capacity -> fewer days needed; the predicate "can ship within D days" is monotonic in capacity).
-public int MinimumShipCapacity(int[] weights, int days)
-{
-    int low = weights.Max, high = weights.Sum; // search space: capacity, not array indices
-
-    while (low < high)
-    {
-        int mid = low + (high - low) / 2;
-        if (CanShipWithinDays(weights, mid, days))
-            high = mid; // this capacity works -- try to find an even smaller one
-        else
-            low = mid + 1; // insufficient -- need more capacity
-    }
-    return low;
-}
-
-private bool CanShipWithinDays(int[] weights, int capacity, int days)
-{
-    int daysNeeded = 1, currentLoad = 0;
-    foreach (var w in weights)
-    {
-        if (currentLoad + w > capacity) { daysNeeded++; currentLoad = 0; }
-        currentLoad += w;
-    }
-    return daysNeeded <= days;
-}
-```
-**Discussion**: This directly demonstrates Advanced Q9's generalization — there's no "sorted array" being searched at all; instead, binary search operates over the **space of possible capacity values**, exploiting the monotonic relationship between capacity and days-needed (higher capacity always needs ≤ as many days) to find the minimum viable capacity in O(log(sum of weights)) instead of a brute-force O(sum of weights) linear scan through every possible capacity value.
-
-### Expert — External merge sort for data too large for memory (Advanced Q2)
-```csharp
-public async Task ExternalSortAsync(string inputFile, string outputFile, int chunkSizeBytes)
-{
-    var runFiles = new List<string>;
-
-    // Phase 1: read chunks, sort each in-memory, write as a sorted "run" file.
-    await foreach (var chunk in ReadChunksAsync(inputFile, chunkSizeBytes))
-    {
-        chunk.Sort; // in-memory sort -- Array.Sort/introsort is perfectly fine HERE, within one chunk
-        var runFile = Path.GetTempFileName;
-        await WriteRunAsync(runFile, chunk);
-        runFiles.Add(runFile);
-    }
-
-    // Phase 2: repeatedly merge pairs of sorted runs (streaming, NOT loading full runs into memory)
-    while (runFiles.Count > 1)
-    {
-        var newRunFiles = new List<string>;
-        for (int i = 0; i < runFiles.Count; i += 2)
-        {
-            if (i + 1 < runFiles.Count)
-            {
-                var merged = Path.GetTempFileName;
-                await MergeTwoSortedRunsAsync(runFiles[i], runFiles[i + 1], merged); // streaming merge
-                newRunFiles.Add(merged);
-            }
-            else newRunFiles.Add(runFiles[i]); // odd one out, carries forward unchanged
-        }
-        runFiles = newRunFiles;
-    }
-
-    File.Move(runFiles[0], outputFile);
-}
-```
-**Discussion**: `MergeTwoSortedRunsAsync` (implementation omitted for brevity) streams both input runs sequentially, comparing their current elements and writing the smaller one to the output, advancing only the stream that "lost" the comparison — never needing either full run in memory simultaneously, exactly the mechanism Advanced Q2 describes as merge sort's natural fit for external, larger-than-memory sorting, in direct contrast to quicksort's random-access partitioning, which doesn't translate to this sequential-streaming model at all.
-
----
-
-## 12. System Design
-
-**Scenario:** Design the **end-of-day trade reconciliation sort/merge pipeline** for a mid-size broker-dealer — nightly, it must ingest ~40 million executed-trade records from multiple venues (each venue's feed arriving as an unsorted, append-only file), produce a single stream sorted by `(SettlementDate, CounterpartyId, TradeId)` for the downstream reconciliation-matching engine, and complete within a 90-minute overnight batch window with full auditability of every merge decision.
-
-**Requirements:** *Functional* — merge N venue files into one globally-sorted stream; support incremental re-runs if a single venue's file arrives late without re-sorting the whole dataset; preserve original per-record venue provenance. *Non-functional* — deterministic, reproducible output (byte-identical for identical input, a regulatory-audit requirement); resumable after a mid-run failure without restarting from zero; bounded memory (the batch host has 16 GB RAM, well under the ~8 GB raw record size × comfortable multiplier needed to hold everything in memory alongside merge buffers).
-
-**Back-of-the-envelope:** 40M records × ~200 bytes/record ≈ 8 GB raw. A single in-memory `Array.Sort` is feasible memory-wise but risks holding the entire dataset in RAM alongside JIT/GC overhead and downstream buffers on a shared batch host — and doesn't naturally give per-venue incremental resumability. This pushes the design toward **external, run-based merge sort** (§2.5, Advanced Q2): sort each venue's file independently (in memory, since a single venue's file is a few hundred MB, comfortably fits), write each as an already-sorted "run," then k-way merge the runs.
-
-**Architecture:**
 ```mermaid
 graph LR
  V1["Venue 1 file<br/>(unsorted)"] --> S1["In-memory sort<br/>Array.Sort per venue"]
@@ -248,23 +771,8 @@ graph LR
  KM -.->|"merge decision log<br/>(audit trail)"| AUDIT["Audit store"]
 ```
 
-**Components:** a per-venue **in-memory sorter** (`Array.Sort`, stable ordering not required within a venue since `TradeId` is already unique — Basic/Intermediate distinction from §2.2 doesn't apply here); a **durable run writer** checkpointing each sorted run to disk before merge begins (the resumability requirement — a crash after runs are written doesn't require re-sorting); a **k-way merge coordinator** using a min-heap keyed on each run's current head record (an O(log N) "which run has the next-smallest record" operation per output record, standard multi-way external-merge structure, generalizing the two-way `MergeTwoSortedRunsAsync` from §11's Expert exercise to N runs); and an **audit log** recording each merge decision (which run "won" at each step) — required because the reconciliation-matching engine downstream must be able to prove, to an auditor, exactly how the sorted order was derived from raw venue input, not merely that it *is* sorted.
+**13. Low-Level Design**
 
-**Database/storage selection:** Sorted runs and the audit log are written to the batch host's local disk (fast, ephemeral, sufficient for a 90-minute job) rather than a database — this is a batch-computation pipeline, not a query-serving system, so a relational store adds no value here and would only add I/O overhead; the *output* of the pipeline lands in the existing reconciliation-matching engine's own store.
-
-**Failure handling:** If a venue's file arrives late (after the nightly run has started), the design supports an **incremental re-merge**: only that venue's run needs to be (re)sorted, and the k-way merge re-runs against the updated set of runs — never re-sorting venues that already produced a valid, checkpointed run, directly exploiting the "each run independently sorted and durable" structure to bound the cost of a late-arrival correction to O(late venue's size + merge cost), not O(total dataset size).
-
-**Monitoring:** per-venue sort duration and record count (catching an unusually slow or unusually small venue file before it silently corrupts the reconciliation input); k-way merge throughput (records/sec, to catch the k-way merge itself becoming the bottleneck as venue count grows); end-to-end pipeline duration against the 90-minute SLA, alerting at 70% of budget consumed to leave remediation time.
-
-**Trade-offs:** External run-based merge sort over a single giant in-memory sort trades a small amount of additional complexity (managing runs, a k-way merge coordinator) for resumability, per-venue incremental correction, and headroom against the shared batch host's memory constraints — the same trade-off §2.5 and Advanced Q2 establish generally, now applied concretely to a regulated, audit-sensitive nightly batch.
-
----
-
-## 13. Low-Level Design
-
-**Requirements:** deterministic, reproducible k-way merge; per-run resumability; an auditable trail of merge decisions; thread-safe concurrent per-venue sorting (Step 1 of §12's pipeline parallelizes trivially across venues, since each venue's sort is fully independent).
-
-**Class diagram:**
 ```mermaid
 classDiagram
  class ISortedRun {
@@ -296,7 +804,8 @@ classDiagram
  VenueSorter --> FileBackedSortedRun
 ```
 
-**Sequence diagram:**
+**13. Low-Level Design**
+
 ```mermaid
 sequenceDiagram
  participant Orchestrator
@@ -320,76 +829,95 @@ sequenceDiagram
  end
 ```
 
-**Design patterns used:** Strategy (`ISortedRun` abstracts file-backed vs. in-memory runs, letting the coordinator merge either uniformly); Iterator (`IAsyncEnumerable<TradeRecord>` streams merged output without materializing it); Template Method (the merge loop's peek/compare/advance/audit sequence is fixed, while what counts as "smallest" is injected via the comparer); Observer (`IAuditSink` reacts to every merge decision without the coordinator needing to know what auditing does with it).
+### Module 36 — Algorithms: Dynamic Programming & Greedy Algorithms
+*Source: `02-Dynamic-Programming-Greedy.md`*
 
-**SOLID mapping:** Single Responsibility (`VenueSorter` sorts, `KWayMergeCoordinator` merges, `IAuditSink` audits — each independently testable); Open/Closed (a new run source, e.g., a database-backed run, implements `ISortedRun` without modifying the coordinator); Liskov (any `ISortedRun` implementation must genuinely support `Peek`/`Advance` with the same "already internally sorted" contract — a run that isn't actually sorted silently breaks the merge's correctness with no exception, echoing §2.3's binary-search-precondition silent-failure theme); Interface Segregation (`ISortedRun` and `IAuditSink` are separate, narrow interfaces); Dependency Inversion (`KWayMergeCoordinator` depends on the `ISortedRun`/`IAuditSink` abstractions, not concrete file I/O).
+**3. Visual Architecture**
 
-**Extensibility:** adding a new venue is adding one more `ISortedRun` instance to the merge; changing the sort key (e.g., adding a fourth tiebreaker field) is a single comparer change, not a structural rewrite, since the coordinator is comparer-driven rather than hardcoding the `(SettlementDate, CounterpartyId, TradeId)` ordering.
+```mermaid
+graph TB
+ subgraph "Naive Recursion (exponential, recomputes)"
+ F5["Fib(5)"] --> F4A["Fib(4)"]
+ F5 --> F3A["Fib(3)"]
+ F4A --> F3B["Fib(3) -- SAME subproblem, recomputed!"]
+ F4A --> F2A["Fib(2)"]
+ end
+ subgraph "Memoized DP (each subproblem computed ONCE)"
+ Cache["Memo Cache: {2:1, 3:2, 4:3, 5:5}"]
+ Cache -.->|"Fib(3) computed ONCE, reused"| F5
+ end
+```
 
-**Concurrency/thread safety:** per-venue sorting (§12) runs fully concurrently — each `VenueSorter.SortVenueFileAsync` call is independent, with no shared mutable state, safely parallelizable via `Task.WhenAll`. The k-way merge itself is inherently sequential (each output record depends on the current heap state), so it does not parallelize the same way — attempting to parallelize the merge phase itself would require partitioning the *key space* first (the distributed-sort sample-partitioning approach, §9/Expert Q3), a materially different design, not a simple `Parallel.ForEach` over the merge loop.
+**12. System Design**
 
----
+```mermaid
+graph TB
+ REQ["Allocation request<br/>(accounts, bounds, weights, total shares)"] --> Gate{TotalShares within<br/>DP-feasible bound?}
+ Gate -->|Yes, common case| DP["Exact DP allocation<br/>(bounded knapsack-shaped)"]
+ Gate -->|No, large block order| Heur["Greedy + local-DP-refinement<br/>hybrid (bounded windows)"]
+ DP --> Verify["Constraint verifier<br/>(bounds + exact-total check)"]
+ Heur --> Verify
+ Verify --> Audit["Audit log:<br/>which path, inputs, decision trace"]
+ Verify --> OUT["Allocation result"]
+```
 
-## 14. Production Debugging
+**13. Low-Level Design**
 
-**Incident:** The reconciliation pipeline (§12) began intermittently missing its 90-minute SLA, with the overrun growing week over week rather than being a one-time spike — eventually breaching the SLA outright on a night with an unusually large options-expiry trade volume.
+```mermaid
+classDiagram
+ class IAllocationStrategy {
+ <<interface>>
+ +Allocate(request) AllocationResult
+ }
+ class ExactDpAllocator {
+ +Allocate(request) AllocationResult
+ }
+ class GreedyRefinedAllocator {
+ +Allocate(request) AllocationResult
+ }
+ class FeasibilityGate {
+ +ChooseStrategy(request) IAllocationStrategy
+ }
+ class ConstraintVerifier {
+ +Verify(request, result) VerificationResult
+ }
+ class AllocationOrchestrator {
+ -FeasibilityGate _gate
+ -ConstraintVerifier _verifier
+ -IAuditSink _audit
+ +ComputeAsync(request) AllocationResult
+ }
+ IAllocationStrategy <|.. ExactDpAllocator
+ IAllocationStrategy <|.. GreedyRefinedAllocator
+ AllocationOrchestrator --> FeasibilityGate
+ AllocationOrchestrator --> ConstraintVerifier
+ AllocationOrchestrator --> IAllocationStrategy
+```
 
-**Investigation:** Per-venue sort timings (already monitored, §12) were flat and unremarkable — the growth was entirely in the k-way merge phase. Profiling the merge coordinator revealed the min-heap comparer was doing more work than expected: the comparer compared `(SettlementDate, CounterpartyId, TradeId)` as a composite key by first comparing `SettlementDate` (cheap, a struct comparison), but on any date tie, fell through to `CounterpartyId` — a `string` field — compared via default culture-aware `string.Compare`, which is dramatically more expensive than an ordinal comparison (locale-aware comparison involves Unicode normalization and culture-specific collation rules, not a simple byte-by-byte comparison). As venue count and trade volume grew, same-date ties became far more frequent, and the heap — performing O(log N) comparisons per output record, each now hitting the expensive culture-aware path far more often — became the dominant cost.
+**13. Low-Level Design**
 
-**Root cause:** The `CounterpartyId` comparer was written as `string.Compare(a, b)` (implicitly culture-aware) rather than `string.CompareOrdinal(a, b)` or `string.Compare(a, b, StringComparison.Ordinal)` — a subtle, easy-to-miss default, since `CounterpartyId` values are internal, ASCII-only identifiers with no genuine linguistic-sorting requirement, making culture-aware comparison pure, unnecessary overhead paid on every tie-breaking comparison in the hottest loop of the entire pipeline.
+```mermaid
+sequenceDiagram
+ participant Client
+ participant Orchestrator as AllocationOrchestrator
+ participant Gate as FeasibilityGate
+ participant Strategy as IAllocationStrategy
+ participant Verifier as ConstraintVerifier
+ participant Audit
 
-**Tools:** BenchmarkDotNet micro-benchmark isolating `string.Compare` vs. `string.CompareOrdinal` for representative `CounterpartyId` values (confirming a 5-8x per-comparison cost difference); a CPU sampling profiler (dotnet-trace) pinpointing the hot path directly to the comparer inside the heap's sift-down operation.
-
-**Fix:** Switched the comparer to `string.CompareOrdinal` (equivalently, `StringComparison.Ordinal`) for the `CounterpartyId` tiebreak — a one-line change that restored the merge phase to its expected throughput, since ordinal comparison is a direct byte/char comparison with none of culture-aware comparison's normalization overhead.
-
-**Prevention:** A coding-standard rule added specifically for any comparer used in a hot sorting/merging path: default to `StringComparison.Ordinal` unless linguistic/culture-aware ordering is a genuine, stated business requirement (rare for internal identifiers, common for user-facing display sorting) — paired with a benchmark-based regression gate on the reconciliation pipeline's merge-phase throughput, so a future accidental reintroduction of a culture-aware comparison in a hot path fails CI rather than silently degrading week over week until an SLA breach forces investigation.
-
----
-
-## 15. Architecture Decision
-
-**Context:** Choosing the sorting strategy for the reconciliation pipeline's per-venue sort step (§12).
-
-**Option A — In-memory `Array.Sort` (introsort) per venue file:**
-*Advantages:* Simple, uses .NET's extensively-hardened, worst-case-safe default (§7/§8); each venue's file comfortably fits in memory, so no external-sort complexity is needed at this granularity.
-*Disadvantages:* None significant at this granularity — the "external sort" concern only applies at the *whole-dataset* level (§12's k-way merge across venues), not per-venue.
-*Cost/complexity:* Low — this is the recommended default and what §12 actually specifies.
-
-**Option B — LINQ `OrderBy` per venue file:**
-*Advantages:* Guaranteed stable, simpler-looking call site.
-*Disadvantages:* Stability is not a genuine requirement here (`TradeId` is already unique per Comment in §13), so the stability guarantee is paid for with no benefit; allocation overhead (§7) is unnecessary cost in a pipeline where per-venue sort duration is directly SLA-relevant.
-*Cost/complexity:* Low, but strictly worse than Option A for this specific, verified-non-stability-dependent use case.
-
-**Option C — Radix sort on a derived integer sort key:**
-*Advantages:* Could outperform comparison-based sort if `(SettlementDate, CounterpartyId, TradeId)` were collapsed into a single bounded-range integer key (Expert Q4's reasoning) — a genuine option if per-venue sort time became the bottleneck.
-*Disadvantages:* Requires engineering a composite-key encoding scheme (packing three fields into one sortable integer, itself error-prone and adding a new correctness-surface); the incident (§14) showed the bottleneck was actually in the *merge* comparer, not the per-venue sort, so this optimization targets a cost center that isn't the actual constraint.
-*Cost/complexity:* Higher — new encoding logic, more testing surface, for a benefit not currently justified by the measured bottleneck.
-
-**Recommendation: Option A (in-memory introsort per venue) for the sort step, combined with the ordinal-comparer fix (§14) for the merge step.** The Production Debugging incident is the deciding evidence: the actual measured bottleneck was an avoidable comparer-cost issue in the merge phase, not the sort algorithm's asymptotic complexity — reinforcing this module's recurring theme (§7, Advanced Q6) that a "faster algorithm" (Option C) is the wrong lever to pull before first measuring and fixing an actual, identified constant-factor cost in the current design.
-
----
-
-## 17. Principal Engineer Perspective
-
-**Business impact:** A late or SLA-breaching reconciliation run delays trade-break detection into the next business day — a direct regulatory and operational-risk exposure for a broker-dealer, not merely an engineering inconvenience; §14's incident (a slow week-over-week SLA drift culminating in an outright breach) is exactly the kind of "gradual degradation, no single alarming event, until it becomes a headline incident" pattern a Principal Engineer is expected to catch via trend monitoring, not wait for a threshold breach to surface it.
-
-**Engineering trade-offs:** The central trade this module's production scenario embodies — a small amount of added structural complexity (external, run-based, auditable k-way merge, §12/§13) in exchange for resumability, incremental-correction, and regulatory-auditability properties a simpler single in-memory sort doesn't provide — is the same "complexity earns its keep only when it buys a genuine, stated requirement" discipline recurring across this entire course, now applied at the algorithm-selection layer specifically.
-
-**Technical leadership:** The organization-wide, correctness-relevant API-pairs reference document this module's earlier incident (the unstable-multi-key-sort bug, §4) motivated should explicitly include the ordinal-vs-culture-aware `string.Compare` distinction §14 surfaced — both incidents share the same underlying shape: a superficially-reasonable default API choice silently carrying a cost (correctness in one case, performance in the other) invisible until a specific, non-obvious condition (ties needing stability; tie-frequency growth pushing the culture-aware comparator into the hot path) exposes it.
-
-**Cross-team communication:** The reconciliation-matching engine's downstream dependency on this pipeline's output being genuinely, verifiably sorted and auditable (§12's audit-log requirement) means any change to the sort/merge implementation must be communicated to and reviewed by the downstream team — an internal implementation detail (which sort algorithm, which comparer) is not "purely internal" when a downstream system's correctness assumptions (sortedness, auditability) depend on it.
-
-**Architecture governance:** Require any new hot-path comparer (sorting or merging) to explicitly declare and justify its `StringComparison` choice in code review — converting §14's specific, hard-won lesson into a standing, checked review criterion rather than tribal knowledge rediscovered independently by each future team that writes a comparer.
-
-**Cost optimization:** The culture-aware-comparer regression (§14) was pure wasted compute — no correctness or business benefit, just avoidable CPU cost compounding as tie-frequency grew; the fix's near-zero cost against its outsized throughput recovery is a textbook example of the highest-leverage kind of performance work: finding and removing accidental, unnecessary cost in an already-hot path, rather than pursuing a fundamentally different (and more complex, Option C) algorithm.
-
-**Risk analysis:** A batch pipeline with a hard SLA and regulatory stakes should have its performance-sensitive hot paths (the merge comparer specifically) covered by a benchmark-based regression gate (§14's prevention step), not only correctness tests — a purely-correctness-focused test suite would have passed throughout the entire multi-week SLA degradation, since the output remained correctly sorted the whole time; only a performance regression gate would have caught the actual, business-relevant risk.
-
-**Long-term maintainability:** What decayed here wasn't the code's correctness but the gap between an original, reasonable-at-the-time default (`string.Compare`, chosen before tie-frequency was significant) and the system's evolved reality (venue count and volume growth making that default's cost material) — the same "periodic re-audit against current, evolved reality, not one-time initial correctness" discipline this course applies repeatedly, now instantiated as a standing regression gate rather than a one-off fix.
-
-## 18. Revision
-**Key takeaways**:.NET's `Array.Sort`/`List<T>.Sort` use introsort (quicksort + heapsort fallback + insertion sort for small subarrays) — O(n log n) worst-case, but **not stable**; LINQ's `OrderBy`/`ThenBy` **is** guaranteed stable, essential for any multi-key sort preserving prior grouping among ties. Binary search requires sorted input (a silent-failure precondition if violated) and should use `low + (high-low)/2` to avoid overflow. Merge sort (O(n) space, stable, guaranteed O(n log n)) suits external/streaming sorting naturally; quicksort (in-place, average-case O(n log n)) suits in-memory sorting, with introsort's hybrid design eliminating its classic worst-case vulnerability. Binary search generalizes far beyond array search to any monotonic-predicate search over an answer space.
-
----
-
-**Next**: Continuing autonomously to Module 36 — Dynamic Programming & Greedy Algorithms to complete the `13-Algorithms` domain before advancing to `14-System-Design`.
+ Client->>Orchestrator: ComputeAsync(request)
+ Orchestrator->>Gate: ChooseStrategy(request)
+ Gate-->>Orchestrator: ExactDpAllocator or GreedyRefinedAllocator
+ Orchestrator->>Strategy: Allocate(request)
+ alt DP path exceeds runtime safety threshold
+ Orchestrator->>Strategy: abort, retry with GreedyRefinedAllocator
+ end
+ Strategy-->>Orchestrator: AllocationResult
+ Orchestrator->>Verifier: Verify(request, result)
+ alt verification fails
+ Orchestrator-->>Client: error (never return an unverified result)
+ else verification passes
+ Orchestrator->>Audit: record path, inputs, result
+ Orchestrator-->>Client: AllocationResult
+ end
+```

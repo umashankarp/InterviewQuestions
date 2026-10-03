@@ -1,1218 +1,1206 @@
+# SQL Server — Complete Interview Prep (All Topics, One File)
+
 > Domain: SQL Server | Level: Beginner → Expert | Prerequisite: None (foundational data-layer domain)
+> **Quick-prep edition** (consolidated 2026-10-03). This one file replaces the 14 former SQL Server files. Originals: `git show ebb2d5c:04-SQL-Server/<file>.md`. Extra query drills: `Architect-Role-Cheat-Sheet/SQL-Query-Interview-Questions-Top30.md`.
+> Each topic has: **Key concepts → Code example → Most common interview questions with answers.**
 
-# SQL Server Interview Workbook — Indexing & Query Performance/Execution Plans
-
-A Principal/Staff/Architect-calibrated interview workbook. Every question below carries a full worked answer: the spoken answer, the T-SQL, sample data and output, alternative approaches with a stated preference, performance/index/plan implications, edge cases, a production scenario, likely follow-ups with strong answers, common mistakes, and the specific insight that separates a senior answer from an adequate one.
-
-**Canonical sample schema used throughout** (also reused by sibling workbook files):
-- `Employees(EmployeeID, FirstName, LastName, DepartmentID, ManagerID, Salary, HireDate)`, `Departments(DepartmentID, DepartmentName)`
-- `Customers(CustomerID, CustomerName, Country)`, `Orders(OrderID, CustomerID, OrderDate, TotalAmount)`, `OrderItems(OrderItemID, OrderID, ProductID, Quantity, UnitPrice)`, `Products(ProductID, ProductName, CategoryID, Price)`, `Categories(CategoryID, CategoryName)`
-
----
-
-## Part A: Indexing
-
-### Q1. What's the difference between a clustered and a non-clustered index, and how is each actually structured on disk?
-
-**Difficulty:** 🔴 Senior
-
-#### 1. Interview Answer
-A clustered index *is* the table: the leaf level of its B+‑tree contains the actual data rows, physically ordered by the index key. A table can have at most one, because rows can only be sorted one way at a time. A non-clustered index is a separate structure whose leaf level contains the index key column(s) plus a *row locator* — the clustering key if the table has a clustered index, or a physical Row ID (RID) if the table is a heap. A table can have up to 999 non-clustered indexes. Reading through a non-clustered index therefore usually means two traversals when you need columns that aren't in the index: one down the non-clustered B+‑tree to find the row locator, then a second traversal (a "key lookup") down the clustered index to fetch the rest of the row.
-
-#### 2. SQL Query
-```sql
--- Clustered index (usually the PK, but doesn't have to be)
-CREATE CLUSTERED INDEX IX_Employees_EmployeeID ON dbo.Employees(EmployeeID);
-
--- Non-clustered index on a frequently filtered column
-CREATE NONCLUSTERED INDEX IX_Employees_DepartmentID ON dbo.Employees(DepartmentID);
-```
-
-#### 3. Explain the Query
-The clustered index statement physically sorts and stores `Employees` rows by `EmployeeID`. The non-clustered index builds a second, smaller B+‑tree keyed on `DepartmentID`; each leaf row stores `DepartmentID` plus the clustering key (`EmployeeID`), not the whole row. A query filtering on `DepartmentID` that also needs `Salary` must jump from the non-clustered leaf to the clustered index to retrieve `Salary` — the key lookup.
-
-#### 4. Sample Data
-| EmployeeID | DepartmentID | Salary |
-|---|---|---|
-| 101 | 10 | 95000 |
-| 102 | 10 | 88000 |
-| 103 | 20 | 76000 |
-
-#### 5. Expected Output
-`SELECT Salary FROM Employees WHERE DepartmentID = 10` returns `95000, 88000` — but internally via a seek on `IX_Employees_DepartmentID` followed by two key lookups into the clustered index.
-
-#### 6. Alternative Solutions
-- **Heap (no clustered index) + non-clustered indexes only** — viable for pure insert-heavy staging tables with no ordered access pattern, but every non-clustered index then stores an 8-byte RID instead of the (often narrower, but sometimes wider) clustering key, and RIDs change if the row is ever moved (forwarding pointers), which is worse in practice.
-- **Clustered index on a natural, frequently-ranged column (e.g., OrderDate)** instead of a surrogate key — good when range scans by date dominate, bad if it causes page splits from non-sequential inserts.
-- **Preferred**: clustered index on a narrow, static, ever-increasing key (identity or sequential GUID via `NEWSEQUENTIALID()`), because every non-clustered index carries that key at every leaf row — a wide or volatile clustering key bloats every other index and causes fragmentation on update.
-
-#### 7. Performance
-Index requirement: none beyond the index itself — this *is* the fundamental performance decision for the table. Verify via the actual execution plan: a `Clustered Index Seek` is O(log n) page reads down the tree; a non-clustered lookup path shows as `Index Seek` + `Key Lookup`, and SSMS/Query Store will show the lookup's estimated/actual row count and cost percentage — if the lookup count is high relative to rows returned, that's the signal to add covering columns (Q3). Confirm via `SET STATISTICS IO ON` logical reads, not intuition.
-
-#### 8. Edge Cases
-A heap with no clustered index and no non-clustered indexes forces a full table scan for every query. Updating the clustering key value is expensive — it's a delete+insert at every non-clustered index that references it as the row locator. Wide clustering keys (e.g., a `VARCHAR(200)` natural key) inflate every secondary index.
-
-#### 9. Production Scenario
-A ledger table clustered on `(AccountID, TransactionID)` gets sequential inserts per account and range-scans well for "all transactions for this account," at the cost of hot-page contention if one account is extremely high-volume — a case for partitioning (see Database Design workbook, Q121).
-
-#### 10. Interview Follow-ups
-1. Why can a table have only one clustered index?
-2. What happens to non-clustered indexes if you rebuild the clustered index?
-3. What's a "forwarding pointer" and when does it occur?
-4. When would you deliberately choose a heap?
-5. How does a unique clustered index differ from a non-unique one internally?
-
-#### 11. Follow-up Answers
-1. Because the clustered index physically orders the data rows — data can only have one physical order at a time.
-2. Rebuilding the clustered index doesn't invalidate non-clustered indexes' logical row locators (the clustering key values), but it is still a size-of-data operation that can cause non-clustered indexes to be rebuilt too if the clustering key values change (rare) or if `ALL` is specified.
-3. A forwarding pointer happens on a heap when a variable-length row grows too large for its page after an update and must move; the original slot leaves a pointer to the new location, adding an extra I/O to every access — a heap-specific pathology that argues for clustered indexes on volatile tables.
-4. Rare in OLTP; sometimes used for high-throughput staging/ETL landing tables where you bulk-load and immediately bulk-read/truncate, and no natural sort order helps.
-5. SQL Server adds a hidden 4-byte "uniquifier" to duplicate keys in a non-unique clustered index so every non-clustered index's row locator stays unique — a subtle cost of not enforcing uniqueness on the clustering key.
-
-#### 12. Common Mistakes
-Assuming the primary key and clustered index are the same thing (they default together but are independent choices). Choosing a wide or GUID (`NEWID()`, not sequential) clustering key, which randomizes insert location and causes constant page splits. Forgetting that every non-clustered index pays the clustering-key-width tax.
-
-#### 13. Architect Insight
-A senior candidate recites "clustered = data, non-clustered = pointer." A staff/principal candidate reasons about the *cost this imposes on every other index in the table* and picks the clustering key as a table-wide architectural decision — not a per-query one — because changing it later means rebuilding every dependent non-clustered index.
-
----
-
-### Q2. How do you decide column order in a composite (multi-column) index, and why does order matter?
-
-**Difficulty:** 🔴 Senior
-
-#### 1. Interview Answer
-Column order determines which query predicates the index can seek on versus merely scan within. A composite index is sorted first by its leading column, then by the next column within each value of the first, and so on — exactly like a phone book sorted by last name then first name. A query that filters only on the second column can't seek the index at all (it would have to scan every leading-column value). The rule of thumb — often stated as "equality, then inequality, then included columns" — is: put columns used in equality predicates first (most selective ones earliest among ties), range/inequality predicate columns next, and put `ORDER BY`/output-only columns last (or in `INCLUDE`).
-
-#### 2. SQL Query
-```sql
--- Good: supports "orders for one customer in a date range" as a pure seek
-CREATE NONCLUSTERED INDEX IX_Orders_CustomerID_OrderDate
-    ON dbo.Orders(CustomerID, OrderDate) INCLUDE (TotalAmount);
-
-SELECT OrderID, TotalAmount
-FROM Orders
-WHERE CustomerID = 42 AND OrderDate >= '2026-01-01';
-```
-
-#### 3. Explain the Query
-`CustomerID` leads because it's an equality predicate; `OrderDate` follows because it's a range predicate applied *within* each customer's rows — the optimizer seeks to `CustomerID = 42`, then range-scans the contiguous `OrderDate` values for just that customer. `TotalAmount` is included (not keyed) because it's only needed in the output, not for filtering or ordering — keeping it out of the key keeps the key itself narrow.
-
-#### 4. Sample Data
-| OrderID | CustomerID | OrderDate | TotalAmount |
+| # | Topic | # | Topic |
 |---|---|---|---|
-| 1 | 42 | 2025-11-01 | 120 |
-| 2 | 42 | 2026-02-10 | 340 |
-| 3 | 7 | 2026-02-11 | 50 |
+| 1 | SQL fundamentals (query order, NULLs, GROUP BY) | 9 | Stored procedures, functions, views, triggers, temp tables |
+| 2 | Joins | 10 | Production troubleshooting playbook |
+| 3 | Subqueries, CTEs, APPLY | 11 | Database design, partitioning, HA |
+| 4 | Window functions | 12 | SQL Server & microservices |
+| 5 | Classic query problems (30 solutions) | 13 | FinTech SQL: payments, ledger, reconciliation |
+| 6 | Indexing | 14 | Top 40 rapid-fire + Principal questions |
+| 7 | Execution plans & query tuning | 15 | Mistakes checklist |
+| 8 | Transactions, isolation, locking, deadlocks | | |
 
-#### 5. Expected Output
-Only `OrderID 2` (`CustomerID=42` and `OrderDate >= 2026-01-01`).
-
-#### 6. Alternative Solutions
-- **`(OrderDate, CustomerID)`** — would help "all orders in a date range across customers" but forces a scan-then-filter for the per-customer-in-range query above; wrong for this predicate shape.
-- **Two single-column indexes** on `CustomerID` and `OrderDate` separately — SQL Server *can* intersect them, but an index intersection is almost always more expensive than one well-ordered composite seek; only worth it when the two columns are queried independently in different queries as well.
-- **Preferred**: the composite `(CustomerID, OrderDate)` with `TotalAmount` included, because it serves the actual predicate shape as a single seek plus becomes covering (Q3) for this exact query.
-
-#### 7. Performance
-Verify column order is correct by checking the plan for a `Seek` predicate (both columns) versus a `Seek` predicate + `Residual`/`Predicate` (only the leading column seeks, the rest is a filter applied after). `SET STATISTICS IO` should show logical reads close to the number of matching rows, not the whole table.
-
-#### 8. Edge Cases
-If `CustomerID` has very low selectivity (e.g., 90% of orders belong to one whale customer), the optimizer may still choose a scan over the seek for that value — cardinality estimation, not just index existence, decides the plan (see Q15). NULLs in a leading equality column need `IS NULL`, which composite indexes support, but be sure the query actually uses it explicitly.
-
-#### 9. Production Scenario
-A customer-facing "my order history" page filtering by `CustomerID` and a date range is exactly this pattern — one of the highest-frequency queries in any e-commerce or banking transaction-history screen.
-
-#### 10. Interview Follow-ups
-1. What happens if you swap the column order?
-2. How many range columns can a composite index seek on effectively?
-3. Does column order matter for `INCLUDE`d columns?
-4. How would you decide order if two columns are both used in equality predicates in different queries?
-5. What's the "leftmost prefix" rule?
-
-#### 11. Follow-up Answers
-1. The query above degrades to a scan of all rows for `CustomerID=42` — worse if the composite were `(OrderDate, CustomerID)`, it can't seek on `CustomerID` at all without `OrderDate` supplied.
-2. Effectively one contiguous range after any number of leading equality columns — SQL Server can seek `col1 = x AND col2 BETWEEN a AND b`, but a second range column beyond that just gets filtered, not seeked.
-3. No — included columns are stored only at the leaf and aren't part of the sort key, so their order doesn't affect seekability, only storage/covering.
-4. Put the column that's more frequently an equality predicate, or the more selective one, leading; if both patterns matter equally, consider two separate indexes rather than compromising one.
-5. A composite index can only be used for seeking on a *prefix* of its key columns starting from the left — `(A, B, C)` seeks efficiently on `A`, `A+B`, or `A+B+C`, but not on `B` or `C` alone.
-
-#### 12. Common Mistakes
-Ordering composite index columns to match a `SELECT` list instead of the `WHERE`/`JOIN` predicate shape. Assuming an index helps a query just because all referenced columns are somewhere in the index, regardless of order.
-
-#### 13. Architect Insight
-Junior candidates know composite indexes exist; senior candidates can look at a query's predicate and immediately state the correct column order and justify it via the leftmost-prefix rule; principal candidates additionally weigh this against *all* the other queries hitting that table, because one index serves many queries and column order is a shared, table-wide trade-off, not a per-query optimization.
+**Sample schema used throughout**
+```sql
+Employees(EmpId, Name, DeptId, ManagerId, Salary, HireDate)
+Departments(DeptId, DeptName)
+Customers(CustomerId, Name, CreatedAt)
+Orders(OrderId, CustomerId, OrderDate, Amount, Status)
+OrderItems(OrderId, ProductId, Qty, Price)
+Products(ProductId, Name, CategoryId)
+Transactions(TxnId, AccountId, TxnDate, Amount, Reference)
+Logins(UserId, LoginDate)
+```
 
 ---
 
-### Q3. What's a covering index, and how do included columns differ from key columns?
+## 1. SQL Fundamentals
 
-**Difficulty:** 🟡 Intermediate
+**Key concepts**
+- **Logical processing order:** `FROM/JOIN → ON → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → ORDER BY → TOP/OFFSET`. That's why a SELECT alias can't be used in WHERE but can be used in ORDER BY.
+- **WHERE** filters rows *before* grouping; **HAVING** filters groups *after* aggregation.
+- **NULL = unknown** → three-valued logic (TRUE/FALSE/UNKNOWN). `NULL = NULL` is UNKNOWN → use `IS NULL`. Aggregates ignore NULLs (except `COUNT(*)`).
+- `COUNT(*)` counts rows; `COUNT(col)` counts non-null values; `COUNT(DISTINCT col)` counts distinct non-null values.
+- **`ISNULL`** (2 arguments, takes the first argument's type, T-SQL only) vs **`COALESCE`** (n arguments, ANSI, returns the highest-precedence type) vs **`NULLIF(a,b)`** (NULL if equal — great for avoiding divide-by-zero).
+- **DISTINCT vs GROUP BY:** same result for de-duplication; GROUP BY when you need aggregates.
+- **Pagination:** `ORDER BY ... OFFSET n ROWS FETCH NEXT m ROWS ONLY` (needs a deterministic ORDER BY; deep offsets are slow → keyset).
+- **CASE:** simple (`CASE x WHEN 1`) vs searched (`CASE WHEN x > 1`); evaluated in order.
+- **Data types:** `DECIMAL(19,4)` for money (never `FLOAT`), `DATETIME2`/`DATETIMEOFFSET` rather than `DATETIME`, `NVARCHAR` for Unicode, avoid `VARCHAR(MAX)` unless needed.
+- **DDL** (CREATE/ALTER/DROP), **DML** (SELECT/INSERT/UPDATE/DELETE/MERGE), **DCL** (GRANT/REVOKE), **TCL** (BEGIN/COMMIT/ROLLBACK).
+- **DELETE vs TRUNCATE vs DROP:** DELETE is row-by-row, logged, filterable and fires triggers. TRUNCATE deallocates pages, is minimally logged, resets identity, can't have a WHERE, and can't run on a table referenced by a foreign key (it *can* be rolled back inside a transaction). DROP removes the table.
 
-#### 1. Interview Answer
-A covering index is a non-clustered index that contains every column a specific query needs — in the key, in `INCLUDE`, or both — so SQL Server can satisfy the query entirely from the non-clustered index's leaf level without a key lookup back to the clustered index. `INCLUDE` columns are stored only at the leaf level of the non-clustered B+‑tree: they don't participate in the sort order and aren't used for seeking or filtering, but they're available for output, which keeps the key itself narrow (cheaper to seek/sort) while still avoiding lookups.
-
-#### 2. SQL Query
 ```sql
-CREATE NONCLUSTERED INDEX IX_Orders_CustomerID_Covering
-    ON dbo.Orders(CustomerID, OrderDate)
-    INCLUDE (TotalAmount);
+-- Departments with more than 5 employees and average salary > 80k
+SELECT d.DeptName, COUNT(*) AS Headcount, AVG(e.Salary) AS AvgSalary
+FROM Employees e
+JOIN Departments d ON d.DeptId = e.DeptId
+WHERE e.HireDate < '2026-01-01'            -- row filter
+GROUP BY d.DeptName
+HAVING COUNT(*) > 5 AND AVG(e.Salary) > 80000   -- group filter
+ORDER BY AvgSalary DESC;                    -- alias allowed here
 
-SELECT OrderDate, TotalAmount
-FROM Orders
-WHERE CustomerID = 42;
+-- NULL handling
+SELECT COUNT(*) AS AllRows, COUNT(ManagerId) AS WithManager FROM Employees;
+SELECT Amount / NULLIF(Qty, 0) AS UnitPrice FROM OrderItems;   -- no divide-by-zero
+SELECT COALESCE(MobilePhone, WorkPhone, 'n/a') FROM Contacts;
+
+-- Searched CASE
+SELECT OrderId,
+       CASE WHEN Amount >= 10000 THEN 'Large'
+            WHEN Amount >= 1000  THEN 'Medium'
+            ELSE 'Small' END AS Bucket
+FROM Orders;
+
+-- Pagination
+SELECT OrderId, OrderDate FROM Orders
+ORDER BY OrderDate DESC, OrderId DESC
+OFFSET 40 ROWS FETCH NEXT 20 ROWS ONLY;
+
+-- Common date functions
+SELECT DATEADD(MONTH, -6, CAST(GETDATE() AS DATE)),         -- 6 months ago
+       DATEDIFF(DAY, HireDate, GETDATE()),
+       EOMONTH(GETDATE()),                                  -- end of month
+       DATEFROMPARTS(2026, 10, 1),
+       FORMAT(OrderDate, 'yyyy-MM')                         -- slow on large sets; prefer DATETRUNC (2022+)
+FROM Employees;
 ```
 
-#### 3. Explain the Query
-Every column the query touches — `CustomerID` (filter), `OrderDate` (output/key), `TotalAmount` (output, included) — exists in the non-clustered index leaf. The optimizer can produce an `Index Seek` with no `Key Lookup` operator at all.
+**Common interview questions**
 
-#### 4. Sample Data
-Same `Orders` table as Q2.
+**Q1. In what order does SQL Server process a query?**
+Logically: FROM/JOIN, WHERE, GROUP BY, HAVING, SELECT, DISTINCT, ORDER BY, then TOP/OFFSET. So WHERE can't see SELECT aliases or aggregates, and ORDER BY can. (The optimizer may physically reorder operations, but the results must match this logical order.)
 
-#### 5. Expected Output
-`OrderDate, TotalAmount` rows for `CustomerID = 42`, served purely from the non-clustered index.
+**Q2. WHERE vs HAVING?**
+WHERE filters individual rows before grouping and can't use aggregates. HAVING filters groups after aggregation. Put non-aggregate filters in WHERE — it reduces the rows that get grouped.
 
-#### 6. Alternative Solutions
-- **Widen the index key itself** (`(CustomerID, OrderDate, TotalAmount)`) instead of using `INCLUDE` — works but makes the key wider than necessary, increasing page-split and sort costs since `TotalAmount` never needs to be sorted.
-- **Rely on the clustered index only** and accept the key lookup — fine for low-frequency queries or small result sets, not for hot paths.
-- **Preferred**: `INCLUDE` for output-only columns — narrower key, same covering benefit.
+**Q3. `COUNT(*)` vs `COUNT(col)` vs `COUNT(DISTINCT col)`?**
+All rows / non-null values of col / distinct non-null values. `COUNT(1)` behaves exactly like `COUNT(*)`.
 
-#### 7. Performance
-Confirm by inspecting the plan: no `Key Lookup` operator should appear. Trade-off: every included column increases the leaf-page size and storage/maintenance cost of the index and slightly increases write cost on `INSERT`/`UPDATE` of those columns — covering indexes are a read/write trade-off, not a free win.
+**Q4. Why does `WHERE col = NULL` return nothing?**
+Comparisons with NULL yield UNKNOWN, which WHERE treats as false. Use `IS NULL` / `IS NOT NULL`.
 
-#### 8. Edge Cases
-Adding too many included columns for "just in case" coverage bloats the index and can push it past being worth maintaining versus just doing the lookup. Wide `VARCHAR`/`NVARCHAR` included columns multiply that cost. A covering index doesn't help if the query later adds a column to its `SELECT *` that isn't included.
+**Q5. `ISNULL` vs `COALESCE`?**
+`ISNULL` takes 2 arguments, returns the first argument's data type (can truncate), and is T-SQL only. `COALESCE` takes any number, is ANSI standard, and uses data type precedence; it's expanded to a CASE (so subqueries inside it may be evaluated twice).
 
-#### 9. Production Scenario
-Dashboard/reporting queries that repeatedly project the same 3–4 columns for a filtered customer or account are the classic covering-index candidate — turns a lookup-heavy plan into a pure seek.
+**Q6. DELETE vs TRUNCATE?**
+DELETE: row-by-row, fully logged, supports WHERE, fires triggers, keeps identity. TRUNCATE: deallocates data pages (minimal logging), no WHERE, resets identity, needs ALTER permission, and isn't allowed on tables referenced by foreign keys. Both are transactional in SQL Server.
 
-#### 10. Interview Follow-ups
-1. Does a covering index eliminate the need for the clustered index lookup entirely, always?
-2. What's the storage cost of `INCLUDE`?
-3. Can `INCLUDE` columns be of any data type?
-4. How do you find out if an index isn't fully covering a query?
+**Q7. Why `DECIMAL` and not `FLOAT` for money?**
+FLOAT is approximate binary floating point (0.1 can't be represented exactly), so sums drift. DECIMAL is exact base-10.
 
-#### 11. Follow-up Answers
-1. Only for that specific query's column list — a different query against the same table may still need a lookup unless it's also covered.
-2. Included columns are duplicated at every leaf row of the non-clustered index — real storage and write-amplification cost, not free.
-3. Almost any type except a few large object restrictions on the *key* — `INCLUDE` is more permissive on size than key columns (which are capped near 900/1700 bytes), because leaf-only storage doesn't need to support seeking.
-4. Look for a `Key Lookup` operator (or `RID Lookup` on a heap) in the actual execution plan connected to the index seek via a nested loop.
-
-#### 12. Common Mistakes
-Including every column "to be safe," which turns the non-clustered index into a near-duplicate of the table and doubles write cost. Forgetting that key-lookup elimination is query-specific, not table-wide.
-
-#### 13. Architect Insight
-The senior-vs-adequate line here is whether the candidate treats covering indexes as a targeted response to a specific, measured hot query (verified via plan/DMV) versus a blanket "add INCLUDE everywhere" habit that quietly doubles the table's write cost.
+**Q8. DISTINCT vs GROUP BY?**
+Without aggregates they produce the same result and often the same plan. Use GROUP BY when you need aggregates; DISTINCT to remove duplicate rows. Reaching for DISTINCT to hide duplicates from a bad join is a code smell.
 
 ---
 
-### Q4. What's a filtered index, and when does it outperform a full non-clustered index?
+## 2. Joins
 
-**Difficulty:** 🟡 Intermediate
+**Key concepts**
+- **INNER JOIN:** only matching rows. **LEFT JOIN:** all left rows + matches (NULLs otherwise). **RIGHT JOIN:** the mirror (rarely used; rewrite as LEFT). **FULL OUTER:** all rows from both sides. **CROSS JOIN:** Cartesian product (calendars, combinations). **SELF JOIN:** a table joined to itself (employee → manager).
+- **Filter placement in a LEFT JOIN:** a condition on the right table in **WHERE** turns it into an inner join; put it in **ON** to keep unmatched left rows.
+- **Anti-join** (rows without a match): `NOT EXISTS` (best), `LEFT JOIN ... WHERE right.key IS NULL`, `EXCEPT`. **Avoid `NOT IN` with a nullable subquery** — one NULL makes it return **no rows**.
+- **Semi-join** (rows with at least one match): `EXISTS` / `IN` — no duplicates, unlike JOIN.
+- Joining one-to-many multiplies rows → watch aggregates (fan-out double counting).
+- **Physical join operators** (Nested Loops, Hash, Merge) are covered in §7.
 
-#### 1. Interview Answer
-A filtered index is a non-clustered index with a `WHERE` predicate, indexing only the subset of rows that match it. It's smaller, cheaper to maintain, and has better statistics quality (a denser, more accurate histogram) than a full index would for that subset — ideal when queries consistently target a small, well-defined slice of a much larger table, like active/pending rows in a table dominated by completed/archived ones.
-
-#### 2. SQL Query
 ```sql
-CREATE NONCLUSTERED INDEX IX_Transactions_Pending
-    ON dbo.Transactions(AccountID, CreatedAt)
-    WHERE Status = 'PENDING';
+-- INNER: orders with their customer
+SELECT o.OrderId, c.Name FROM Orders o JOIN Customers c ON c.CustomerId = o.CustomerId;
 
-SELECT TransactionID, Amount
-FROM Transactions
-WHERE Status = 'PENDING' AND AccountID = 555;
+-- LEFT: every customer, with 2026 orders if any (filter in ON!)
+SELECT c.CustomerId, c.Name, o.OrderId
+FROM Customers c
+LEFT JOIN Orders o ON o.CustomerId = c.CustomerId AND o.OrderDate >= '2026-01-01';
+
+-- Anti-join: customers with no orders
+SELECT c.* FROM Customers c
+WHERE NOT EXISTS (SELECT 1 FROM Orders o WHERE o.CustomerId = c.CustomerId);
+
+-- NOT IN trap: returns NOTHING if any Orders.CustomerId is NULL
+SELECT * FROM Customers WHERE CustomerId NOT IN (SELECT CustomerId FROM Orders);
+
+-- SELF JOIN: employees earning more than their manager
+SELECT e.Name, e.Salary, m.Name AS Manager, m.Salary AS ManagerSalary
+FROM Employees e JOIN Employees m ON m.EmpId = e.ManagerId
+WHERE e.Salary > m.Salary;
+
+-- FULL OUTER: reconcile two sources
+SELECT COALESCE(a.Reference, b.Reference) AS Reference, a.Amount AS Ours, b.Amount AS Bank
+FROM Ledger a FULL OUTER JOIN BankStatement b ON a.Reference = b.Reference
+WHERE a.Reference IS NULL OR b.Reference IS NULL OR a.Amount <> b.Amount;
+
+-- CROSS JOIN: every store × every day (for zero-filled reports)
+SELECT s.StoreId, d.[Date] FROM Stores s CROSS JOIN Calendar d WHERE d.[Date] >= '2026-10-01';
 ```
 
-#### 3. Explain the Query
-The index only contains rows where `Status = 'PENDING'`; if 99% of transactions are `SUCCESS`/`FAILED`, this index is roughly 1% of the table's size, so it fits in memory more easily and every maintenance operation only touches pending rows.
+**Common interview questions**
 
-#### 4. Sample Data
-| TransactionID | AccountID | Status | CreatedAt |
-|---|---|---|---|
-| 1 | 555 | PENDING | 2026-09-10 |
-| 2 | 555 | SUCCESS | 2026-09-01 |
-| 3 | 555 | PENDING | 2026-09-12 |
+**Q1. Explain the join types.**
+INNER returns matches only; LEFT returns all left rows (NULLs for missing right rows); RIGHT is the mirror; FULL returns everything from both sides; CROSS returns every combination; a SELF join relates rows within one table.
 
-#### 5. Expected Output
-`TransactionID 1` and `3`.
+**Q2. Why did my LEFT JOIN behave like an INNER JOIN?**
+A WHERE condition on a right-table column (e.g., `WHERE o.Status = 'Paid'`) removes the NULL-extended rows. Move the condition into the ON clause, or allow `OR o.OrderId IS NULL`.
 
-#### 6. Alternative Solutions
-- **Full index on `(Status, AccountID, CreatedAt)`** — works for any status, but is far larger and its statistics are diluted across all status values, hurting cardinality estimates for the rare `PENDING` case.
-- **Indexed view / separate "hot" table** for pending transactions — heavier to maintain, justified only at extreme scale.
-- **Preferred**: the filtered index — it directly matches the access pattern ("we only ever query pending rows this way") at a fraction of the cost.
+**Q3. `NOT IN` vs `NOT EXISTS`?**
+If the subquery returns any NULL, `x NOT IN (...)` evaluates to UNKNOWN for every row → no rows returned. `NOT EXISTS` handles NULLs correctly and usually gets an efficient anti-semi-join plan. Prefer `NOT EXISTS`.
 
-#### 7. Performance
-The plan shows a normal `Index Seek`, but the *optimizer must be able to prove the query's predicate implies the filter* — the query's `WHERE` must match or be a subset of the index's filter predicate, using the exact same comparison semantics (this is stricter than it looks; parameterized queries with `@Status` instead of a literal `'PENDING'` may not match unless SQL Server can simplify it, so filtered indexes pair best with literal-heavy or `OPTION (RECOMPILE)` queries).
+**Q4. JOIN vs EXISTS vs IN?**
+JOIN returns columns from both tables and can duplicate rows (one-to-many). EXISTS/IN only test for existence (a semi-join) and never duplicate. The optimizer often produces the same plan for EXISTS and IN; EXISTS is clearer and NULL-safe in its negated form.
 
-#### 8. Edge Cases
-If application code passes `Status` as a parameter rather than a literal, the optimizer may be unable to guarantee the filtered index covers the query for all possible parameter values and will ignore it — a frequent "why isn't my filtered index being used" root cause. Filtered indexes can't be used to enforce uniqueness across the whole table, only within the filtered subset.
+**Q5. How do you find records in table A not in table B?**
+`NOT EXISTS` (preferred), `LEFT JOIN B ... WHERE B.key IS NULL`, or `SELECT key FROM A EXCEPT SELECT key FROM B` (distinct keys only).
 
-#### 9. Production Scenario
-A payments table where only `PENDING`/`PROCESSING` rows are polled by a reconciliation job, while `SUCCESS`/`FAILED` rows dominate row count historically — the filtered index keeps that hot polling query fast indefinitely regardless of table growth.
-
-#### 10. Interview Follow-ups
-1. Why might a filtered index silently not get used?
-2. Can a filtered index be unique?
-3. How does a filtered index affect statistics maintenance?
-4. What SQL Server version introduced filtered indexes?
-
-#### 11. Follow-up Answers
-1. Parameterized predicates that the optimizer can't statically prove match the filter (type mismatches, non-SARGable wrapping, or values passed as variables instead of literals in a way the optimizer can't simplify).
-2. Yes — `UNIQUE` filtered indexes are a common way to enforce "unique among non-deleted rows" for soft-delete tables.
-3. Filtered indexes get their own filtered statistics, which are denser and more accurate for the subset than the full table's statistics would be — a secondary performance benefit beyond size.
-4. SQL Server 2008.
-
-#### 12. Common Mistakes
-Creating a filtered index and then querying with a parameter, not a literal, and being confused when it's unused. Using a filtered index to try to enforce uniqueness across the *whole* table (it only covers the filtered subset).
-
-#### 13. Architect Insight
-Recognizing that a filtered index's statistics quality — not just its size — is often the bigger win, and knowing the parameter-vs-literal gotcha up front, is what separates someone who's actually debugged this in production from someone reciting the definition.
+**Q6. Why did my SUM double after adding a join?**
+Fan-out: joining a one-to-many table repeats each parent row per child, so parent amounts are summed multiple times. Aggregate the child first in a subquery or CTE, then join.
 
 ---
 
-### Q5. What is index selectivity and cardinality, and how do they determine whether SQL Server will actually use an index?
+## 3. Subqueries, CTEs, Temp Tables & APPLY
 
-**Difficulty:** 🔴 Senior
+**Key concepts**
+- **Subqueries:** scalar (one value), multi-row (`IN`, `EXISTS`), table (a derived table in FROM). **Correlated** subqueries reference the outer row (conceptually run per row; the optimizer often rewrites them as joins).
+- **CTE** (`WITH x AS (...)`): a named, readable query block; **not materialized** — referenced twice means executed twice. Scoped to one statement.
+- **Recursive CTE:** anchor + recursive member with `UNION ALL`; for hierarchies and series; `OPTION (MAXRECURSION n)` (default 100).
+- **Temp table `#t`:** physically in tempdb, has statistics, can be indexed — best for large intermediate results reused several times. **Table variable `@t`:** limited statistics (deferred compilation in 2019+ helps), best for small sets. **CTE:** readability, single use.
+- **CROSS APPLY / OUTER APPLY:** run a table expression per row (top-N per group, calling table-valued functions, unpacking JSON). OUTER APPLY keeps rows with no results (like LEFT JOIN).
 
-#### 1. Interview Answer
-Selectivity is the fraction of rows an index key value returns — `distinct values / total rows` for a rough estimate, or the actual matching-row fraction for a specific predicate. High selectivity (few rows per key value, like an email address) makes an index seek cheap and attractive; low selectivity (few distinct values, like a `Status` flag with 3 values, or a `Gender` column) means each key value matches a large fraction of the table, and SQL Server's optimizer will often correctly choose a table/clustered-index scan over a seek plus mass key-lookups, because the scan does less total I/O. This is a cost-based decision, not a fixed threshold — the optimizer estimates cardinality (expected row count) from statistics and picks whichever physical operation it estimates is cheaper.
-
-#### 2. SQL Query
 ```sql
--- Low selectivity: Status has 3 values across millions of rows
-SELECT * FROM Transactions WHERE Status = 'SUCCESS';   -- likely a scan
+-- Correlated subquery: employees above their department's average
+SELECT e.Name, e.Salary, e.DeptId
+FROM Employees e
+WHERE e.Salary > (SELECT AVG(Salary) FROM Employees x WHERE x.DeptId = e.DeptId);
 
--- High selectivity: AccountID has near-unique values relative to a filter
-SELECT * FROM Transactions WHERE TransactionID = 88213; -- always a seek
+-- Chained CTEs
+WITH DeptAvg AS (SELECT DeptId, AVG(Salary) AS AvgSal FROM Employees GROUP BY DeptId),
+     Above   AS (SELECT e.*, d.AvgSal FROM Employees e JOIN DeptAvg d ON d.DeptId = e.DeptId WHERE e.Salary > d.AvgSal)
+SELECT * FROM Above ORDER BY DeptId;
+
+-- Recursive CTE: org chart under employee 1
+WITH Org AS (
+    SELECT EmpId, Name, ManagerId, 0 AS Lvl FROM Employees WHERE EmpId = 1        -- anchor
+    UNION ALL
+    SELECT e.EmpId, e.Name, e.ManagerId, o.Lvl + 1
+    FROM Employees e JOIN Org o ON e.ManagerId = o.EmpId                          -- recursive
+)
+SELECT * FROM Org OPTION (MAXRECURSION 50);
+
+-- Recursive date series
+WITH D AS (SELECT CAST('2026-10-01' AS DATE) AS d UNION ALL SELECT DATEADD(DAY, 1, d) FROM D WHERE d < '2026-10-31')
+SELECT d FROM D;
+
+-- CROSS APPLY: latest 3 orders per customer
+SELECT c.CustomerId, x.OrderId, x.OrderDate
+FROM Customers c
+CROSS APPLY (SELECT TOP (3) OrderId, OrderDate FROM Orders o
+             WHERE o.CustomerId = c.CustomerId ORDER BY OrderDate DESC) x;
+
+-- Temp table for a reused, large intermediate set
+SELECT CustomerId, SUM(Amount) AS Total INTO #Totals FROM Orders GROUP BY CustomerId;
+CREATE CLUSTERED INDEX IX ON #Totals(CustomerId);
 ```
 
-#### 3. Explain the Query
-For the `Status` query, if `SUCCESS` is 95% of rows, an index seek would still touch 95% of the table's rows via lookups — strictly more expensive than one sequential scan. For `TransactionID` (the clustering/unique key), exactly one row matches, so a seek is unambiguously cheapest.
+**Common interview questions**
 
-#### 4. Sample Data
-| Status | RowCount |
-|---|---|
-| SUCCESS | 9,500,000 |
-| FAILED | 400,000 |
-| PENDING | 100,000 |
+**Q1. CTE vs temp table vs table variable?**
+CTE: readability, single-statement scope, not materialized. Temp table: real tempdb storage with statistics and indexes — best for big intermediate results used multiple times or across statements. Table variable: lightweight, minimal statistics, good for small row counts; it doesn't participate in a transaction rollback.
 
-#### 5. Expected Output
-Querying `Status = 'PENDING'` (1% selectivity) is a good seek candidate; `Status = 'SUCCESS'` (95%) is not, even with an index present.
+**Q2. Is a CTE materialized?**
+No. It's inlined into the query like a view; referencing it twice runs it twice. Materialize into a temp table if the work is expensive and reused.
 
-#### 6. Alternative Solutions
-- **Filtered index on `Status = 'PENDING'`** (Q4) — turns the low-selectivity-overall column into a highly selective, purpose-built index for the one value that's actually queried selectively.
-- **Force the seek via an index hint** — almost always the wrong move; fighting the optimizer's cost-based decision on a correctly-estimated low-selectivity predicate usually makes things worse.
-- **Preferred**: accept the scan for genuinely low-selectivity predicates; use a filtered index only for the specific low-frequency value that's actually queried often.
+**Q3. How does a recursive CTE work?**
+The anchor member produces the starting rows; the recursive member joins back to the CTE, repeatedly, until it returns no rows; the results are combined with UNION ALL. Guard against cycles and infinite loops with a level column and MAXRECURSION.
 
-#### 7. Performance
-Verify with `DBCC SHOW_STATISTICS` or the histogram in the actual execution plan's "Statistics Info" — compare `Estimated Number of Rows` to `Actual Number of Rows`; a large gap signals stale or skewed statistics rather than a selectivity problem per se (see Q15).
+**Q4. Correlated subquery vs join — which is faster?**
+Often the same: the optimizer decorrelates many subqueries into joins. When it can't, a correlated subquery may execute per outer row. Rewrite as a JOIN, a window function or APPLY, and check the plan.
 
-#### 8. Edge Cases
-Skewed distributions (one `AccountID` with a million transactions among mostly single-digit accounts) break the "average selectivity" assumption — this is where parameter sniffing (Q16) and per-value cardinality estimation diverge sharply from the column's overall selectivity.
-
-#### 9. Production Scenario
-A fraud-flag column that's `0` for 99.99% of rows and `1` for suspicious transactions is a textbook filtered-index-on-a-low-selectivity-column case: the column overall is nearly useless as an index, but the rare value is exactly what fraud-review queries filter on.
-
-#### 10. Interview Follow-ups
-1. How does SQL Server estimate selectivity without scanning the whole table?
-2. What's the difference between selectivity and density?
-3. Why might the optimizer choose a scan even for a selective predicate?
-4. How would you diagnose a case where the optimizer "should" seek but scans instead?
-
-#### 11. Follow-up Answers
-1. Via sampled or full-scan statistics (histograms) built and periodically auto-updated on indexed/queried columns, not by scanning at query time.
-2. Density is the inverse relationship — `1/distinct values` — used internally for multi-column cardinality math; selectivity is the more query-facing framing of "how many rows match."
-3. If statistics are stale/skewed, if the predicate isn't SARGable (Q18), or if the estimated cost of the seek-plus-lookups genuinely exceeds a scan for that specific value.
-4. Compare estimated vs. actual rows in the plan, check `sys.dm_db_stats_properties` for last-updated time and modification counter, and check for non-SARGable predicate forms before assuming the optimizer is "wrong."
-`
-
-#### 12. Common Mistakes
-Treating "add an index" as always correct regardless of the column's cardinality. Fighting the optimizer with hints instead of first checking statistics freshness and predicate SARGability.
-
-#### 13. Architect Insight
-A senior engineer knows scans-beat-seeks-sometimes is real; a principal engineer designs the *right narrow index for the actually-queried skewed value* (filtered index) instead of arguing with the optimizer about the column as a whole.
+**Q5. When do you use CROSS APPLY?**
+For per-row table expressions: top-N per group with an index, calling an inline table-valued function per row, or `OPENJSON` per row. OUTER APPLY keeps outer rows with no results.
 
 ---
 
-### Q6. What causes index fragmentation, and how do you choose between REORGANIZE and REBUILD?
+## 4. Window Functions
 
-**Difficulty:** 🟡 Intermediate
+**Key concepts**
+- `function() OVER (PARTITION BY ... ORDER BY ... ROWS/RANGE ...)` — calculates across related rows **without collapsing them** (unlike GROUP BY).
+- **Ranking:** `ROW_NUMBER` (1,2,3 — unique), `RANK` (1,1,3 — gaps), `DENSE_RANK` (1,1,2 — no gaps), `NTILE(n)` (buckets).
+- **Offset:** `LAG(col, n, default)`, `LEAD(...)`; `FIRST_VALUE`, `LAST_VALUE` (needs a frame `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`).
+- **Aggregates over windows:** `SUM/AVG/COUNT/MIN/MAX OVER (...)` — running totals, moving averages, percent of total.
+- **Distribution:** `PERCENT_RANK`, `CUME_DIST`, `PERCENTILE_CONT` (interpolated median), `PERCENTILE_DISC`.
+- **Frames:** with ORDER BY the default is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` → ties are treated as one peer group and it's slower (spools to tempdb). **Use `ROWS`** explicitly for running totals.
+- Window functions can't be used in WHERE (they're evaluated in SELECT) → wrap in a CTE/subquery to filter.
+- Performance: a supporting index on `(PARTITION BY cols, ORDER BY cols)` avoids sorts.
 
-#### 1. Interview Answer
-Fragmentation happens when logical page order (the B+‑tree's leaf-to-leaf chain) diverges from physical page order on disk, mainly from page splits caused by inserts/updates that don't fit in existing pages in key order (common with non-sequential keys like GUIDs, or `UPDATE`s that grow a variable-length column). Microsoft's own guidance: `REORGANIZE` for fragmentation roughly 5–30% (low system-resource, defragments the leaf level in place, can be stopped/resumed, doesn't update statistics with a full scan); `REBUILD` above ~30% (drops and recreates the index — reclaims space, resets fill factor, is a size-of-data operation, but with `ONLINE = ON` in Enterprise/certain editions can avoid blocking).
-
-#### 2. SQL Query
 ```sql
-SELECT i.name, ps.avg_fragmentation_in_percent, ps.page_count
-FROM sys.dm_db_index_physical_stats(DB_ID(), OBJECT_ID('dbo.Orders'), NULL, NULL, 'LIMITED') ps
-JOIN sys.indexes i ON i.object_id = ps.object_id AND i.index_id = ps.index_id;
+-- Ranking functions side by side
+SELECT Name, DeptId, Salary,
+       ROW_NUMBER() OVER (PARTITION BY DeptId ORDER BY Salary DESC) AS RowNum,
+       RANK()       OVER (PARTITION BY DeptId ORDER BY Salary DESC) AS Rnk,
+       DENSE_RANK() OVER (PARTITION BY DeptId ORDER BY Salary DESC) AS DenseRnk,
+       NTILE(4)     OVER (ORDER BY Salary DESC)                     AS Quartile
+FROM Employees;
 
-ALTER INDEX IX_Orders_CustomerID_OrderDate ON dbo.Orders REORGANIZE;
--- vs.
-ALTER INDEX IX_Orders_CustomerID_OrderDate ON dbo.Orders REBUILD WITH (ONLINE = ON, FILLFACTOR = 90);
+-- Running total and 7-row moving average (ROWS, not default RANGE)
+SELECT AccountId, TxnDate, Amount,
+       SUM(Amount) OVER (PARTITION BY AccountId ORDER BY TxnDate, TxnId ROWS UNBOUNDED PRECEDING) AS RunningBalance,
+       AVG(Amount) OVER (PARTITION BY AccountId ORDER BY TxnDate, TxnId ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS MovingAvg7
+FROM Transactions;
+
+-- Compare with previous row
+SELECT AccountId, TxnDate, Amount,
+       Amount - LAG(Amount, 1, 0) OVER (PARTITION BY AccountId ORDER BY TxnDate) AS DiffFromPrev,
+       DATEDIFF(DAY, LAG(TxnDate) OVER (PARTITION BY AccountId ORDER BY TxnDate), TxnDate) AS DaysSincePrev
+FROM Transactions;
+
+-- Percent of total and median
+SELECT DeptId, Name, Salary,
+       100.0 * Salary / SUM(Salary) OVER (PARTITION BY DeptId) AS PctOfDept,
+       PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY Salary) OVER (PARTITION BY DeptId) AS MedianSalary
+FROM Employees;
+
+-- Filtering on a window function → CTE
+WITH r AS (SELECT *, DENSE_RANK() OVER (PARTITION BY DeptId ORDER BY Salary DESC) dr FROM Employees)
+SELECT * FROM r WHERE dr <= 3;
 ```
 
-#### 3. Explain the Query
-`sys.dm_db_index_physical_stats` reports `avg_fragmentation_in_percent` per index; the maintenance script branches on that value. `FILLFACTOR = 90` leaves 10% free space per page on rebuild to delay the next round of splits for insert-heavy indexes.
+**Common interview questions**
 
-#### 4. Sample Data
-| Index | Fragmentation % | Page Count |
-|---|---|---|
-| IX_Orders_CustomerID_OrderDate | 42% | 15,000 |
-| PK_Orders | 3% | 50,000 |
+**Q1. ROW_NUMBER vs RANK vs DENSE_RANK?**
+With salaries 100, 100, 90: ROW_NUMBER = 1,2,3 (arbitrary order among ties unless you add a tie-breaker); RANK = 1,1,3; DENSE_RANK = 1,1,2. Use DENSE_RANK for "Nth highest distinct value", ROW_NUMBER for de-duplication and "pick one per group".
 
-#### 5. Expected Output
-The first index qualifies for `REBUILD` (>30%); the second is healthy and needs no action — and note page count matters too: Microsoft's guidance generally doesn't bother with indexes under ~1000 pages regardless of fragmentation, since the cost of maintenance exceeds the benefit.
+**Q2. Window function vs GROUP BY?**
+GROUP BY collapses rows into one per group; window functions keep every row and add the aggregate alongside it (e.g., each employee's salary next to the department average).
 
-#### 6. Alternative Solutions
-- **Scheduled full rebuild of everything nightly** — simple but wasteful; rebuilds healthy, small, or rarely-fragmenting indexes for no benefit and consumes log space/IO unnecessarily.
-- **Ola Hallengren's maintenance solution** (community-standard, not homegrown) — conditionally reorganizes/rebuilds based on fragmentation and page-count thresholds automatically; the de facto production standard for SQL Server index maintenance.
-- **Preferred**: condition-based maintenance (via DMV threshold checks, ideally via the established Ola Hallengren scripts) rather than blanket or manual rebuilds.
+**Q3. ROWS vs RANGE?**
+ROWS counts physical rows; RANGE includes all peers with the same ORDER BY value. The default frame with ORDER BY is RANGE, which gives surprising running totals when dates tie, and is slower (on-disk spool). Specify ROWS and add a unique tie-breaker.
 
-#### 7. Performance
-`REBUILD` fully updates statistics with a 100% scan as a side effect; `REORGANIZE` does not update statistics at all — a common miss is reorganizing and assuming statistics are now fresh. Rebuilding is log-intensive in `FULL` recovery model; consider `BULK_LOGGED` temporarily for large offline maintenance windows if RPO tolerates it.
+**Q4. Why can't I use ROW_NUMBER in WHERE?**
+Window functions are computed during SELECT, after WHERE. Wrap the query in a CTE or derived table and filter outside.
 
-#### 8. Edge Cases
-Very small tables/indexes fragment "high on paper" (e.g., 60%) but the absolute page count is trivial (under 1000 pages) — Microsoft explicitly recommends ignoring fragmentation below this threshold. Heavily fragmented heaps (no clustered index) cannot be reorganized at all — only rebuilt (or converted to a clustered index).
+**Q5. How do LAG and LEAD help?**
+They read a previous or next row's value in the same partition without a self-join — month-over-month change, time between events, detecting status transitions.
 
-#### 9. Production Scenario
-A ledger table with a sequential `BIGINT IDENTITY` clustering key rarely fragments from inserts (always appended at the end); the same table's non-clustered index on a mutable `Status` column fragments quickly as rows move between filtered ranges — different indexes on the same table need different maintenance cadences.
-
-#### 10. Interview Follow-ups
-1. Why doesn't REORGANIZE update statistics?
-2. What's a page split, mechanically?
-3. Why do sequential GUID keys fragment less than random GUIDs?
-4. Can you rebuild indexes online in all SQL Server editions?
-
-#### 11. Follow-up Answers
-1. Reorganize only physically reorders existing leaf pages to match logical order; it doesn't re-sample the data distribution, so the statistics histogram is untouched — a separate `UPDATE STATISTICS` is needed if data has changed meaningfully.
-2. When a new row doesn't fit on its target page (identified by its key value) in sorted order, SQL Server allocates a new page and moves roughly half the rows to it, breaking physical/logical order at that point and leaving a page roughly half-full.
-3. `NEWSEQUENTIALID()` or application-generated sequential IDs insert at the end of the key range, appending rather than splitting existing pages, unlike `NEWID()`'s random values which insert throughout the tree.
-4. Online index rebuild has historically been an Enterprise-only feature; check the specific edition/version's feature matrix on Microsoft Learn before assuming availability — Standard Edition gained some online DDL capability in more recent versions, but this should always be verified per version rather than assumed.
-
-#### 12. Common Mistakes
-Rebuilding every index nightly regardless of fragmentation or size. Assuming `REORGANIZE` refreshes statistics. Choosing a random GUID as a clustering key without considering fragmentation impact.
-
-#### 13. Architect Insight
-The senior/principal distinction here is operational: knowing the DMV, the 5%/30% thresholds, and the page-count caveat is senior; designing the *clustering key choice up front* to minimize future fragmentation, and picking a maintenance tool (not a bespoke script) that the whole ops team can operate, is principal-level thinking about total cost of ownership.
+**Q6. How do you make window queries fast?**
+A "POC" index — Partition columns, then Order columns, Covering the selected columns — so SQL Server streams rows without sorting; use ROWS frames; filter early.
 
 ---
 
-### Q7. When do indexes actively hurt performance?
+## 5. Classic Query Problems (Memorize the Shapes)
 
-**Difficulty:** 🔴 Senior
-
-#### 1. Interview Answer
-Every index is a write amplifier: each `INSERT`/`UPDATE`/`DELETE` that touches an indexed column must also update every index containing that column, in addition to the base table (or clustered index). Indexes hurt when: (1) a table has many rarely-used indexes maintained on every write of a high-throughput OLTP table; (2) redundant/overlapping indexes exist (e.g., `(A)` and `(A, B)` — the first is often fully redundant); (3) wide indexes with many included columns multiply page count and memory/buffer-pool pressure; (4) the optimizer's extra plan-choice search space for many indexes marginally increases compile time; (5) index maintenance (rebuild/reorganize, Q6) becomes a growing operational burden as index count grows.
-
-#### 2. SQL Query
 ```sql
--- Find unused or rarely-used indexes worth reviewing
-SELECT OBJECT_NAME(s.object_id) AS TableName, i.name AS IndexName,
-       s.user_seeks, s.user_scans, s.user_lookups, s.user_updates
-FROM sys.dm_db_index_usage_stats s
-JOIN sys.indexes i ON i.object_id = s.object_id AND i.index_id = s.index_id
-WHERE s.database_id = DB_ID() AND s.user_updates > (s.user_seeks + s.user_scans + s.user_lookups) * 10;
+-- 1. Second highest salary (NULL if none)
+SELECT MAX(Salary) FROM Employees WHERE Salary < (SELECT MAX(Salary) FROM Employees);
+
+-- 2. Nth highest salary (distinct)
+DECLARE @N INT = 3;
+WITH r AS (SELECT Salary, DENSE_RANK() OVER (ORDER BY Salary DESC) dr FROM Employees)
+SELECT DISTINCT Salary FROM r WHERE dr = @N;
+-- or: SELECT DISTINCT Salary FROM Employees ORDER BY Salary DESC OFFSET @N-1 ROWS FETCH NEXT 1 ROW ONLY;
+
+-- 3. Top 3 salaries per department
+WITH r AS (SELECT *, DENSE_RANK() OVER (PARTITION BY DeptId ORDER BY Salary DESC) dr FROM Employees)
+SELECT DeptId, Name, Salary FROM r WHERE dr <= 3;
+
+-- 4. Highest-paid employee per department (ties included)
+WITH r AS (SELECT *, RANK() OVER (PARTITION BY DeptId ORDER BY Salary DESC) rk FROM Employees)
+SELECT * FROM r WHERE rk = 1;
+
+-- 5. Employees earning more than their manager → self join (see §2)
+
+-- 6. Find duplicates
+SELECT Email, COUNT(*) AS Cnt FROM Customers GROUP BY Email HAVING COUNT(*) > 1;
+
+-- 7. Delete duplicates, keep the latest
+WITH d AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY Email ORDER BY CreatedAt DESC, CustomerId DESC) rn FROM Customers)
+DELETE FROM d WHERE rn > 1;
+
+-- 8. Customers who never ordered
+SELECT c.* FROM Customers c WHERE NOT EXISTS (SELECT 1 FROM Orders o WHERE o.CustomerId = c.CustomerId);
+
+-- 9. Customers with more than 3 orders
+SELECT CustomerId, COUNT(*) FROM Orders GROUP BY CustomerId HAVING COUNT(*) > 3;
+
+-- 10. Latest transaction per customer (ROW_NUMBER, or CROSS APPLY TOP 1 with an index)
+WITH r AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY AccountId ORDER BY TxnDate DESC, TxnId DESC) rn FROM Transactions)
+SELECT * FROM r WHERE rn = 1;            -- rn = 2 → second transaction; ORDER BY ASC → first
+
+-- 11. Employees hired in the last 6 months (SARGable)
+SELECT * FROM Employees WHERE HireDate >= DATEADD(MONTH, -6, CAST(GETDATE() AS DATE));
+
+-- 12. Running total of sales by day
+SELECT SaleDate, DailyTotal, SUM(DailyTotal) OVER (ORDER BY SaleDate ROWS UNBOUNDED PRECEDING) AS RunningTotal
+FROM (SELECT CAST(OrderDate AS DATE) SaleDate, SUM(Amount) DailyTotal FROM Orders GROUP BY CAST(OrderDate AS DATE)) t;
+
+-- 13. Month-over-month growth %
+WITH m AS (SELECT DATEFROMPARTS(YEAR(OrderDate), MONTH(OrderDate), 1) AS Mth, SUM(Amount) AS Rev FROM Orders
+           GROUP BY DATEFROMPARTS(YEAR(OrderDate), MONTH(OrderDate), 1))
+SELECT Mth, Rev, LAG(Rev) OVER (ORDER BY Mth) AS PrevRev,
+       100.0 * (Rev - LAG(Rev) OVER (ORDER BY Mth)) / NULLIF(LAG(Rev) OVER (ORDER BY Mth), 0) AS GrowthPct
+FROM m;
+-- Year-over-year: LAG(Rev, 12) on monthly data (or join to the same month last year)
+
+-- 14. Products whose sales grew vs the previous month
+WITH ps AS (SELECT ProductId, DATEFROMPARTS(YEAR(o.OrderDate), MONTH(o.OrderDate), 1) Mth, SUM(oi.Qty * oi.Price) Sales
+            FROM OrderItems oi JOIN Orders o ON o.OrderId = oi.OrderId GROUP BY ProductId, DATEFROMPARTS(YEAR(o.OrderDate), MONTH(o.OrderDate), 1)),
+     c AS (SELECT *, LAG(Sales) OVER (PARTITION BY ProductId ORDER BY Mth) Prev FROM ps)
+SELECT * FROM c WHERE Sales > Prev;
+
+-- 15. Consecutive login days (gaps & islands): date − row_number is constant within a streak
+WITH d AS (SELECT DISTINCT UserId, CAST(LoginDate AS DATE) AS D FROM Logins),
+     g AS (SELECT UserId, D, DATEADD(DAY, -ROW_NUMBER() OVER (PARTITION BY UserId ORDER BY D), D) AS Grp FROM d)
+SELECT UserId, MIN(D) AS StreakStart, MAX(D) AS StreakEnd, COUNT(*) AS Days
+FROM g GROUP BY UserId, Grp
+HAVING COUNT(*) >= 3;                   -- users with 3+ consecutive days
+-- Longest streak per user: wrap the above and take MAX(Days) per UserId
+
+-- 16. Missing dates in a range (calendar table or GENERATE_SERIES in SQL Server 2022)
+SELECT DATEADD(DAY, s.value, '2026-10-01') AS MissingDate
+FROM GENERATE_SERIES(0, 30) s
+WHERE NOT EXISTS (SELECT 1 FROM Transactions t WHERE CAST(t.TxnDate AS DATE) = DATEADD(DAY, s.value, '2026-10-01'));
+
+-- 17. Gaps in an ID sequence
+SELECT Id + 1 AS GapStart, NextId - 1 AS GapEnd
+FROM (SELECT Id, LEAD(Id) OVER (ORDER BY Id) AS NextId FROM Invoices) t
+WHERE NextId - Id > 1;
+
+-- 18. Customers who bought EVERY product in category 5 (relational division)
+SELECT o.CustomerId
+FROM Orders o JOIN OrderItems oi ON oi.OrderId = o.OrderId JOIN Products p ON p.ProductId = oi.ProductId
+WHERE p.CategoryId = 5
+GROUP BY o.CustomerId
+HAVING COUNT(DISTINCT p.ProductId) = (SELECT COUNT(*) FROM Products WHERE CategoryId = 5);
+
+-- 19. Bought product A but not B
+SELECT DISTINCT o.CustomerId FROM Orders o JOIN OrderItems i ON i.OrderId = o.OrderId WHERE i.ProductId = 'A'
+EXCEPT
+SELECT DISTINCT o.CustomerId FROM Orders o JOIN OrderItems i ON i.OrderId = o.OrderId WHERE i.ProductId = 'B';
+
+-- 20. Above department average (window version)
+SELECT * FROM (SELECT *, AVG(Salary) OVER (PARTITION BY DeptId) AS DeptAvg FROM Employees) t WHERE Salary > DeptAvg;
+
+-- 21. Department % of total salary
+SELECT DeptId, SUM(Salary) AS DeptTotal, 100.0 * SUM(Salary) / SUM(SUM(Salary)) OVER () AS PctOfCompany
+FROM Employees GROUP BY DeptId;
+
+-- 22. Duplicate financial transactions on several columns, within 10 minutes of each other
+SELECT a.TxnId, b.TxnId AS PossibleDuplicate
+FROM Transactions a
+JOIN Transactions b ON b.AccountId = a.AccountId AND b.Amount = a.Amount AND b.Reference = a.Reference
+                   AND b.TxnId > a.TxnId AND b.TxnDate BETWEEN a.TxnDate AND DATEADD(MINUTE, 10, a.TxnDate);
+
+-- 23. Overlapping date ranges (bookings)
+SELECT a.BookingId, b.BookingId
+FROM Bookings a JOIN Bookings b ON a.RoomId = b.RoomId AND a.BookingId < b.BookingId
+WHERE a.StartDate < b.EndDate AND b.StartDate < a.EndDate;          -- overlap test
+
+-- 24. Event A followed by event B within 30 minutes
+SELECT DISTINCT a.UserId
+FROM Events a JOIN Events b ON b.UserId = a.UserId AND b.EventType = 'B' AND a.EventType = 'A'
+ AND b.EventTime > a.EventTime AND b.EventTime <= DATEADD(MINUTE, 30, a.EventTime);
+
+-- 25. Top-selling product
+SELECT TOP (1) WITH TIES ProductId, SUM(Qty) AS Units FROM OrderItems GROUP BY ProductId ORDER BY SUM(Qty) DESC;
+
+-- 26. Cumulative percentage (Pareto)
+SELECT ProductId, Sales, 100.0 * SUM(Sales) OVER (ORDER BY Sales DESC ROWS UNBOUNDED PRECEDING) / SUM(Sales) OVER () AS CumPct
+FROM (SELECT ProductId, SUM(Qty * Price) AS Sales FROM OrderItems GROUP BY ProductId) t;
+
+-- 27. Point-in-time (as-of) FX rate for each transaction
+SELECT t.TxnId, t.TxnDate, r.Rate
+FROM Transactions t
+CROSS APPLY (SELECT TOP (1) Rate FROM FxRates f WHERE f.Pair = 'EURUSD' AND f.AsOf <= t.TxnDate ORDER BY f.AsOf DESC) r;
+
+-- 28. Pivot: monthly sales per product as columns
+SELECT ProductId,
+       SUM(CASE WHEN MONTH(o.OrderDate) = 1 THEN oi.Qty END) AS Jan,
+       SUM(CASE WHEN MONTH(o.OrderDate) = 2 THEN oi.Qty END) AS Feb
+FROM OrderItems oi JOIN Orders o ON o.OrderId = oi.OrderId GROUP BY ProductId;
+
+-- 29. Swap gender values in one update
+UPDATE Employees SET Gender = CASE Gender WHEN 'M' THEN 'F' WHEN 'F' THEN 'M' END;
+
+-- 30. Upsert (prefer explicit UPDATE/INSERT with locking hints over MERGE in high concurrency)
+BEGIN TRAN;
+UPDATE Balances WITH (UPDLOCK, SERIALIZABLE) SET Amount = @a WHERE AccountId = @id;
+IF @@ROWCOUNT = 0 INSERT Balances(AccountId, Amount) VALUES (@id, @a);
+COMMIT;
 ```
 
-#### 3. Explain the Query
-`sys.dm_db_index_usage_stats` tracks reads vs. writes per index since the last SQL Server restart; an index with high `user_updates` and near-zero `user_seeks`/`user_scans`/`user_lookups` is pure write overhead with no read benefit — a rebuild/drop candidate.
+**Common interview questions**
 
-#### 4. Sample Data
-| IndexName | user_seeks | user_scans | user_lookups | user_updates |
+**Q1. How do you find the Nth highest salary?**
+`DENSE_RANK() OVER (ORDER BY Salary DESC)` and filter `= N` (handles ties); or `OFFSET N-1 ROWS FETCH NEXT 1 ROW ONLY` over distinct salaries. Mention what should happen with ties and when fewer than N values exist.
+
+**Q2. How do you delete duplicates but keep one?**
+A CTE with `ROW_NUMBER() OVER (PARTITION BY <duplicate key> ORDER BY <keep rule>)` and `DELETE WHERE rn > 1`. Then add a unique constraint so they can't come back. On big tables, delete in batches.
+
+**Q3. Explain gaps-and-islands.**
+For consecutive values, `value − ROW_NUMBER()` is constant within a run, so grouping by that difference yields each island (a streak). Gaps are found with `LEAD`/`LAG` comparing neighbours.
+
+**Q4. How do you get the latest row per group efficiently?**
+`ROW_NUMBER() ... = 1` in a CTE, or `CROSS APPLY (SELECT TOP 1 ... ORDER BY date DESC)` — with an index on `(GroupKey, Date DESC)` the APPLY version seeks once per group, which is great when there are few groups with many rows each.
+
+**Q5. How do you detect overlapping ranges?**
+Two ranges overlap when `A.start < B.end AND B.start < A.end` (adjust for inclusive ends). Self-join on the shared resource with `A.id < B.id` to avoid duplicates.
+
+---
+
+## 6. Indexing
+
+**Key concepts**
+- **B-tree** structure: root → intermediate → leaf pages (8 KB pages, 64 KB extents).
+- **Clustered index** = the table data itself, sorted by the key (one per table). Best key: **narrow, unique, static, ever-increasing** (`BIGINT IDENTITY`). Random GUIDs cause page splits and fragmentation (use `NEWSEQUENTIALID()` if a GUID is required).
+- **Heap** = a table without a clustered index (forwarded records, RID lookups).
+- **Non-clustered index** = a separate B-tree of key columns + a row locator (the clustered key). Up to 999 per table.
+- **Covering index** = contains every column the query needs; **INCLUDE** columns live only at the leaf level (they don't affect ordering or key size limits).
+- **Composite key order:** equality columns first, then range/sort columns; the leftmost prefix rule — an index on `(A, B)` helps `WHERE A=` and `WHERE A= AND B>` but not `WHERE B=` alone.
+- **Filtered index:** `WHERE Status = 'PENDING'` — small and precise for hot subsets (watch parameterized queries, which may not match the filter).
+- **Unique index/constraint:** enforces business rules (idempotency keys).
+- **Columnstore:** column-oriented and compressed, for analytics/aggregations over millions of rows (batch mode); nonclustered columnstore on OLTP tables enables real-time analytics.
+- **Selectivity:** high-selectivity predicates (few rows) favour seeks; low selectivity → scans are cheaper than many lookups (the tipping point).
+- **Costs:** every index slows INSERT/UPDATE/DELETE, uses memory and disk, and needs maintenance. Remove unused or duplicate indexes (`sys.dm_db_index_usage_stats`).
+- **Fragmentation:** REORGANIZE (online, light, ~5–30%) vs REBUILD (more thorough, updates statistics; online in Enterprise edition). On SSDs fragmentation matters less than **statistics** and page density.
+- **Fill factor** leaves free space on pages to reduce splits on random inserts.
+
+```sql
+-- Clustered on an identity; non-clustered covering index for a hot query
+CREATE TABLE Orders (
+    OrderId    BIGINT IDENTITY CONSTRAINT PK_Orders PRIMARY KEY CLUSTERED,
+    CustomerId BIGINT NOT NULL,
+    OrderDate  DATETIME2 NOT NULL,
+    Status     VARCHAR(20) NOT NULL,
+    Amount     DECIMAL(19,4) NOT NULL
+);
+
+-- Query: WHERE CustomerId = @c AND OrderDate >= @d ORDER BY OrderDate DESC, returns Amount, Status
+CREATE NONCLUSTERED INDEX IX_Orders_Customer_Date
+    ON Orders (CustomerId, OrderDate DESC)     -- equality first, then range/sort
+    INCLUDE (Amount, Status);                  -- covering → no key lookup
+
+-- Filtered index for a small hot subset
+CREATE NONCLUSTERED INDEX IX_Orders_Pending ON Orders (OrderDate) INCLUDE (CustomerId)
+WHERE Status = 'PENDING';
+
+-- Unique constraint as a business rule
+CREATE UNIQUE INDEX UX_Payments_IdemKey ON Payments (ClientId, IdempotencyKey);
+
+-- Analytics
+CREATE NONCLUSTERED COLUMNSTORE INDEX NCCI_Orders ON Orders (OrderDate, CustomerId, Amount, Status);
+
+-- Unused indexes (reads vs writes since the last restart)
+SELECT OBJECT_NAME(s.object_id) AS TableName, i.name, s.user_seeks, s.user_scans, s.user_lookups, s.user_updates
+FROM sys.dm_db_index_usage_stats s JOIN sys.indexes i ON i.object_id = s.object_id AND i.index_id = s.index_id
+WHERE s.database_id = DB_ID() ORDER BY (s.user_seeks + s.user_scans + s.user_lookups) ASC;
+
+-- Missing index suggestions (treat as hints, not orders)
+SELECT * FROM sys.dm_db_missing_index_details;
+```
+
+**Common interview questions**
+
+**Q1. Clustered vs non-clustered index?**
+The clustered index *is* the table, with leaf pages containing full rows in key order — one per table. A non-clustered index is a separate structure with key columns and a pointer (the clustered key) back to the row; there can be many. Lookups through a non-clustered index that don't cover the query need key lookups into the clustered index.
+
+**Q2. How do you choose a clustered key?**
+Narrow (it's copied into every non-clustered index), unique, static (updates move rows), ever-increasing (avoids page splits). `BIGINT IDENTITY` is the classic choice; a random GUID is bad (fragmentation, larger indexes).
+
+**Q3. What's a covering index and why use INCLUDE?**
+An index containing all columns a query needs, so it never touches the base table. INCLUDE adds non-key columns only at the leaf level — no impact on sort order or key size limits, and cheaper to maintain than putting them in the key.
+
+**Q4. How do you decide column order in a composite index?**
+Equality predicates first (most selective among them), then range predicates or ORDER BY columns. Remember the leftmost prefix rule: the index can only seek on a leading subset of its columns.
+
+**Q5. When do indexes hurt?**
+Write-heavy tables (every insert/update maintains each index), too many overlapping indexes, wide keys, indexes on low-selectivity columns that are never used, and blocking or deadlocks from extra lock resources. Every index needs a query that justifies it.
+
+**Q6. Adding an index made the application slower. Why?**
+Write overhead on a hot table; a plan change where the optimizer picked the new index with bad estimates (lookups for many rows); more locks and deadlocks between readers and writers; or larger log and replication volume. Check Query Store for regressed queries and the write latency.
+
+**Q7. REORGANIZE vs REBUILD?**
+REORGANIZE defragments leaf pages in place — always online, lightweight, interruptible. REBUILD recreates the index (full defragmentation and fresh statistics) and can be online in Enterprise edition. Common guideline: reorganize at 5–30% fragmentation, rebuild above 30% — but on modern storage, keeping statistics up to date matters more.
+
+**Q8. What is a filtered index and when is it better?**
+An index on a subset of rows (`WHERE IsActive = 1`). It's smaller, cheaper to maintain and more accurate for queries targeting that subset. Caveat: parameterized queries may not match the filter at compile time.
+
+**Q9. When would you use a columnstore index?**
+For analytics and aggregations over large tables (data warehouses, reporting on OLTP via a nonclustered columnstore): it reads only the needed columns, compresses heavily, and runs in batch mode. Not for singleton row lookups.
+
+---
+
+## 7. Execution Plans & Query Tuning
+
+**Key concepts**
+- **Estimated plan** (no execution) vs **actual plan** (includes actual row counts, warnings, memory grants). Read right-to-left, top-to-bottom; look for **fat arrows**, **estimated vs actual row mismatches**, **warnings** (implicit conversion, spills, missing statistics).
+- **Table scan** (heap) / **clustered index scan** (all rows) / **index seek** (B-tree navigation to a range) / **key lookup** (fetching extra columns per row → fix with INCLUDE).
+- **Join operators:** **Nested Loops** (small outer input + indexed inner — OLTP), **Hash Match** (large unsorted inputs, needs a memory grant), **Merge Join** (both inputs sorted on the join key), **Adaptive Join** (2017+, chooses at runtime).
+- **Statistics** = histograms (up to 200 steps) of value distributions → cardinality estimation. Stale statistics → bad plans. Auto-update triggers after a threshold of changes (dynamic since 2016); update manually after large loads (`UPDATE STATISTICS ... WITH FULLSCAN` on critical tables).
+- **SARGable predicates** let the optimizer seek. Non-SARGable: a function on the column (`YEAR(d)=`, `ISNULL(c,..)=`, `LEFT(name,3)=`), **implicit conversion** (an `NVARCHAR` parameter vs a `VARCHAR` column), leading wildcards (`LIKE '%abc'`), arithmetic on the column (`Amount * 1.1 > 100`).
+- **Parameter sniffing:** the plan is compiled for the first parameter values and cached; skewed data makes it bad for other values. Fixes: better indexes; `OPTION (RECOMPILE)`; `OPTIMIZE FOR (@p = ...)` / `OPTIMIZE FOR UNKNOWN`; split procedures by case; **Query Store forced plans**; SQL 2022 **Parameter Sensitive Plan** optimization.
+- **"Fast in SSMS, slow in the app":** different SET options (SSMS defaults to `ARITHABORT ON`, ADO.NET to OFF) → a separate plan cache entry → a different sniffed plan. It's parameter sniffing, not ARITHABORT itself.
+- **Spills to tempdb:** the memory grant was too small for a sort or hash (bad estimates) → fix estimates, indexes that provide order, memory grant feedback (2019+).
+- **Plan cache pollution:** non-parameterized ad hoc SQL creates a plan per literal → parameterize (sp_executesql, ORMs do), enable `optimize for ad hoc workloads`.
+- **Query Store:** records query plans and runtime stats over time → find regressions and force good plans. **Enable it on every database.**
+- **OR conditions** can prevent seeks → rewrite as UNION ALL or use separate indexes; **catch-all queries** (`@p IS NULL OR col = @p`) → `OPTION (RECOMPILE)` or dynamic SQL.
+- **Deep OFFSET pagination** → keyset pagination.
+
+```sql
+-- Non-SARGable → SARGable rewrites
+WHERE YEAR(OrderDate) = 2026                       -- scan
+WHERE OrderDate >= '2026-01-01' AND OrderDate < '2027-01-01'   -- seek
+
+WHERE ISNULL(Status, '') = 'PAID'                  -- scan
+WHERE Status = 'PAID'                              -- seek
+
+WHERE AccountNo = 12345        -- AccountNo is VARCHAR → CONVERT_IMPLICIT on the column → scan
+WHERE AccountNo = '12345'      -- seek (match types; in .NET set DbType.AnsiString / correct length)
+
+WHERE Name LIKE '%smith'       -- scan (leading wildcard) → full-text search or a reversed computed column
+WHERE Name LIKE 'smith%'       -- seek
+
+-- Parameter sniffing fixes
+SELECT * FROM Orders WHERE CustomerId = @c OPTION (RECOMPILE);              -- fresh plan each run
+SELECT * FROM Orders WHERE CustomerId = @c OPTION (OPTIMIZE FOR (@c UNKNOWN)); -- average-density plan
+
+-- Catch-all search
+SELECT * FROM Orders
+WHERE (@CustomerId IS NULL OR CustomerId = @CustomerId)
+  AND (@Status IS NULL OR Status = @Status)
+OPTION (RECOMPILE);
+
+-- Inspect the actual I/O and time
+SET STATISTICS IO, TIME ON;
+
+-- Query Store: top regressed queries / force a plan
+SELECT TOP 20 q.query_id, rs.avg_duration, p.plan_id
+FROM sys.query_store_runtime_stats rs
+JOIN sys.query_store_plan p ON p.plan_id = rs.plan_id
+JOIN sys.query_store_query q ON q.query_id = p.query_id
+ORDER BY rs.avg_duration DESC;
+EXEC sp_query_store_force_plan @query_id = 42, @plan_id = 7;
+
+-- Statistics
+UPDATE STATISTICS dbo.Orders WITH FULLSCAN;
+DBCC SHOW_STATISTICS ('dbo.Orders', 'IX_Orders_Customer_Date');
+```
+
+**Common interview questions**
+
+**Q1. How do you read an execution plan?**
+Right to left (data flows leftward), top to bottom. Find the most expensive operators; compare estimated vs actual rows (big gaps = statistics or sniffing problems); look for scans on large tables, key lookups executed many times, sorts and hashes with spill warnings, implicit-conversion warnings, and parallelism skew. Always use the *actual* plan when possible.
+
+**Q2. Scan vs seek vs key lookup?**
+A seek navigates the B-tree to the needed range; a scan reads the whole index or table; a key lookup fetches columns missing from a non-clustered index, once per row. Many lookups are expensive → make the index covering.
+
+**Q3. What is parameter sniffing and how do you fix it?**
+SQL Server compiles a plan using the first-call parameter values and reuses it. With skewed data (one huge customer, many tiny ones), the cached plan suits one case and is terrible for the other. Fixes in order: an index that makes both cases cheap; RECOMPILE for infrequent queries; OPTIMIZE FOR; separate code paths; force a known-good plan via Query Store; PSP optimization in SQL Server 2022.
+
+**Q4. Why is a query fast in SSMS but slow from the app?**
+SSMS and the app use different SET options (notably ARITHABORT), so they get different plan cache entries — the app is stuck with a plan sniffed for atypical parameters. Compare both plans from the cache; fix the sniffing, don't just flip ARITHABORT. Other causes: different parameter types (implicit conversion from `nvarchar`), or app-side issues (row-by-row fetching, network).
+
+**Q5. What makes a predicate SARGable?**
+The column must appear "bare" on one side of a comparison with a compatible type, so the optimizer can seek into the index range. Functions on the column, implicit conversions, leading wildcards and arithmetic on the column all force scans.
+
+**Q6. Nested loops vs hash vs merge join — when?**
+Nested loops: a small outer input with an index on the inner side (typical OLTP). Hash: large, unsorted inputs; builds a hash table in memory (watch spills). Merge: both inputs already sorted on the join key — very efficient for large sorted sets.
+
+**Q7. What causes a sort to spill to tempdb?**
+The memory grant, based on estimated rows, was too small for the actual rows. Fix the estimates (statistics, sniffing), provide order via an index, reduce the selected columns, or rely on memory grant feedback.
+
+**Q8. What is cardinality estimation and why does it go wrong?**
+The optimizer's prediction of row counts at each step, from statistics histograms and assumptions (independence between predicates, containment). It goes wrong with stale statistics, correlated columns, table variables, functions on columns, multi-statement TVFs and parameter sniffing. Bad estimates → wrong join types, memory grants and index choices.
+
+**Q9. How do you find the worst queries on a server?**
+Query Store (top duration, CPU and reads; regressed queries), `sys.dm_exec_query_stats` joined to the SQL text and plans, Extended Events for long-running queries, and wait statistics to understand *why* they're slow.
+
+**Q10. How do you tune a slow stored procedure?**
+Reproduce it with the real parameters; get the actual plan and `STATISTICS IO/TIME`; find the most expensive operator and estimate errors; fix SARGability, indexes and statistics; check for sniffing; avoid row-by-row logic (cursors, scalar UDFs); and verify with Query Store after deployment.
+
+---
+
+## 8. Transactions, Isolation, Locking & Deadlocks
+
+**Key concepts**
+- **ACID:** Atomicity (all or nothing — the transaction log + rollback), Consistency (constraints), Isolation (locks/row versions), Durability (write-ahead log hardened on commit).
+- **Isolation levels**
+
+| Level | Dirty read | Non-repeatable read | Phantom | Mechanism |
 |---|---|---|---|---|
-| IX_Orders_LegacyReport | 0 | 2 | 0 | 480,000 |
-| IX_Orders_CustomerID_OrderDate | 120,000 | 300 | 0 | 480,000 |
+| READ UNCOMMITTED / `NOLOCK` | ✅ | ✅ | ✅ | no shared locks; can read rows twice or skip them |
+| **READ COMMITTED** (default) | ❌ | ✅ | ✅ | short shared locks; readers block on writers |
+| **RCSI** (READ_COMMITTED_SNAPSHOT ON) | ❌ | ✅ | ✅ | statement-level row versions; **readers don't block writers** |
+| REPEATABLE READ | ❌ | ❌ | ✅ | shared locks held to the end of the transaction |
+| **SNAPSHOT** | ❌ | ❌ | ❌ | transaction-level versions; **update conflicts → error 3960** |
+| SERIALIZABLE | ❌ | ❌ | ❌ | key-range locks; most blocking |
 
-#### 5. Expected Output
-`IX_Orders_LegacyReport` is a strong drop candidate; the second index earns its write cost through heavy read use.
+- **Lock modes:** Shared (S), Update (U — prevents conversion deadlocks), Exclusive (X), Intent (IS/IX/IU), Schema (Sch-S/Sch-M). **Granularity:** row/key → page → table (plus partition).
+- **Lock escalation:** about **5,000 locks** on one object → escalates to a table lock → blocks everyone. Avoid with batching (e.g., 2,000 rows per transaction) or `ALTER TABLE ... SET (LOCK_ESCALATION = AUTO|DISABLE)`.
+- **Blocking** = waiting on a lock; **deadlock** = a cycle; SQL Server's lock monitor picks a victim (error **1205**; the lowest rollback cost, or set `DEADLOCK_PRIORITY`).
+- **Optimistic concurrency:** a `rowversion` column checked in `WHERE` (0 rows affected = conflict). **Pessimistic:** `UPDLOCK`/`HOLDLOCK` hints in short transactions.
+- **RCSI/SNAPSHOT cost:** the tempdb version store, 14 bytes per row, and longer version chains with long-running transactions.
+- **Long transactions** hold locks, block log truncation (log growth), bloat the version store, and lengthen recovery.
+- **`SET XACT_ABORT ON`** in procedures so any error rolls back the whole transaction.
 
-#### 6. Alternative Solutions
-- **Drop unused indexes outright** after confirming via usage stats over a full representative business cycle (not just since last restart — stats reset on restart/failover).
-- **Consolidate overlapping indexes** into one wider composite rather than several narrow redundant ones.
-- **Preferred**: periodic, data-driven index audits against `sys.dm_db_index_usage_stats` (captured over time, not a single snapshot) rather than either "index everything" or "never touch indexes" extremes.
-
-#### 7. Performance
-Every additional index roughly adds one more B+‑tree write per DML statement touching its key columns — on a table doing thousands of writes/second, 10 unnecessary indexes can be a meaningfully measurable multiple of total I/O and log generation, not just a rounding error.
-
-#### 8. Edge Cases
-`sys.dm_db_index_usage_stats` resets on service restart/failover, so "zero usage" right after a failover is misleading — always check uptime and consider a longer observation window or Query Store data instead.
-
-#### 9. Production Scenario
-This is exactly the "we added an index and the application got slower" incident (Q9) — usually because the new index's write cost on a hot insert path outweighed its read benefit, or because it duplicated an existing index's coverage.
-
-#### 10. Interview Follow-ups
-1. How do you know an index is truly redundant vs. subtly different?
-2. What's the write cost difference between updating a key column vs. an included column?
-3. How does index count affect optimizer compile time?
-4. Would you ever keep an "unused" index anyway?
-
-#### 11. Follow-up Answers
-1. `(A)` is redundant to `(A, B)` for equality/seek purposes on `A` alone, but not identical if `(A)` is unique/has different fill factor, or if `(A,B)` is filtered and `(A)` is not — check exact semantics, don't drop on name pattern alone.
-2. Updating a key column can force the row to move within the index's sort order (page split potential); updating an included-only column just rewrites the leaf entry in place — cheaper, but still not free.
-3. More indexes mean a larger search space for the optimizer to cost during plan generation, which can measurably increase compile time for complex queries on heavily-indexed tables.
-4. Yes — an index enforcing a business uniqueness constraint, or one used rarely but for a critical month-end/regulatory report, is legitimate even with low seek counts; usage stats inform, they don't override business requirements.
-
-#### 12. Common Mistakes
-Treating "more indexes = faster" as universally true. Dropping indexes based on a usage snapshot taken right after a restart. Not distinguishing index-supports-a-constraint from index-supports-a-query.
-
-#### 13. Architect Insight
-Adequate answers describe indexes as purely beneficial for reads; senior/principal answers frame every index as a read/write trade-off made at the table level, and treat "which indexes exist" as something to actively govern and audit over the table's lifetime, not a one-time setup decision.
-
----
-
-### Q8. Given a new, unfamiliar table and its query workload, how do you decide which columns to index?
-
-**Difficulty:** 🔥 Architect
-
-#### 1. Interview Answer
-Start from the actual query workload, not the schema in isolation: capture the highest-frequency and highest-cost queries (via Query Store or `sys.dm_exec_query_stats`), and for each, identify equality predicates, range predicates, join keys, and `ORDER BY`/`GROUP BY` columns. Apply the composite-index ordering rule (Q2: equality → range → include) per query pattern, then look for overlap across queries to consolidate into a smaller number of indexes that serve multiple query shapes rather than one bespoke index per query. Weigh every candidate index against its write cost on that table's actual write volume (Q7) before adding it — indexing is always workload-first, never schema-first.
-
-#### 2. SQL Query
 ```sql
-SELECT TOP 20
-    qs.execution_count,
-    qs.total_logical_reads / qs.execution_count AS avg_logical_reads,
-    SUBSTRING(qt.text, (qs.statement_start_offset/2)+1,
-        ((CASE qs.statement_end_offset WHEN -1 THEN DATALENGTH(qt.text) ELSE qs.statement_end_offset END - qs.statement_start_offset)/2) + 1) AS query_text
-FROM sys.dm_exec_query_stats qs
-CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) qt
-WHERE qt.text LIKE '%Orders%'
-ORDER BY qs.total_logical_reads DESC;
-```
-
-#### 3. Explain the Query
-This pulls the highest-I/O queries touching `Orders` from the plan cache, ranked by total logical reads — the actual bottleneck signal, not a guess. In practice you'd use Query Store's built-in "Top Resource Consuming Queries" report instead of hand-rolling this on a modern instance, since Query Store persists across restarts and plan cache eviction.
-
-#### 4. Sample Data
-Not applicable — this is a workload-analysis query against system DMVs, not business data.
-
-#### 5. Expected Output
-A ranked list of the actual queries costing the most I/O against the target table, each with its predicate shape extractable from the query text.
-
-#### 6. Alternative Solutions
-- **Index every foreign key and every WHERE-clause column found by inspection** — fast to do, but ignores actual frequency/cost and often over-indexes rarely-run queries while missing composite shapes that matter.
-- **Database Engine Tuning Advisor** against a captured workload trace — legitimate and useful for a first pass on unfamiliar schemas, but its recommendations should be reviewed, not applied blindly (it can suggest redundant or overly-specific indexes).
-- **Preferred**: Query Store/DMV-driven analysis of real production query cost, cross-checked against DETA suggestions as a second opinion, applied with the write-cost governance from Q7.
-
-#### 7. Performance
-Prioritize indexes that fix the queries contributing the most *total* logical reads/CPU (`execution_count × per-execution cost`), not just the single slowest query — a moderately slow query run 100,000 times/day usually matters more than a very slow report run once a month.
-
-#### 8. Edge Cases
-A brand-new table/feature has no query history yet — in that case, index from the known access patterns in the application design (foreign keys used in joins, the primary lookup key) and revisit with real data after the feature ships; don't over-engineer speculative indexes for query shapes that don't exist yet.
-
-#### 9. Production Scenario
-Inheriting a legacy schema with 40 indexes on one table (a real, common finding) — the workflow above (usage stats to find dead weight, Query Store to find what's actually driving cost) is exactly how you'd triage it rather than guessing.
-
-#### 10. Interview Follow-ups
-1. How do you handle conflicting index needs between an OLTP write path and a reporting read path on the same table?
-2. What's the role of Query Store specifically, versus the plan cache?
-3. How do you validate an index recommendation before deploying it to production?
-4. How does this change for a table with 500 million rows (see Q115)?
-
-#### 11. Follow-up Answers
-1. Separate them physically where possible — a read replica or reporting database with its own index set, or an indexed view/summary table — rather than compromising the OLTP table's write path with report-only indexes.
-2. The plan cache is transient (evicted under memory pressure, cleared on restart) and only shows the *current* compiled plan; Query Store persists historical plans and runtime stats across restarts, enabling trend analysis and plan-regression detection (Q16/Q17) that the plan cache alone can't provide.
-3. Test on a representative data volume/distribution (not just a small dev copy), check the plan before/after with `SET STATISTICS IO/TIME`, and monitor write-path impact (duration of inserts/updates) in a staging environment before production rollout, ideally behind a low-risk deployment window.
-4. At that scale, indexing decisions can't be separated from partitioning and archiving strategy (Q115/Q121) — an index alone doesn't solve the operational cost of maintaining statistics/rebuilds on a 500M-row table.
-
-#### 12. Common Mistakes
-Indexing based on the schema diagram alone. Applying every Database Engine Tuning Advisor suggestion without reviewing for redundancy. Ignoring the write path entirely when optimizing reads.
-
-#### 13. Architect Insight
-This question is where architect-level candidates distinguish themselves by explicitly naming the *process* (measure real workload → identify predicate shapes → consolidate → weigh against write cost → validate before deploy) rather than jumping straight to "I'd add an index on X" — process discipline under ambiguity is exactly what's being tested.
-
----
-
-### Q9. Production incident: adding an index made the application slower. Walk through the root-cause investigation.
-
-**Difficulty:** 🔥 Architect
-
-#### 1. Interview Answer
-This is almost always one of: (a) the new index sits on a high-write table and its maintenance cost outweighs the read benefit it was meant to provide; (b) the new index changed the optimizer's plan choice for *other*, unrelated queries via plan cache invalidation or a shifted cost estimate, sending some of them to a worse plan; (c) the index caused unexpected lock contention (a new index means new pages to lock/latch, and can change lock ordering, occasionally introducing new deadlock patterns); or (d) the rebuild/creation itself was still running or briefly held a blocking schema-modification lock during a deploy window that overlapped live traffic. The investigation is: confirm the regression's time window against the deployment; compare execution plans (via Query Store's plan-regression view, which is built exactly for this) for the affected queries before and after; check `sys.dm_db_index_usage_stats` for the new index's actual read-vs-write ratio; and check for blocking/deadlocks coinciding with the change.
-
-#### 2. SQL Query
-```sql
--- Query Store: find queries whose plan changed and got worse after a given time
-SELECT q.query_id, rs1.avg_duration AS avg_duration_before, rs2.avg_duration AS avg_duration_after
-FROM sys.query_store_query q
-JOIN sys.query_store_plan p1 ON p1.query_id = q.query_id
-JOIN sys.query_store_runtime_stats rs1 ON rs1.plan_id = p1.plan_id
-JOIN sys.query_store_plan p2 ON p2.query_id = q.query_id AND p2.plan_id <> p1.plan_id
-JOIN sys.query_store_runtime_stats rs2 ON rs2.plan_id = p2.plan_id
-WHERE rs2.avg_duration > rs1.avg_duration * 2;
-```
-
-#### 3. Explain the Query
-This surfaces queries with more than one distinct plan on record where a later plan's average duration is at least double an earlier one's — Query Store's plan-forcing feature (`sp_query_store_force_plan`) can then pin the good plan immediately as a stopgap while the index change is properly reviewed.
-
-#### 4. Sample Data
-Not applicable — diagnostic query against Query Store system views.
-
-#### 5. Expected Output
-A short list of regressed queries with both plan IDs, which you'd open side-by-side in SSMS to compare operators.
-
-#### 6. Alternative Solutions
-- **Immediately drop the new index** — fastest mitigation if it's clearly the cause and not load-bearing for anything else yet, but skips root-cause understanding.
-- **Force the prior good plan via Query Store** — buys time without removing the index, useful if the index is needed for a different, legitimate query.
-- **Preferred**: mitigate first (drop or force-plan, whichever is faster and safer given what's known), then complete the Query-Store-driven root cause before deciding whether to reintroduce the index with adjustments (different columns, filtered, different fill factor, or during a lower-traffic maintenance window).
-
-#### 7. Performance
-The core lesson to verify, not assume: a new index changes the cost estimates the optimizer uses for *every* plan touching that table, not just the query it was added for — cost-based optimizers can and do pick worse plans for unrelated queries once a new access path exists and looks (incorrectly, for that query) cheaper.
-
-#### 8. Edge Cases
-If the regression coincides exactly with statistics auto-update triggered by the index-creation's implicit scan, the real cause may be a parameter-sniffed bad plan (Q16) coincidentally surfaced by the new statistics, not the index itself — don't stop investigating at "we added an index" without confirming the causal mechanism.
-
-#### 9. Production Scenario
-A payments-processing system where a new index intended to speed up a reconciliation report instead slowed down the hot payment-insert path by ~15%, discovered via APM latency alerts within an hour of a routine deploy — exactly the kind of incident this workbook's Troubleshooting section (Q105–Q116) treats in more general form.
-
-#### 10. Interview Follow-ups
-1. How would you have caught this before production?
-2. What's plan forcing, and what are its risks?
-3. How does this differ from a parameter-sniffing regression?
-4. What monitoring would you put in place to catch this faster next time?
-
-#### 11. Follow-up Answers
-1. Load-test the write path with the new index under representative concurrency before deploy, and deploy behind a canary/percentage rollout with APM latency monitoring rather than a full cutover.
-2. `sp_query_store_force_plan` pins a specific plan for a query; the risk is that a forced plan can become suboptimal later as data distribution changes, so it's a temporary stabilizer, not a permanent fix, and needs a follow-up ticket to actually resolve root cause.
-3. Parameter sniffing regressions happen without any schema change, purely from a new parameter value compiling a bad-for-other-values plan; an index-related regression is caused by a genuine access-path change altering cost estimates — the fix for the former is often `OPTIMIZE FOR`/`RECOMPILE`, for the latter it's revisiting the index design.
-4. Query Store's automatic plan regression detection/alerts (available in modern SQL Server versions), APM latency dashboards keyed to deploy markers, and a standard "index change" runbook requiring before/after `STATISTICS IO/TIME` comparison as part of code review.
-
-#### 12. Common Mistakes
-Assuming a new index can only help, never hurt, because "it's just an index." Dropping the index without ever confirming the causal mechanism, risking a repeat with the next "helpful" index. Not having deploy-time correlation between schema changes and APM alerts.
-
-#### 13. Architect Insight
-The discriminating trait here is treating index changes as *production changes with blast radius*, requiring the same rigor (staging validation, canary rollout, before/after measurement, rollback plan) as an application code deploy — not as a low-risk DBA housekeeping task.
-
----
-
-## Part B: Query Performance & Execution Plans
-
-### Q10. How do you read a SQL Server execution plan, and what's the difference between estimated and actual plans?
-
-**Difficulty:** 🟡 Intermediate
-
-#### 1. Interview Answer
-An execution plan is a tree of physical operators (scans, seeks, joins, sorts, aggregates) that SQL Server's Query Optimizer chose to run a statement, read right-to-left, bottom-to-top for data flow, with each operator showing its estimated cost as a percentage of the total batch. The *estimated* plan is generated by the optimizer without running the query, using statistics-based row-count estimates only; the *actual* plan requires execution and additionally reports the true number of rows produced by each operator, actual execution counts, and runtime warnings (like implicit conversions or spills) — comparing estimated vs. actual rows at each operator is the single most useful diagnostic in the whole plan.
-
-#### 2. SQL Query
-```sql
-SET STATISTICS XML ON;
-SELECT o.OrderID, c.CustomerName
-FROM Orders o JOIN Customers c ON c.CustomerID = o.CustomerID
-WHERE o.OrderDate >= '2026-01-01';
-SET STATISTICS XML OFF;
-```
-
-#### 3. Explain the Query
-`SET STATISTICS XML ON` captures the actual execution plan as XML alongside the result set (equivalent to SSMS's "Include Actual Execution Plan" button); the plan XML records both estimated and actual row counts per operator, letting you diff them directly.
-
-#### 4. Sample Data
-Not applicable — this is a plan-capture technique, not a data query.
-
-#### 5. Expected Output
-A graphical (or XML) plan showing, e.g., `Index Seek (Orders) → Hash Match (Join) → Index Seek (Customers)`, each annotated with its cost percentage and estimated/actual row counts.
-
-#### 6. Alternative Solutions
-- **`SET SHOWPLAN_XML ON`** — shows only the *estimated* plan without executing the query at all; useful when you can't safely run the query against production data (e.g., it has side effects, or is prohibitively slow).
-- **Query Store's plan viewer in SSMS** — best for historical/regression analysis (Q9), not just a single ad hoc capture.
-- **Preferred**: actual plan (`STATISTICS XML`/SSMS "Include Actual Execution Plan") for any live investigation, since estimated-vs-actual divergence is the primary signal for most performance problems (Q15).
-
-#### 7. Performance
-Read the plan for: highest cost-percentage operators first, any operator where actual rows vastly exceed estimated rows (cardinality estimation problem, Q15), warning icons (implicit conversion, spilled sort/hash to `tempdb`), and the overall shape (are there unnecessary sorts or lookups that a different index would eliminate).
-
-#### 8. Edge Cases
-Cost percentages are *relative estimates*, not wall-clock time — a plan can show one operator at "80% cost" while actually running fast in absolute terms if the whole batch is cheap; always corroborate with actual duration/IO, not cost percentage alone. Triggers and cascading constraints run "invisibly" outside the plan you're looking at unless you capture them separately.
-
-#### 9. Production Scenario
-Every serious production slow-query investigation starts here — before touching indexes, code, or configuration, you capture and read the actual plan to know what's actually happening rather than guessing.
-
-#### 10. Interview Follow-ups
-1. Why would estimated and actual row counts differ significantly?
-2. What do the yellow warning triangles in a graphical plan mean?
-3. How do you get an actual plan for a query you can't safely execute against production?
-4. What's a "spill to tempdb" and how do you spot it?
-
-#### 11. Follow-up Answers
-1. Stale statistics, parameter sniffing against an atypical value, non-SARGable predicates the optimizer can't estimate precisely, or complex multi-table join cardinality math compounding small errors — see Q15.
-2. Common warnings: implicit conversion affecting cardinality/seek ability, no join predicate (unintended cross join), or a column with no statistics.
-3. Run it against a restored copy/replica with representative data and volume, or capture the estimated plan only via `SHOWPLAN_XML`, understanding it won't reflect true runtime row counts.
-4. A sort or hash operation that doesn't fit in its granted memory spills intermediate results to `tempdb`; visible in the actual plan as a warning on the Sort/Hash Match operator, and a strong signal to investigate memory grant sizing or reduce the row/column volume being sorted.
-
-#### 12. Common Mistakes
-Reading cost percentages as if they were absolute timings. Only ever looking at estimated plans in production troubleshooting. Ignoring warning icons.
-
-#### 13. Architect Insight
-Adequate candidates can name the operators; senior candidates diagnose from estimated-vs-actual divergence and warnings; principal candidates use the plan as one input alongside Query Store history, DMV wait stats, and `STATISTICS IO/TIME` to build a complete causal picture rather than fixating on the plan shape alone.
-
----
-
-### Q11. What's the difference between a table scan, an index scan, and an index seek?
-
-**Difficulty:** 🟢 Basic
-
-#### 1. Interview Answer
-A table scan reads every row of a heap (no clustered index) top to bottom. An index scan reads every row of an index (clustered or non-clustered) in leaf order, still touching every row — usually because no predicate exists that lets the optimizer narrow the search, or because a large fraction of rows are needed anyway. An index seek navigates the B+‑tree directly to the matching row(s) using the key, touching only the pages needed to satisfy the predicate — O(log n) plus the number of matching rows, versus O(n) for a scan.
-
-#### 2. SQL Query
-```sql
-SELECT * FROM Orders;                              -- (Clustered) Index Scan
-SELECT * FROM Orders WHERE CustomerID = 42;         -- Index Seek if CustomerID is indexed and selective
-SELECT * FROM Orders WHERE YEAR(OrderDate) = 2026;  -- Scan, even with an index on OrderDate (non-SARGable, see Q18)
-```
-
-#### 3. Explain the Query
-The first has no predicate, so every row must be read — a scan is not just acceptable but optimal here. The second, with a selective indexed equality predicate, seeks directly. The third wraps the indexed column in a function, which defeats seekability even though `OrderDate` is indexed — this is purely a query-authoring problem, not a missing-index problem.
-
-#### 4. Sample Data
-`Orders(OrderID, CustomerID, OrderDate)` with an index on `OrderDate`.
-
-#### 5. Expected Output
-Query 1 and 3 both produce scans; query 2 produces a seek — despite query 3 having an index available on the filtered column.
-
-#### 6. Alternative Solutions
-For query 3: rewrite as `WHERE OrderDate >= '2026-01-01' AND OrderDate < '2027-01-01'` — a SARGable range predicate that *can* seek on the same index, producing identical results with vastly better scalability as the table grows.
-
-#### 7. Performance
-A scan's cost grows linearly with table size regardless of how few rows match; a seek's cost is nearly flat as the table grows (logarithmic tree depth plus matching rows) — this divergence is exactly why "works fine in dev, times out in production" happens as tables grow past the point where a scan-based query used to be tolerable.
-
-#### 8. Edge Cases
-For very small tables, the optimizer may deliberately choose a scan over a seek even when an index exists, because reading the whole (tiny) table in one sequential pass is genuinely cheaper than the overhead of tree navigation — this is correct optimizer behavior, not a bug.
-
-#### 9. Production Scenario
-The `YEAR(OrderDate) = 2026` pattern is one of the most common real-world causes of a "sudden" performance cliff as a table crosses from small (scan is fine) to large (scan becomes the bottleneck) — see Q18 for the full SARGability treatment.
-
-#### 10. Interview Follow-ups
-1. Is a scan always bad?
-2. Can an index seek still be slow?
-3. What's a "range scan" versus a "seek," terminology-wise?
-4. How would you find all non-SARGable predicates in an application's query set?
-
-#### 11. Follow-up Answers
-1. No — for small tables, or queries genuinely needing most/all rows (a report with no effective filter), a scan can be the optimizer's correct, cheapest choice.
-2. Yes — a seek that matches millions of rows (a poorly selective predicate, Q5) still has to read and process all of them; "seek" describes the access method, not a performance guarantee.
-3. SQL Server plans label both point lookups and contiguous-range reads as "Index Seek" — the seek predicate shown in the operator's properties clarifies whether it's an equality or a range.
-4. Review Query Store/plan cache for scans on large tables that have a seemingly-relevant index available, and inspect those queries' `WHERE` clauses for functions wrapping columns, implicit conversions, or leading wildcards (`LIKE '%x'`).
-
-#### 12. Common Mistakes
-Assuming "scan" always means "missing index" without checking whether the predicate is even seekable. Assuming "seek" always means "fast."
-
-#### 13. Architect Insight
-The senior-level tell is immediately spotting that `YEAR(OrderDate) = 2026` is a query-authoring bug, not an indexing gap — junior debugging adds indexes; senior debugging reads the predicate first.
-
----
-
-### Q12. What's a key lookup (bookmark lookup), and how do you eliminate it?
-
-**Difficulty:** 🟡 Intermediate
-
-#### 1. Interview Answer
-A key lookup happens when a non-clustered index seek finds the matching rows but the query needs additional columns not present in that index, forcing a second seek per matching row into the clustered index (or a RID lookup into a heap) to fetch them. It's cheap for a handful of matches but becomes the dominant cost as match count grows, because it's effectively a nested-loop join executed once per row rather than a single set-based operation. ("Bookmark lookup" is the pre-2005 term for the same concept; modern plans show `Key Lookup` or `RID Lookup`.)
-
-#### 2. SQL Query
-```sql
--- Non-clustered index on CustomerID only
-CREATE NONCLUSTERED INDEX IX_Orders_CustomerID ON dbo.Orders(CustomerID);
-
-SELECT OrderID, OrderDate, TotalAmount
-FROM Orders
-WHERE CustomerID = 42;   -- Index Seek + Key Lookup (TotalAmount, OrderDate not in the index)
-```
-
-#### 3. Explain the Query
-The seek on `IX_Orders_CustomerID` finds matching `OrderID`s (via the clustering key stored at the leaf) quickly, but `OrderDate` and `TotalAmount` aren't in that index, so a `Key Lookup` operator runs once per matched row against the clustered index to retrieve them — visible in the plan as a `Nested Loops` joining the seek to the lookup.
-
-#### 4. Sample Data
-Same `Orders` table; assume `CustomerID = 42` matches 5,000 rows out of 10 million.
-
-#### 5. Expected Output
-Correct results, but 5,000 individual lookup operations — noticeably slower than a covering-index plan for the same result set.
-
-#### 6. Alternative Solutions
-- **Add `INCLUDE (OrderDate, TotalAmount)`** to the existing index — turns it covering, eliminating the lookup entirely (Q3).
-- **Leave it as-is** if the matched-row count is consistently small (a handful of rows) — the lookup cost is genuinely negligible at low cardinality, and adding `INCLUDE` has its own write-cost trade-off (Q7).
-- **Preferred**: covering index via `INCLUDE`, specifically when Query Store/plan analysis shows this exact query pattern running frequently against a non-trivial match count.
-
-#### 7. Performance
-SSMS's plan will show the `Key Lookup`'s cost percentage directly, often surprisingly high relative to the seek itself once match counts climb into the thousands — this is the single most common "why is my seek-based query still slow" answer.
-
-#### 8. Edge Cases
-If the matched-row count varies wildly by parameter value (some customers have 5 orders, others 50,000), a plan compiled for the low-count case can perform terribly for the high-count case purely from lookup count — this interacts directly with parameter sniffing (Q16).
-
-#### 9. Production Scenario
-A "recent orders" widget querying by `CustomerID` across a growing `Orders` table is exactly this pattern; as the table and per-customer order counts grow, the same query's cost grows with it purely from lookup count, even though the index "exists."
-
-#### 10. Interview Follow-ups
-1. How do you spot a key lookup in a plan quickly?
-2. Is a RID lookup worse than a key lookup?
-3. Does adding INCLUDE always help?
-4. What's the relationship between key lookups and parameter sniffing?
-
-#### 11. Follow-up Answers
-1. Look for a `Key Lookup` or `RID Lookup` operator joined to the seek via `Nested Loops`, and check its cost percentage in the plan.
-2. Generally comparable in mechanism, but a RID lookup (heap) uses a physical page/slot address, which can go stale via forwarding pointers (Q1) — an extra potential hop the key-lookup-via-clustered-index path doesn't have.
-3. No — it trades read cost for write cost (Q7); only worth it when the query is frequent/costly enough to justify the wider index.
-4. A plan compiled for a low-match-count parameter value may keep the seek+lookup strategy even when a later, high-match-count value makes a full scan objectively cheaper — the lookup count is precisely the mechanism by which a "good" plan for one parameter becomes catastrophic for another.
-
-#### 12. Common Mistakes
-Not noticing the lookup operator at all and only looking at the seek. Adding `INCLUDE` reflexively without checking whether match counts justify it.
-
-#### 13. Architect Insight
-Recognizing that the lookup's cost scales with *match count, not table size*, and that this is precisely the variable that makes the same query fast for some parameter values and slow for others, is the connective insight that ties indexing, plan-reading, and parameter sniffing together — exactly the kind of cross-topic synthesis a principal-level answer demonstrates.
-
----
-
-### Q13. What causes a Sort operator to spill to tempdb, and how do you fix it?
-
-**Difficulty:** 🔴 Senior
-
-#### 1. Interview Answer
-SQL Server estimates how much memory a Sort (or Hash Match) operator will need based on estimated row count and row width, and requests that memory grant up front before execution starts. If the *actual* row count or width significantly exceeds the estimate — most often from stale statistics, parameter sniffing, or a non-SARGable predicate producing a much larger intermediate set than predicted — the operator runs out of its granted memory and spills intermediate data to `tempdb`, which is dramatically slower than an in-memory sort and shows as an explicit warning on the operator in the actual execution plan.
-
-#### 2. SQL Query
-```sql
-SELECT OrderID, CustomerID, TotalAmount
-FROM Orders
-ORDER BY TotalAmount DESC;   -- large sort if Orders has no useful index for this order
-```
-
-#### 3. Explain the Query
-Without an index on `TotalAmount`, SQL Server must sort the entire result set in a Sort operator; if `Orders` has 50 million rows and the memory grant (sized from statistics) undershoots the actual row count, the sort spills.
-
-#### 4. Sample Data
-Not meaningfully representable at small scale — this is a scale-dependent phenomenon.
-
-#### 5. Expected Output
-Correct sorted results, but with a `Sort Warning` in the actual plan and dramatically higher duration than the granted-memory estimate would predict.
-
-#### 6. Alternative Solutions
-- **Add a supporting index on the sort column** — turns an explicit Sort operator into an `Index Scan`/`Seek` that already returns rows in order, eliminating the sort entirely; the strongest fix when the column is queried this way often.
-- **Update statistics** if the estimate was simply stale, so the memory grant is sized correctly even though a Sort operator still runs.
-- **Increase `tempdb` file count/placement on fast storage** as a mitigation for spills that can't be eliminated (e.g., genuinely ad hoc sort columns) — treats the symptom, not the cause, but is a legitimate operational lever.
-- **Preferred**: eliminate the sort via indexing when the access pattern is known and recurring; only tune `tempdb`/memory grants for genuinely unpredictable ad hoc sorts.
-
-#### 7. Performance
-Verify via the actual plan's Sort operator properties (memory grant used vs. granted, spill level) or `sys.dm_exec_query_memory_grants` while the query runs — don't assume a spill from symptoms (slow query) alone without confirming the operator warning.
-
-#### 8. Edge Cases
-Multiple concurrent large sorts can exhaust `tempdb`'s configured space entirely, causing outright query failures for unrelated sessions sharing the same `tempdb` — a spill isn't just slow, at scale it's a shared-resource risk across the whole instance.
-
-#### 9. Production Scenario
-An ad hoc reporting query newly added to a dashboard, sorting a large unindexed result set, can silently degrade the whole instance's `tempdb` throughput for every other concurrent workload — a classic "one bad report query" incident.
-
-#### 10. Interview Follow-ups
-1. How do you see the memory grant size for a query before it runs?
-2. Does a Hash Match operator have the same spill risk?
-3. What's the relationship between spills and parameter sniffing?
-4. How do you monitor for spills instance-wide, not just per query?
-
-#### 11. Follow-up Answers
-1. The estimated plan shows a `MemoryGrantInfo` element (visible via the plan XML or operator properties) reflecting the optimizer's row/width estimate at compile time.
-2. Yes — Hash Match (used in hash joins and hash aggregates) builds an in-memory hash table sized similarly from estimates and spills partitions to `tempdb` under the same estimate-vs-actual mismatch conditions.
-3. A plan compiled for a small parameter value gets a small memory grant; if a later execution reuses that plan for a much larger parameter value, the undersized grant causes a spill purely from plan reuse, not from stale statistics — another concrete parameter-sniffing symptom (Q16).
-4. `sys.dm_exec_query_memory_grants` for current grants, and Extended Events (`sort_warning`/`hash_warning`) or Query Store wait-stats categorization for historical/aggregate spill tracking across the whole instance.
-
-#### 12. Common Mistakes
-Diagnosing a slow query as "needs more memory" without checking whether an index could eliminate the sort altogether. Not distinguishing a genuine one-off ad hoc spill from a recurring, indexable pattern.
-
-#### 13. Architect Insight
-The principal-level answer treats a spill as a symptom with several distinct possible root causes (statistics, sniffing, missing index, genuinely unpredictable ad hoc access) and picks the fix that matches the actual cause, rather than reaching for "increase memory" or "add more tempdb files" as a universal first response.
-
----
-
-### Q14. When does SQL Server choose a hash join versus a nested-loop join versus a merge join?
-
-**Difficulty:** 🔴 Senior
-
-#### 1. Interview Answer
-Nested loops: best when one input is small and the other is large but has a usable index on the join column — for each outer row, seek the inner input; cheapest in I/O when the outer side is genuinely small. Merge join: best when both inputs are already sorted on the join key (e.g., both delivered via ordered index scans) — a single synchronized pass through both sorted streams, very efficient, but requires that sort order (or pays to create it). Hash join: best when inputs are large and unsorted, and/or their sizes differ significantly — builds an in-memory hash table from the smaller ("build") input, then probes it with the larger ("probe") input; the general-purpose workhorse for large, unindexed joins, at the cost of needing memory (Q13) and full materialization of the build side before probing starts.
-
-#### 2. SQL Query
-```sql
-SELECT o.OrderID, c.CustomerName
-FROM Orders o
-JOIN Customers c ON c.CustomerID = o.CustomerID
-WHERE o.OrderDate >= '2026-01-01';
-```
-
-#### 3. Explain the Query
-If `Orders` is filtered down to a small set via an index seek on `OrderDate`, and `Customers` has an index on `CustomerID`, the optimizer likely picks nested loops (small filtered outer, indexed inner seek). If the filter is much less selective and both sides are large, it likely picks a hash join instead.
-
-#### 4. Sample Data
-`Orders`: 10 million rows, ~2,000 match the date filter. `Customers`: 500,000 rows, indexed on `CustomerID`.
-
-#### 5. Expected Output
-With the numbers above, nested loops (2,000 outer-side seeks into an indexed `Customers`) beats building a 500,000-row hash table for a 2,000-row probe.
-
-#### 6. Alternative Solutions
-- **Force a join type via hint (`INNER HASH JOIN`, `INNER LOOP JOIN`, `INNER MERGE JOIN`)** — occasionally justified when the optimizer's cardinality estimate is provably wrong and can't be fixed by updating statistics, but it's a targeted, documented override, not a default habit.
-- **Rewrite to change the effective input sizes** (filter earlier, pre-aggregate) so the optimizer's natural cost-based choice improves without forcing anything.
-- **Preferred**: trust the cost-based choice by default; only override with a hint after confirming (via the plan) that the estimate, not the join algorithm choice logic itself, is the actual problem.
-
-#### 7. Performance
-Nested loops scale with `outer rows × inner seek cost` — bad if the "small" side turns out large. Hash join scales with `build input size` for memory and I/O if it spills (Q13). Merge join is cheapest when sort order is free (already indexed that way) and expensive if SQL Server must add explicit Sort operators to enable it — check the plan for whether the merge join's inputs required additional sorts.
-
-#### 8. Edge Cases
-A nested loop join against a table lacking a usable index on the join column effectively becomes "seek-less," degrading to a scan per outer row — catastrophic; this is what index hints or forced nested loops can accidentally cause if applied without checking both sides are properly indexed.
-
-#### 9. Production Scenario
-Reporting queries joining a large fact table to a large dimension table with no effective filter are the classic hash-join case; point-lookup transactional queries joining a filtered small set to an indexed reference table are the classic nested-loop case — recognizing which shape a query has predicts which join type is appropriate before even looking at the plan.
-
-#### 10. Interview Follow-ups
-1. Why might the optimizer choose the "wrong" join type?
-2. What's an adaptive join (batch mode)?
-3. Can you have a hash join between three tables in one plan?
-4. How does join type choice relate to parallelism?
-
-#### 11. Follow-up Answers
-1. Usually cardinality misestimation (Q15) — the optimizer picked correctly for its estimated row counts, but the estimates themselves were wrong, which is a statistics/predicate problem, not a join-algorithm bug.
-2. SQL Server's Adaptive Join operator (batch-mode, available on modern versions) defers the nested-loop-vs-hash-join choice until after seeing the actual row count of the build input at runtime, mitigating exactly the misestimation risk described above for that specific decision point.
-3. A single plan can have multiple binary join operators (each joining two inputs) chained together, so a three-table query might show two hash joins, or a mix of hash and nested loops, depending on each pairwise input's characteristics.
-4. Hash joins parallelize well (each thread can build/probe a partition of the hash table); nested loops parallelize less naturally per-row but can still run in parallel across independent outer-row partitions — join type and degree-of-parallelism decisions interact in the optimizer's overall plan search.
-
-#### 12. Common Mistakes
-Assuming one join type is universally "best." Forcing a join hint without first confirming the cardinality estimate was the actual problem. Not checking whether a merge join's apparent efficiency is actually paid for by hidden Sort operators earlier in the plan.
-
-#### 13. Architect Insight
-A senior candidate can explain when each join type is theoretically preferred; a principal candidate reads the actual plan, identifies which cost driver (estimate error vs. genuine algorithm mismatch) is at play, and picks the narrowest possible fix — usually statistics or an index, only rarely a hint.
-
----
-
-### Q15. What is cardinality estimation, how does it use statistics, and what makes it go wrong?
-
-**Difficulty:** 🔥 Architect
-
-#### 1. Interview Answer
-Cardinality estimation is the optimizer's prediction of how many rows will flow out of each operator in a candidate plan, derived from column/index statistics — primarily a histogram (up to 200 steps) capturing the data distribution, plus density information for multi-column correlation. These estimates drive every downstream decision: join type (Q14), memory grants (Q13), seek-vs-scan (Q11), and parallelism degree. It goes wrong from: stale statistics (data has changed materially since the last auto-update, which triggers at a percentage-of-rows-modified threshold, not immediately); parameter sniffing (Q16) compiling for an atypical value; correlated columns the optimizer assumes are independent (e.g., `City = 'New York'` and `State = 'NY'` — multiplying their individual selectivities underestimates the true match count since they're not independent); and non-SARGable predicates (Q18) the optimizer can't estimate precisely from a histogram at all, falling back to a fixed guess.
-
-#### 2. SQL Query
-```sql
-DBCC SHOW_STATISTICS ('dbo.Orders', 'IX_Orders_CustomerID_OrderDate') WITH HISTOGRAM;
-
-SELECT OBJECT_NAME(object_id), stats_id, last_updated, rows, rows_sampled, modification_counter
-FROM sys.dm_db_stats_properties(OBJECT_ID('dbo.Orders'), NULL);
-```
-
-#### 3. Explain the Query
-`DBCC SHOW_STATISTICS ... WITH HISTOGRAM` shows the actual step values and row-count estimates the optimizer will use for that index's leading column. `sys.dm_db_stats_properties` shows how stale the statistics are (`last_updated`) and how much the underlying data has changed since (`modification_counter`) relative to `rows` — the direct diagnostic for "are my statistics stale."
-
-#### 4. Sample Data
-| RANGE_HI_KEY | RANGE_ROWS | EQ_ROWS | DISTINCT_RANGE_ROWS |
-|---|---|---|---|
-| 2026-01-01 | 120,000 | 3,500 | 28 |
-| 2026-02-01 | 118,000 | 4,100 | 27 |
-
-#### 5. Expected Output
-For a predicate `OrderDate = '2026-02-01'`, the optimizer estimates `4,100` rows directly from `EQ_ROWS`; for a range query between the two boundaries, it interpolates from `RANGE_ROWS`/`DISTINCT_RANGE_ROWS`.
-
-#### 6. Alternative Solutions
-- **`UPDATE STATISTICS ... WITH FULLSCAN`** — most accurate, most expensive; reserved for critical tables or after bulk loads.
-- **Rely on auto-update** (default) — sufficient for most tables, but the trigger threshold is a percentage of rows changed, which means very large tables can go a long time between auto-updates in absolute row terms; modern SQL Server versions improved this with more granular auto-update thresholds, but it should still be verified per table/version rather than assumed sufficient.
-- **`OPTION (RECOMPILE)`** or **`OPTIMIZE FOR`** hints to address parameter-specific estimation issues directly (Q16) rather than fighting statistics quality in general.
-- **Preferred**: auto-update as the default, with explicit `FULLSCAN` updates scheduled after large bulk operations (ETL loads, bulk deletes) that wouldn't otherwise cross the auto-update threshold promptly, plus targeted per-query hints for the specific parameter-sniffing cases statistics quality alone can't fix.
-
-#### 7. Performance
-Always compare estimated vs. actual rows per operator (Q10) as the direct evidence of a cardinality problem — don't infer it indirectly from slow duration alone, since slow duration has many other possible causes (blocking, missing index, hardware).
-
-#### 8. Edge Cases
-Multi-statement table-valued functions and table variables (pre-2019, without the `RECOMPILE`-triggering "table variable deferred compilation" improvement in later versions) have historically had very poor or fixed-guess cardinality estimates regardless of statistics — a specific, well-known trap worth naming explicitly in an interview.
-
-#### 9. Production Scenario
-A nightly batch job that bulk-inserts millions of rows and is immediately followed by application queries against that data can hit exactly this: statistics from before the load are now wildly stale, and the auto-update threshold hasn't fired yet, producing terrible estimates and plan choices for the first queries after the load until either auto-update catches up or a forced update is run as part of the ETL pipeline itself.
-
-#### 10. Interview Follow-ups
-1. What's the auto-update statistics threshold, roughly?
-2. How do correlated columns cause estimation errors, concretely?
-3. What are multi-column statistics and when do you create them manually?
-4. How does the new (2014+) cardinality estimator differ from the legacy one?
-
-#### 11. Follow-up Answers
-1. Historically a fixed ~20% of rows changed (plus a smaller fixed component) triggers auto-update; this can mean enormous absolute row counts change on very large tables before an update fires — worth verifying the specific behavior/trace flags or database-scoped configuration for the SQL Server version in use rather than quoting one number as universal.
-2. The optimizer's default assumption is independence between predicates on different columns, so it multiplies their individual selectivities together — if `City` and `State` are correlated (as they obviously are), this underestimates rows matching both, sometimes drastically.
-3. Manually created multi-column statistics (`CREATE STATISTICS`) or filtered statistics can capture correlation the optimizer wouldn't otherwise model; used when a specific known-correlated predicate combination is a recurring, high-value query pattern with observed estimation errors.
-4. The 2014+ cardinality estimator changed several core assumptions (e.g., how it handles ascending key/out-of-date-statistics scenarios and multi-predicate correlation) and can produce different — not universally better — estimates than the legacy (pre-2014) model; database compatibility level controls which model is used, which is itself a common source of "why did upgrading SQL Server change my plans" incidents.
-
-#### 12. Common Mistakes
-Treating "update statistics" as a cure-all without checking whether the real problem is parameter sniffing or a non-SARGable predicate instead. Assuming correlated-column estimation errors are bugs rather than a documented, name-able optimizer limitation.
-
-#### 13. Architect Insight
-This is one of the highest-value topics in the whole workbook for separating tiers: an adequate answer says "statistics help the optimizer estimate rows"; a senior answer explains the histogram mechanism and staleness; a principal/architect answer names the *specific* failure modes (correlation, parameter sniffing, non-SARGability, cardinality-estimator-version changes) and matches each to its distinct fix, because conflating them leads to the wrong remediation.
-
----
-
-### Q16. What is parameter sniffing, and how do you fix a query that's fast for one parameter value but slow for another?
-
-**Difficulty:** 🔥 Architect
-
-#### 1. Interview Answer
-When SQL Server compiles a parameterized query or stored procedure, it "sniffs" the actual parameter value(s) supplied on that first compilation and builds a plan optimized for that specific value's cardinality — then caches and reuses that plan for subsequent calls with different values. This is usually beneficial (plan reuse avoids recompilation cost), but becomes a problem when the data distribution is skewed enough that the plan optimal for one value (e.g., a rare `Status`) is badly wrong for another (e.g., a common `Status`) — most visibly when a low-cardinality value compiles a nested-loop/seek plan that then runs with thousands of key lookups for a high-cardinality value passed later. Fixes, from least to most invasive: `OPTIMIZE FOR <typical value>` (or `OPTIMIZE FOR UNKNOWN`, which uses average density instead of a sniffed value) to compile a "safe average" plan; `OPTION (RECOMPILE)` to compile fresh every execution (trades CPU for plan correctness, best for genuinely highly-variable parameters); splitting into separate statements/procedures per parameter-value class if the skew is bimodal; or, in SQL Server 2022+, Parameter Sensitive Plan (PSP) optimization, which lets the engine automatically cache multiple plans for different parameter value "buckets" for the same query.
-
-#### 2. SQL Query
-```sql
-CREATE OR ALTER PROCEDURE dbo.GetTransactionsByStatus
-    @Status VARCHAR(20)
+-- Turn on RCSI (needs a brief exclusive moment on the database)
+ALTER DATABASE Payments SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;
+
+-- Safe procedure transaction template
+CREATE OR ALTER PROCEDURE dbo.TransferFunds @From BIGINT, @To BIGINT, @Amount DECIMAL(19,4)
 AS
 BEGIN
-    SELECT TransactionID, AccountID, Amount
-    FROM Transactions
-    WHERE Status = @Status
-    OPTION (RECOMPILE);   -- or OPTIMIZE FOR (@Status = 'PENDING')
+    SET NOCOUNT ON; SET XACT_ABORT ON;
+    BEGIN TRY
+        BEGIN TRAN;
+        -- consistent lock order (lower id first) prevents A↔B deadlocks
+        UPDATE Accounts SET Balance = Balance - @Amount
+        WHERE AccountId = @From AND Balance >= @Amount;
+        IF @@ROWCOUNT = 0 THROW 50001, 'Insufficient funds', 1;
+        UPDATE Accounts SET Balance = Balance + @Amount WHERE AccountId = @To;
+        COMMIT;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0 ROLLBACK;
+        THROW;                                    -- rethrow with the original error
+    END CATCH
 END;
+
+-- Optimistic concurrency with rowversion
+UPDATE Accounts SET Nickname = @n
+WHERE AccountId = @id AND RowVer = @originalRowVer;
+IF @@ROWCOUNT = 0 THROW 50002, 'Concurrency conflict', 1;
+
+-- Pessimistic: lock the row for this short transaction (queue-style processing)
+SELECT TOP (10) * FROM WorkQueue WITH (UPDLOCK, READPAST, ROWLOCK) WHERE Status = 'NEW' ORDER BY Id;
+
+-- Who is blocking whom?
+SELECT r.session_id, r.blocking_session_id, r.wait_type, r.wait_time, t.text
+FROM sys.dm_exec_requests r CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+WHERE r.blocking_session_id <> 0;
+
+-- Batched delete to avoid lock escalation and log growth
+WHILE 1 = 1
+BEGIN
+    DELETE TOP (2000) FROM AuditLog WHERE CreatedAt < DATEADD(YEAR, -7, SYSUTCDATETIME());
+    IF @@ROWCOUNT = 0 BREAK;
+END;
+
+-- Deadlock graphs from the default system_health session
+SELECT xed.value('@timestamp', 'datetime2'), xed.query('.')
+FROM (SELECT CAST(target_data AS XML) AS td FROM sys.dm_xe_session_targets st
+      JOIN sys.dm_xe_sessions s ON s.address = st.event_session_address
+      WHERE s.name = 'system_health' AND st.target_name = 'ring_buffer') x
+CROSS APPLY td.nodes('//RingBufferTarget/event[@name="xml_deadlock_report"]') AS q(xed);
 ```
 
-#### 3. Explain the Query
-`OPTION (RECOMPILE)` forces a fresh compile using the actual runtime value of `@Status` every single execution, guaranteeing a correctly-estimated plan for whichever value is passed at the cost of compilation CPU on every call — the right trade when execution frequency is low-to-moderate and correctness matters more than compile overhead; for high-frequency execution, `OPTIMIZE FOR` a representative "worst common case" value is usually the better trade.
+**Common interview questions**
 
-#### 4. Sample Data
-`Transactions.Status`: `SUCCESS` 9.5M rows, `PENDING` 100K rows.
+**Q1. Explain the isolation levels.**
+READ UNCOMMITTED reads dirty data. READ COMMITTED (the default) prevents dirty reads with short shared locks. REPEATABLE READ holds shared locks so rows can't change underneath you (phantoms are still possible). SERIALIZABLE adds range locks, preventing phantoms. SNAPSHOT and RCSI use row versioning: readers see committed versions without blocking writers.
 
-#### 5. Expected Output
-Without a fix: a plan compiled first for `@Status = 'PENDING'` (seek + few lookups) runs disastrously for `@Status = 'SUCCESS'` (seek + 9.5M lookups) if reused as-is; with `OPTION (RECOMPILE)`, each call gets a plan matched to its actual value (a scan for `SUCCESS`, a seek for `PENDING`).
+**Q2. Show dirty, non-repeatable and phantom reads.**
+Dirty: session A updates without committing, B reads the uncommitted value with NOLOCK, A rolls back. Non-repeatable: B reads a row twice inside a transaction and A updates and commits in between → different values. Phantom: B runs `COUNT(*) WHERE x > 10` twice and A inserts a matching row in between.
 
-#### 6. Alternative Solutions
-- **`OPTIMIZE FOR UNKNOWN`** — compiles using average statistics density rather than any specific sniffed value, giving a consistent "average" plan; good when no single value is representative and consistency matters more than optimality for any one value.
-- **Plan guides / Query Store forced plans** — apply a fix without changing application code, useful when you can't modify the query/procedure directly (third-party app).
-- **PSP optimization (2022+)** — lets the engine handle it automatically for eligible query shapes, reducing the need for manual hints, but should still be monitored, not treated as a silent fix-all.
-- **Preferred**: `OPTION (RECOMPILE)` for low/moderate-frequency, highly-skewed-parameter procedures; `OPTIMIZE FOR` a chosen typical value for high-frequency ones where recompilation cost would itself become a bottleneck; PSP as a modern-version safety net, still monitored via Query Store.
+**Q3. RCSI vs SNAPSHOT isolation?**
+RCSI changes READ COMMITTED to statement-level versioning — transparent to applications; readers never block writers. SNAPSHOT is opt-in per transaction with transaction-level consistency; if two snapshot transactions update the same row, the second fails with update-conflict error 3960. Both use the tempdb version store.
 
-#### 7. Performance
-Confirm the diagnosis via Query Store: look for one `query_id` with multiple plans and wildly different `avg_duration`/`avg_logical_io_reads` across executions — that variance across executions of the *same query text* with different plans is the direct fingerprint of a parameter-sniffing problem, distinct from a generally-slow query that's uniformly slow.
+**Q4. Someone wants `NOLOCK` everywhere to fix blocking. Your response?**
+No: it can return uncommitted data and miss or duplicate rows during page splits — unacceptable for financial data. Enable RCSI instead, which removes reader/writer blocking with consistent reads, and fix the long transactions and missing indexes that cause blocking.
 
-#### 8. Edge Cases
-`OPTION (RECOMPILE)` also means the query never benefits from plan cache reuse, so extremely high-frequency (thousands of calls/second) procedures can turn compilation CPU itself into the new bottleneck — this is exactly why "always just recompile" isn't the universal answer.
+**Q5. What is lock escalation and how do you avoid problems?**
+When a statement holds roughly 5,000+ locks on one object, SQL Server escalates to a table (or partition) lock to save memory — which blocks other sessions. Avoid it by batching large modifications, using indexes so fewer rows are locked, or setting partition-level escalation.
 
-#### 9. Production Scenario
-A stored procedure serving a customer support dashboard's "show all transactions with status X" that is fast in QA (tested only against the common status) and suddenly a support agent filters by a rare status, or vice versa in production, and the app times out — a very common, very real production incident traced back to exactly this mechanism.
+**Q6. How does SQL Server handle deadlocks and how do you fix them?**
+The lock monitor detects the cycle (about every 5 seconds) and kills the cheapest transaction to roll back (error 1205). Diagnose from the deadlock graph (system_health XE): which statements, objects and lock modes. Fix: access objects in a consistent order, keep transactions short, add indexes so fewer rows are scanned and locked, use RCSI for reader/writer deadlocks, and retry 1205 in the application.
 
-#### 10. Interview Follow-ups
-1. How is this different from cardinality estimation in general (Q15)?
-2. What triggers a stored procedure's plan to be evicted/recompiled naturally?
-3. What's the risk of OPTIMIZE FOR a specific literal value?
-4. How does ad hoc/inline SQL (not a stored procedure) experience parameter sniffing differently?
+**Q7. Optimistic vs pessimistic concurrency?**
+Optimistic: no locks held; detect conflicts at write time with a rowversion check — best for low contention and web apps. Pessimistic: lock on read (UPDLOCK) inside a short transaction — best when conflicts are frequent and retries are expensive (e.g., allocating limited inventory).
 
-#### 11. Follow-up Answers
-1. Cardinality estimation (Q15) is the general mechanism of predicting row counts from statistics; parameter sniffing is a specific, narrower failure mode of that mechanism where the *compiled* plan is fine for the sniffed value but wrong for a different value at *reuse* time — the estimation itself wasn't wrong for the value it saw.
-2. Statistics updates on referenced objects, explicit `sp_recompile`, schema changes to referenced objects, plan cache memory pressure evicting the plan, or server restart/failover.
-3. If the chosen literal's typical distribution shifts over time (business changes), the hardcoded `OPTIMIZE FOR` value can silently become wrong and needs periodic review — it's a targeted fix, not a "set and forget" one.
-4. Ad hoc/inline SQL without forced parameterization is compiled per distinct literal text by default (each `Status = 'PENDING'` vs. `Status = 'SUCCESS'` literal is its own cache entry), so it doesn't suffer classic parameter sniffing the same way — but it instead risks plan cache bloat from too many single-use plans, a different but related performance problem (Q17).
+**Q8. Why are long transactions harmful?**
+They hold locks (blocking), prevent log truncation (log growth), keep row versions alive (tempdb growth), increase deadlock chances, and make rollback and recovery slow. Keep transactions short; never wait for user input or remote calls inside one.
 
-#### 12. Common Mistakes
-Diagnosing every "sometimes slow" query as parameter sniffing without confirming via Query Store's multi-plan evidence. Applying `OPTION (RECOMPILE)` universally without weighing the CPU cost at the procedure's actual call frequency.
-
-#### 13. Architect Insight
-This is consistently one of the highest-frequency real interview questions at this level because it's where textbook optimizer knowledge meets production judgment — the discriminator is picking the *right* fix (recompile vs. optimize-for vs. splitting logic vs. PSP) for the specific frequency/skew profile, not just naming that "parameter sniffing" is the cause.
+**Q9. What does `SET XACT_ABORT ON` do?**
+Any runtime error aborts and rolls back the entire transaction, instead of leaving it open after statement-level errors. Standard practice in procedures with explicit transactions.
 
 ---
 
-### Q17. What is plan cache pollution, and how do ad hoc queries cause it?
+## 9. Stored Procedures, Functions, Views, Triggers & Temp Objects
 
-**Difficulty:** 🔴 Senior
+**Key concepts**
+- **Stored procedures:** precompiled/cached plans, security boundary (grant EXECUTE only), fewer round trips; can return multiple result sets and use transactions. Use `sp_executesql` with parameters for dynamic SQL (prevents injection and enables plan reuse).
+- **Functions:** scalar UDFs (historically row-by-row and they prevent parallelism; SQL 2019 can **inline** many of them), **inline table-valued functions** (a single SELECT — behaves like a parameterized view, optimizer-friendly), multi-statement TVFs (poor estimates — avoid on hot paths). Functions can't change data.
+- **Views:** saved queries for abstraction and security; **indexed views** materialize results (schema binding, maintenance cost on writes).
+- **Triggers:** AFTER / INSTEAD OF; they run inside the caller's transaction; work with the `inserted`/`deleted` pseudo-tables **as sets** (multi-row!). Hidden logic and performance cost → use sparingly (audit, legacy integrity).
+- **Cursors:** row-by-row → usually replace with set-based SQL; if needed, use `LOCAL FAST_FORWARD`.
+- **Temporal tables** for automatic history (see §11).
+- **Sequences** vs **IDENTITY:** a sequence is shared and can be fetched before insert.
+- **MERGE:** convenient but has had bugs and concurrency issues; use it carefully with `HOLDLOCK`, or prefer separate UPDATE/INSERT.
 
-#### 1. Interview Answer
-The plan cache stores compiled plans keyed by the exact query text (for ad hoc SQL) or object identity (for stored procedures/parameterized queries), so it can skip recompilation on reuse. Ad hoc SQL built by string-concatenating literal values directly into the query text (a common anti-pattern, and also a SQL-injection risk) produces a distinct cache entry for every unique literal combination, even though the query *shape* is identical — thousands of single-use, never-reused plans bloat the cache, consuming memory that would otherwise hold genuinely reusable plans, and adding compilation CPU overhead on every call since nothing is ever actually reused.
-
-#### 2. SQL Query
 ```sql
--- Anti-pattern: produces a new cache entry per CustomerID value
-EXEC sp_executesql N'SELECT * FROM Orders WHERE CustomerID = 42';
-EXEC sp_executesql N'SELECT * FROM Orders WHERE CustomerID = 43';
+-- Inline TVF (good) vs scalar UDF (often bad on large sets)
+CREATE OR ALTER FUNCTION dbo.CustomerOrders(@CustomerId BIGINT)
+RETURNS TABLE AS RETURN
+    SELECT OrderId, OrderDate, Amount FROM dbo.Orders WHERE CustomerId = @CustomerId;
+GO
+SELECT * FROM dbo.CustomerOrders(42);
 
--- Fix: parameterized, one reusable cache entry for any CustomerID
-EXEC sp_executesql N'SELECT * FROM Orders WHERE CustomerID = @CustomerID',
-    N'@CustomerID INT', @CustomerID = 42;
+-- Safe dynamic SQL
+DECLARE @sql NVARCHAR(MAX) = N'SELECT * FROM dbo.Orders WHERE Status = @s AND OrderDate >= @d';
+EXEC sp_executesql @sql, N'@s VARCHAR(20), @d DATETIME2', @s = 'PAID', @d = '2026-01-01';
+
+-- Set-based audit trigger (handles multi-row updates)
+CREATE OR ALTER TRIGGER trg_Accounts_Audit ON dbo.Accounts AFTER UPDATE AS
+BEGIN
+    SET NOCOUNT ON;
+    INSERT dbo.AccountAudit (AccountId, OldBalance, NewBalance, ChangedAt, ChangedBy)
+    SELECT d.AccountId, d.Balance, i.Balance, SYSUTCDATETIME(), SUSER_SNAME()
+    FROM inserted i JOIN deleted d ON d.AccountId = i.AccountId
+    WHERE i.Balance <> d.Balance;
+END;
+
+-- Indexed view for a hot aggregate
+CREATE VIEW dbo.vDailySales WITH SCHEMABINDING AS
+SELECT CAST(OrderDate AS DATE) AS D, COUNT_BIG(*) AS Cnt, SUM(Amount) AS Total
+FROM dbo.Orders GROUP BY CAST(OrderDate AS DATE);
+GO
+CREATE UNIQUE CLUSTERED INDEX IX_vDailySales ON dbo.vDailySales(D);
 ```
 
-#### 3. Explain the Query
-The first form's query text literally differs per call (`42` vs `43`), so SQL Server treats them as unrelated statements needing separate plans; the second form has one fixed query text with a parameter marker, so every call regardless of `@CustomerID`'s value reuses the same cached plan (subject to the parameter-sniffing trade-offs of Q16).
+**Common interview questions**
 
-#### 4. Sample Data
-Not applicable — a plan-cache behavior, not a data query.
+**Q1. Stored procedure vs function?**
+A procedure can modify data, manage transactions, return multiple result sets and output parameters; it's called with EXEC. A function returns a value or table, can't modify data, and can be used inside SELECT/WHERE/JOIN. Inline TVFs are optimizer-friendly; scalar UDFs and multi-statement TVFs can be performance traps.
 
-#### 5. Expected Output
-Monitoring `sys.dm_exec_cached_plans` after the anti-pattern shows `usecounts = 1` for a large number of distinct, near-identical plans; after the fix, one plan with a high `usecounts`.
+**Q2. Why are scalar UDFs slow?**
+Historically they ran once per row, hid their cost from the optimizer, and forced serial plans. SQL Server 2019 inlines many of them automatically; otherwise rewrite them as inline TVFs or expressions.
 
-#### 6. Alternative Solutions
-- **`sp_executesql` with parameters** (shown above) — the standard, correct fix at the application/query-construction level.
-- **Forced parameterization** (`ALTER DATABASE ... SET PARAMETERIZATION FORCED`) — a database-wide setting that makes SQL Server auto-parameterize literals in ad hoc queries even if the application doesn't; a blunt instrument that can itself cause unwanted parameter sniffing on queries that actually benefited from literal-specific plans, so applied cautiously and tested, not as a default.
-- **Preferred**: fix query construction to use parameters (ORM/data-access-layer level, e.g., proper use of parameterized `SqlCommand` in ADO.NET/EF Core) — the root-cause fix; forced parameterization only as a stopgap for third-party applications that can't be changed.
+**Q3. What's the danger in triggers?**
+Hidden side effects, extra work inside every transaction, and the classic bug of assuming one row (`SELECT @id = id FROM inserted`) when a statement changes many. Write them set-based and keep them minimal.
 
-#### 7. Performance
-Check `sys.dm_exec_cached_plans` grouped by `objtype = 'Adhoc'` and `usecounts = 1` count and total cache memory (`sys.dm_os_memory_clerks` for `CACHESTORE_SQLCP`) to quantify the actual pollution before and after a fix — don't assume it's the cause of memory pressure without measuring.
+**Q4. How do you prevent SQL injection in dynamic SQL?**
+Parameterize with `sp_executesql`; whitelist identifiers (column or table names) and wrap them with `QUOTENAME`; never concatenate user input; and run with least-privilege permissions.
 
-#### 8. Edge Cases
-The "optimize for ad hoc workloads" server-level setting mitigates the *memory* cost specifically by only caching a lightweight stub on first execution (a full plan is only cached on the second execution of the exact same text) — a legitimate low-risk instance-level configuration for workloads dominated by genuinely single-use ad hoc queries, distinct from fixing the query construction itself.
+**Q5. View vs indexed view?**
+A normal view is just a stored query, expanded at runtime. An indexed view stores the results physically and is maintained on every write — great for expensive, frequently read aggregates; costly on write-heavy tables; and it has many restrictions (SCHEMABINDING, `COUNT_BIG`, deterministic expressions).
 
-#### 9. Production Scenario
-A poorly-built reporting/search feature that concatenates every filter value directly into SQL text (often alongside a SQL-injection vulnerability, which should be flagged as a separate, more urgent finding) is a frequent real-world source of both plan cache bloat and a security defect discovered in the same code review.
-
-#### 10. Interview Follow-ups
-1. How is this different from parameter sniffing (Q16)?
-2. What's "optimize for ad hoc workloads" and when would you enable it?
-3. Does this affect stored procedures the same way?
-4. How would you detect this in an existing production system?
-
-#### 11. Follow-up Answers
-1. They're near-opposite failure modes of the same mechanism: parameter sniffing is *too much* reuse of a plan that's wrong for some values; plan cache pollution is *too little* reuse because queries are needlessly distinct — the fix directions are correspondingly different (recompile/optimize-for vs. parameterize).
-2. A server-level configuration that defers full plan caching until a query's exact text is seen twice; enable it on instances dominated by genuine single-use ad hoc SQL to reduce memory pressure from single-use plan bloat, with minimal downside for workloads that do have legitimately reusable parameterized queries.
-3. No — stored procedures and `sp_executesql` calls are parameterized by construction (the procedure/statement signature is fixed), so they don't suffer this specific pollution mode; the risk is specific to string-concatenated ad hoc SQL.
-4. Query `sys.dm_exec_cached_plans` joined to `sys.dm_exec_sql_text`, group by a normalized form of the query text (stripping literals) to spot large families of near-identical single-use entries, and check total ad hoc cache memory via `sys.dm_os_memory_clerks`.
-
-#### 12. Common Mistakes
-Building SQL via string concatenation for "just this one report." Confusing plan cache pollution with parameter sniffing and applying the wrong fix (e.g., `OPTION (RECOMPILE)` doesn't address cache bloat from ad hoc text variation).
-
-#### 13. Architect Insight
-Recognizing that this is fundamentally an application/data-access-layer discipline issue (parameterize at the source) rather than a database-tunable setting is the principal-level framing — server-level mitigations like "optimize for ad hoc workloads" manage the symptom for workloads you can't change, they don't fix the underlying anti-pattern.
+**Q6. Cursor vs set-based?**
+SQL engines are optimized for set operations; cursors process one row at a time with high overhead. Replace them with joins, window functions or batching; if a cursor is unavoidable, use `LOCAL FAST_FORWARD READ_ONLY`.
 
 ---
 
-### Q18. What makes a predicate SARGable, and what common patterns break it?
+## 10. Production Troubleshooting Playbook
 
-**Difficulty:** 🔴 Senior
+**Order of investigation:** *what's running now → what is it waiting on → which query and plan → what changed → fix → prevent.*
 
-#### 1. Interview Answer
-"SARGable" (Search ARGument-able) means the predicate is written in a form the optimizer can evaluate directly against an index's B+‑tree structure via a seek, rather than needing to evaluate a function or expression against every row first. Breaking patterns: wrapping the indexed column in a function (`WHERE YEAR(OrderDate) = 2026`, `WHERE UPPER(Name) = 'X'`); implicit data-type conversions where the column's type differs from the literal/parameter's type, forcing SQL Server to convert the column (not the literal) to compare them, especially common with `VARCHAR`-vs-`NVARCHAR` mismatches; a leading wildcard in `LIKE` (`LIKE '%smith'`); and arithmetic on the column itself (`WHERE Price * 1.1 > 100`). Each defeats seeking because the optimizer can't use the index's sort order to jump directly to matching values without first computing the expression for every row.
+| Wait type | Meaning | Usual fix |
+|---|---|---|
+| `LCK_M_*` | blocking on locks | find the head blocker, shorten transactions, RCSI, indexes |
+| `PAGEIOLATCH_*` | reading pages from disk | missing indexes (scans), memory pressure, slow storage |
+| `CXPACKET`/`CXCONSUMER` | parallelism | tune MAXDOP/cost threshold, fix skew and bad estimates |
+| `SOS_SCHEDULER_YIELD` | CPU pressure | expensive queries, scans, scalar UDFs |
+| `RESOURCE_SEMAPHORE` | waiting for memory grants | huge sorts and hashes, bad estimates |
+| `WRITELOG` | log flush latency | slow log disk, too many tiny commits → batch |
+| `PAGELATCH_*` on tempdb | tempdb contention | more tempdb data files, memory-optimized tempdb metadata |
+| `ASYNC_NETWORK_IO` | the client isn't consuming results | app reading row-by-row or fetching too much |
 
-#### 2. SQL Query
 ```sql
--- Non-SARGable (function on the column)
-SELECT * FROM Orders WHERE YEAR(OrderDate) = 2026;
+-- What's running right now (or use sp_WhoIsActive)
+SELECT r.session_id, r.status, r.wait_type, r.wait_time, r.blocking_session_id, r.cpu_time, r.logical_reads,
+       t.text, p.query_plan
+FROM sys.dm_exec_requests r
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+CROSS APPLY sys.dm_exec_query_plan(r.plan_handle) p
+WHERE r.session_id > 50;
 
--- SARGable equivalent
-SELECT * FROM Orders WHERE OrderDate >= '2026-01-01' AND OrderDate < '2027-01-01';
+-- Top CPU queries from the plan cache
+SELECT TOP 10 qs.total_worker_time / qs.execution_count AS AvgCpu, qs.execution_count, st.text
+FROM sys.dm_exec_query_stats qs CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+ORDER BY qs.total_worker_time DESC;
 
--- Non-SARGable (implicit conversion: Name is VARCHAR, literal is NVARCHAR via N'' or driver default)
-SELECT * FROM Customers WHERE Name = N'Smith';
+-- Server-wide waits since restart
+SELECT TOP 15 wait_type, wait_time_ms, waiting_tasks_count FROM sys.dm_os_wait_stats
+WHERE wait_type NOT LIKE 'SLEEP%' ORDER BY wait_time_ms DESC;
 
--- SARGable (matching types)
-SELECT * FROM Customers WHERE Name = 'Smith';
+-- Connections per application/host
+SELECT program_name, host_name, COUNT(*) AS Sessions FROM sys.dm_exec_sessions
+WHERE is_user_process = 1 GROUP BY program_name, host_name ORDER BY Sessions DESC;
 ```
 
-#### 3. Explain the Query
-`YEAR(OrderDate) = 2026` must compute `YEAR()` for every row before it can compare, ignoring any index on `OrderDate` entirely; the range rewrite lets the optimizer seek directly to the `2026-01-01` boundary and range-scan forward. The `NVARCHAR` literal against a `VARCHAR` column forces an implicit conversion of the *column* (per SQL Server's data type precedence rules, the lower-precedence type converts), which similarly defeats seeking on a `VARCHAR` index.
+**Common interview questions**
 
-#### 4. Sample Data
-`Customers(Name VARCHAR(100))` with an index on `Name`; application code (e.g., via ADO.NET/EF Core sending `NVARCHAR` parameters by default) causes the implicit conversion invisibly, without any application-visible symptom besides slowness.
+**Q1. A query suddenly became slow after a deployment. How do you investigate?**
+Query Store: did the plan change (plan regression)? If so, force the previous plan to restore service, then find the cause — new parameter types causing implicit conversion, a changed query shape, statistics updated with a skewed sample, or sniffing. If the plan is the same, check blocking, waits and data volume. Add regression monitoring.
 
-#### 5. Expected Output
-The non-SARGable forms return correct results but via a scan; the SARGable rewrites return identical results via a seek.
+**Q2. CPU is at 95% — what do you do?**
+Confirm it's SQL Server (not another process). Find the top CPU queries (Query Store / `dm_exec_query_stats`); look for scans from missing indexes, implicit conversions, parameter sniffing, scalar UDFs, excessive compilations (ad hoc SQL) and parallelism. Fix the worst offenders first; consider `OPTION (RECOMPILE)` storms and plan cache churn.
 
-#### 6. Alternative Solutions
-- **Computed column + index on the computed column** (e.g., a persisted `OrderYear AS YEAR(OrderDate)` column, indexed) — lets you keep the function-based query shape if the application layer can't be changed, at the cost of schema complexity and an extra maintained column.
-- **Fix the query/parameter types directly** — the cleanest fix, and the only one that also avoids the implicit-conversion variant of this problem.
-- **Preferred**: fix the predicate/parameter type at the source; reserve computed-column indexes for cases where the expression is genuinely needed in many different queries and rewriting all of them isn't practical.
+**Q3. Blocking is increasing — what do you check?**
+Find the head blocker (`blocking_session_id` chains, `sp_WhoIsActive`): what statement it runs and whether it's an open transaction idle in the app (a classic: the app forgot to commit). Look at lock types, escalation, missing indexes causing scans, and long transactions. Short term: kill the head blocker if safe. Long term: RCSI, indexes, shorter transactions, batching.
 
-#### 7. Performance
-Confirm via the actual plan: an implicit conversion shows an explicit warning icon on the affected operator in modern SSMS versions, directly naming the conversion — don't rely on inference alone when the plan will tell you outright.
+**Q4. Plenty of free CPU but queries are slow. What else?**
+Waits: blocking (`LCK`), I/O (`PAGEIOLATCH`, `WRITELOG`), memory grants (`RESOURCE_SEMAPHORE`), tempdb contention, network or client consumption (`ASYNC_NETWORK_IO`), thread-pool starvation in the app, or connection pool exhaustion.
 
-#### 8. Edge Cases
-`VARCHAR`/`NVARCHAR` mismatches are especially insidious because they produce *correct results* and no error — purely a silent performance defect, often introduced by an ORM's default parameter type inference (e.g., .NET strings default to `NVARCHAR` unless explicitly typed), which is why this specific pattern deserves explicit attention in a .NET-heavy shop.
+**Q5. Database connections are exhausted. How do you investigate?**
+Count sessions by application and host; check whether they're sleeping with open transactions (connection leaks — not disposing `SqlConnection`) or active and blocked (slow queries holding connections). Check app pool settings (default Max Pool Size 100) and whether async code blocks threads. Fix the leaks, the slow queries, and set timeouts.
 
-#### 9. Production Scenario
-A .NET application using Entity Framework (or raw ADO.NET) against `VARCHAR` columns without explicitly specifying `SqlDbType.VarChar` on parameters is one of the most common real-world SARGability defects in exactly this codebase's stack — worth naming directly given the candidate's C#/.NET background.
+**Q6. An index seek changed to a scan. Why?**
+Statistics changed (the estimated rows crossed the tipping point), a parameter type mismatch (implicit conversion), a query change adding a function or OR, sniffing for a non-selective value, or a dropped or changed index. Compare the old and new plans in Query Store.
 
-#### 10. Interview Follow-ups
-1. Why does SQL Server convert the column instead of the literal in a type mismatch?
-2. How do you find all non-SARGable predicates in an existing codebase?
-3. Is `LIKE '%smith%'` always non-SARGable?
-4. Does a SARGable rewrite always produce an identical result set to the original?
+**Q7. How do you optimize queries on a 500-million-row table?**
+Index for the actual access patterns (covering, filtered); partition by date for maintenance and archiving (partition elimination needs the key in the predicate); a columnstore for analytics; keyset pagination; statistics maintenance with appropriate sampling; batch large modifications; archive cold data; consider read replicas for reporting.
 
-#### 11. Follow-up Answers
-1. Per Data Type Precedence rules, the value with lower precedence converts to the higher-precedence type — `NVARCHAR` outranks `VARCHAR`, so the `VARCHAR` column (not the `NVARCHAR` literal) is what gets implicitly converted for every row, defeating its index.
-2. Review Query Store/plan cache for scans on indexed columns, check actual plans for implicit-conversion warnings, and audit ORM parameter type mapping (in .NET, confirm `SqlParameter.SqlDbType` matches the column type) as a systematic code-review item.
-3. Yes for a leading wildcard (`%smith`) — no way to seek since any value could match; a trailing-only wildcard (`smith%`) *is* SARGable, since it can seek to the `smith` prefix and range-scan forward.
-4. Almost always yes if done correctly (the date-range rewrite is logically equivalent to the `YEAR()` filter for a full calendar year), but care is needed at boundaries (off-by-one on date ranges, case-sensitivity differences if collation matters) — always verify equivalence, don't just assume it.
-
-#### 12. Common Mistakes
-Wrapping indexed columns in functions out of habit for readability. Letting an ORM infer parameter types without verifying they match column types. Assuming any `LIKE` usage is automatically non-SARGable.
-
-#### 13. Architect Insight
-This is a favorite because it's cheap to test live in an interview (dictate a query, ask "is this SARGable, why, fix it") and cleanly separates candidates who've internalized *why* certain forms defeat seeking (data type precedence, index structure) from those who've only memorized "don't use functions on columns" as a rule without the underlying mechanism.
+**Q8. How would you design SQL Server for high transaction volume?**
+A narrow, efficient schema with the right indexes only; RCSI; short transactions; batched writes; tempdb and log on fast storage with proper file sizing; connection pooling; avoid hotspots (sequential-key last-page contention → `OPTIMIZE_FOR_SEQUENTIAL_KEY`, partitioning); In-Memory OLTP for extreme hot tables; read replicas for reads; and monitoring with Query Store and wait statistics.
 
 ---
 
-### Q19. How do OR conditions, LIKE, and pagination each create their own distinct performance problems, and how do you fix each?
+## 11. Database Design, Partitioning & High Availability
 
-**Difficulty:** 🔴 Senior
+**Key concepts — design**
+- **Normalization:** **1NF** atomic values, no repeating groups; **2NF** no partial dependency on part of a composite key; **3NF** no transitive dependency (non-key → non-key); **BCNF** every determinant is a candidate key. OLTP aims for 3NF; analytics uses star schemas (denormalized).
+- **Denormalize deliberately** for read performance (stored totals, reporting tables) — and own the consistency (same transaction, triggers or async rebuild).
+- **Keys:** candidate (any unique column set), primary (the chosen one), alternate, **surrogate** (IDENTITY/GUID — stable, narrow) vs **natural** (business meaning — can change), foreign key (referential integrity).
+- **Constraints:** PK, FK (`ON DELETE NO ACTION | CASCADE | SET NULL`), UNIQUE, CHECK, DEFAULT, NOT NULL — enforce rules in the database, not only in code. Index foreign key columns.
+- **Soft delete** (`IsDeleted`, `DeletedAt` + filtered indexes/views) vs **hard delete** (GDPR erasure, simpler queries). **Audit:** temporal tables vs trigger-based audit tables.
+- **Multi-tenancy:** shared schema with a `TenantId` column + **row-level security** · schema per tenant · database per tenant (isolation vs cost and operations).
 
-#### 1. Interview Answer
-**OR conditions** across different columns often prevent a single index seek because no one index covers both branches efficiently — SQL Server may need an index union/concatenation (`Index Seek` + `Index Seek` combined via `Concatenation`/`Merge`) or fall back to a scan; rewriting as `UNION` of two seek-friendly queries, or restructuring to a single `IN` list when the OR is on the same column, often performs far better than the OR form. **`LIKE`** is SARGable only for patterns with a fixed, non-wildcard prefix (`'smith%'`); a leading wildcard (`'%smith'`) can't seek and forces a scan — full-text search or a trigram/dedicated search index is the correct tool for genuine substring search at scale, not `LIKE '%x%'` against a B+‑tree index. **Pagination** via `OFFSET n ROWS FETCH NEXT m ROWS ONLY` re-scans and discards the first `n` rows on every page request — cheap for early pages, increasingly expensive (`O(n)`) for deep pages; keyset/seek pagination (`WHERE OrderID < @LastSeenOrderID ORDER BY OrderID DESC`) instead seeks directly to the continuation point, staying `O(log n)` regardless of page depth.
+**Key concepts — scale and HA**
+- **Partitioning** (one database): a partition function (boundaries) + partition scheme (filegroups); **partition elimination** when queries filter on the key; **partition switching** for instant archive or load; aligned indexes.
+- **Sharding** (many databases): application-level routing by a shard key — for write scale beyond one server; cross-shard queries and transactions become hard.
+- **HA/DR:** **Always On Availability Groups** (sync = HA with no data loss, async = DR; readable secondaries; listener for failover), **Failover Cluster Instances** (shared storage, instance-level), **log shipping** (simple DR), **transactional replication** (table-level copy to other servers or reporting).
+- **Backups:** full + differential + log backups (FULL recovery model) → point-in-time restore. Define **RPO/RTO**, and **test restores**.
+- **Archiving:** partition switch out → move to an archive table or cheaper storage; delete in batches otherwise.
 
-#### 2. SQL Query
 ```sql
--- OR across columns: often better as UNION
-SELECT OrderID FROM Orders WHERE CustomerID = 42
-UNION
-SELECT OrderID FROM Orders WHERE OrderDate = '2026-01-01';
+-- 3NF example: customer address split out, enforced with constraints
+CREATE TABLE Customers (
+    CustomerId BIGINT IDENTITY PRIMARY KEY,
+    Email      NVARCHAR(256) NOT NULL CONSTRAINT UQ_Customers_Email UNIQUE,
+    Status     VARCHAR(10) NOT NULL CONSTRAINT CK_Customers_Status CHECK (Status IN ('ACTIVE','CLOSED')),
+    CreatedAt  DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+);
+CREATE TABLE Orders (
+    OrderId    BIGINT IDENTITY PRIMARY KEY,
+    CustomerId BIGINT NOT NULL CONSTRAINT FK_Orders_Customers REFERENCES Customers(CustomerId),
+    Amount     DECIMAL(19,4) NOT NULL CHECK (Amount > 0)
+);
+CREATE INDEX IX_Orders_CustomerId ON Orders(CustomerId);    -- always index FKs
 
--- Deep OFFSET pagination (page 10,000): expensive
-SELECT OrderID, OrderDate FROM Orders ORDER BY OrderID
-OFFSET 100000 ROWS FETCH NEXT 20 ROWS ONLY;
+-- Monthly partitioning
+CREATE PARTITION FUNCTION pfMonthly (DATETIME2) AS RANGE RIGHT FOR VALUES ('2026-08-01', '2026-09-01', '2026-10-01');
+CREATE PARTITION SCHEME psMonthly AS PARTITION pfMonthly ALL TO ([PRIMARY]);
+CREATE TABLE Txn (TxnId BIGINT NOT NULL, TxnDate DATETIME2 NOT NULL, Amount DECIMAL(19,4) NOT NULL,
+                  CONSTRAINT PK_Txn PRIMARY KEY (TxnDate, TxnId)) ON psMonthly(TxnDate);
+-- Archive the oldest month instantly (metadata-only)
+ALTER TABLE Txn SWITCH PARTITION 1 TO TxnArchive PARTITION 1;
 
--- Keyset pagination: cheap regardless of depth
-SELECT TOP (20) OrderID, OrderDate FROM Orders
-WHERE OrderID < @LastSeenOrderID
-ORDER BY OrderID DESC;
+-- System-versioned temporal table (automatic history)
+CREATE TABLE Accounts (
+    AccountId BIGINT PRIMARY KEY, Balance DECIMAL(19,4) NOT NULL,
+    ValidFrom DATETIME2 GENERATED ALWAYS AS ROW START, ValidTo DATETIME2 GENERATED ALWAYS AS ROW END,
+    PERIOD FOR SYSTEM_TIME (ValidFrom, ValidTo)
+) WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = dbo.AccountsHistory));
+SELECT * FROM Accounts FOR SYSTEM_TIME AS OF '2026-09-30T23:59:59';
+
+-- Row-level security for multi-tenancy
+CREATE FUNCTION dbo.fn_TenantFilter(@TenantId INT) RETURNS TABLE WITH SCHEMABINDING AS
+RETURN SELECT 1 AS ok WHERE @TenantId = CAST(SESSION_CONTEXT(N'TenantId') AS INT);
+CREATE SECURITY POLICY TenantPolicy ADD FILTER PREDICATE dbo.fn_TenantFilter(TenantId) ON dbo.Orders WITH (STATE = ON);
+-- app sets per connection: EXEC sp_set_session_context N'TenantId', 42;
 ```
 
-#### 3. Explain the Query
-The `UNION` form lets each branch seek its own index independently, then deduplicates the combined result — often cheaper than a single scan-based OR, provided both columns are separately indexed. The `OFFSET` query must count through and discard 100,000 rows in index order before returning the next 20 — cost grows with page depth. The keyset form seeks directly to `OrderID < @LastSeenOrderID` and takes the next 20 — constant cost regardless of how "deep" into the dataset that continuation point is.
+**Common interview questions**
 
-#### 4. Sample Data
-`Orders` with 10 million rows, `OrderID` clustered/indexed ascending.
+**Q1. Explain 1NF, 2NF and 3NF with an example.**
+An `Orders(OrderId, ProductIds="1,2,3")` column violates 1NF → move to `OrderItems` rows. `OrderItems(OrderId, ProductId, ProductName)`: ProductName depends only on ProductId (part of the key) → 2NF violation → move it to `Products`. `Orders(OrderId, CustomerId, CustomerCity)`: city depends on the customer, not the order → 3NF violation → keep it in `Customers`.
 
-#### 5. Expected Output
-All three pagination-style queries return correct, consistent-shape results, but `OFFSET 100000` measurably costs more than `OFFSET 20`, while the keyset query's cost stays flat regardless of the `@LastSeenOrderID` value.
+**Q2. When would you denormalize?**
+When read performance requires it and you can own the consistency: reporting tables, cached aggregates (an account's current balance), read models in CQRS, or avoiding expensive joins on hot paths. Document the source of truth and how the copy stays in sync.
 
-#### 6. Alternative Solutions
-- **For OR**: a computed/indicator column combining conditions, or restructuring the query into an `IN` list when possible, are lighter alternatives to `UNION` when applicable; `UNION ALL` (not `UNION`) if you can guarantee the branches are mutually exclusive, to skip the deduplication cost.
-- **For LIKE**: SQL Server Full-Text Search (`CONTAINS`/`FREETEXT`) for substring/word search at scale; a computed reversed-string column indexed separately can support suffix (`'%smith'`) matches specifically, as a narrower alternative to full-text search.
-- **For pagination**: keyset/seek pagination is preferred whenever the UI supports "next page" style navigation without needing arbitrary jump-to-page-N; `OFFSET`/`FETCH` remains acceptable for shallow pagination (first several pages) or when arbitrary page-number jumping is a hard UI requirement.
-- **Preferred**: UNION for genuinely different-column ORs; full-text search for real substring search; keyset pagination as the default for infinite-scroll/next-page UIs, `OFFSET`/`FETCH` reserved for shallow, page-number-driven UIs.
+**Q3. Surrogate vs natural key?**
+Surrogate keys (IDENTITY, sequential GUID) are stable, narrow and meaningless — ideal for PKs and FKs. Natural keys (email, ISIN, IBAN) can change and are often wide; keep them as UNIQUE constraints. Typical design: a surrogate PK plus unique natural keys.
 
-#### 7. Performance
-Verify the OR rewrite actually improves the plan (compare logical reads via `STATISTICS IO` before/after — `UNION` isn't automatically better if the columns aren't well-indexed separately). For pagination, directly compare `STATISTICS IO`/duration at a shallow offset versus a deep offset to demonstrate the `O(n)` growth concretely rather than asserting it.
+**Q4. Partitioning vs sharding?**
+Partitioning splits one table inside one database — great for manageability (archiving, maintenance) and partition elimination, but it doesn't add write capacity beyond one server. Sharding splits data across multiple databases or servers for scale, at the cost of routing, cross-shard queries, rebalancing and distributed transactions.
 
-#### 8. Edge Cases
-Keyset pagination requires a unique, stable sort key (ties on the sort column alone can skip or duplicate rows across pages) — always include a tiebreaker column (or use a genuinely unique key like `OrderID`) in both the `WHERE` and `ORDER BY`. `UNION` (versus `UNION ALL`) silently deduplicates, which is a correctness change, not just a performance one, if the branches can overlap.
+**Q5. Always On AG vs replication vs log shipping?**
+AGs are database-level HA/DR with automatic failover (synchronous) and readable secondaries. Transactional replication copies selected tables and objects to other databases (good for reporting or distribution, not HA). Log shipping is simple, asynchronous DR with manual failover. FCI gives instance-level HA on shared storage.
 
-#### 9. Production Scenario
-A public API's "list transactions" endpoint that exposes `?page=N` naively as `OFFSET (N-1)*pageSize` will visibly slow down as users/bots page deep into large accounts — a very common real API performance complaint, and a good candidate discussion point for redesigning the API contract around a cursor/continuation token instead of a page number.
+**Q6. Soft delete or hard delete?**
+Soft delete keeps history and enables undo, but every query must filter it (use views, filtered indexes or EF query filters) and it conflicts with GDPR erasure. Hard delete is simpler and compliant — keep history via temporal or audit tables. In finance, records are usually never deleted; they're reversed or closed.
 
-#### 10. Interview Follow-ups
-1. Why does OFFSET/FETCH pagination get slower for deeper pages, mechanically?
-2. What's a concrete downside of keyset pagination from a UX/API-design perspective?
-3. When is UNION ALL unsafe to use instead of UNION?
-4. How would you redesign a public paginated API to use keyset pagination without breaking existing page-number-based clients?
+**Q7. How do you design a multi-tenant database?**
+Choose an isolation level by risk and cost: shared tables with `TenantId` + row-level security (cheapest, needs strong enforcement), schema per tenant, or database per tenant (strong isolation, per-tenant backup and restore, higher ops cost — elastic pools help). Put `TenantId` first in indexes and derive it from the authenticated session.
 
-#### 11. Follow-up Answers
-1. The engine must still traverse and count past every skipped row in index order before it can start returning the requested page — there's no way to "jump to row 100,000" in a B+‑tree without walking through the preceding rows (or maintaining a separate row-number index structure, which SQL Server doesn't do natively for this).
-2. Keyset pagination doesn't support arbitrary "jump to page 47" navigation — it only supports "next"/"previous" relative to a known cursor position, which is a real UX constraint for UIs that expect page-number jump links.
-3. When the branches can produce overlapping/duplicate rows and the caller needs those duplicates removed — `UNION ALL` skips deduplication entirely, which is only safe/correct when the branches are known to be mutually exclusive.
-4. Offer both: an opaque `cursor` parameter for keyset-based "next page" navigation as the primary/recommended path, while keeping the existing `page` parameter working via `OFFSET`/`FETCH` for backward compatibility, clearly documenting the performance trade-off of deep page-number access in the API docs.
+**Q8. Temporal tables vs audit triggers?**
+Temporal tables automatically keep full row history with point-in-time queries — little code, consistent. Audit triggers give custom content (who, why, which columns) but are code you must maintain and test. For "who did it", combine a temporal table with application-level audit context.
 
-#### 12. Common Mistakes
-Using `LIKE '%x%'` for search and reaching for more hardware instead of full-text search. Using `UNION` when `UNION ALL` is both correct and cheaper. Building a public API purely around page numbers without ever considering cursor-based pagination.
-
-#### 13. Architect Insight
-Each of these three sub-problems has the same underlying shape — a query pattern that *looks* reasonable but structurally can't use an index the way the developer assumes — and a principal-level candidate names the mechanism for each precisely (index union cost, wildcard seek-ability, offset re-scan cost) rather than offering only "add caching" as a generic deflection.
+**Q9. Design an archiving strategy for a huge history table.**
+Partition by date; keep N months hot; switch old partitions out to an archive table or filegroup (or export to cheap storage such as Parquet in a data lake); compress archives (page compression or columnstore); keep queries working through a view if needed; and respect retention regulations (e.g., 7 years) with legal holds.
 
 ---
 
-## References
-1. [Clustered and Nonclustered Indexes Described](https://learn.microsoft.com/en-us/sql/relational-databases/indexes/clustered-and-nonclustered-indexes-described) — Microsoft Learn
-2. [Create Nonclustered Indexes](https://learn.microsoft.com/en-us/sql/relational-databases/indexes/create-nonclustered-indexes) — Microsoft Learn
-3. [CREATE INDEX (Transact-SQL)](https://learn.microsoft.com/en-us/sql/t-sql/statements/create-index-transact-sql) — Microsoft Learn
-4. [SQL Server Index Architecture and Design Guide](https://learn.microsoft.com/en-us/sql/relational-databases/sql-server-index-design-guide) — Microsoft Learn
-5. [Create Filtered Indexes](https://learn.microsoft.com/en-us/sql/relational-databases/indexes/create-filtered-indexes) — Microsoft Learn
-6. [Reorganize and Rebuild Indexes](https://learn.microsoft.com/en-us/sql/relational-databases/indexes/reorganize-and-rebuild-indexes) — Microsoft Learn
-7. [Execution Plan Overview](https://learn.microsoft.com/en-us/sql/relational-databases/performance/execution-plans) — Microsoft Learn
-8. [Analyze an Actual Execution Plan](https://learn.microsoft.com/en-us/sql/relational-databases/performance/analyze-an-actual-execution-plan) — Microsoft Learn
-9. [Display an Actual Execution Plan](https://learn.microsoft.com/en-us/sql/relational-databases/performance/display-an-actual-execution-plan) — Microsoft Learn
-10. [Logical and Physical Showplan Operator Reference](https://learn.microsoft.com/en-us/sql/relational-databases/showplan-logical-and-physical-operators-reference) — Microsoft Learn
-11. [Statistics](https://learn.microsoft.com/en-us/sql/relational-databases/statistics/statistics) — Microsoft Learn
-12. [Cardinality Estimation (SQL Server)](https://learn.microsoft.com/en-us/sql/relational-databases/performance/cardinality-estimation-sql-server) — Microsoft Learn
-13. [Parameter Sensitive Plan Optimization](https://learn.microsoft.com/en-us/sql/relational-databases/performance/parameter-sensitive-plan-optimization) — Microsoft Learn
-14. [Automatic Tuning](https://learn.microsoft.com/en-us/sql/relational-databases/automatic-tuning/automatic-tuning) — Microsoft Learn
-15. [Join Hints (Transact-SQL)](https://learn.microsoft.com/en-us/sql/t-sql/queries/hints-transact-sql-join) — Microsoft Learn
-16. [ORDER BY Clause — OFFSET/FETCH (Transact-SQL)](https://learn.microsoft.com/en-us/sql/t-sql/queries/select-order-by-clause-transact-sql) — Microsoft Learn
-17. [TOP (Transact-SQL)](https://learn.microsoft.com/en-us/sql/t-sql/queries/top-transact-sql) — Microsoft Learn
+## 12. SQL Server & Microservices
+
+**Key concepts**
+- **Database per service:** each service owns its data; others access it via APIs or events → independent deployment and scaling. Cost: no cross-service joins or transactions, data duplication, eventual consistency, more databases to operate.
+- **A shared database** couples services through the schema (one change breaks others), creates noisy neighbours, and blurs ownership.
+- **Avoid distributed transactions (2PC/MSDTC):** blocking, coordinator failures, poor scalability, unsupported in many cloud setups → use **sagas** (local transactions + compensations).
+- **Transactional outbox:** write the business row **and** an `Outbox` row in the **same local transaction**; a relay publishes to the broker and marks rows sent → no lost or phantom events (solves the dual-write problem). Consumers must be idempotent.
+- **CDC (Change Data Capture):** reads the transaction log into change tables; Debezium can stream to Kafka. Use it for replication and read models (watch schema-change handling and lag).
+- **Idempotent consumers:** an `Inbox`/`ProcessedMessages` table with a unique `MessageId`, checked in the same transaction as the business change.
+- **CQRS read models** are updated from events → stale for a moment; the UI must handle read-your-own-writes.
+- **Reconciliation jobs** detect drift between services.
+
+```sql
+CREATE TABLE Outbox (
+    OutboxId     BIGINT IDENTITY PRIMARY KEY,
+    AggregateId  VARCHAR(64) NOT NULL,
+    EventType    VARCHAR(100) NOT NULL,
+    Payload      NVARCHAR(MAX) NOT NULL,
+    CreatedAt    DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+    PublishedAt  DATETIME2 NULL
+);
+CREATE INDEX IX_Outbox_Unpublished ON Outbox(OutboxId) WHERE PublishedAt IS NULL;
+
+-- Business write + event in ONE transaction
+BEGIN TRAN;
+INSERT Orders (OrderId, CustomerId, Amount, Status) VALUES (@id, @cust, @amt, 'PLACED');
+INSERT Outbox (AggregateId, EventType, Payload) VALUES (@id, 'OrderPlaced', @json);
+COMMIT;
+
+-- Relay: claim a batch safely across multiple relay instances
+WITH batch AS (SELECT TOP (100) * FROM Outbox WITH (UPDLOCK, READPAST, ROWLOCK)
+               WHERE PublishedAt IS NULL ORDER BY OutboxId)
+UPDATE batch SET PublishedAt = SYSUTCDATETIME()
+OUTPUT inserted.OutboxId, inserted.EventType, inserted.Payload;   -- publish these (at-least-once)
+
+-- Idempotent consumer
+BEGIN TRAN;
+INSERT ProcessedMessages (MessageId, ProcessedAt) VALUES (@msgId, SYSUTCDATETIME());  -- PK violation = duplicate → skip
+UPDATE Inventory SET Reserved = Reserved + @qty WHERE ProductId = @pid;
+COMMIT;
+
+-- Enable CDC
+EXEC sys.sp_cdc_enable_db;
+EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'Orders', @role_name = NULL;
+```
+
+**Common interview questions**
+
+**Q1. Database per service — benefits and costs?**
+Benefits: autonomy, independent schema evolution and scaling, fault isolation, clear ownership. Costs: no joins or ACID across services, data duplication, eventual consistency, sagas and outbox complexity, reporting needs a separate store, more operational overhead.
+
+**Q2. Why avoid 2PC across microservices?**
+The coordinator is a single point of failure; locks are held across network calls (blocking); availability is the product of all participants'; many brokers and cloud databases don't support it. Sagas with local transactions, idempotency and compensations scale better.
+
+**Q3. Explain the transactional outbox.**
+Saving to the database and publishing to a broker can't be atomic (the dual-write problem). So store the event in an outbox table in the same transaction as the state change; a separate relay (polling or CDC) publishes it and marks it sent. Delivery is at-least-once, so consumers must deduplicate.
+
+**Q4. How does CDC work and when do you use it?**
+SQL Server's CDC reads committed changes from the transaction log into change tables (`cdc.dbo_Orders_CT`) with LSNs; tools like Debezium stream them to Kafka. Use it for read models, search indexes, data lake feeds and outbox relaying, without application code changes. Watch latency, retention and schema changes.
+
+**Q5. How do you enforce idempotency at the database layer?**
+Unique constraints on idempotency keys or message IDs, inserted in the same transaction as the business change; conditional updates (`WHERE Status = 'PENDING'`) for state transitions; upserts guarded by a unique key.
+
+**Q6. Two services' data have drifted. How do you reconcile?**
+Periodic reconciliation jobs compare keys, counts and checksums (or the event log vs state), classify breaks (missing, mismatched, timing), auto-repair safe cases by replaying events, and route the rest to humans. Monitor drift as a metric.
+
+---
+
+## 13. FinTech SQL: Payments, Ledger, Reconciliation, Audit
+
+**Key concepts**
+- **Amounts:** `DECIMAL(19,4)` or `BIGINT` minor units + `CHAR(3)` currency — never FLOAT.
+- **Payment status lifecycle:** `CREATED → AUTHORIZED → CAPTURED → SETTLED`, with `FAILED`, `REFUNDED`, `REVERSED`. Enforce valid transitions with conditional updates; store status history.
+- **Double-entry ledger:** every transaction has ≥ 2 entries; **sum of debits = sum of credits**. **Append-only:** never UPDATE/DELETE entries — correct with **reversing entries**.
+- **Balance:** derived from entries (always correct, slower) or stored in an `AccountBalance` row updated **in the same transaction** as the entries (fast) — and verified nightly against the sum of entries.
+- **Overdraft prevention:** a conditional update `WHERE Balance >= @amt`, or `UPDLOCK` on the balance row.
+- **Reconciliation:** load the external settlement file into staging → match on reference/amount/date → classify breaks (missing internally, missing externally, amount mismatch, timing difference, duplicate) → auto-resolve timing breaks → route the rest to an ops queue.
+- **Duplicate detection:** idempotency keys (unique constraint) and heuristic matches (same account, amount and merchant within N minutes).
+- **Audit (SOX/PCI):** immutable entries (deny UPDATE/DELETE permissions, triggers to block changes), who/when/why columns, temporal history, a hash chain for tamper evidence, separation of duties, retention (often 7+ years), and no card numbers stored in clear (tokenize; PCI scope).
+
+```sql
+CREATE TABLE LedgerTransaction (
+    TxnId          UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
+    IdempotencyKey VARCHAR(64) NOT NULL CONSTRAINT UQ_Ledger_Idem UNIQUE,
+    Description    NVARCHAR(200) NOT NULL,
+    CreatedAt      DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+    CreatedBy      NVARCHAR(128) NOT NULL DEFAULT SUSER_SNAME()
+);
+CREATE TABLE LedgerEntry (
+    EntryId     BIGINT IDENTITY PRIMARY KEY,
+    TxnId       UNIQUEIDENTIFIER NOT NULL REFERENCES LedgerTransaction(TxnId),
+    AccountId   BIGINT NOT NULL,
+    Direction   CHAR(1) NOT NULL CHECK (Direction IN ('D','C')),
+    AmountMinor BIGINT NOT NULL CHECK (AmountMinor > 0),
+    Currency    CHAR(3) NOT NULL
+);
+CREATE INDEX IX_LedgerEntry_Account ON LedgerEntry(AccountId, EntryId) INCLUDE (Direction, AmountMinor);
+
+-- Post a transfer atomically: entries + balance update + balanced check
+CREATE OR ALTER PROCEDURE dbo.PostTransfer @Key VARCHAR(64), @From BIGINT, @To BIGINT, @Amt BIGINT, @Ccy CHAR(3)
+AS
+BEGIN
+    SET NOCOUNT ON; SET XACT_ABORT ON;
+    IF EXISTS (SELECT 1 FROM LedgerTransaction WHERE IdempotencyKey = @Key) RETURN;   -- already posted
+    DECLARE @Txn UNIQUEIDENTIFIER = NEWID();
+    BEGIN TRAN;
+        UPDATE AccountBalance SET BalanceMinor = BalanceMinor - @Amt
+        WHERE AccountId = @From AND Currency = @Ccy AND BalanceMinor >= @Amt;
+        IF @@ROWCOUNT = 0 THROW 50010, 'Insufficient funds', 1;
+        UPDATE AccountBalance SET BalanceMinor = BalanceMinor + @Amt WHERE AccountId = @To AND Currency = @Ccy;
+
+        INSERT LedgerTransaction (TxnId, IdempotencyKey, Description) VALUES (@Txn, @Key, 'Transfer');
+        INSERT LedgerEntry (TxnId, AccountId, Direction, AmountMinor, Currency)
+        VALUES (@Txn, @From, 'D', @Amt, @Ccy), (@Txn, @To, 'C', @Amt, @Ccy);
+    COMMIT;      -- the unique key on IdempotencyKey catches concurrent duplicates
+END;
+
+-- Integrity check: every transaction balances
+SELECT TxnId FROM LedgerEntry
+GROUP BY TxnId
+HAVING SUM(CASE Direction WHEN 'D' THEN AmountMinor ELSE -AmountMinor END) <> 0;
+
+-- Stored balance vs derived balance (nightly)
+SELECT b.AccountId, b.BalanceMinor, e.Derived
+FROM AccountBalance b
+JOIN (SELECT AccountId, SUM(CASE Direction WHEN 'C' THEN AmountMinor ELSE -AmountMinor END) AS Derived
+      FROM LedgerEntry GROUP BY AccountId) e ON e.AccountId = b.AccountId
+WHERE b.BalanceMinor <> e.Derived;
+
+-- Reconciliation against a bank settlement file loaded into staging
+SELECT COALESCE(i.Reference, s.Reference) AS Reference,
+       CASE WHEN i.Reference IS NULL THEN 'MISSING_INTERNAL'
+            WHEN s.Reference IS NULL THEN 'MISSING_EXTERNAL'
+            WHEN i.AmountMinor <> s.AmountMinor THEN 'AMOUNT_MISMATCH'
+            ELSE 'MATCHED' END AS BreakType
+FROM (SELECT Reference, AmountMinor FROM Payments WHERE SettlementDate = @d) i
+FULL OUTER JOIN SettlementStaging s ON s.Reference = i.Reference
+WHERE i.Reference IS NULL OR s.Reference IS NULL OR i.AmountMinor <> s.AmountMinor;
+
+-- Valid state transition only
+UPDATE Payments SET Status = 'CAPTURED', CapturedAt = SYSUTCDATETIME()
+WHERE PaymentId = @id AND Status = 'AUTHORIZED';
+IF @@ROWCOUNT = 0 THROW 50020, 'Invalid state transition', 1;
+
+-- Block modifications to ledger history
+DENY UPDATE, DELETE ON dbo.LedgerEntry TO AppRole;
+```
+
+**Common interview questions**
+
+**Q1. Design a double-entry ledger in SQL Server.**
+Tables: `LedgerTransaction` (an ID, a unique idempotency key, metadata) and `LedgerEntry` (transaction ID, account, debit/credit, a positive amount, currency). Every transaction has entries whose debits equal credits — enforced by inserting all entries in one procedure inside one transaction, plus a periodic integrity query. Append-only: corrections are reversing transactions. Index entries by account and time.
+
+**Q2. Stored balance or derived balance?**
+Derived from entries is always correct but slows down as history grows. A stored balance is fast; keep it consistent by updating it in the same transaction as the entries, with a conditional update for overdraft protection, and verify it nightly against the sum of entries. Many systems also use snapshots (a balance as of a date + entries since).
+
+**Q3. How do you prevent a negative balance under concurrency?**
+An atomic conditional update: `UPDATE ... SET Balance = Balance - @x WHERE Id = @id AND Balance >= @x`, then check `@@ROWCOUNT`. No read-then-write race, because the check and the change happen in one statement under an exclusive lock.
+
+**Q4. How do you reconcile against an external settlement file?**
+Bulk load the file into a staging table (validated), FULL OUTER JOIN against internal records on reference (and amount and date), classify each break, auto-match timing differences against the next day's file, write results to a reconciliation table, alert on unresolved breaks, and keep everything auditable. Reconcile even if the partner promises exactly-once.
+
+**Q5. How do you detect duplicate payments without an idempotency key?**
+Heuristic matching: same customer or card token, amount, currency and merchant within a short window (a self-join or `LAG` over the time order), flagged for review rather than auto-rejected; then fix the root cause by requiring idempotency keys.
+
+**Q6. How do you represent failed transactions and compensation?**
+Never delete or edit: failed payments keep their record with a `FAILED` status and reason; compensation is a new reversing ledger transaction linked to the original (`ReversalOfTxnId`). The full history is visible and auditable.
+
+**Q7. How do you make a ledger SOX/PCI-auditable?**
+Immutable, append-only tables (permissions + triggers), who/when/source on every entry, temporal history for reference tables, hash-chaining entries for tamper evidence, separation of duties for schema changes, encrypted and tokenized card data (out of PCI scope), audit log retention, and regular integrity reports.
+
+**Q8. How do you migrate a live `Balance` column to a ledger?**
+Create the ledger; write an opening-balance entry per account from a consistent snapshot; dual-write (old column + ledger) in the same transaction; reconcile the two continuously; switch reads to the ledger-derived or maintained balance; then retire direct balance updates — reversible at each step.
+
+---
+
+## 14. Top 40 Rapid-Fire Questions + Principal Questions
+
+1. **Logical query order?** FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → TOP.
+2. **WHERE vs HAVING?** Rows before grouping vs groups after.
+3. **`COUNT(*)` vs `COUNT(col)`?** All rows vs non-null values.
+4. **NULL comparison?** `IS NULL`; `= NULL` is UNKNOWN.
+5. **`ISNULL` vs `COALESCE`?** 2 args/first type vs n args/precedence type.
+6. **DELETE vs TRUNCATE?** Logged rows + WHERE vs page deallocation + identity reset.
+7. **UNION vs UNION ALL?** Removes duplicates (sort cost) vs keeps all (faster).
+8. **`NOT IN` trap?** A NULL in the subquery → no rows.
+9. **LEFT JOIN turned INNER?** A right-table filter in WHERE.
+10. **EXISTS vs JOIN?** A semi-join with no duplicates vs returns columns and may duplicate.
+11. **CTE materialized?** No — inlined.
+12. **Temp table vs table variable?** Statistics and indexes vs lightweight, few rows.
+13. **ROW_NUMBER/RANK/DENSE_RANK?** 1,2,3 / 1,1,3 / 1,1,2.
+14. **ROWS vs RANGE?** Physical rows vs peer groups (the default; slower).
+15. **Running total?** `SUM() OVER (ORDER BY ... ROWS UNBOUNDED PRECEDING)`.
+16. **Previous row?** `LAG()`.
+17. **Gaps and islands?** `value − ROW_NUMBER()` groups.
+18. **Delete duplicates?** CTE + `ROW_NUMBER() > 1`.
+19. **Clustered index?** The table sorted by its key; one per table.
+20. **Covering index?** All needed columns; INCLUDE.
+21. **Good clustered key?** Narrow, unique, static, increasing.
+22. **Composite order?** Equality first, then range.
+23. **Key lookup?** Missing columns → make the index cover.
+24. **SARGable?** A bare column, matching type, no leading wildcard.
+25. **Parameter sniffing?** First-value plan reused → RECOMPILE / OPTIMIZE FOR / Query Store.
+26. **SSMS fast, app slow?** Different SET options → different cached plans.
+27. **Statistics?** Histograms for cardinality estimates; keep them fresh.
+28. **Query Store?** Plan history + forcing; regression detection.
+29. **Default isolation?** READ COMMITTED (locking) — enable RCSI.
+30. **`NOLOCK`?** Dirty, duplicate or missing rows — avoid.
+31. **SNAPSHOT conflict?** Error 3960 on concurrent updates.
+32. **Lock escalation?** ~5,000 locks → table lock; batch.
+33. **Deadlock error?** 1205; graph in system_health; retry + lock order.
+34. **`XACT_ABORT`?** Roll back the whole transaction on any error.
+35. **Scalar UDF issue?** Row-by-row, serial plans (inlined in 2019+).
+36. **Partitioning vs sharding?** One database vs many databases.
+37. **AG vs log shipping?** Automatic HA + readable secondaries vs simple DR.
+38. **Outbox?** Event + state in one local transaction.
+39. **Money type?** `DECIMAL(19,4)` or BIGINT minor units + currency.
+40. **Ledger rule?** Append-only, debits = credits, reversals not edits.
+
+**Principal-level questions**
+
+**P1. Which isolation level would you choose for a payments database, and why?**
+RCSI as the database default (consistent reads, no reader/writer blocking), conditional updates or UPDLOCK for check-then-act money movements, SNAPSHOT for consistent multi-statement reports, and SERIALIZABLE only for narrow critical sections. Avoid NOLOCK. Monitor tempdb version store growth and long-running transactions.
+
+**P2. SQL Server or a NoSQL store for a new transactional service?**
+A relational database for money, orders and anything needing multi-row atomicity, constraints, ad hoc queries for operations and audit, mature tooling and DBA expertise. NoSQL (DynamoDB, Cosmos DB) when access patterns are simple key-value at massive scale with predictable latency. The "boring" choice is usually the right one for financial correctness.
+
+**P3. The database is the bottleneck at 10× growth. What's your plan, in order?**
+Query and index tuning (Query Store top consumers), caching hot reads, read replicas for read-only traffic (handling replica lag), scaling up, partitioning large tables, archiving cold data, CQRS read models, In-Memory OLTP for hot spots, and only then sharding by a natural key (tenant or account) — each step justified by measurements.
+
+**P4. How do you run schema changes safely with zero downtime?**
+Expand–contract: additive changes first (nullable columns, new tables), deploy code that writes both shapes, backfill in throttled batches, switch reads, then remove the old structures in a later release. Use online index operations, avoid long schema locks (`WAIT_AT_LOW_PRIORITY`), test on production-size data, and have a rollback plan per step.
+
+**P5. How do you govern SQL performance across many teams?**
+Query Store on every database with regression alerts; standard indexing and naming guidelines; code review for data-access changes; performance tests with production-like volumes in CI; per-service database ownership; and dashboards of the top consumers per team.
+
+---
+
+## 15. Mistakes Checklist (say why each is wrong)
+- [ ] `= NULL` · `NOT IN` with nullable subqueries · right-table filters in the WHERE of a LEFT JOIN · fan-out double counting
+- [ ] FLOAT for money · `DATETIME` without a time zone strategy · `VARCHAR(MAX)` everywhere
+- [ ] Functions on indexed columns · type mismatches (implicit conversion) · leading-wildcard LIKE · `SELECT *`
+- [ ] Random GUID clustered keys · indexing every column · never removing unused indexes · unindexed foreign keys
+- [ ] Ignoring estimated vs actual rows · stale statistics after big loads · no Query Store
+- [ ] `NOLOCK` on financial data · long transactions · user interaction inside a transaction · no deadlock retry
+- [ ] Huge single-statement deletes/updates (lock escalation, log growth)
+- [ ] Scalar UDFs and cursors on large sets · single-row triggers · concatenated dynamic SQL
+- [ ] Default RANGE frames for running totals · ROW_NUMBER without a tie-breaker
+- [ ] Shared databases across microservices · dual writes without an outbox · 2PC across services
+- [ ] Updating or deleting ledger rows · balances not reconciled with entries · storing card numbers in clear
+- [ ] Backups never restore-tested · no RPO/RTO defined

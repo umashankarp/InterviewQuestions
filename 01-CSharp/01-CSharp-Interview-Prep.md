@@ -1297,3 +1297,866 @@ Nullable reference types (fewer NREs), records and `required` (safer models), pa
 - [ ] `new HttpClient()` per call · disposing injected services · `!` to silence nullability warnings
 - [ ] uncached reflection on hot paths · assembly scanning blocking AOT · `dynamic` instead of interfaces
 - [ ] `ToLower()` comparisons · parsing without `InvariantCulture` · `string +=` in loops · `string.Intern` on user data
+
+---
+
+## Architecture Diagrams (preserved from the original modules)
+
+> All 41 Mermaid/ASCII diagrams from the original `01-CSharp/` files, kept verbatim and grouped by source module. Originals: `git show ebb2d5c:01-CSharp/<file>.md`.
+
+### Module 1 — C# Advanced: CLR, JIT, Garbage Collector & Memory Management
+*Source: `01-CLR-JIT-GC-Memory-Management.md`*
+
+**How does it work (30,000-ft view)?**
+
+```text
+ C# Source (.cs)
+ │ Roslyn compiler (csc)
+ ▼
+ IL + Metadata (.dll/.exe) ──── this is what gets shipped
+ │ Assembly Loader (CLR)
+ ▼
+ Loaded into AppDomain/AssemblyLoadContext
+ │ JIT Compiler (on first call per method)
+ ▼
+ Native machine code (cached in memory for process lifetime)
+ │ CPU executes
+ ▼
+ Objects allocated on Managed Heap ── GC reclaims unreachable ones
+```
+
+**2.2 JIT Compiler Internals**
+
+```mermaid
+flowchart LR
+ A[IL Method Body] -->|first call| B[Tier 0: Quick JIT]
+ B -->|instrumented calls counted<br/>+ PGO profile data| C{Call count > threshold?}
+ C -->|No| B
+ C -->|Yes| D[Tier 1: Optimizing JIT<br/>uses PGO profile]
+ D --> E[Native code cached for process lifetime]
+ B -.->|long-running loop detected| F[OSR: patch running frame<br/>to optimized code mid-loop]
+```
+
+**2.3 Memory Layout — Stack vs Heap**
+
+```mermaid
+graph TD
+ subgraph Stack [Thread Stack - per thread]
+ S1["int x = 5"]
+ S2["Point p (struct, local)"]
+ S3["ref to Customer c ──┐"]
+ end
+ subgraph Heap [Managed Heap]
+ H1["Customer object<br/>[SyncBlk|MethodTable|fields]"]
+ H2["struct Point embedded<br/>inside a class field"]
+ H3["Boxed int (object o = 5)"]
+ end
+ S3 --> H1
+```
+
+**2.4 Garbage Collector Internals — the deepest interview area**
+
+```mermaid
+sequenceDiagram
+ participant App as App Thread
+ participant GC as GC
+ participant Fin as Finalizer Thread
+ App->>App: new FileStream (has finalizer)
+ Note over App: object becomes unreachable
+ GC->>GC: Gen collection: object unreachable but finalizable
+ GC->>Fin: move to freachable queue (object survives!)
+ Fin->>Fin: runs Finalize eventually
+ Note over GC: Object now truly unreachable
+ GC->>GC: NEXT collection reclaims memory
+```
+
+**CLR High-Level Component Diagram**
+
+```mermaid
+graph TB
+ subgraph Process
+ subgraph CLR["CLR / CoreCLR Host"]
+ Loader[Assembly Loader]
+ TypeSys[Type System / MethodTables]
+ JIT[JIT Compiler<br/>Tier0 / Tier1 / PGO / OSR]
+ GC[Garbage Collector<br/>SOH Gen0/1/2, LOH, POH]
+ TP[ThreadPool]
+ EH[Exception Handling]
+ Sec[Security / Sandboxing]
+ end
+ Heap[(Managed Heap)]
+ Stacks[(Thread Stacks)]
+ end
+ IL[IL + Metadata Assembly] --> Loader
+ Loader --> TypeSys --> JIT
+ JIT --> Native[Native Code Cache]
+ Native --> CPU[(CPU)]
+ GC <--> Heap
+ TP --> Stacks
+```
+
+**GC Heap Layout (ASCII)**
+
+```text
+Small Object Heap (SOH)                        Large Object Heap (LOH)  Pinned Object Heap (POH)
+┌───────────┬────────────┬─────────────────┐   ┌────────────────────┐   ┌────────────────────┐
+│ Gen 0     │ Gen 1      │ Gen 2           │   │ Objects >= 85,000B │   │ fixed / GCHandle   │
+│ (nursery) │ (buffer)   │ (long-lived)    │   │ not compacted by   │   │ .Pinned objects    │
+│ freq. GC  │ occasional │ rare, expensive │   │ default            │   │                    │
+└───────────┴────────────┴─────────────────┘   └────────────────────┘   └────────────────────┘
+ ~fast <1ms   ~1-10ms      ~10-100ms+                                      never moved
+```
+
+**Class Diagram**
+
+```mermaid
+classDiagram
+ class ObjectPool~T~ {
+ <<abstract>>
+ +Get T
+ +Return(T item) void
+ }
+ class DefaultObjectPool~T~ {
+ -ConcurrentQueue~T~ _items
+ -IPooledObjectPolicy~T~ _policy
+ -int _maxSize
+ +Get T
+ +Return(T item) void
+ }
+ class IPooledObjectPolicy~T~ {
+ <<interface>>
+ +Create T
+ +Return(T item) bool
+ }
+ class StringBuilderPooledPolicy {
+ +Create StringBuilder
+ +Return(StringBuilder item) bool
+ }
+ ObjectPool~T~ <|-- DefaultObjectPool~T~
+ DefaultObjectPool~T~ o--> IPooledObjectPolicy~T~
+ IPooledObjectPolicy~T~ <|.. StringBuilderPooledPolicy
+```
+
+**Sequence Diagram — Rent/Return under contention**
+
+```mermaid
+sequenceDiagram
+ participant Caller
+ participant Pool as DefaultObjectPool
+ participant Policy as IPooledObjectPolicy
+ Caller->>Pool: Get
+ alt item available in queue
+ Pool->>Pool: dequeue item
+ else queue empty
+ Pool->>Policy: Create
+ Policy-->>Pool: new T
+ end
+ Pool-->>Caller: T instance
+ Caller->>Caller: use instance
+ Caller->>Pool: Return(item)
+ Pool->>Policy: Return(item) -- reset/validate
+ alt policy approves & under capacity
+ Pool->>Pool: enqueue item
+ else rejected or over capacity
+ Pool->>Pool: drop (GC reclaims normally)
+ end
+```
+
+### Module 2 — C# Advanced: Async/Await, Task, and Threading Internals
+*Source: `02-Async-Await-Internals.md`*
+
+**2.8 Threading model tie-back**
+
+```mermaid
+sequenceDiagram
+ participant Caller
+ participant SM as State Machine (MoveNext)
+ participant Awaiter as TaskAwaiter
+ participant TP as ThreadPool
+ participant IO as OS I/O (Completion Port)
+
+ Caller->>SM: call GetDataAsync
+ SM->>Awaiter: httpClient.GetAsync(url).GetAwaiter
+ SM->>Awaiter: IsCompleted? (false)
+ SM->>Awaiter: OnCompleted(continuation = MoveNext)
+ SM-->>Caller: return incomplete Task (thread FREED here)
+ IO-->>TP: I/O completes, queue continuation
+ TP->>SM: MoveNext resumes on pool thread
+ SM->>SM: GetResult, Parse, SetResult
+ SM-->>Caller: Task now Completed (awaiters unblocked)
+```
+
+**Async Call Composition**
+
+```mermaid
+graph TB
+ A[Controller Action: async Task<IActionResult>] --> B[Service.GetOrderAsync]
+ B --> C[Repository.QueryAsync -- DB I/O]
+ B --> D[HttpClient.GetAsync -- external API I/O]
+ C --> E[(SQL Server)]
+ D --> F[(External Service)]
+ subgraph ThreadPool["Thread Pool (shared, finite)"]
+ T1[Worker Thread 1]
+ T2[Worker Thread 2]
+ T3[Worker Thread N]
+ end
+ E -.->|completion port signals| ThreadPool
+ F -.->|completion port signals| ThreadPool
+ ThreadPool -.->|resumes MoveNext continuations| B
+```
+
+**State Machine Lifecycle (ASCII)**
+
+```text
+ Method call
+ │
+ ▼
+ ┌─────────────────────┐ IsCompleted==true (sync path) ┌──────────────────┐
+ │ MoveNext state=-1 │ ─────────────────────────────────▶│ SetResult; done │ <- may never allocate
+ └─────────────────────┘ └──────────────────┘
+ │ IsCompleted==false
+ ▼
+ ┌─────────────────────┐
+ │ box state machine │ <- heap allocation happens HERE, only on the truly-async path
+ │ register continuation│
+ │ RETURN to caller │
+ └─────────────────────┘
+ │ (later, on completion)
+ ▼
+ ┌─────────────────────┐
+ │ MoveNext resumes │
+ │ state=0 -> goto label │
+ │ SetResult / throw │
+ └─────────────────────┘
+```
+
+**Class Diagram**
+
+```mermaid
+classDiagram
+ class IRateLimiter {
+ <<interface>>
+ +AcquireAsync(CancellationToken) ValueTask~IDisposable~
+ }
+ class TokenBucketRateLimiter {
+ -SemaphoreSlim _semaphore
+ -Timer _refillTimer
+ -int _capacity
+ +AcquireAsync(CancellationToken) ValueTask~IDisposable~
+ -Refill void
+ }
+ class RateLimitLease {
+ -SemaphoreSlim _semaphore
+ +Dispose void
+ }
+ IRateLimiter <|.. TokenBucketRateLimiter
+ TokenBucketRateLimiter..> RateLimitLease: creates
+```
+
+**Sequence Diagram — Acquire under contention**
+
+```mermaid
+sequenceDiagram
+ participant Caller
+ participant Limiter as TokenBucketRateLimiter
+ participant Sem as SemaphoreSlim
+ participant Timer as Refill Timer
+
+ Caller->>Limiter: AcquireAsync(ct)
+ Limiter->>Sem: WaitAsync(ct)
+ alt token available
+ Sem-->>Limiter: acquired immediately
+ else no tokens
+ Sem-->>Limiter: awaits (thread NOT blocked, just suspended)
+ Timer->>Sem: Release on tick (refill)
+ Sem-->>Limiter: acquired once released
+ end
+ Limiter-->>Caller: IDisposable lease (release on Dispose)
+ Caller->>Caller: perform rate-limited work
+ Caller->>Limiter: lease.Dispose -- returns token conceptually (bucket model: no-op here, refill is time-based)
+```
+
+### Module 3 — C# Advanced: `Span<T>`, `Memory<T>` & Low-Allocation Code Patterns
+*Source: `03-Span-Memory-Low-Allocation.md`*
+
+**2.6 `Span<T>` and the JIT — Zero-Cost Abstraction, Mostly**
+
+```mermaid
+graph LR
+ A["byte[] array (heap)"] -->|"AsSpan(start,len)"| B["Span&lt;byte&gt; (stack, ref+length)"]
+ C["stackalloc byte[64]"] --> B
+ D["NativeMemory.Alloc(...)"] -->|"unsafe wrap"| B
+ B -->|".Slice(...)"| E["Span&lt;byte&gt; (narrower view, still same memory)"]
+ B -.->|"cannot: ref struct rule"| F["object o = span; // COMPILE ERROR"]
+ B -.->|"cannot"| G["class Foo { Span&lt;byte&gt; f; } // COMPILE ERROR"]
+```
+
+**Memory View Hierarchy (ASCII)**
+
+```text
+               ┌───────────────────────────────────────────┐
+               │ Underlying Memory                         │
+               │ (array on heap | stackalloc | native buf) │
+               └───────────────────────────────────────────┘
+                      ▲                ▲               ▲
+               view (no copy)   view (no copy)   view (no copy)
+                      │                │               │
+        ┌────────────────┐  ┌──────────────────┐  ┌────────────────┐
+        │ Span<T>        │  │ ReadOnlySpan<T>  │  │ Memory<T>      │
+        │ (stack only)   │  │ (stack only)     │  │ (heap-safe,    │
+        │ mutable        │  │ read-only        │  │ field/await-   │
+        │                │  │                  │  │ safe)          │
+        └────────────────┘  └──────────────────┘  └───────┬────────┘
+                                                          │ .Span
+                                                          ▼
+                                                  ┌──────────────────────┐
+                                                  │ Span<T> materialized │
+                                                  │ right before use     │
+                                                  └──────────────────────┘
+```
+
+**Data Flow — Zero-Allocation Request Parsing (Kestrel-style)**
+
+```mermaid
+sequenceDiagram
+ participant Socket as OS Socket Buffer
+ participant Kestrel as Kestrel Pipe (pooled buffers)
+ participant Parser as HTTP Parser
+ participant App as App Code
+
+ Socket->>Kestrel: raw bytes arrive into a pooled buffer segment
+ Kestrel->>Parser: ReadOnlySequence<byte> (spans over pooled memory, no copy)
+ Parser->>Parser: parse method/headers via ReadOnlySpan<byte> slices (no allocation)
+ Parser->>App: expose parsed values as spans/strings only where truly needed
+ Note over App: Only strings the app actually needs (e.g., route values)<br/>get materialized/allocated -- everything else stays a view
+```
+
+**Class Diagram**
+
+```mermaid
+classDiagram
+ class ILogFieldWriter {
+ <<interface>>
+ +WriteField(Span~byte~ destination, ReadOnlySpan~byte~ key, long value) int
+ +WriteField(Span~byte~ destination, ReadOnlySpan~byte~ key, ReadOnlySpan~char~ value) int
+ }
+ class Utf8LogFieldWriter {
+ +WriteField(...) int
+ }
+ class PooledLogLineBuilder {
+ -byte[] _buffer
+ -int _position
+ +Append(ReadOnlySpan~byte~ key, long value) void
+ +Append(ReadOnlySpan~byte~ key, ReadOnlySpan~char~ value) void
+ +WrittenSpan ReadOnlySpan~byte~
+ }
+ ILogFieldWriter <|.. Utf8LogFieldWriter
+ PooledLogLineBuilder o--> ILogFieldWriter
+```
+
+**Sequence Diagram**
+
+```mermaid
+sequenceDiagram
+ participant App
+ participant Builder as PooledLogLineBuilder
+ participant Writer as Utf8LogFieldWriter
+ participant Pool as ArrayPool<byte>.Shared
+
+ App->>Pool: (constructor) Rent(256)
+ App->>Builder: Append("orderId"u8, 12345)
+ Builder->>Writer: WriteField(span, key, value)
+ Writer-->>Builder: bytes written
+ App->>Builder: Append("status"u8, "shipped")
+ Builder->>Writer: WriteField(span, key, value)
+ App->>Builder: WrittenSpan
+ Builder-->>App: ReadOnlySpan<byte> (ready to write to log sink)
+ App->>Builder: Dispose
+ Builder->>Pool: Return(buffer)
+```
+
+### Module 4 — C# Advanced: Delegates, Events, Closures & Multicast Internals
+*Source: `04-Delegates-Events-Closures.md`*
+
+**2.2 Multicast Delegates — the `+=` Mechanism**
+
+```mermaid
+graph LR
+ subgraph "h after three += operations"
+ D3["MulticastDelegate instance #3"] --> IL["_invocationList: [OnClickA, OnClickB, OnClickC]"]
+ end
+ subgraph "Each += creates a NEW object"
+ D1["instance #1: [OnClickA]"] -->|"+= OnClickB creates"| D2["instance #2: [OnClickA, OnClickB]"]
+ D2 -->|"+= OnClickC creates"| D3
+ end
+```
+
+**2.7 Weak Event Pattern**
+
+```mermaid
+graph TD
+ Logger["Logger (long-lived singleton)<br/>MessageLogged event"] -->|"strong ref via invocation list"| Widget1["ShortLivedWidget #1<br/>(logically 'disposed', still alive!)"]
+ Logger -->|"strong ref"| Widget2["ShortLivedWidget #2<br/>(also leaked)"]
+ AppCode["Application code"] -.->|"no longer references"| Widget1
+ AppCode -.->|"no longer references"| Widget2
+ style Widget1 fill:#844,color:#fff
+ style Widget2 fill:#844,color:#fff
+```
+
+**Delegate Type Hierarchy**
+
+```mermaid
+classDiagram
+ class Delegate {
+ <<abstract, CLR base class>>
+ +Target object
+ +Method MethodInfo
+ }
+ class MulticastDelegate {
+ <<abstract>>
+ -_invocationList object[]
+ +GetInvocationList Delegate[]
+ }
+ class Action~T~ {
+ +Invoke(T) void
+ }
+ class Func~T,TResult~ {
+ +Invoke(T) TResult
+ }
+ class EventHandler {
+ +Invoke(object, EventArgs) void
+ }
+ class MyCustomDelegate {
+ <<user-declared: delegate void MyCustomDelegate(int x)>>
+ }
+ Delegate <|-- MulticastDelegate
+ MulticastDelegate <|-- Action~T~
+ MulticastDelegate <|-- Func~T,TResult~
+ MulticastDelegate <|-- EventHandler
+ MulticastDelegate <|-- MyCustomDelegate
+```
+
+**Closure Capture Data Flow (ASCII)**
+
+```text
+Method scope:
+ int threshold = 10; ┌─────────────────────┐
+ Action a = => { │ DisplayClass (heap) │
+ threshold++; │ int threshold = 10 │◄────┐
+ Console.WriteLine(threshold);│ │ │
+ }; └─────────────────────┘ │
+ a; // prints 11 ▲ │
+ Console.WriteLine(threshold); // 11 (!) │ delegate targets │
+ │ this instance │
+ ┌────────┴────────┐ │
+ │ Action delegate │──────────┘
+ │ _target = DisplayClass
+ │ _methodPtr = Lambda
+ └─────────────────┘
+```
+
+**Class Diagram**
+
+```mermaid
+classDiagram
+ class IEventBus {
+ <<interface>>
+ +Subscribe~TEvent~(Action~TEvent~ handler) IDisposable
+ +Publish~TEvent~(TEvent evt) void
+ }
+ class InMemoryEventBus {
+ -ConcurrentDictionary~Type, List~object~~ _subscribers
+ -object _lock
+ +Subscribe~TEvent~(Action~TEvent~ handler) IDisposable
+ +Publish~TEvent~(TEvent evt) void
+ }
+ class Subscription {
+ -Action _unsubscribeAction
+ +Dispose void
+ }
+ IEventBus <|.. InMemoryEventBus
+ InMemoryEventBus..> Subscription: creates
+```
+
+**Sequence Diagram**
+
+```mermaid
+sequenceDiagram
+ participant Sub as Subscriber
+ participant Bus as InMemoryEventBus
+ participant Pub as Publisher
+
+ Sub->>Bus: Subscribe<OrderShipped>(handler)
+ Bus-->>Sub: IDisposable subscription
+ Pub->>Bus: Publish(new OrderShipped(...))
+ Bus->>Bus: snapshot subscriber list (under lock)
+ Bus->>Sub: invoke handler (outside lock, isolated try/catch)
+ Sub->>Bus: subscription.Dispose (e.g., in its own Dispose)
+ Bus->>Bus: remove handler from list
+```
+
+### Module 5 — C# Advanced: LINQ Internals — `IEnumerable` vs `IQueryable`, Deferred Execution & Iterator State Machines
+*Source: `05-LINQ-Internals.md`*
+
+**2.3 `IQueryable<T>` — Expression Trees and Provider Translation**
+
+```mermaid
+graph TB
+ A["dbContext.Orders.Where(o => o.Total > 100)"] --> B["Expression tree built:<br/>MethodCallExpression(Where,<br/> source, Lambda(BinaryExpression(GreaterThan,<br/> MemberAccess(o,Total), Constant(100))))"]
+ B --> C[".OrderBy(o => o.Date) -- wraps the tree further"]
+ C --> D["Enumeration triggers Provider.Execute"]
+ D --> E["EF Core's LINQ provider walks the tree,<br/>generates SQL:<br/>SELECT * FROM Orders WHERE Total > 100 ORDER BY Date"]
+ E --> F[(Database)]
+ F --> G["Rows materialized into Order objects"]
+```
+
+**LINQ Execution Model — Two Worlds**
+
+```mermaid
+graph TB
+ subgraph "LINQ to Objects (IEnumerable<T>)"
+ A1[Source: List/Array/yield-based iterator] --> A2["Where(Func&lt;T,bool&gt)<br/>compiled delegate"]
+ A2 --> A3["Select(Func&lt;T,TResult&gt)<br/>compiled delegate"]
+ A3 --> A4["foreach / ToList<br/>drives MoveNext chain, in-process"]
+ end
+ subgraph "LINQ to Entities (IQueryable<T>)"
+ B1["Source: DbSet&lt;T&gt;"] --> B2["Where(Expression&lt;Func&lt;T,bool&gt;&gt)<br/>appends to expression tree"]
+ B2 --> B3["OrderBy(Expression&lt;Func&lt;T,TKey&gt;&gt)<br/>appends further"]
+ B3 --> B4["ToListAsync<br/>triggers Provider.Execute"]
+ B4 --> B5["Expression tree -> SQL translation"]
+ B5 --> B6[(Database engine)]
+ end
+```
+
+**Iterator State Machine Lifecycle (ASCII, mirrors the async state machine diagram)**
+
+```text
+ Range(0, 3) called
+ │
+ ▼
+ ┌───────────────────────┐ NOT executed yet -- just constructs the state machine object
+ │ state = -2 (not started)│
+ └───────────────────────┘
+ │ first MoveNext call (from foreach / next LINQ operator)
+ ▼
+ ┌───────────────────────┐
+ │ state = 0, i = 0 │
+ │ Current = start + 0 │ <-- yield return suspends HERE, returns true
+ └───────────────────────┘
+ │ next MoveNext call
+ ▼
+ ┌───────────────────────┐
+ │ resume at state 0, │
+ │ i++, loop condition, │
+ │ Current = start + 1 │
+ └───────────────────────┘
+ │... repeats until loop condition false...
+ ▼
+ ┌───────────────────────┐
+ │ MoveNext returns false │ <-- enumeration complete
+ └───────────────────────┘
+```
+
+**Class Diagram**
+
+```mermaid
+classDiagram
+ class ISortableFilterableSpec~T~ {
+ <<interface>>
+ +GetSortExpression(string fieldName) Expression~Func~T,object~~
+ +GetFilterExpression(string fieldName, string value) Expression~Func~T,bool~~
+ }
+ class TransactionFieldMap {
+ -Dictionary~string, Expression~Func~Transaction,object~~~ _sortFields
+ -Dictionary~string, Func~string, Expression~Func~Transaction,bool~~~~ _filterFields
+ +GetSortExpression(string) Expression~Func~Transaction,object~~
+ +GetFilterExpression(string, string) Expression~Func~Transaction,bool~~
+ }
+ ISortableFilterableSpec~Transaction~ <|.. TransactionFieldMap
+```
+
+### Module 6 — C# Advanced: Generics, Variance & Generic Constraints
+*Source: `06-Generics-Variance.md`*
+
+**2.1 Reified Generics vs Type Erasure — the CLR-Level Mechanism**
+
+```mermaid
+graph TB
+ subgraph "Generic Type Definition (IL, one copy)"
+ Def["List&lt;T&gt; -- generic IL, T is a placeholder"]
+ end
+ Def --> JIT{"JIT compilation<br/>per instantiation"}
+ JIT -->|"T = int (value type)"| Code1["Specialized native code for List&lt;int&gt;<br/>(operates on int directly, no boxing)"]
+ JIT -->|"T = double (value type)"| Code2["SEPARATE specialized native code for List&lt;double&gt;"]
+ JIT -->|"T = string (reference type)"| Code3["Shared native code for ALL reference-type<br/>instantiations (List&lt;string&gt;, List&lt;MyClass&gt;,...)"]
+ JIT -->|"T = MyClass (reference type)"| Code3
+```
+
+**Variance Direction Diagram**
+
+```mermaid
+graph LR
+ subgraph "Covariance: out T (safe substitution goes UP the hierarchy for the WRAPPER)"
+ A1["IProducer&lt;Cat&gt;"] -->|"assignable to"| A2["IProducer&lt;Animal&gt;"]
+ end
+ subgraph "Contravariance: in T (safe substitution goes DOWN the hierarchy for the WRAPPER)"
+ B1["IConsumer&lt;Animal&gt;"] -->|"assignable to"| B2["IConsumer&lt;Cat&gt;"]
+ end
+ subgraph "Invariance: classes, or T used in BOTH positions"
+ C1["List&lt;Cat&gt;"] -.->|"COMPILE ERROR"| C2["List&lt;Animal&gt;"]
+ end
+```
+
+**Generic Instantiation & JIT Specialization (ASCII)**
+
+```text
+ List<T> (IL, one generic definition)
+ │
+ ┌─────────────────────┼─────────────────────┐
+ ▼ ▼ ▼
+ List<int> List<double> List<string> / List<MyClass> /...
+ (own native code, (own native code, (ONE SHARED native code body --
+ inline int[] storage, inline double[] all reference types are pointer-
+ zero boxing) storage, zero sized and behave uniformly)
+ boxing)
+```
+
+**Class Diagram**
+
+```mermaid
+classDiagram
+ class IResult~out T~ {
+ <<interface>>
+ +IsSuccess bool
+ +Value T
+ +Error string
+ }
+ class Result~T~ {
+ +IsSuccess bool
+ +Value T
+ +Error string
+ +Success(T value)$ Result~T~
+ +Failure(string error)$ Result~T~
+ +Map~TResult~(Func~T,TResult~ mapper) Result~TResult~
+ }
+ IResult~T~ <|.. Result~T~
+```
+
+**Sequence Diagram — `Map` chaining**
+
+```mermaid
+sequenceDiagram
+ participant Caller
+ participant R1 as Result<Order>
+ participant R2 as Result<OrderDto>
+
+ Caller->>R1: Result<Order>.Success(order)
+ Caller->>R1: Map(order => new OrderDto(order))
+ R1->>R1: check IsSuccess
+ alt IsSuccess
+ R1->>R2: Result<OrderDto>.Success(mapper(Value))
+ else failed
+ R1->>R2: Result<OrderDto>.Failure(Error)
+ end
+ R2-->>Caller: Result<OrderDto>
+```
+
+### Module 7 — C# Advanced: Records, Pattern Matching & Immutability
+*Source: `07-Records-Pattern-Matching-Immutability.md`*
+
+**Record Equality & `with` Mechanics (ASCII)**
+
+```text
+var original = new Order(1, "Widget", 10) { Tags = new List<string> { "sale" } };
+var copy = original with { Quantity = 20 };
+
+  ┌───────────────────────────┐        ┌───────────────────────────┐
+  │ original (heap object)    │        │ copy (NEW heap object)    │
+  │   Id       = 1            │        │   Id       = 1            │
+  │   Name     = "Widget"     │        │   Name     = "Widget"     │
+  │   Quantity = 10           │        │   Quantity = 20  <- the   │
+  │                           │        │                  only     │
+  │                           │        │                  change   │
+  │   Tags ───────────────────┼───┐    │   Tags ───────────────────┼───┐
+  └───────────────────────────┘   │    └───────────────────────────┘   │
+                                  │                                    │
+                                  └─────────────────┬──────────────────┘
+                                                    │
+                                                    ▼
+                          ┌─────────────────────────────────────────┐
+                          │ SHARED List<string> { "sale" }          │
+                          │ `with` copied the REFERENCE, not the    │
+                          │ list -- mutating via EITHER reference   │
+                          │ affects BOTH original and copy          │
+                          └─────────────────────────────────────────┘
+```
+
+**Pattern Matching Decision Tree (Discriminated-Union-Style Modeling)**
+
+```mermaid
+classDiagram
+ class Shape {
+ <<abstract record, sealed hierarchy>>
+ }
+ class Circle {
+ +double Radius
+ }
+ class Rectangle {
+ +double Width
+ +double Height
+ }
+ class Triangle {
+ +double Base
+ +double Height
+ }
+ Shape <|-- Circle
+ Shape <|-- Rectangle
+ Shape <|-- Triangle
+ note for Shape "sealed hierarchy -- enables compiler\nexhaustiveness checking on switch expressions\nover Shape (with warnings-as-errors enabled)"
+```
+
+**Class Diagram**
+
+```mermaid
+classDiagram
+ class OrderState {
+ <<abstract sealed-hierarchy record>>
+ }
+ class Pending {
+ +DateTime CreatedAt
+ }
+ class Paid {
+ +DateTime PaidAt
+ +string TransactionId
+ }
+ class Shipped {
+ +DateTime ShippedAt
+ +string TrackingNumber
+ }
+ class Cancelled {
+ +DateTime CancelledAt
+ +string Reason
+ }
+ OrderState <|-- Pending
+ OrderState <|-- Paid
+ OrderState <|-- Shipped
+ OrderState <|-- Cancelled
+```
+
+**Sequence Diagram**
+
+```mermaid
+sequenceDiagram
+ participant Client
+ participant Transitions as OrderStateTransitions
+ Client->>Transitions: Pay(new Pending(...), "txn-123")
+ Transitions->>Transitions: switch on current state (exhaustive)
+ Transitions-->>Client: new Paid(now, "txn-123")
+ Client->>Transitions: Ship(paidState, "trk-456")
+ Transitions->>Transitions: switch on current state (exhaustive)
+ Transitions-->>Client: new Shipped(now, "trk-456")
+ Client->>Transitions: Ship(pendingState, "trk-789")
+ Transitions->>Transitions: switch matches Pending arm
+ Transitions-->>Client: throws InvalidOperationException("Cannot ship an unpaid order.")
+```
+
+### Module 8 — C# Advanced: Exception Handling, SEH Internals & Custom Exception Design
+*Source: `08-Exception-Handling-Custom-Exceptions.md`*
+
+**Two-Pass Exception Handling (ASCII)**
+
+```text
+Call stack at throw time:
+ Main
+ └── ProcessOrder
+ └── ValidateStock <-- throw new InsufficientStockException(...) HERE
+
+PASS 1 (search, no unwinding yet):
+ ValidateStock frame: any matching catch here? No try/catch in this frame.
+ ProcessOrder frame: try/catch(InsufficientStockException) when (...)? EVALUATE FILTER (stack NOT yet unwound)
+ -> filter returns true -> MATCH FOUND at this frame
+
+PASS 2 (unwind down to the matched frame):
+ ValidateStock frame: run any 'finally' blocks in this frame, pop it
+ ProcessOrder frame: stack trace was already captured at throw time (ValidateStock's line);
+ now actually execute the matched catch block's body
+```
+
+**Exception Hierarchy Example**
+
+```mermaid
+classDiagram
+ class Exception {
+ <<System.Exception>>
+ +string Message
+ +Exception InnerException
+ +string StackTrace
+ }
+ class ApplicationDomainException {
+ <<custom base for this app>>
+ +string ErrorCode
+ }
+ class InsufficientStockException {
+ +string Sku
+ +int Requested
+ +int Available
+ }
+ class PaymentDeclinedException {
+ +string DeclineReason
+ }
+ class OrderValidationException {
+ +IReadOnlyList~string~ Errors
+ }
+ Exception <|-- ApplicationDomainException
+ ApplicationDomainException <|-- InsufficientStockException
+ ApplicationDomainException <|-- PaymentDeclinedException
+ ApplicationDomainException <|-- OrderValidationException
+```
+
+**Class Diagram**
+
+```mermaid
+classDiagram
+ class ApiException {
+ <<abstract>>
+ +string ErrorCode
+ +int HttpStatusCode
+ }
+ class ValidationApiException {
+ +IReadOnlyDictionary~string,string[]~ FieldErrors
+ }
+ class RateLimitApiException {
+ +TimeSpan RetryAfter
+ }
+ class NotFoundApiException
+ class ExceptionHandlingMiddleware {
+ -RequestDelegate _next
+ -ILogger _logger
+ +InvokeAsync(HttpContext) Task
+ }
+ ApiException <|-- ValidationApiException
+ ApiException <|-- RateLimitApiException
+ ApiException <|-- NotFoundApiException
+ ExceptionHandlingMiddleware..> ApiException: catches specifically
+```
+
+**Sequence Diagram**
+
+```mermaid
+sequenceDiagram
+ participant Client
+ participant Middleware as ExceptionHandlingMiddleware
+ participant App as Application Pipeline
+
+ Client->>Middleware: HTTP request
+ Middleware->>App: _next(context)
+ alt ApiException thrown (expected)
+ App-->>Middleware: throws ValidationApiException
+ Middleware->>Middleware: LogInformation (low severity)
+ Middleware-->>Client: 400 { errorCode, message, details }
+ else Unexpected exception thrown
+ App-->>Middleware: throws NullReferenceException
+ Middleware->>Middleware: LogCritical (high severity, triggers alert)
+ Middleware-->>Client: 500 { errorCode: "INTERNAL_ERROR", generic message }
+ end
+```

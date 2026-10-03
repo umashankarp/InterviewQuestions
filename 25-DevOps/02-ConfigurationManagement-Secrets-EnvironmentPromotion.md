@@ -1,6 +1,6 @@
 # Module 86 — DevOps: Configuration Management, Secrets & Environment Promotion
 
-> Domain: DevOps | Level: Beginner → Expert | Prerequisite: [[01-InfrastructureAsCode-Terraform-State-Drift]] (IaC/state/drift), [[../23-Kubernetes/04-Configuration-Security-ConfigMaps-Secrets-RBAC-PodSecurity]] (ConfigMaps/Secrets/RBAC), [[../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep]] (application-side config consumption), [[../23-Kubernetes/08-Observability-Multicluster-GitOps]] (GitOps promotion), [[../21-AWS/02-IAM-Security-KMS-SecretsManager]] / [[../22-Azure/02-IAM-Security-EntraID-RBAC-KeyVault]] (cloud secret stores)
+> Domain: DevOps | Level: Beginner → Expert | Prerequisite: [[01-InfrastructureAsCode-Terraform-State-Drift]] (IaC/state/drift), [[../23-Kubernetes/01-Kubernetes-Interview-Prep]] (ConfigMaps/Secrets/RBAC), [[../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep]] (application-side config consumption), [[../23-Kubernetes/01-Kubernetes-Interview-Prep]] (GitOps promotion), [[../21-AWS/01-AWS-Interview-Prep]] / [[../22-Azure/01-Azure-Interview-Prep]] (cloud secret stores)
 
 ---
 

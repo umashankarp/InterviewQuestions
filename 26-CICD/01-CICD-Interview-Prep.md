@@ -1,6 +1,6 @@
 # Module 89 — CI/CD: CI Pipeline Architecture — Pipeline-as-Code, Build Stages, Caching & Monorepo/Polyrepo Strategies
 
-> Domain: CI/CD | Level: Beginner → Expert | Prerequisite: [[../25-DevOps/01-InfrastructureAsCode-Terraform-State-Drift]] (pipeline-as-code parallels IaC's declarative-artifact discipline), [[../25-DevOps/04-DevSecOps-PolicyAsCode-PlatformEngineering]] (shift-left scanning integrated into the pipeline stages this module designs), [[../24-Docker/02-Dockerfile-Optimization-MultiStageBuilds]] (build-layer caching, directly generalized here to whole-pipeline caching)
+> Domain: CI/CD | Level: Beginner → Expert | Prerequisite: [[../25-DevOps/01-InfrastructureAsCode-Terraform-State-Drift]] (pipeline-as-code parallels IaC's declarative-artifact discipline), [[../25-DevOps/04-DevSecOps-PolicyAsCode-PlatformEngineering]] (shift-left scanning integrated into the pipeline stages this module designs), [[../24-Docker/01-Docker-Interview-Prep]] (build-layer caching, directly generalized here to whole-pipeline caching)
 
 ---
 

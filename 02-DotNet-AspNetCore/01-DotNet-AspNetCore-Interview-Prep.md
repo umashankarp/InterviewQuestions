@@ -824,3 +824,410 @@ A rate limiter, total request timeout, retries with exponential backoff and jitt
 - [ ] `ConnectionId` as identity · assuming SignalR delivery is reliable · no backplane when scaled out
 - [ ] Reusing proto field numbers · a new `GrpcChannel` per call · L4 load balancing for gRPC · no deadlines
 - [ ] `new HttpClient()` per call · retrying non-idempotent POSTs
+
+---
+
+## Architecture Diagrams (preserved from the original modules)
+
+> All 19 Mermaid/ASCII diagrams from the original `02-DotNet-AspNetCore/` files, kept verbatim and grouped by source module. Originals: `git show ebb2d5c:02-DotNet-AspNetCore/<file>.md`.
+
+### Module 9 — ASP.NET Core: Middleware Pipeline & Request Processing Internals
+*Source: `01-Middleware-Pipeline-Request-Internals.md`*
+
+**2.6 Kestrel, `System.IO.Pipelines`, and Where Middleware Sits in the Larger Picture**
+
+```mermaid
+graph TB
+ Client[HTTP Client] --> Proxy["Reverse Proxy<br/>(nginx / IIS / YARP)"]
+ Proxy --> Kestrel["Kestrel<br/>(parses via System.IO.Pipelines)"]
+ Kestrel --> HttpCtx[HttpContext created]
+ HttpCtx --> MW1["ExceptionHandler middleware"]
+ MW1 --> MW2["HttpsRedirection middleware"]
+ MW2 --> MW3["Routing middleware<br/>(matches endpoint, populates GetEndpoint)"]
+ MW3 --> MW4["Authentication middleware<br/>(populates HttpContext.User)"]
+ MW4 --> MW5["Authorization middleware<br/>(reads endpoint metadata + HttpContext.User)"]
+ MW5 --> Endpoint["Matched Endpoint Handler<br/>(Controller action / Minimal API delegate)"]
+ Endpoint -.->|response flows back OUT| MW5
+ MW5 -.-> MW4
+ MW4 -.-> MW3
+ MW3 -.-> MW2
+ MW2 -.-> MW1
+ MW1 -.-> Client
+```
+
+**The Onion Model (ASCII)**
+
+```text
+Request ──────────────────────────────────────────────────────►
+ ┌─────────────────────────────────────────────────────────┐
+ │ ExceptionHandler middleware │
+ │ ┌───────────────────────────────────────────────────┐ │
+ │ │ HttpsRedirection middleware │ │
+ │ │ ┌─────────────────────────────────────────────┐ │ │
+ │ │ │ Routing (matches endpoint) │ │ │
+ │ │ │ ┌───────────────────────────────────────┐ │ │ │
+ │ │ │ │ Authentication │ │ │ │
+ │ │ │ │ ┌─────────────────────────────────┐ │ │ │ │
+ │ │ │ │ │ Authorization │ │ │ │ │
+ │ │ │ │ │ ┌───────────────────────────┐ │ │ │ │ │
+ │ │ │ │ │ │ ENDPOINT (your handler) │ │ │ │ │ │
+ │ │ │ │ │ └───────────────────────────┘ │ │ │ │ │
+ │ │ │ │ └─────────────────────────────────┘ │ │ │ │
+ │ │ │ └───────────────────────────────────────┘ │ │ │
+ │ │ └─────────────────────────────────────────────┘ │ │
+ │ └───────────────────────────────────────────────────┘ │
+ └─────────────────────────────────────────────────────────┘
+Response ◄──────────────────────────────────────────────────────
+ (each layer can inspect/modify the response on the way back OUT,
+ UNTIL that layer's HasStarted becomes true)
+```
+
+**Middleware Short-Circuit Diagram**
+
+```mermaid
+sequenceDiagram
+ participant C as Client
+ participant M1 as Middleware A
+ participant M2 as Middleware B (rate limiter)
+ participant M3 as Middleware C
+ participant E as Endpoint
+
+ C->>M1: Request
+ M1->>M2: await next(context)
+ alt rate limit exceeded
+ M2-->>M1: writes 429 response, does NOT call next -- SHORT-CIRCUIT
+ M1-->>C: 429 Too Many Requests (M3, Endpoint NEVER RUN)
+ else within limit
+ M2->>M3: await next(context)
+ M3->>E: await next(context)
+ E-->>M3: handler completes
+ M3-->>M2:
+ M2-->>M1:
+ M1-->>C: normal response
+ end
+```
+
+**Class Diagram**
+
+```mermaid
+classDiagram
+ class IApplicationBuilder {
+ <<framework interface>>
+ +Use(...)
+ +New IApplicationBuilder
+ }
+ class MiddlewareExtensions {
+ <<static class>>
+ +UseWhenEndpointHasMetadata~TMetadata~(builder, configureBranch) IApplicationBuilder
+ }
+ MiddlewareExtensions..> IApplicationBuilder: extends
+```
+
+**Sequence Diagram**
+
+```mermaid
+sequenceDiagram
+ participant C as Client
+ participant Routing as UseRouting
+ participant Branch as UseWhenEndpointHasMetadata
+ participant Auth as UseAuthentication
+ participant E as Endpoint
+
+ C->>Routing: Request
+ Routing->>Routing: match endpoint, populate GetEndpoint
+ Routing->>Branch: next(context)
+ alt endpoint has RequiresExtraValidationAttribute
+ Branch->>Branch: run branch pipeline (ExpensiveSchemaValidationMiddleware)
+ Note over Branch: branch does NOT call back into original pipeline's next
+ else no metadata
+ Branch->>Auth: next(context) -- continue ORIGINAL pipeline
+ Auth->>E:...
+ end
+```
+
+### Module 10 — ASP.NET Core: Dependency Injection Container Internals
+*Source: `02-DI-Container-Internals.md`*
+
+**Lifetime Scope Nesting (ASCII)**
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│ ROOT Service Provider (application lifetime) │
+│ Singleton instances live HERE, created once, shared forever │
+│ │
+│ ┌─────────────────────┐ ┌─────────────────────┐ │
+│ │ Request Scope #1 │ │ Request Scope #2 │... │
+│ │ (created per HTTP req)│ │ (created per HTTP req)│ │
+│ │ │ │ │ │
+│ │ Scoped instances live │ │ Scoped instances live │ │
+│ │ HERE -- one DbContext,│ │ HERE -- a DIFFERENT │ │
+│ │ shared across this │ │ DbContext instance, │ │
+│ │ request's whole graph │ │ shared across THIS │ │
+│ │ │ │ request's graph only │ │
+│ │ Transient: new EVERY │ │ Transient: new EVERY │ │
+│ │ time, even within │ │ time, even within │ │
+│ │ this one scope │ │ this one scope │ │
+│ └─────────────────────┘ └─────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+
+CAPTIVE DEPENDENCY BUG: a Singleton (root-scope) constructor resolves a
+Scoped dependency -- it gets locked to ONE specific scope's instance
+(whichever scope was active at that moment), reused incorrectly forever:
+
+ Singleton (root) ──holds a reference to──► [Scoped instance from Request Scope #1]
+ │ ▲
+ └── used by Request Scope #2's handling ─────────────┘
+ (WRONG: Request #2 gets Request #1's stale/disposed instance)
+```
+
+**Dependency Graph Resolution**
+
+```mermaid
+graph TB
+ OrderService["OrderService (Scoped)"] --> Repo["IOrderRepository (Scoped)"]
+ OrderService --> Email["IEmailSender (Transient)"]
+ Repo --> DbCtx["DbContext (Scoped)"]
+ Email --> SmtpClient["SmtpClient wrapper (Transient)"]
+ Cache["ICacheService (Singleton)"] -.->|"SAFE: Singleton depending on Singleton"| ConfigOptions["IOptions&lt;CacheConfig&gt; (Singleton)"]
+ BadSingleton["BadSingleton (Singleton)"] -.->|"CAPTIVE DEPENDENCY -- UNSAFE"| Repo
+ style BadSingleton fill:#844,color:#fff
+```
+
+**Class Diagram**
+
+```mermaid
+classDiagram
+ class DiagnosticAnalyzer {
+ <<Roslyn base class>>
+ }
+ class SingletonScopedDependencyAnalyzer {
+ +SupportedDiagnostics DiagnosticDescriptor[]
+ +Initialize(AnalysisContext) void
+ -AnalyzeConstructor(SyntaxNodeAnalysisContext) void
+ }
+ class ServiceLifetimeRegistry {
+ -Dictionary~string,string~ _typeToLifetime
+ +LoadFromRegistrationCalls(SyntaxTree[]) void
+ +GetLifetime(string typeName) string
+ }
+ DiagnosticAnalyzer <|-- SingletonScopedDependencyAnalyzer
+ SingletonScopedDependencyAnalyzer..> ServiceLifetimeRegistry: uses
+```
+
+**Sequence Diagram**
+
+```mermaid
+sequenceDiagram
+ participant Dev as Developer (writes code)
+ participant IDE as IDE / Roslyn Analyzer
+ participant Registry as ServiceLifetimeRegistry
+ participant Build as CI Build
+
+ Dev->>IDE: writes `services.AddSingleton<IFoo, Foo>`<br/>+ Foo(IScopedThing thing) constructor
+ IDE->>Registry: parse registration calls across the project
+ IDE->>IDE: AnalyzeConstructor(Foo) -- checks each parameter's registered lifetime
+ IDE-->>Dev: SQUIGGLY WARNING immediately in the editor:<br/>"Singleton Foo depends on Scoped IScopedThing"
+ Dev->>Build: commits anyway (warning ignored)
+ Build->>Build: ValidateOnBuild=true catches it AGAIN at CI build/startup time
+ Build-->>Dev: Build FAILS -- second, independent layer of defense
+```
+
+### Module 11 — ASP.NET Core: Minimal APIs vs Controllers, MVC Filters & Model Binding Internals
+*Source: `03-MinimalAPIs-vs-Controllers-ModelBinding.md`*
+
+**Nested Pipelines (ASCII)**
+
+```text
+Middleware Pipeline
+┌───────────────────────────────────────────────────────────────────┐
+│ ExceptionHandler → ForwardedHeaders → Routing → Auth → AuthZ → │
+│ │
+│ ┌─────────────────────────────────────────────────────────────┐ │
+│ │ MVC FILTER PIPELINE (Controllers only) │ │
+│ │ Authorization Filters │ │
+│ │ Resource Filters (wraps model binding) │ │
+│ │ [ MODEL BINDING happens here ] │ │
+│ │ Action Filters (wraps the action method body) │ │
+│ │ [ ACTION METHOD BODY ] │ │
+│ │ Exception Filters (only if action/filters throw) │ │
+│ │ Result Filters (wraps IActionResult execution) │ │
+│ └─────────────────────────────────────────────────────────────┘ │
+│ │
+│ OR, for Minimal APIs: │
+│ ┌─────────────────────────────────────────────────────────────┐ │
+│ │ ENDPOINT FILTER CHAIN (single, uniform onion, no stages) │ │
+│ │ AddEndpointFilter #1 → AddEndpointFilter #2 → [ HANDLER ] │ │
+│ └─────────────────────────────────────────────────────────────┘ │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+**Model Binding Source Resolution**
+
+```mermaid
+flowchart TD
+ A[Incoming Request] --> B{Parameter has explicit<br/>From* attribute?}
+ B -->|Yes| C[Bind from that EXACT source]
+ B -->|No| D{Is the parameter type<br/>a 'simple' type?<br/>int, string, Guid, etc.}
+ D -->|Yes| E[Infer: Route values, then Query string]
+ D -->|No -- complex type| F[Infer: Request Body -- JSON deserialization]
+ F --> G{More than one complex-type<br/>parameter without attributes?}
+ G -->|Yes| H[BINDING ERROR: only ONE body source allowed]
+ G -->|No| I[Bind successfully from body]
+```
+
+**Class Diagram**
+
+```mermaid
+classDiagram
+ class IApiErrorResponseBuilder {
+ <<interface>>
+ +BuildValidationError(IEnumerable~ValidationResult~) ProblemDetails
+ +BuildNotFoundError(string resourceType, string id) ProblemDetails
+ }
+ class StandardApiErrorResponseBuilder {
+ +BuildValidationError(...) ProblemDetails
+ +BuildNotFoundError(...) ProblemDetails
+ }
+ class ControllerIntegration {
+ <<static configuration>>
+ +ConfigureApiControllerOptions(ApiBehaviorOptions, IApiErrorResponseBuilder) void
+ }
+ class MinimalApiIntegration {
+ <<ValidationFilter~T~>>
+ -IApiErrorResponseBuilder _builder
+ }
+ IApiErrorResponseBuilder <|.. StandardApiErrorResponseBuilder
+ ControllerIntegration..> IApiErrorResponseBuilder: uses
+ MinimalApiIntegration..> IApiErrorResponseBuilder: uses
+```
+
+**Sequence Diagram**
+
+```mermaid
+sequenceDiagram
+ participant ControllerClient as Client (hits Controller endpoint)
+ participant MinimalClient as Client (hits Minimal API endpoint)
+ participant Builder as StandardApiErrorResponseBuilder
+
+ ControllerClient->>Builder: invalid model state -> InvalidModelStateResponseFactory
+ Builder-->>ControllerClient: 400 { title, errors } -- STANDARD SHAPE
+
+ MinimalClient->>Builder: ValidationFilter detects invalid input
+ Builder-->>MinimalClient: 400 { title, errors } -- IDENTICAL STANDARD SHAPE
+```
+
+### Module 12 — ASP.NET Core: Authentication & Authorization Deep Dive
+*Source: `04-Authentication-Authorization-Deep-Dive.md`*
+
+**Authentication + Authorization Sequence**
+
+```mermaid
+sequenceDiagram
+ participant C as Client
+ participant AuthN as UseAuthentication
+ participant Transform as IClaimsTransformation
+ participant AuthZ as UseAuthorization
+ participant E as Endpoint
+
+ C->>AuthN: Request with Bearer token
+ AuthN->>AuthN: JwtBearer scheme handler: AuthenticateAsync<br/>validates token, builds ClaimsPrincipal
+ AuthN->>Transform: TransformAsync(principal)
+ Transform->>Transform: e.g., look up subscription tier, ADD claim
+ Transform-->>AuthN: augmented ClaimsPrincipal
+ AuthN->>AuthZ: HttpContext.User populated
+ AuthZ->>AuthZ: evaluate endpoint's required policy<br/>(requirements -- AND across types, OR within a type)
+ alt policy succeeds
+ AuthZ->>E: request proceeds
+ else policy fails
+ AuthZ-->>C: 403 Forbidden (ForbidAsync)
+ end
+ Note over AuthN,C: If AuthenticateAsync itself fails/no credentials:<br/>401 Unauthorized (ChallengeAsync), AuthZ never even runs
+```
+
+**Requirement Evaluation Logic (ASCII)**
+
+```text
+Policy "CanEditOrders" = [ RequireRoleRequirement("Editor"), MinimumAccountAgeRequirement(30 days) ]
+
+ ┌─────────────────────────────┐
+ │ RequireRoleRequirement │◄── Handler A: checks role -- Succeed or not
+ │ (must be satisfied) │◄── Handler B (if registered): ALSO gets a chance
+ └─────────────────────────────┘ (OR relationship between handlers for SAME requirement)
+ AND
+ ┌─────────────────────────────┐
+ │ MinimumAccountAgeRequirement │◄── Handler C: checks claim -- Succeed or not
+ │ (must be satisfied) │
+ └─────────────────────────────┘
+
+Policy succeeds ONLY IF: (RequireRoleRequirement satisfied by ANY of its handlers)
+ AND (MinimumAccountAgeRequirement satisfied by ANY of its handlers)
+```
+
+**Class Diagram**
+
+```mermaid
+classDiagram
+ class IResourceAuthorizationHelper {
+ <<interface>>
+ +AuthorizeOrForbidAsync~TResource~(ClaimsPrincipal, TResource, string policy) IResult?
+ }
+ class ResourceAuthorizationHelper {
+ -IAuthorizationService _authService
+ +AuthorizeOrForbidAsync~TResource~(...) IResult?
+ }
+ IResourceAuthorizationHelper <|.. ResourceAuthorizationHelper
+```
+
+**Sequence Diagram**
+
+```mermaid
+sequenceDiagram
+ participant Endpoint
+ participant Helper as ResourceAuthorizationHelper
+ participant AuthSvc as IAuthorizationService
+ participant Handler as OrderOwnerOrManagerHandler
+
+ Endpoint->>Endpoint: load resource (order)
+ Endpoint->>Helper: AuthorizeOrForbidAsync(user, order, "OrderAccess")
+ Helper->>AuthSvc: AuthorizeAsync(user, order, "OrderAccess")
+ AuthSvc->>Handler: HandleRequirementAsync(context, requirement, order)
+ Handler-->>AuthSvc: Succeed or not
+ AuthSvc-->>Helper: PolicyAuthorizationResult
+ alt Succeeded
+ Helper-->>Endpoint: null -- proceed
+ else Failed
+ Helper-->>Endpoint: Results.Forbid
+ Endpoint-->>Endpoint: return immediately
+ end
+```
+
+### Module 13 — ASP.NET Core: Configuration & the Options Pattern Internals
+*Source: `05-Configuration-Options-Pattern.md`*
+
+**3. Visual Architecture**
+
+```mermaid
+graph LR
+ A[appsettings.json] --> M[Merged IConfiguration]
+ B[appsettings.Production.json] --> M
+ C[Environment Variables] --> M
+ D[Command-line args] --> M
+ M -->|Bind| E["IOptions&lt;T&gt; (once, frozen)"]
+ M -->|Bind per-scope| F["IOptionsSnapshot&lt;T&gt; (per request)"]
+ M -->|Bind + watch for change| G["IOptionsMonitor&lt;T&gt; (always current)"]
+```
+
+### Module 14 — ASP.NET Core: Health Checks & Observability Integration
+*Source: `06-HealthChecks-Observability.md`*
+
+**3. Visual Architecture**
+
+```mermaid
+graph LR
+ K8s[Kubernetes] -->|liveness probe| L["/health/live (self-check only)"]
+ K8s -->|readiness probe| R["/health/ready (DB, cache, downstream deps)"]
+ App[Application] --> Activity[Activity/ActivitySource]
+ Activity -->|traceparent header| Downstream[Downstream Service]
+ App --> Meter[Meter/Counter/Histogram]
+ Meter --> OTel[OpenTelemetry Collector] --> Dashboard[Grafana/Datadog/etc.]
+```
