@@ -410,3 +410,472 @@ Automated, enforced controls: every change via PR with an independent approver, 
 - [ ] One security gate at the end · noisy scanners teams learn to ignore
 - [ ] Long-lived cloud keys in CI · unpinned third-party actions
 - [ ] A "DevOps team" silo · platforms built without talking to users
+
+---
+
+## Architecture Diagrams (preserved from the original modules)
+
+> All 15 Mermaid/ASCII diagrams from the original `25-DevOps/` files, kept verbatim and grouped by source module. Originals: `git show ebb2d5c:25-DevOps/<file>.md`.
+
+### Module 85 — DevOps: Infrastructure as Code — Terraform, State Management & Drift
+*Source: `01-InfrastructureAsCode-Terraform-State-Drift.md`*
+
+**The Plan/Apply Cycle vs. a Continuously-Reconciling Controller**
+
+```mermaid
+sequenceDiagram
+ participant Eng as Engineer
+ participant TF as Terraform CLI
+ participant State as State File (remote backend)
+ participant Cloud as Real Cloud Infrastructure
+
+ Eng->>TF: terraform apply
+ TF->>Cloud: Create/update resources per HCL
+ TF->>State: Record new resource IDs/attributes
+ Note over Cloud,State: Terraform now exits. NOTHING is watching.
+
+ rect rgb(255, 230, 230)
+ Note over Cloud: Weeks pass. Someone manually changes<br/>a resource via the AWS Console.
+ Note over Cloud,State: Terraform has ZERO awareness of this change --<br/>no reconciliation loop exists (contrast /)
+ end
+
+ Eng->>TF: terraform plan (unrelated, routine change)
+ TF->>Cloud: Refresh -- reads REAL current state
+ TF->>State: Diff real state vs. state file vs. HCL
+ TF-->>Eng: Plan shows the manual change as a DRIFT to be REVERTED
+```
+
+**Terraform's Resource Graph — Parallel Where Independent, Sequential Where Dependent**
+
+```mermaid
+graph TB
+ VPC["aws_vpc.main"] --> Subnet["aws_subnet.main<br/>(references vpc.id)"]
+ Subnet --> Instance["aws_instance.app<br/>(references subnet.id)"]
+ VPC --> IAMRole["aws_iam_role.app<br/>(NO dependency on subnet)"]
+ IAMRole -.->|"provisioned in PARALLEL with Subnet/Instance"| Instance
+```
+
+**12. System Design**
+
+```mermaid
+graph TB
+ subgraph "Per-Team Repository"
+ HCL["Team's HCL<br/>(consumes shared modules)"]
+ end
+ subgraph "Module Registry (platform-owned)"
+ Modules["Vetted, versioned modules<br/>(VPC, standard compute, DB patterns)<br/>-- direct analog of a Helm chart repo,"]
+ end
+ subgraph "CI/CD Pipeline (per team, platform-templated)"
+ PR["PR opened -> automated PLAN<br/>posted as PR comment (§Intermediate Q3's isolation)"]
+ Review["Risk-tiered review gate (§Advanced Q8)<br/>Tier 1 changes require explicit sign-off"]
+ Apply["APPLY on merge -- least-privilege<br/>execution role SCOPED to this team's account/environment"]
+ end
+ subgraph "State (per team, bounded context)"
+ Backend["Remote backend: S3+DynamoDB lock<br/>encrypted, access restricted to this team's CI role only"]
+ end
+ subgraph "Platform-Owned, Cross-Cutting"
+ Drift["Scheduled drift detection<br/>across EVERY team's state, alerts to dedicated channel"]
+ end
+
+ HCL --> Modules
+ HCL --> PR --> Review --> Apply --> Backend
+ Backend -.-> Drift
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class IStateBackendReader {
+ <<interface>>
+ +ReadStateAsync(target) StateSnapshot
+ }
+ class S3StateBackendReader
+ class AzureBlobStateBackendReader
+ IStateBackendReader <|.. S3StateBackendReader
+ IStateBackendReader <|.. AzureBlobStateBackendReader
+
+ class IDriftDetector {
+ <<interface>>
+ +DetectAsync(target) DriftResult
+ }
+ class TerraformPlanRefreshDetector
+ IDriftDetector <|.. TerraformPlanRefreshDetector
+
+ class IRiskClassifier {
+ <<interface>>
+ +Classify(resourceType) RiskTier
+ }
+ class ResourceTypeRiskClassifier
+ IRiskClassifier <|.. ResourceTypeRiskClassifier
+
+ class IAlertRoute {
+ <<interface>>
+ +RouteAsync(driftAlert, tier)
+ }
+ class PagedAlertRoute
+ class DigestAlertRoute
+ IAlertRoute <|.. PagedAlertRoute
+ IAlertRoute <|.. DigestAlertRoute
+
+ class DriftDetectionOrchestrator {
+ -IStateBackendReader backendReader
+ -IDriftDetector detector
+ -IRiskClassifier classifier
+ -IAlertRoute[] routes
+ +RunAsync(targets)
+ }
+ DriftDetectionOrchestrator --> IStateBackendReader
+ DriftDetectionOrchestrator --> IDriftDetector
+ DriftDetectionOrchestrator --> IRiskClassifier
+ DriftDetectionOrchestrator --> IAlertRoute
+```
+
+### Module 86 — DevOps: Configuration Management, Secrets & Environment Promotion
+*Source: `02-ConfigurationManagement-Secrets-EnvironmentPromotion.md`*
+
+**The Promotion Pipeline — One Artifact, Layered Config, Reviewed Deltas**
+
+```text
+ BUILD (once) PROMOTE (by PR, per environment)
+┌──────────────────────┐ ┌───────────────────────────────────────────────────┐
+│ git tag v1.4.2 │ │ config repo: │
+│ → image sha256:abc… │ │ base/values.yaml (shared declaration) │
+│ (env-agnostic: │ │ envs/staging/values.yaml (small delta) │
+│ no URLs, no │ │ envs/prod/values.yaml (small delta) │
+│ secrets baked in) │ │ │
+└──────────┬───────────┘ │ PR: "promote v1.4.2 to prod" = digest bump + │
+ │ │ any config delta — a human-readable diff │
+ ▼ └────────────────────┬──────────────────────────────┘
+ registry (digest-addressed) │ merge
+ │ ▼
+ │ GitOps controller / pipeline applies
+ │ │
+ ▼ ▼
+ ┌─ staging ──────────┐ ┌─ production ────────┐
+ │ sha256:abc… │ same │ sha256:abc… │ secrets NEVER in
+ │ + staging values │ digest ► │ + prod values │ this flow — only
+ │ + secret REFERENCES│ │ + secret REFERENCES │ references
+ └────────────────────┘ └─────────┬───────────┘
+ │ dereferenced at runtime by
+ ▼ workload identity only
+ ┌─ secret store ──────┐
+ │ Vault / ASM / KV │ ← rotation happens
+ │ (audit, versions, │ HERE, once, with
+ │ leases, RBAC) │ dual-secret overlap
+ └──────────────────────┘
+```
+
+**Secret Delivery Patterns — Where the Copies Live**
+
+```text
+(1) CI-injected: store → pipeline → env vars (pipeline = high-privilege broker)
+(2) Operator-synced: store → ESO/CSI → K8s Secret/file (reconciled copy in cluster)
+(3) Direct SDK: store → app (cached, refreshed) (no intermediate copy; hard dep)
+(4) Dynamic: store MINTS per-workload, short-TTL credential (lease + renewal)
+ fewer copies / stronger guarantees ───────────────────────────────► more machinery
+```
+
+**12. System Design**
+
+```mermaid
+graph TB
+ subgraph "Config Repo (source of truth)"
+ Base["base/values.yaml"]
+ EnvDelta["envs/{env}/values.yaml (small deltas)"]
+ end
+ subgraph "Secret Store (per-environment scoped)"
+ Vault["Vault / cloud Secrets Manager<br/>dynamic secrets where supported"]
+ end
+ subgraph "CI/CD Pipeline"
+ PR["PR: promote config/artifact digest"]
+ Review["Risk-tiered review<br/>(mirrors)"]
+ Apply["Apply -- pipeline is SOLE writer<br/>to production config objects"]
+ end
+ subgraph "Per-Cluster Runtime"
+ Operator["External Secrets Operator<br/>(reconciles references -> K8s Secrets)"]
+ ConfigMap["ConfigMap (non-secret, from base+delta)"]
+ Pods["Application Pods<br/>(local secret cache, graceful degradation)"]
+ end
+ subgraph "Cross-Cutting"
+ DriftJob["Scheduled parity-drift detector"]
+ RotationJob["Dual-secret-overlap rotation orchestrator"]
+ end
+
+ Base --> PR
+ EnvDelta --> PR
+ PR --> Review --> Apply
+ Apply --> ConfigMap
+ Apply --> Operator
+ Vault --> Operator --> Pods
+ ConfigMap --> Pods
+ DriftJob -.-> ConfigMap
+ DriftJob -.-> Vault
+ RotationJob --> Vault
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class ISecretStore {
+ <<interface>>
+ +GetCurrentAsync(path) SecretValue
+ +StageNewAsync(path, value) SecretVersion
+ +PromoteAsync(path, version)
+ +RetireOldAsync(path, version)
+ }
+ class VaultSecretStore
+ class CloudSecretsManagerStore
+ ISecretStore <|.. VaultSecretStore
+ ISecretStore <|.. CloudSecretsManagerStore
+
+ class ITargetAuthValidator {
+ <<interface>>
+ +ValidateAsync(secretValue) bool
+ }
+ class DatabaseAuthValidator
+ class ApiKeyAuthValidator
+ ITargetAuthValidator <|.. DatabaseAuthValidator
+ ITargetAuthValidator <|.. ApiKeyAuthValidator
+
+ class IOverlapWindowPolicy {
+ <<interface>>
+ +GetOverlapDuration(credentialTier) TimeSpan
+ }
+ class RiskTieredOverlapPolicy
+ IOverlapWindowPolicy <|.. RiskTieredOverlapPolicy
+
+ class RotationOrchestrator {
+ -ISecretStore store
+ -ITargetAuthValidator validator
+ -IOverlapWindowPolicy overlapPolicy
+ +RotateAsync(path, tier) RotationResult
+ }
+ RotationOrchestrator --> ISecretStore
+ RotationOrchestrator --> ITargetAuthValidator
+ RotationOrchestrator --> IOverlapWindowPolicy
+```
+
+### Module 87 — DevOps: Release & Deployment Strategies — Blue-Green, Canary & Progressive Delivery
+*Source: `03-ReleaseDeploymentStrategies-BlueGreen-Canary-ProgressiveDelivery.md`*
+
+**Canary Rollout with Automated Analysis (Argo Rollouts / Flagger pattern)**
+
+```mermaid
+graph TB
+ NewVersion["New version deployed<br/>(0% traffic initially)"]
+ Ramp1["Shift 5% traffic to canary"]
+ Analysis1{"Automated analysis:<br/>error rate, latency<br/>vs. stable baseline"}
+ Ramp2["Shift 25% -> 50% -> 100%<br/>(progressive steps)"]
+ Rollback["Automatic rollback:<br/>0% traffic to canary,<br/>alert raised"]
+ Complete["Canary promoted:<br/>becomes new stable"]
+
+ NewVersion --> Ramp1 --> Analysis1
+ Analysis1 -->|Pass| Ramp2 --> Complete
+ Analysis1 -->|Fail| Rollback
+ Ramp2 -.->|Re-analyzed at each step| Analysis1
+```
+
+**12. System Design**
+
+```mermaid
+graph TB
+ subgraph "Team Repository"
+ RolloutSpec["Rollout spec (declarative):<br/>strategy=canary, risk_tier=high,<br/>analysis=infra+business-metrics"]
+ end
+ subgraph "Platform-Owned Registry"
+ Templates["Vetted analysis templates<br/>per risk tier (direct analog of<br/>the module registry)"]
+ end
+ subgraph "GitOps Controller"
+ ArgoRollouts["Argo Rollouts controller<br/>reconciles RolloutSpec continuously"]
+ end
+ subgraph "Traffic Layer"
+ Mesh["Service mesh / ingress<br/>weighted routing"]
+ end
+ subgraph "Analysis Engine"
+ Metrics["Prometheus/metrics backend<br/>(infra + business metrics)"]
+ AnalysisRun["AnalysisRun: compares canary<br/>vs stable against template thresholds"]
+ end
+ subgraph "Cross-Cutting"
+ Dashboard["Unified rollout-status dashboard<br/>(all teams, all strategies)"]
+ end
+
+ RolloutSpec --> ArgoRollouts
+ Templates --> ArgoRollouts
+ ArgoRollouts --> Mesh
+ ArgoRollouts --> AnalysisRun --> Metrics
+ AnalysisRun -->|fail| ArgoRollouts
+ ArgoRollouts -.-> Dashboard
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class IMetricsProvider {
+ <<interface>>
+ +QueryAsync(metricName, timeRange, cohort) MetricSeries
+ }
+ class PrometheusMetricsProvider
+ class CloudWatchMetricsProvider
+ IMetricsProvider <|.. PrometheusMetricsProvider
+ IMetricsProvider <|.. CloudWatchMetricsProvider
+
+ class IComparisonStrategy {
+ <<interface>>
+ +Evaluate(canarySeries, stableSeries, threshold) ComparisonResult
+ }
+ class PercentageDeviationStrategy
+ class StatisticalSignificanceStrategy
+ IComparisonStrategy <|.. PercentageDeviationStrategy
+ IComparisonStrategy <|.. StatisticalSignificanceStrategy
+
+ class AnalysisMetricSpec {
+ +string MetricName
+ +IComparisonStrategy Comparison
+ +double Threshold
+ }
+
+ class AnalysisTemplate {
+ +AnalysisMetricSpec[] Metrics
+ +TimeSpan DwellDuration
+ }
+
+ class AnalysisEngine {
+ -IMetricsProvider provider
+ +RunAsync(template, canaryCohort, stableCohort) AnalysisResult
+ }
+ AnalysisEngine --> IMetricsProvider
+ AnalysisTemplate --> AnalysisMetricSpec
+ AnalysisMetricSpec --> IComparisonStrategy
+ AnalysisEngine --> AnalysisTemplate
+```
+
+### Module 88 — DevOps: DevSecOps, Policy-as-Code & Platform Engineering (Capstone)
+*Source: `04-DevSecOps-PolicyAsCode-PlatformEngineering.md`*
+
+**The Unified Delivery Pipeline — Policy Gates at Every Stage**
+
+```mermaid
+graph TB
+ Commit["Developer commits code"]
+ PreCommit["Pre-commit: secret scan (Sec2.2),<br/>basic lint -- fastest feedback"]
+ PR["PR opened"]
+ CIScan["CI: SAST + SCA + IaC scan (Checkov/tfsec)<br/>+ Policy-as-Code gate (OPA/Rego)"]
+ Build["Build: image built, SBOM generated,<br/>signed + provenance attested (Cosign/SLSA)"]
+ Registry["Registry: admission-time signature<br/>verification before pull is permitted"]
+ Deploy["Deploy: K8s admission controller<br/>(Gatekeeper/Kyverno) re-enforces policy"]
+ Runtime["Runtime: periodic posture scan,<br/>drift detection (Modules 85 Sec2.6/86 Sec2.5)"]
+
+ Commit --> PreCommit --> PR --> CIScan --> Build --> Registry --> Deploy --> Runtime
+ Runtime -.->|drift/violation found| Alert["Alert: risk-tiered<br/>(Sec Advanced Q8)"]
+```
+
+**The Internal Developer Platform — Unifying Modules 85/86/87 Under One Golden Path**
+
+```mermaid
+graph LR
+ subgraph "Developer-Facing Portal (Backstage-style)"
+ Catalog["Service catalog<br/>(ownership, health)"]
+ Scaffold["Golden-path scaffolding<br/>(new-service templates)"]
+ SelfService["Self-service actions"]
+ end
+ subgraph "Underlying Platform Capabilities"
+ IaC[": self-service<br/>infrastructure provisioning"]
+ Config[": config +<br/>secrets, reference-not-value"]
+ Delivery[": progressive<br/>delivery, canary/blue-green"]
+ Policy["This module: policy-as-code<br/>+ security scanning, EVERY stage"]
+ end
+
+ Scaffold --> IaC
+ Scaffold --> Config
+ Scaffold --> Delivery
+ Scaffold --> Policy
+ SelfService --> IaC
+ SelfService --> Config
+ SelfService --> Delivery
+ Catalog -.->|health/compliance status| Policy
+```
+
+**12. System Design**
+
+```mermaid
+graph TB
+ subgraph "IDP Portal (Backstage-style)"
+ Catalog["Service catalog + compliance status"]
+ Scaffold["Golden-path templates<br/>(pre-wired: IaC + secrets + delivery + policy)"]
+ end
+ subgraph "Delivery Pipeline (per service)"
+ PreCommit["Pre-commit: secret scan"]
+ CI["CI: SAST/SCA/IaC scan + OPA policy gate"]
+ BuildSign["Build: SBOM + image sign/provenance"]
+ end
+ subgraph "Runtime Enforcement"
+ Admission["Admission controller:<br/>SAME OPA policies + signature verification"]
+ RuntimeScan["Scheduled posture scan +<br/>drift detection (Modules 85/86)"]
+ end
+ subgraph "Cross-Cutting Platform Services"
+ PolicyRegistry["Policy registry (versioned, tested Rego)"]
+ SbomIndex["SBOM aggregate index<br/>(inverted, queryable -- Sec11 Hard)"]
+ BreakGlass["Break-glass: fast, audited,<br/>still policy-evaluated"]
+ CoverageAudit["Coverage-gap + policy-liveness<br/>canary checker (Sec Advanced Q7)"]
+ end
+
+ Scaffold --> PreCommit --> CI --> BuildSign
+ PolicyRegistry --> CI
+ PolicyRegistry --> Admission
+ BuildSign --> Admission --> RuntimeScan
+ RuntimeScan --> SbomIndex
+ CoverageAudit -.-> CI
+ CoverageAudit -.-> Admission
+ BreakGlass -.->|audited exception| Admission
+ Catalog -.-> CoverageAudit
+```
+
+**13. Low-Level Design**
+
+```mermaid
+classDiagram
+ class IStructuredInputAdapter {
+ <<interface>>
+ +ToPolicyInput(rawArtifact) PolicyInput
+ }
+ class TerraformPlanAdapter
+ class KubernetesManifestAdapter
+ IStructuredInputAdapter <|.. TerraformPlanAdapter
+ IStructuredInputAdapter <|.. KubernetesManifestAdapter
+
+ class IPolicyEngine {
+ <<interface>>
+ +Evaluate(policyBundle, input) PolicyResult
+ }
+ class OpaRegoEngine
+ IPolicyEngine <|.. OpaRegoEngine
+
+ class IEnforcementPointSink {
+ <<interface>>
+ +ReportAsync(result, enforcementPoint)
+ }
+ class CIGateSink
+ class AdmissionControllerSink
+ IEnforcementPointSink <|.. CIGateSink
+ IEnforcementPointSink <|.. AdmissionControllerSink
+
+ class PolicyLivenessCanary {
+ -knownViolatingFixtures
+ +VerifyAsync(enforcementPoint) bool
+ }
+
+ class PolicyEvaluationOrchestrator {
+ -IStructuredInputAdapter[] adapters
+ -IPolicyEngine engine
+ -IEnforcementPointSink[] sinks
+ -PolicyLivenessCanary canary
+ +EvaluateAsync(rawArtifact) PolicyResult
+ }
+ PolicyEvaluationOrchestrator --> IStructuredInputAdapter
+ PolicyEvaluationOrchestrator --> IPolicyEngine
+ PolicyEvaluationOrchestrator --> IEnforcementPointSink
+ PolicyEvaluationOrchestrator --> PolicyLivenessCanary
+```

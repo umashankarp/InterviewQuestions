@@ -1,6 +1,6 @@
 # Module 119 — CQRS: Command/Query Responsibility Segregation, Read Models & the Complexity Threshold for Full Adoption
 
-> Domain: CQRS | Level: Beginner → Expert | Prerequisite: [[../33-Hexagonal-Architecture/02-Capstone-AdapterSubstitutionForTestability-RegulatedTradingExecutionEngine]] (§Expert Q5 previewed a Command/Query Port split for the Order Execution Engine's position dashboard — this module formalizes that preview into full CQRS), [[../31-Domain-Driven-Design/03-DomainEvents-DomainServices-Repositories]] (Intermediate Q4's original read/write Repository mismatch), [[../30-Architecture-Patterns/*]] (the bounded-context-level CQRS preview)
+> Domain: CQRS | Level: Beginner → Expert | Prerequisite: [[../33-Hexagonal-Architecture/02-Capstone-AdapterSubstitutionForTestability-RegulatedTradingExecutionEngine]] (§Expert Q5 previewed a Command/Query Port split for the Order Execution Engine's position dashboard — this module formalizes that preview into full CQRS), [[../31-Domain-Driven-Design/01-DDD-Interview-Prep]] (Intermediate Q4's original read/write Repository mismatch), [[../30-Architecture-Patterns/*]] (the bounded-context-level CQRS preview)
 >
 > **Domain scope note:** `34-CQRS` is scoped to 2 modules (119–120, standard depth, autonomously scoped given the substantial groundwork already laid by prior previews): this Fundamentals module and a capstone on event-driven read-model projection at scale. Full 16-section template (per the 2026-07-18 reversion in `CLAUDE.md`); Elite FinTech Interview Panel lens.
 

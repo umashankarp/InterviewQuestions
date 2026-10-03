@@ -1,60 +1,428 @@
-# Module 89 — CI/CD: CI Pipeline Architecture — Pipeline-as-Code, Build Stages, Caching & Monorepo/Polyrepo Strategies
+# CI/CD — Complete Interview Prep (All Topics, One File)
 
-> Domain: CI/CD | Level: Beginner → Expert | Prerequisite: [[../25-DevOps/01-InfrastructureAsCode-Terraform-State-Drift]] (pipeline-as-code parallels IaC's declarative-artifact discipline), [[../25-DevOps/04-DevSecOps-PolicyAsCode-PlatformEngineering]] (shift-left scanning integrated into the pipeline stages this module designs), [[../24-Docker/01-Docker-Interview-Prep]] (build-layer caching, directly generalized here to whole-pipeline caching)
+> Domain: CI/CD | Level: Beginner → Expert | Prerequisite: [[../25-DevOps/01-DevOps-Interview-Prep]] (IaC, release strategies, DevSecOps), [[../24-Docker/01-Docker-Interview-Prep]] (build caching, images)
+> **Quick-prep edition** (consolidated 2026-10-03). This one file replaces Modules 89–92. Originals: `git show ebb2d5c:26-CICD/<file>.md`
+> Each topic has: **Key concepts → pipeline/code example → Most common interview questions with answers.**
+
+| # | Topic | # | Topic |
+|---|---|---|---|
+| 1 | CI vs CD vs continuous deployment; branching | 7 | Artifact management & reproducible builds |
+| 2 | Pipeline-as-code & stage design (fail fast) | 8 | Environment promotion & gates |
+| 3 | Caching & parallelization | 9 | Progressive delivery & rollback orchestration |
+| 4 | Monorepo vs polyrepo | 10 | GitOps vs push-based CD; hotfix paths |
+| 5 | Test strategy: pyramid, flakiness, coverage, quality gates | 11 | Pipeline security |
+| 6 | Test data, doubles vs real dependencies (Testcontainers) | 12 | A complete .NET pipeline (GitHub Actions & Azure DevOps) |
+| | | 13 | Top 30 rapid-fire + Principal · 14 Mistakes checklist |
 
 ---
 
-## 1. Fundamentals
+## 1. CI vs CD vs Continuous Deployment; Branching
 
-**What**: Continuous Integration (CI) is the practice of automatically building, testing, and validating every code change — ideally on every commit or PR — so integration problems surface within minutes rather than accumulating silently until a painful, infrequent "integration day." A CI pipeline is the automated sequence of stages (compile, lint, test, package, scan) that implements this; **pipeline-as-code** means that sequence is itself defined in a version-controlled, reviewable file (a Jenkinsfile, a GitHub Actions workflow YAML, a GitLab `.gitlab-ci.yml`) rather than configured through a UI that leaves no diffable history.
+**Key concepts**
+- **Continuous Integration:** every change is merged to the mainline frequently (at least daily), built and tested automatically → integration problems surface within minutes.
+- **Continuous Delivery:** every mainline change is **releasable** — deployed automatically to pre-production, with production deployment a button/approval.
+- **Continuous Deployment:** every change that passes the pipeline goes to production automatically.
+- **Trunk-based development** (short-lived branches, < 1–2 days, feature flags) correlates with high DORA performance; **GitFlow** (long-lived develop/release branches) suits versioned, infrequently released products but slows integration.
+- Branch protection: required reviews, status checks, signed commits, linear history, CODEOWNERS.
 
-**Why it exists**: Before CI, integration problems (two developers' changes conflicting in ways neither discovered until a merge) were often discovered only when someone attempted to combine weeks of independent work — a discovery cost that scales brutally with how much diverged work has accumulated. Automating the build-and-test cycle on every change converts this into a continuous, small-cost activity: a broken change is caught and attributable to a specific, small commit within minutes, not buried in a multi-week merge. Pipeline-as-code exists for the identical reason mandated Infrastructure-as-Code over manual console changes: a pipeline configured through a UI is unreviewable, undiffable, and unrepeatable across environments — exactly the governance gap this course has now examined in infrastructure, configuration, deployment strategy, and security policy, recurring here in the pipeline definition itself.
+**Common interview questions**
 
-**When it matters**: From the moment more than one person contributes to a codebase, and increasingly critically as commit frequency, codebase size, and team count grow — a CI pipeline design that was adequate for ten engineers committing a few times a day routinely becomes the organization's binding velocity constraint once hundreds of engineers commit continuously against a shared monorepo.
+**Q1. Continuous delivery vs continuous deployment?**
+Delivery: always releasable, production release is a decision (manual approval or schedule). Deployment: every passing change goes to production automatically. Both require the same automation; deployment also needs strong automated verification and progressive delivery.
 
-**How (30,000-ft view)**:
+**Q2. Trunk-based development or GitFlow?**
+Trunk-based for services deployed continuously — small batches, fewer merge conflicts, fast feedback, incomplete features hidden behind flags. GitFlow for products with versioned releases and long support of multiple versions (libraries, on-prem software).
+
+---
+
+## 2. Pipeline-as-Code & Stage Design (Fail Fast)
+
+**Key concepts**
+- The pipeline is a **versioned, reviewed artifact** in the repo (YAML: GitHub Actions, Azure Pipelines, GitLab CI, Jenkinsfile) — changes go through PRs; **shared templates/reusable workflows** give consistency across teams.
+- **Stage ordering by cost and signal:** cheapest, fastest, most likely to fail first: restore → **build + analyzers** → **unit tests** → static analysis (SAST/SCA/secret scan) → package/container build → **integration/contract tests** → image scan/sign → deploy to dev/test → E2E/smoke → promote.
+- **Build once**, produce an immutable artifact (container digest/NuGet/zip), pass it to later stages.
+- Keep PR pipelines under ~10 minutes; heavier suites run post-merge or nightly.
+- **Required checks** gate merges.
+
+```yaml
+# .github/workflows/ci.yml — fail-fast PR pipeline for a .NET service
+name: ci
+on: { pull_request: { branches: [main] }, push: { branches: [main] } }
+permissions: { contents: read, id-token: write, packages: write }
+concurrency: { group: ci-${{ github.ref }}, cancel-in-progress: true }
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "9.0.x", cache: true, cache-dependency-path: "**/packages.lock.json" }
+      - run: dotnet restore --locked-mode
+      - run: dotnet build -c Release --no-restore -warnaserror
+      - run: dotnet test -c Release --no-build --logger trx --collect:"XPlat Code Coverage" --filter "Category!=Integration"
+      - run: dotnet list package --vulnerable --include-transitive
+  integration:
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "9.0.x" }
+      - run: dotnet test tests/Payments.IntegrationTests -c Release --filter "Category=Integration"   # Testcontainers
 ```
-Pipeline-as-code: the pipeline definition itself is a versioned file in the repo,
- reviewed via PR exactly like application code -- the IaC discipline,
- applied to the delivery pipeline's own definition
-Build stages: compile -> lint -> unit test -> package -> integration test -> scan
- (the shift-left security) -- ordered fail-fast, cheapest/fastest checks first
-Caching: dependency caches (package manager downloads), build caches (compiled
- artifacts, Docker layers -- the layer caching, generalized) -- correctness
- depends entirely on cache KEYS capturing every input that could change the output
-Monorepo/Polyrepo: a monorepo's CI must compute an "affected projects" graph (only
- test/build what a change could possibly impact) to scale -- get this graph WRONG
- and CI either wastes enormous compute (over-inclusion) or silently misses real
- breakage (under-inclusion, THIS module's central production incident)
+
+**Common interview questions**
+
+**Q1. How do you design a CI pipeline for fast feedback?**
+Order stages by speed and failure likelihood (build/analyzers/unit tests first), run independent jobs in parallel, cache dependencies and build outputs correctly, cancel superseded runs, keep slow suites off the PR path (post-merge/nightly with fast reporting), and track pipeline duration as a metric.
+
+**Q2. Why "build once, deploy many"?**
+So the exact artifact tested is the one deployed; rebuilding per environment can change dependencies or base images. Promote the same digest/version; inject environment config at deploy time.
+
+---
+
+## 3. Caching & Parallelization
+
+**Key concepts**
+- **Caching correctness is a cache-key problem:** key on the exact inputs (lock files, SDK version, OS) — too broad = stale or poisoned caches, too narrow = no hits. Use `packages.lock.json` + `--locked-mode` for NuGet.
+- Cache layers: dependency caches (NuGet/npm), build outputs (incremental builds, remote build caches), Docker layer cache (BuildKit `--cache-to/--cache-from`), test result caching (in Nx/Bazel).
+- **Parallelization:** fan-out independent jobs (build per project, test shards, scans), fan-in for gates; **test sharding** balanced by historical duration, not file count.
+- Ephemeral runners need remote caches; self-hosted runners have warm caches but security/isolation concerns.
+
+**Common interview question**
+
+**Q. Our cache made builds pass with an outdated dependency. Why?**
+The cache key didn't include the true inputs (e.g., keyed on the branch instead of the lock file hash), so a stale restore was reused. Key caches on content hashes of lock files and toolchain versions, use locked restores, and periodically bust caches.
+
+---
+
+## 4. Monorepo vs Polyrepo
+
+| | Monorepo | Polyrepo |
+|---|---|---|
+| Pros | atomic cross-project changes, shared tooling, easy refactoring, single version policy | clear ownership, independent pipelines and permissions, simpler tooling per repo |
+| Cons | needs affected-project detection, build tooling at scale, CODEOWNERS, large clones | cross-repo changes are slow, dependency/version drift, duplicated pipeline config |
+| Tooling | Nx, Bazel, Turborepo, path filters, `dotnet` solution filters | reusable workflows/templates, package feeds |
+
+- **Affected-project detection:** build/test only what changed and what depends on it (dependency graph) — path filters alone miss transitive dependencies.
+
+**Common interview question**
+
+**Q. Monorepo or polyrepo for 30 .NET microservices?**
+Either works with discipline. Monorepo if teams frequently change shared libraries and contracts together and you can invest in affected-build tooling and CODEOWNERS. Polyrepo if teams are autonomous with independent release cycles, sharing via versioned packages and contract tests. The decision is about coupling and tooling investment, not fashion.
+
+---
+
+## 5. Test Strategy: Pyramid, Flakiness, Coverage, Quality Gates
+
+**Key concepts**
+- **Test pyramid:** many fast **unit** tests → fewer **integration/component** tests (real DB via Testcontainers, `WebApplicationFactory`) → **contract** tests (Pact) → very few **E2E/UI** tests. The "testing trophy" emphasizes integration tests for web apps — the principle is cost vs confidence.
+- **Flaky tests:** nondeterministic (timing, shared state, order dependence, external services, async waits). Detect (rerun analysis, flake rate per test), **quarantine** (non-blocking with an owner and deadline), fix root causes; never "retry until green" silently.
+- **Coverage** is a **proxy**: high coverage with weak assertions proves little; use it to find untested risky code, gate on **coverage of changed lines** rather than a global %, and consider **mutation testing** (Stryker.NET) to measure test strength.
+- **Quality gates:** tests pass, no new critical issues (SAST/SCA), coverage on new code, performance budgets, contract verification (can-i-deploy).
+
+```csharp
+// Integration test with WebApplicationFactory + Testcontainers SQL Server
+public sealed class PaymentsApiTests : IAsyncLifetime
+{
+    private readonly MsSqlContainer _sql = new MsSqlBuilder().WithImage("mcr.microsoft.com/mssql/server:2022-latest").Build();
+    private WebApplicationFactory<Program> _factory = default!;
+
+    public async Task InitializeAsync()
+    {
+        await _sql.StartAsync();
+        _factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+            b.UseSetting("ConnectionStrings:Payments", _sql.GetConnectionString()));
+    }
+
+    [Fact]
+    public async Task Duplicate_idempotency_key_returns_same_payment()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("Idempotency-Key", "k-123");
+        var r1 = await client.PostAsJsonAsync("/api/v1/payments", new { amount = "10.00", currency = "EUR" });
+        var r2 = await client.PostAsJsonAsync("/api/v1/payments", new { amount = "10.00", currency = "EUR" });
+        Assert.Equal(await r1.Content.ReadAsStringAsync(), await r2.Content.ReadAsStringAsync());
+    }
+
+    public async Task DisposeAsync() { await _factory.DisposeAsync(); await _sql.DisposeAsync(); }
+}
+```
+
+**Common interview questions**
+
+**Q1. How do you deal with flaky tests?**
+Measure flakiness per test, quarantine flaky tests from the blocking path with an owner and deadline, fix root causes (deterministic time via `TimeProvider`, isolated data, proper async waits instead of sleeps, no shared external services), and track the flake rate as a team metric. Blind auto-retries hide real race conditions.
+
+**Q2. Is 80% code coverage a good quality gate?**
+Not by itself — coverage measures execution, not verification. Gate on coverage of changed code for critical modules, combine with mutation testing for high-risk logic, and focus tests on behaviours and failure paths (idempotency, concurrency, rounding).
+
+**Q3. How do you test microservices without a giant E2E environment?**
+Unit + component tests per service with real dependencies in containers, consumer-driven contract tests between services with can-i-deploy, a thin set of E2E smoke tests for critical journeys, and production verification (synthetic transactions, canaries).
+
+---
+
+## 6. Test Data, Doubles vs Real Dependencies
+
+**Key concepts**
+- **Isolation:** each test creates its own data (unique IDs/tenants), transactions rolled back, or a fresh database per test class/run (Testcontainers, Respawn for resetting) → parallel-safe.
+- **Test doubles** (mocks, stubs, fakes) are fast but can diverge from real behaviour (SQL translation, transactions, serialization). Use **real dependencies in containers** for persistence and messaging; use fakes for slow or non-deterministic external systems (payment providers — via WireMock.Net / sandboxes).
+- Production data in tests: never raw PII; use synthetic or masked data.
+
+**Common interview question**
+
+**Q. EF Core InMemory provider or a real database for tests?**
+A real database (SQL Server/PostgreSQL in Testcontainers) for anything involving queries, transactions, constraints or concurrency — the InMemory provider doesn't translate SQL or enforce relational behaviour and gives false confidence. Unit-test pure domain logic without any database.
+
+---
+
+## 7. Artifact Management & Reproducible Builds
+
+**Key concepts**
+- **Immutable, content-addressed artifacts:** container digests, versioned packages (SemVer + build metadata), checksums; never overwrite a published version.
+- **Artifact repositories:** container registries (ACR/ECR/GHCR), package feeds (Azure Artifacts, GitHub Packages, Artifactory, Nexus) with **upstream proxying** (cache public packages, protect against deletion/compromise).
+- **Retention policies:** balance storage cost, the ability to roll back (keep everything deployed in the last N months), and **compliance** (regulated environments may require keeping released artifacts for years) — don't let a cleanup job delete what's running in production.
+- **Reproducible builds:** pinned SDK (`global.json`), **lock files** (`packages.lock.json`, `RestoreLockedMode`), `Deterministic` + `ContinuousIntegrationBuild=true` (SourceLink), pinned base images by digest, no network fetches of floating versions during build.
+- **Versioning:** SemVer, automated from git (GitVersion, MinVer, Nerdbank.GitVersioning).
+
+```xml
+<!-- Directory.Build.props: deterministic, reproducible .NET builds -->
+<Project>
+  <PropertyGroup>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+</Project>
+```
+
+```json
+// global.json — pin the SDK
+{ "sdk": { "version": "9.0.100", "rollForward": "latestPatch" } }
+```
+
+**Common interview questions**
+
+**Q1. Why reproducible builds?**
+To prove that a given artifact came from a given commit (supply-chain integrity), to rebuild exactly for audits or hotfixes, and to get reliable caching. Pin toolchains, dependencies (lock files) and base images, and avoid time- or environment-dependent outputs.
+
+**Q2. A retention policy deleted the image running in production — how do you prevent that?**
+Retention rules that exempt anything currently deployed or deployed within the rollback window (query the deployment system), tag-based protection for released versions, separate retention for release vs CI-snapshot artifacts, and compliance-driven minimum retention for released artifacts.
+
+---
+
+## 8. Environment Promotion & Gates
+
+**Key concepts**
+- **Promotion pipeline:** dev → test/QA → staging (production-like) → production (often canary → full), with the **same artifact** and increasing blast radius.
+- **Automated gates:** test results, security scan results, contract verification, performance budgets, SLO health of the previous stage, change-window checks.
+- **Human approvals:** where required (regulated releases) — keep them meaningful (show the diff, risk, evidence) and avoid approval theatre; the gate-as-bottleneck problem → replace with automated evidence where possible.
+- **Environment parity:** same IaC modules, same deployment mechanism; differences only in size and config.
+
+```yaml
+# Azure Pipelines multi-stage promotion with environments (approvals/checks configured on the environment)
+stages:
+- stage: Build
+  jobs: [{ job: build, steps: [{ script: dotnet publish -c Release -o $(Build.ArtifactStagingDirectory) }, { publish: $(Build.ArtifactStagingDirectory), artifact: app }] }]
+- stage: DeployTest
+  dependsOn: Build
+  jobs: [{ deployment: test, environment: payments-test, strategy: { runOnce: { deploy: { steps: [{ download: current, artifact: app }, { script: ./deploy.sh test }] } } } }]
+- stage: DeployProd
+  dependsOn: DeployTest
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs: [{ deployment: prod, environment: payments-prod, strategy: { canary: { increments: [10, 50], deploy: { steps: [{ script: ./deploy.sh prod }] } } } }]
+```
+
+**Common interview questions**
+
+**Q1. Manual approval gates are slowing releases. What do you do?**
+Find what the approver actually checks and automate it (tests, scans, change risk scoring, SLO checks, evidence collection); keep manual approval only for genuinely high-risk changes; make approvals informed (risk summary, links) and time-bounded; measure approval wait time.
+
+**Q2. What makes staging trustworthy?**
+Same artifact and deployment mechanism, IaC parity with prod, realistic data volume and shape (masked), production-like integrations or high-fidelity fakes, and observability equal to prod — otherwise it's a false gate.
+
+---
+
+## 9. Progressive Delivery & Rollback Orchestration
+
+**Key concepts**
+- Integrate canary/blue-green into the pipeline: deploy new version → shift a small % of traffic → **automated analysis** (error rate, latency, business KPIs vs baseline) → promote or **auto-rollback**.
+- **Rollback must be first-class and symmetric:** one command/automation, tested regularly; artifacts and config versions retained; DB changes backward compatible (expand–contract) so rollback is safe. Prefer **roll forward** only when rollback isn't possible.
+- **Rollback triggers** defined before the release (SLO burn, error thresholds).
+- Tools: Argo Rollouts, Flagger, Spinnaker, AWS CodeDeploy, Azure Deployment slots/Container Apps revisions, LaunchDarkly/feature flags.
+
+**Common interview question**
+
+**Q. How do you make rollback safe?**
+Immutable artifacts and versioned config to redeploy the previous state, backward-compatible schema changes, idempotent deployment scripts, automated rollback on predefined signals, feature flags as an instant kill switch, and regular rollback drills so the path is known to work.
+
+---
+
+## 10. GitOps vs Push-Based CD; Hotfix Paths
+
+| | Push-based CD | GitOps (pull) |
+|---|---|---|
+| How | the pipeline runs `kubectl`/`helm`/`az` against the target | an agent in the cluster pulls desired state from git and reconciles |
+| Credentials | CI holds deploy credentials to prod | cluster pulls; CI needs no cluster credentials |
+| Drift | not detected | detected and corrected continuously |
+| Audit | pipeline logs | git history = deployment history |
+| Fits | VMs, PaaS, serverless, mixed targets | Kubernetes |
+
+- **Emergency/hotfix path:** the governance blind spot — define it in advance: same pipeline with expedited (not skipped) checks, a minimal approver set, automatic post-incident review, and no manual production changes outside the pipeline (break-glass logged and reconciled into git afterwards).
+
+**Common interview question**
+
+**Q. Production is down and the fix needs to go out now. What's your hotfix process?**
+Mitigate first (rollback/flag/traffic shift); if code is needed, a hotfix branch or commit to main through the same pipeline with an expedited path (critical tests and scans still run, fast approval), progressive rollout if possible, then a post-incident review and backport. Never patch production by hand — and if break-glass was used, reconcile it into git immediately.
+
+---
+
+## 11. Pipeline Security
+
+**Key concepts**
+- CI/CD is a **privileged, attackable surface** (it can deploy to production and holds secrets).
+- Controls: **OIDC federation** to cloud (no static keys), least-privilege per-environment deploy identities, secrets in the platform's secret store (masked), **no secrets to PRs from forks**, `permissions:` minimized per job, pin third-party actions **by commit SHA**, isolated **ephemeral runners** (self-hosted runners on public repos are dangerous), protected branches/environments with required reviewers, CODEOWNERS for pipeline files, signed artifacts and provenance (SLSA), audit logging.
+- Threats: poisoned PRs (`pull_request_target` misuse), compromised actions/plugins, dependency confusion (private package names on public feeds → use package source mapping), stolen runner tokens.
+
+```xml
+<!-- nuget.config: package source mapping prevents dependency confusion -->
+<packageSourceMapping>
+  <packageSource key="internal"><package pattern="Acme.*" /></packageSource>
+  <packageSource key="nuget.org"><package pattern="*" /></packageSource>
+</packageSourceMapping>
+```
+
+**Common interview question**
+
+**Q. How could an attacker abuse your pipeline, and how do you prevent it?**
+By submitting a PR that exfiltrates secrets, compromising a third-party action, publishing a malicious package with your internal name, or stealing long-lived cloud keys. Prevent with OIDC and short-lived credentials, no secrets in fork PR builds, SHA-pinned actions, package source mapping, least-privilege job permissions, protected environments with reviewers, ephemeral isolated runners, and signed provenance verified at deploy.
+
+---
+
+## 12. A Complete .NET Pipeline (GitHub Actions)
+
+```yaml
+name: payments-api
+on: { push: { branches: [main] }, pull_request: {} }
+permissions: { contents: read, id-token: write, packages: write, security-events: write }
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    outputs: { digest: ${{ steps.push.outputs.digest }} }
+    steps:
+      - uses: actions/checkout@v4                                   # (pin by SHA in real pipelines)
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "9.0.x" }
+      - run: dotnet restore --locked-mode && dotnet build -c Release --no-restore -warnaserror
+      - run: dotnet test -c Release --no-build --collect:"XPlat Code Coverage"
+      - uses: github/codeql-action/init@v3
+        with: { languages: csharp }
+      - uses: github/codeql-action/analyze@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: ${{ github.actor }}, password: ${{ secrets.GITHUB_TOKEN }} }
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: ghcr.io/acme/payments-api:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          sbom: true
+          provenance: mode=max
+      - uses: aquasecurity/trivy-action@0.28.0
+        with: { image-ref: "ghcr.io/acme/payments-api:${{ github.sha }}", severity: "CRITICAL,HIGH", exit-code: "1", ignore-unfixed: true }
+
+  deploy-staging:
+    if: github.ref == 'refs/heads/main'
+    needs: ci
+    environment: staging
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "update GitOps repo / deploy digest ${{ needs.ci.outputs.digest }} to staging, then run smoke tests"
+
+  deploy-prod:
+    needs: deploy-staging
+    environment: production          # required reviewers + wait timer configured on the environment
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "progressive rollout of ${{ needs.ci.outputs.digest }} with automated analysis and auto-rollback"
 ```
 
 ---
 
-## 2. Deep Dive
+## 13. Top 30 Rapid-Fire Questions + Principal Questions
 
-### 2.1 Pipeline-as-Code — the Delivery Pipeline as a Reviewed, Versioned Artifact
-A pipeline defined as code (Jenkinsfile, GitHub Actions YAML, GitLab CI YAML, Azure Pipelines YAML) gets everything a versioned artifact provides: PR review before a pipeline change takes effect, a diffable history explaining *why* a stage was added or a gate loosened, and — critically — the ability to reuse the identical pipeline definition across every branch and environment rather than each environment silently diverging via UI-configured, undocumented settings (directly the base+delta parity discipline, applied to pipeline definitions specifically). Modern pipeline-as-code systems further support **reusable, shared pipeline templates** (GitHub Actions' reusable workflows, GitLab's `include`, Jenkins shared libraries) — the pipeline-definition analog of the vetted module registry: a security-scanning stage or a standard deployment step, defined once, centrally maintained, and consumed by every team's pipeline, rather than each team copy-pasting (and inevitably diverging from) a similar but independently-maintained stage definition.
+1. **CI?** Frequent integration with automated build/test.
+2. **Continuous delivery?** Always releasable.
+3. **Continuous deployment?** Auto to prod.
+4. **Trunk-based?** Short-lived branches + flags.
+5. **Pipeline-as-code?** Versioned, reviewed YAML.
+6. **Stage order?** Cheap/fast first.
+7. **Build once?** Promote the same artifact.
+8. **Cache key?** Hash of lock files + toolchain.
+9. **Locked restore?** `packages.lock.json` + `--locked-mode`.
+10. **Affected builds?** Dependency-graph detection.
+11. **Test pyramid?** Many unit, fewer integration, few E2E.
+12. **Flaky tests?** Measure, quarantine, fix.
+13. **Coverage?** A proxy — gate on new code, mutation testing.
+14. **Real DB tests?** Testcontainers.
+15. **Contract tests?** Pact + can-i-deploy.
+16. **Immutable artifacts?** Never overwrite versions.
+17. **Reproducible?** Pinned SDK, locks, deterministic builds.
+18. **Retention risk?** Deleting what prod runs.
+19. **Promotion?** dev → test → staging → prod, same artifact.
+20. **Gates?** Automated evidence over manual approval.
+21. **Progressive delivery?** Canary + analysis + auto-rollback.
+22. **Rollback prerequisite?** Backward-compatible DB changes.
+23. **GitOps advantage?** Pull model, drift correction, git audit.
+24. **Push CD fit?** Non-K8s targets.
+25. **Hotfix?** Same pipeline, expedited checks.
+26. **CI credentials?** OIDC, short-lived.
+27. **Fork PR secrets?** Never exposed.
+28. **Third-party actions?** Pin by SHA.
+29. **Dependency confusion?** Package source mapping.
+30. **SBOM/provenance?** Generated and attested at build.
 
-### 2.2 Build Stage Design — Ordering for Fail-Fast Economics
-Stages should be ordered by a simple economic principle: **cheapest and fastest checks first**, so a change that's going to fail does so in seconds, not after minutes of expensive work that turns out to be wasted. A typical ordering: static analysis/linting (seconds, catches syntax/style issues) → compilation (catches type errors) → unit tests (fast, isolated, no external dependencies) → packaging/build artifact creation → integration tests (slower, may need real or containerized dependencies) → security scanning (the SAST/SCA/IaC scans) → deployment to a validation environment. Violating this ordering — running slow integration tests before cheap linting, say — doesn't change *what* gets caught, only *how expensively and slowly* it gets caught, directly costing developer feedback-loop time on every single failed change, compounding across an organization's total commit volume into a very real productivity cost.
+**Principal-level questions**
 
-### 2.3 Caching — Correctness Is Entirely a Cache-Key Problem
-Caching (dependency downloads, compiled build artifacts, Docker image layers) is CI's single highest-leverage speed optimization — and its single most common correctness hazard. A cache is safe to reuse only if its **key** captures every input that could affect the cached output: a dependency cache keyed only on a lockfile's hash is safe (identical lockfile ⟹ identical resolved dependencies); a build-artifact cache keyed only on source-file hashes but *not* on compiler flags, target platform, or build-tool version is unsafe — a cache hit could silently serve an artifact built under different, no-longer-current conditions, and unlike a cache *miss* (merely slower), a cache **hit on stale data** produces an artifact that looks successfully built but reflects the wrong inputs — a silent correctness failure, not a visible, safely-detected slowdown. The general principle: a cache key must be a *complete* fingerprint of everything the cached output depends on, and any change to any of those inputs must change the key — an incomplete key is a governance gap of the exact shape this course has repeatedly examined (a system's declared behavior — "this cache correctly reflects current inputs" — silently diverging from what's actually true).
+**P1. Standardize CI/CD for 80 repositories without becoming a bottleneck.**
+Reusable workflow/pipeline templates owned by a platform team (versioned, opt-in upgrades with deprecation windows), built-in security and quality gates, golden-path service templates, self-service environments, metrics on pipeline duration and DORA per team, and an extension mechanism for team-specific steps.
 
-### 2.4 Parallelization — Fan-Out for Speed, Fan-In for Correctness
-Independent stages (or independent shards of a large test suite) run in parallel to reduce wall-clock pipeline duration — matrix builds (testing across multiple OS/language-version combinations simultaneously) and test sharding (splitting a large suite across N parallel workers, each running a subset) are the two most common patterns. The correctness requirement often overlooked: parallelized work must **fan back in** to a single, unambiguous overall result before any downstream decision (merge approval, deployment trigger) is made — a pipeline that reports "success" the moment the *first* shard passes, without waiting for and aggregating every shard's result, provides false confidence identical in shape to the rolling-deployment-completed-mechanically-but-not-correctly incident, now occurring at the test-execution level instead of the deployment level.
+**P2. How do you prove to an auditor that only reviewed code reaches production?**
+Branch protection with required independent reviews, CODEOWNERS on sensitive paths, signed commits, builds only on protected branches, immutable signed artifacts with provenance linking commit → build → digest, deployments only via the pipeline with environment protection, admission verification of signatures, and exported audit logs.
 
-### 2.5 Monorepo vs. Polyrepo — the Affected-Project Detection Problem
-A **polyrepo** (one repository per service) naturally scopes CI to exactly what changed — a commit to service A's repository triggers only service A's pipeline, with no ambiguity about scope. A **monorepo** (many services/libraries in one repository) requires CI to compute which projects a given change could possibly affect — running the full test suite for every project on every commit doesn't scale past a modest codebase size, but computing *which subset* is affected requires an accurate, complete dependency graph: a change to a shared library must trigger tests for every project that (transitively) depends on it, and getting this graph **incomplete** — missing a genuine dependency edge — means CI silently skips testing a project a change could actually break, producing exactly this module's central production incident: a declared "these are the affected projects" computation that is, in fact, wrong, with no visible failure signal distinguishing "correctly computed, nothing affected" from "incorrectly computed, missed something." Tools like Bazel, Nx, and Turborepo exist specifically to compute and maintain this dependency graph reliably, but the graph's correctness is only as good as its ability to detect every genuine dependency edge — including non-obvious ones (a runtime dependency loaded via reflection/dynamic import, a build-time code-generation step consuming a shared schema file) that static analysis of import statements alone can miss.
-
-### 2.6 Pipeline Security and Isolation — CI as a Privileged, Attackable Surface
-A CI runner routinely holds real secrets (the reference-not-value principle, delivered into the pipeline for deployment steps), executes arbitrary code from a repository (including, dangerously, from external contributors' pull requests in an open or loosely-controlled repository), and often has meaningful network/cloud access to perform its deployment duties — making it a genuinely attractive and privileged attack target, not a neutral piece of internal tooling. The standard defenses: **never run untrusted PR-triggered workflows with the same secret access as trusted, merged-branch pipelines** (a malicious PR's CI run should not be able to read production deployment credentials); **ephemeral, single-use runners** (each pipeline run gets a freshly-provisioned, disposable execution environment, torn down immediately after, preventing one run's compromise from persisting into or contaminating the next); and **least-privilege scoping** of whatever credentials a given pipeline stage genuinely needs (a test stage needs no cloud-deployment credentials at all; only the deployment stage does) — directly §Advanced Q7's secret-store access-scoping discipline, applied to CI runner permissions specifically.
+**P3. Pipeline takes 45 minutes and developers batch changes. Your plan?**
+Measure stage durations; parallelize; fix caching; move slow suites off the PR path with fast post-merge feedback; shard tests by duration; fix or quarantine flaky tests; adopt affected-project builds; use larger/faster runners where cheap. Target < 10 minutes for the PR path and track it.
 
 ---
 
-## 3. Visual Architecture
+## 14. Mistakes Checklist (say why each is wrong)
+- [ ] Long-lived feature branches · merging without required checks
+- [ ] Rebuilding per environment · mutable artifact versions · `latest` deployments
+- [ ] Caches keyed too broadly (stale/poisoned) · floating dependency versions
+- [ ] Slow PR pipelines with E2E suites · auto-retrying flaky tests silently
+- [ ] Coverage % as the only quality gate · InMemory DB for integration tests
+- [ ] Manual approvals with no evidence · staging that doesn't resemble prod
+- [ ] No tested rollback · breaking schema changes before code
+- [ ] Manual hotfixes in prod · break-glass changes never reconciled into git
+- [ ] Static cloud keys in CI · secrets exposed to fork PRs · unpinned third-party actions
 
-### Fail-Fast Staged Pipeline with Parallel Fan-Out/Fan-In
+---
+
+## Architecture Diagrams (preserved from the original modules)
+
+> All 11 Mermaid/ASCII diagrams from the original `26-CICD/` files, kept verbatim and grouped by source module. Originals: `git show ebb2d5c:26-CICD/<file>.md`.
+
+### Module 89 — CI/CD: CI Pipeline Architecture — Pipeline-as-Code, Build Stages, Caching & Monorepo/Polyrepo Strategies
+*Source: `01-CIPipelineArchitecture-PipelineAsCode-Caching-Monorepo.md`*
+
+**Fail-Fast Staged Pipeline with Parallel Fan-Out/Fan-In**
+
 ```mermaid
 graph TB
  Commit["Commit / PR opened"]
@@ -79,354 +447,8 @@ graph TB
  FanIn --> Scan --> Package --> Deploy
 ```
 
-### Monorepo Affected-Project Detection — the Dependency Graph's Blind Spot
-```
-Declared dependency graph (from static import analysis):
- ServiceA --> SharedLibX
- ServiceB --> SharedLibX
- ServiceC --> (no declared dependency on SharedLibX)
+**12. System Design**
 
-ACTUAL runtime dependency (via reflection-based plugin loading,
-invisible to static import analysis):
- ServiceC...actually...loads SharedLibX's plugin interface at runtime
-
-Change to SharedLibX:
- CI computes "affected" = {ServiceA, ServiceB} <-- INCOMPLETE
- ServiceC is NOT tested <-- silent gap
- ServiceC breaks in PRODUCTION, weeks later <-- Sec4's incident
-```
-
----
-
-## 4. Production Example
-
-**Scenario**: A large e-commerce organization's monorepo used a popular build-graph tool to compute "affected projects" per commit, running full test suites only for projects the tool identified as potentially impacted — a well-adopted, seemingly reliable optimization that had run correctly for over a year, giving the organization strong confidence in the affected-project computation's completeness. A shared authentication library was updated to change a token-validation function's default behavior in a subtle, backward-incompatible way. The build-graph tool correctly identified and tested the twelve services with a *statically declared* (import-statement-visible) dependency on the library — all twelve passed. Three weeks later, a thirteenth service — one that loaded the authentication library's validation logic via a runtime plugin-discovery mechanism (a dynamic assembly load based on a configuration-driven type name, invisible to the build-graph tool's static-import-based dependency analysis) — began silently accepting invalid tokens in production, a genuine authentication bypass, discovered only through an unrelated security audit.
-
-**Investigation**: The build-graph tool's dependency graph was built entirely from static source analysis (parsing import/using statements across the codebase) — a sound, fast, and *usually* complete approach, but one with a structural blind spot for any dependency established at runtime rather than compile time: reflection-based loading, configuration-driven dynamic type resolution, and plugin-discovery patterns are all, by design, invisible to static analysis, since the actual dependency edge exists only in behavior observed when the code runs, not in any statically parseable reference.
-
-**Root cause**: The organization had implicitly trusted the build-graph tool's dependency computation as complete, with no independent verification and no fallback safety net for the specific class of dependency (runtime/reflection-based) the tool was structurally unable to detect — precisely this course's recurring "a declared computation (here, 'these are the affected projects') is not automatically the same as the actual, complete truth" pattern (Modules 74/75/76/78/79/85/86/87/88), now recurring in build-graph dependency analysis specifically.
-
-**Fix**: (1) Immediately audited every service in the monorepo for reflection/dynamic-loading-based dependencies on shared libraries, manually annotating each with an explicit, non-static "declared dependency" marker the build-graph tool could additionally honor (a supplementary, manually-maintained edge list covering exactly the blind spot static analysis couldn't see); (2) as a structural backstop, added a much lower-frequency (nightly, not per-commit) **full-suite run across every project regardless of the affected-project computation**, specifically designed to catch exactly this class of dependency-graph-blind-spot gap within at most 24 hours rather than three weeks; (3) established a policy requiring any new reflection/dynamic-loading pattern introduced against a shared library to be accompanied by an explicit dependency-graph annotation in the same PR, treated as a required review item.
-
-**Lesson**: A build-graph tool's affected-project computation is, in the exact sense this course has established repeatedly, a *declared* claim about what's affected — and like every other declared state examined across this entire curriculum, it requires either comprehensive coverage of every genuine dependency mechanism (impossible to guarantee for dynamically-established dependencies via static analysis alone) or an independent, periodic verification backstop (the nightly full-suite run) catching what the primary mechanism structurally cannot see — the identical "cover every path, and verify rather than merely trust a declared computation" principle the capstone distilled, now applied to CI's own core optimization technique.
-## 10. Interview Questions
-
-### Basic (10)
-
-1. **Q: What is Continuous Integration?**
- **A:** The practice of automatically building, testing, and validating every code change (ideally on every commit or PR) so integration problems surface within minutes rather than accumulating until an infrequent, painful integration effort.
- **Why correct:** States both the mechanism (automated build/test on every change) and the specific problem it solves (early, cheap detection versus late, expensive detection).
- **Common mistakes:** Describing CI as merely "running tests," without the "on every change, automatically" emphasis that makes it continuous.
- **Follow-ups:** "Why does detection timing matter so much?" (A broken change is attributable to one small, recent commit when caught immediately; caught weeks later, it's buried among many changes, making root-causing far more expensive.)
-
-2. **Q: What is pipeline-as-code?**
- **A:** Defining a CI/CD pipeline's stages and configuration in a version-controlled file (a Jenkinsfile, a GitHub Actions YAML) rather than through a UI, giving the pipeline definition the same review/diff/history benefits as application code.
- **Why correct:** States the mechanism (versioned file) and the specific benefit (reviewability/history) that distinguishes it from UI-configured pipelines.
- **Common mistakes:** Believing pipeline-as-code is only about avoiding manual clicking, missing the more important reviewability and cross-environment consistency benefits.
- **Follow-ups:** "What does this parallel from the Infrastructure-as-Code domain?" (the core argument for IaC over manual console changes — reviewable, repeatable, auditable change management.)
-
-3. **Q: Why should cheap checks (linting, compilation) run before expensive ones (integration tests) in a pipeline?**
- **A:** So a change that's going to fail does so in seconds rather than after minutes of expensive, ultimately-wasted work — the ordering doesn't change what's caught, only how quickly and cheaply.
- **Why correct:** States the fail-fast economic principle precisely.
- **Common mistakes:** Assuming stage order is arbitrary or purely a matter of convention rather than a deliberate cost-optimization decision.
- **Follow-ups:** "What's the downstream cost of getting this ordering wrong at organizational scale?" (Wasted compute and developer feedback-loop time multiplied across every failed commit across the entire organization's commit volume.)
-
-4. **Q: What must a build cache key capture to be correct?**
- **A:** Every input that could affect the cached output — not just source file hashes, but also compiler flags, tool versions, target platform, and any other variable the build depends on.
- **Why correct:** States the completeness requirement precisely, distinguishing a correct cache key from a merely-common but incomplete one.
- **Common mistakes:** Assuming a source-hash-only cache key is sufficient, missing that other build inputs (flags, tool versions) can change the output without changing the source.
- **Follow-ups:** "Why is an incomplete cache key worse than no cache at all?" (A cache miss is merely slower — safe; an incomplete key causing a stale cache *hit* silently serves outdated output that looks successfully built, a correctness failure rather than a visible slowdown.)
-
-5. **Q: What is test sharding?**
- **A:** Splitting a large test suite across multiple parallel workers, each running a subset of tests, to reduce total wall-clock pipeline duration.
- **Why correct:** States the mechanism (splitting a suite across parallel workers) and its purpose (reducing wall-clock time).
- **Common mistakes:** Believing sharding reduces total compute cost — it doesn't; it reduces wall-clock duration by running the same total work in parallel rather than sequentially.
- **Follow-ups:** "What must happen after all shards complete?" (Fan-in: aggregating every shard's result before declaring overall success — reporting success after only the first shard passes is a correctness gap.)
-
-6. **Q: What is the difference between a monorepo and a polyrepo, from a CI perspective?**
- **A:** A polyrepo naturally scopes CI to exactly what changed (one repository per service); a monorepo (many services/libraries in one repository) requires CI to explicitly compute which projects a given change could affect, since testing everything on every commit doesn't scale.
- **Why correct:** Identifies the specific CI-scoping challenge (affected-project computation) that monorepos introduce and polyrepos avoid by structure.
- **Common mistakes:** Believing monorepo vs. polyrepo is purely a code-organization preference with no CI-architecture consequence.
- **Follow-ups:** "Name a tool that computes this affected-project graph." (Bazel, Nx, or Turborepo.)
-
-7. **Q: Why shouldn't an untrusted, externally-triggered PR pipeline run have the same secret access as a trusted, merged-branch pipeline?**
- **A:** A CI runner executing arbitrary code from a pull request (potentially from an untrusted external contributor) could exfiltrate any secret it has access to — granting PR-triggered runs the same production-deployment credentials as trusted pipelines turns any malicious PR into a direct path to credential theft.
- **Why correct:** States the specific attack vector (arbitrary code execution plus secret access) that this isolation defends against.
- **Common mistakes:** Treating CI runners as neutral internal tooling rather than a privileged, genuinely attackable surface.
- **Follow-ups:** "What's a complementary defense beyond access scoping?" (Ephemeral, single-use runners, ensuring one run's potential compromise doesn't persist into or contaminate subsequent runs.)
-
-8. **Q: What is a reusable pipeline template (e.g., a GitHub Actions reusable workflow)?**
- **A:** A pipeline stage or sequence defined once, centrally maintained, and consumed by multiple teams' pipelines — the pipeline-definition analog of a shared, vetted infrastructure module.
- **Why correct:** States the mechanism (define once, consume many) and draws the direct parallel to shared infrastructure modules.
- **Common mistakes:** Each team copy-pasting a similar pipeline stage independently, which inevitably diverges over time rather than staying consistent.
- **Follow-ups:** "What governance benefit does this provide?" (A security-scanning stage update propagates to every consuming pipeline automatically, rather than requiring each team to independently update their own copy.)
-
-9. **Q: What is an ephemeral CI runner?**
- **A:** A freshly-provisioned, disposable execution environment created for a single pipeline run and torn down immediately after, rather than a long-lived, reused runner.
- **Why correct:** States both the provisioning model (fresh per run) and the disposal behavior (torn down after).
- **Common mistakes:** Assuming a long-lived, reused runner is more efficient without considering the security risk of state or compromise persisting across runs.
- **Follow-ups:** "What risk does this specifically mitigate?" (A compromised or misbehaving run contaminating or persisting state into subsequent, unrelated runs on the same runner.)
-
-10. **Q: What does "fan-in" mean in a parallelized pipeline?**
- **A:** Aggregating the results of every parallel branch (shards, matrix combinations) into one unambiguous overall result before any downstream decision (merge approval, deployment) is made.
- **Why correct:** States the aggregation requirement precisely, distinguishing correct fan-in from a premature "first shard passed" success signal.
- **Common mistakes:** Believing parallelization alone guarantees correctness without also correctly aggregating every parallel result.
- **Follow-ups:** "What's the failure mode of skipping proper fan-in?" (Reporting overall success while some shards are still running or have actually failed — a false-positive success signal.)
-
-### Intermediate (10)
-
-1. **Q: Why does an incomplete build cache key produce a fundamentally different kind of failure than a cache miss?**
- **A:** A cache miss simply means the build proceeds without reuse — slower, but the output is freshly and correctly computed from current inputs, a safe (if suboptimal) outcome. An incomplete cache key that produces a stale cache *hit* serves an artifact built under different, no-longer-current conditions (different compiler flags, an older dependency version) while the pipeline reports success — the output looks correctly built but silently reflects the wrong inputs, a correctness failure indistinguishable from a genuine success without deeper investigation.
- **Why correct:** Precisely distinguishes the two failure classes (safe-but-slow vs. silent-and-wrong) and why only the latter is genuinely dangerous.
- **Common mistakes:** Treating "adding more caching" as a strictly positive optimization without considering that an incorrectly-scoped cache key introduces a new correctness risk class that didn't exist without caching at all.
- **Follow-ups:** "How would you detect a cache-key completeness gap before it causes a production incident?" (Periodically running a build with caching fully disabled and diffing its output against the cached build's output — any difference reveals a cache-key gap.)
-
-2. **Q: Why does the build-graph incident recur the same structural pattern as the Terraform drift and the configuration drift, despite involving neither infrastructure nor configuration?**
- **A:** In all three cases, an automated system computes and reports a *declared* state (Terraform's plan reflecting infrastructure reality, a config repo's declared values, a build-graph tool's affected-project set) that is trusted as authoritative — but each had a blind spot (an out-of-band infrastructure change, an undeclared configuration edit, a dependency mechanism invisible to static analysis) the declaring system couldn't see, producing a confidently-reported but incomplete or wrong declaration. The specific artifact differs, but the structural gap — a declared computation trusted as complete without independent verification of its actual completeness — is identical.
- **Why correct:** Names the shared abstract structure across all three incidents rather than treating each as a domain-specific coincidence.
- **Common mistakes:** Treating the monorepo dependency-graph incident as a novel, CI-specific problem unrelated to this course's prior findings, rather than recognizing and predicting it as the same recurring pattern in a new domain.
- **Follow-ups:** "What diagnostic question would this pattern-recognition prompt for a new, not-yet-encountered automated computation?" ("What does this computation's declared output not have visibility into, and what backstop verifies it independently?")
-
-3. **Q: A team argues that since their monorepo's build-graph tool has correctly identified affected projects for over a year with zero missed regressions, the tool's dependency graph is provably complete. Evaluate this claim.**
- **A:** This is the identical fallacy §Intermediate Q5 identified for drift-detection history — a clean track record is evidence bounded by the specific dependency patterns that have actually occurred and been exercised during that period, not proof that every possible dependency mechanism (including ones not yet present in the codebase, like a newly-introduced reflection-based plugin pattern) is correctly detected. the incident occurred after a full year of apparently flawless operation, specifically because the blind spot (runtime/reflection-based dependencies) simply hadn't been exercised by any change during that year — the tool's structural limitation existed the entire time, invisible until a change happened to fall into its specific blind spot.
- **Why correct:** Applies the established "clean history is bounded evidence, not proof of general correctness" principle precisely to this new context.
- **Common mistakes:** Treating a long track record of correct results as increasingly strong proof of general completeness, rather than recognizing it as evidence bounded by what's actually been tested against.
- **Follow-ups:** "How would you actively test whether the tool's blind spot is real, rather than waiting for an incident to reveal it?" (Deliberately introduce a known reflection/dynamic-loading dependency in a test project and confirm the tool's affected-project computation does or doesn't correctly flag it — an active, adversarial verification rather than passive trust in absence of incidents.)
-
-4. **Q: Why might running the full test suite on every commit, "just to be safe," actually be a worse choice than a well-designed affected-project computation with a periodic full-suite backstop, even accounting for the incident?**
- **A:** Running the full suite on every commit doesn't scale as a codebase and commit frequency grow — feedback-loop time (minutes to hours per commit) directly degrades every developer's velocity, on every single commit, permanently, in exchange for protection against a dependency-graph-blind-spot class of bug that a periodic (not per-commit) full-suite backstop already catches within a bounded, short window (the fix: nightly). The "always run everything" approach trades a large, certain, permanent cost (slow feedback on every commit) for protection against a risk a much cheaper, bounded-latency backstop already substantially mitigates — the risk-tiering principle this entire course has repeatedly applied favors matching the safeguard's cost to the actual risk it addresses, not defaulting to maximum-cost coverage for every risk regardless of a cheaper, nearly-as-effective alternative.
- **Why correct:** Weighs the certain, permanent cost of "always run everything" against the bounded, occasional cost of a periodic backstop, applying this course's established risk-tiering discipline.
- **Common mistakes:** Assuming maximum safety (run everything, always) is unconditionally the correct response to a discovered gap, without weighing its certain, ongoing cost against a cheaper backstop's actual risk-mitigation effectiveness.
- **Follow-ups:** "What would change this calculus toward favoring full-suite-on-every-commit?" (A codebase small enough, or a full suite fast enough, that the feedback-loop cost is genuinely negligible — at which point the affected-project computation's complexity may not be worth its own maintenance burden at all.)
-
-5. **Q: Why does a pipeline reusable-template system introduce the same "shared artifact needs library-grade governance" consideration this course established for infrastructure modules and golden-path scaffolding templates?**
- **A:** A reusable pipeline template (a shared security-scanning stage, say) consumed by dozens of teams' pipelines means a defect or an unreviewed change to that template propagates to every consumer simultaneously — identical in structure to the infrastructure-module-registry governance and the golden-path-template drift finding. A shared template requires the same versioning, review rigor, and change-management discipline as any other widely-depended-upon shared artifact; treating it as "just a CI config snippet" that can be casually modified underestimates its actual, organization-wide blast radius.
- **Why correct:** Draws the precise parallel to two specific, already-established findings about shared-artifact governance rather than treating pipeline templates as a uniquely CI-specific concern.
- **Common mistakes:** Modifying a widely-shared pipeline template with the same casualness as a single team's private pipeline configuration, underestimating its actual consumer footprint.
- **Follow-ups:** "How would you determine a pipeline template's actual consumer footprint before changing it?" (A dependency/usage index — directly analogous to the SBOM-based CVE-impact query — showing every pipeline that references the template, so a change's blast radius is known before it's made, not discovered afterward.)
-
-6. **Q: What's the difference between a build being non-deterministic and a build cache being incorrectly keyed, and why might they be confused with each other during debugging?**
- **A:** A non-deterministic build produces different output from *identical* inputs, run to run (e.g., due to unordered file-system iteration, timestamp embedding, or non-deterministic dependency resolution) — a build-process defect independent of caching entirely. An incorrectly-keyed cache instead serves *stale* output because the key failed to capture a genuinely *changed* input — a cache-configuration defect. Both can present identically during debugging: "the build output doesn't match what I expect given the current source," making it easy to misdiagnose a non-deterministic build as a cache bug (leading to fruitlessly auditing cache keys) or a cache-key bug as build non-determinism (leading to fruitlessly chasing phantom non-determinism in a build process that's actually fine). Distinguishing them requires disabling caching entirely and re-running the build twice from identical inputs — if outputs still differ, it's non-determinism; if they now match, it was a cache-key gap.
- **Why correct:** Precisely distinguishes the two failure classes' underlying cause and names the specific diagnostic (disable caching, re-run twice) that separates them.
- **Common mistakes:** Assuming any build-output inconsistency is automatically a cache problem (or automatically a determinism problem) without the diagnostic step that actually distinguishes the two.
- **Follow-ups:** "Why does build non-determinism matter even independent of caching?" (It breaks reproducible builds and provenance verification, — an artifact's build can't be independently re-verified to match its claimed source if the build process itself isn't deterministic.)
-
-7. **Q: Why does matrix-build testing (multiple OS/language-version combinations) have a fan-in requirement identical in principle to test sharding, and what's a realistic way this requirement gets violated?**
- **A:** Both are parallel fan-out patterns requiring every branch's result to be aggregated before an overall pass/fail decision — a matrix build testing five OS/version combinations that reports "pipeline passed" based on a required-checks configuration listing only *some* of the five combinations as required (with the rest configured as non-blocking, informational-only) silently permits merges despite genuine failures in the non-required combinations, an identical fan-in gap to reporting success after only the first test shard completes. This commonly happens innocently: a matrix combination is initially added as "experimental, non-blocking" during early adoption, and never gets promoted to required status even after it stabilizes, leaving a permanent, unnoticed fan-in gap.
- **Why correct:** Draws the precise structural parallel between matrix-build required-check configuration and shard-level fan-in, and identifies a realistic, innocent path to the gap's introduction.
- **Common mistakes:** Assuming a matrix build's "all green checkmarks" UI presentation reflects genuine, complete aggregation without checking whether every matrix combination is actually configured as a required, blocking check.
- **Follow-ups:** "How would you audit for this gap across an organization's pipelines?" (Programmatically checking every pipeline's required-status-check configuration against its actual matrix/shard definition, flagging any combination present in the matrix but absent from required checks.)
-
-8. **Q: How should ephemeral runner provisioning latency be weighed against long-lived runner reuse's performance advantage?**
- **A:** Long-lived, reused runners avoid per-run provisioning latency and can retain warm caches (dependency downloads, compiled artifacts) across runs, meaningfully speeding up pipeline execution — but at the security cost identifies (state/compromise persistence across runs). The resolution isn't necessarily choosing one extreme: ephemeral runners can still benefit from external, shared caching (the dependency/build caches, stored independently of the runner's own local disk and fetched fresh each run) — decoupling "avoid re-fetching/re-computing identical work" (served by external caching) from "reuse the same execution environment across runs" (the actual security risk) lets an organization gain most of long-lived runners' performance benefit via caching, while still gaining ephemeral runners' security isolation, rather than treating the two properties as an inseparable package deal.
- **Why correct:** Decomposes the apparent trade-off into its two separable components (caching vs. environment reuse) and shows both benefits can largely be achieved independently.
- **Common mistakes:** Treating "ephemeral runners" and "no caching, therefore slow" as an inseparable package, without recognizing external caching can be layered onto ephemeral runners just as effectively as onto long-lived ones.
- **Follow-ups:** "What residual security risk remains even with well-designed external caching on ephemeral runners?" (The external cache store itself becomes an attack surface — a malicious PR run could potentially poison a shared cache with tampered artifacts a later, trusted run then consumes; cache write access needs its own scoping discipline, e.g., only trusted, merged-branch runs may write to the shared cache, while PR runs may only read.)
-
-9. **Q: Why does pipeline-as-code's reviewability benefit matter specifically for security-relevant pipeline changes, beyond general software-engineering best practice?**
- **A:** A pipeline definition change that weakens a security gate (removing a required scan step, loosening a required-check configuration, adding a new secret-access scope to a stage) is functionally equivalent in severity to a security-relevant application code change or infrastructure change — but if pipeline configuration lives in a UI with no PR review requirement, such a change could be made silently, with no reviewer ever seeing it, directly recreating the out-of-band infrastructure change and the out-of-band configuration change, now in the pipeline definition itself — arguably a higher-leverage target for a malicious insider or a compromised credential than either, since a weakened pipeline can then wave through arbitrarily many subsequent malicious changes.
- **Why correct:** Identifies the specific, high-leverage risk (a pipeline's own definition is itself a security control, and weakening it undetected undermines everything downstream) that makes pipeline-as-code's reviewability a security requirement, not merely a convenience.
- **Common mistakes:** Treating pipeline-as-code purely as a developer-convenience or software-engineering-hygiene practice, missing its role as a security control in its own right.
- **Follow-ups:** "What additional control would you add specifically for pipeline-definition changes, beyond ordinary PR review?" (Requiring a distinct, security-team-inclusive review specifically for changes touching required-check configuration, secret-access scopes, or scan-step removal — treating these as a distinguishable, higher-scrutiny change category, directly §Advanced Q8's risk-tiered review principle applied to pipeline-definition changes.)
-
-10. **Q: How does this module's central finding — an automated, declared computation (the affected-project graph) trusted without independent verification — connect to and extend the capstone synthesis?**
- **A:** distilled the entire DevOps domain into "cover every write path, verify rather than merely document every capability, and make the compliant path the easiest path." This module's incident is a precise instance of the middle principle — the build-graph tool's affected-project computation was never independently, adversarially verified (no deliberate test of its blind spots, no periodic backstop) despite being relied upon as if it were verified — extending the capstone's principle from infrastructure/configuration/policy artifacts specifically into CI's own core automated-computation mechanisms, confirming the principle generalizes beyond the specific artifact types examined into any automated system whose output is trusted as ground truth without deliberate verification of its actual completeness.
- **Why correct:** Explicitly connects this module's specific finding to the named unifying principle, demonstrating the principle's generality beyond its original context.
- **Common mistakes:** Treating this module's build-graph incident as an unrelated, CI-specific lesson rather than recognizing it as further confirming evidence for the course's central, cross-domain governance principle.
- **Follow-ups:** "What would you predict about test-sharding fan-in using this same lens, before ever encountering a specific incident?" (That a fan-in mechanism, like any declared "aggregation complete and all-passing" computation, requires the identical verification discipline — deliberately testing that a genuinely-failing shard is correctly reflected in the overall result, not merely trusting the aggregation logic because it's usually observed to work.)
-
-### Advanced (10)
-
-1. **Q: Diagnose the incident from first principles and design the complete structural fix — not merely adding the nightly full-suite backstop.**
- **A:** Root cause: an automated dependency-graph computation with a structural blind spot (runtime/reflection-based dependencies, invisible to static analysis) trusted as complete with no independent verification and no fallback mechanism for the specific class of dependency it couldn't detect. Structural fix: (1) the nightly full-suite backstop, bounding detection latency for any blind-spot-class gap to at most 24 hours; (2) a manually-maintained supplementary dependency-edge annotation mechanism for any known reflection/dynamic-loading pattern, closing the specific blind spot proactively rather than only reactively via the backstop; (3) a required-review policy for any new dynamic-loading pattern against a shared library, requiring an explicit dependency annotation in the same PR; (4) periodic, deliberate adversarial testing of the build-graph tool's blind spots (Intermediate Q3) — introducing a known reflection-based dependency in a test scenario and confirming the annotation mechanism (not the tool alone) correctly flags it — converting "we assume the tool has this blind spot" into a continuously-verified fact rather than a one-time incident-driven realization.
- **Why correct:** Addresses the immediate gap, the systemic blind-spot class, the process preventing recurrence via new dynamic-loading patterns, and ongoing verification rather than a one-time fix.
- **Common mistakes:** Fixing only via the nightly backstop without also addressing the proactive annotation mechanism or the ongoing verification discipline that would catch a similar blind spot in a different form later.
- **Follow-ups:** "Why is the manually-maintained annotation mechanism valuable even with the nightly backstop already in place?" (It closes the specific gap proactively, within minutes at PR time, rather than accepting up to 24 hours of exposure for every occurrence — defense-in-depth, not redundancy.)
-
-2. **Q: A platform team proposes replacing the affected-project build-graph computation entirely with "always run the full suite on every commit," specifically citing the incident as justification. Evaluate this as a Principal Engineer, referencing Intermediate Q4's reasoning.**
- **A:** This overreacts to a single incident by adopting the maximum-cost, maximum-safety extreme rather than a risk-proportionate fix — Intermediate Q4 already established that a periodic backstop bounds the specific risk class (blind-spot dependencies) to a short, defined latency window at a small fraction of the ongoing cost "always run everything" would impose permanently, on every commit, across the organization's entire commit volume indefinitely. The correct response to is Advanced Q1's structural fix (backstop plus proactive annotation plus ongoing verification), not abandoning the affected-project optimization's substantial, continuous velocity benefit in response to one incident whose actual risk is now bounded by cheaper means.
- **Why correct:** Applies the established risk-proportionate-response principle, explicitly referencing the specific cost/benefit reasoning that makes the proposed overreaction unjustified.
- **Common mistakes:** Treating any single significant incident as justification for abandoning an optimization entirely, rather than asking whether a cheaper, risk-proportionate fix (already designed in Advanced Q1) adequately addresses the actual residual risk.
- **Follow-ups:** "Under what circumstances would 'always run the full suite' actually become the right call?" (If the codebase/suite size shrinks, or compute becomes cheap enough, that the affected-project computation's own maintenance and blind-spot-management burden exceeds the cost of simply running everything — a genuine cost-crossover point, not a response to a single incident.)
-
-3. **Q: Design a cache-key completeness verification mechanism that would have caught a cache-key gap (§Intermediate Q1) before it caused a production incident, without requiring a full "disable caching, run twice" comparison on every single build.**
- **A:** Run the full "disable caching, compare against cached output" verification not on every build (prohibitively expensive) but on a scheduled, periodic sample (directly mirroring the nightly full-suite backstop pattern) — e.g., nightly, or on every Nth build, disable caching entirely for that one run and diff its output against what the cache would have served for the identical inputs, alerting on any divergence. This converts an expensive, universally-applied verification into a bounded-cost, periodic sampling check that still catches a cache-key completeness gap within a defined, short latency window, applying the identical "periodic backstop bounds detection latency at a fraction of full-coverage cost" principle Advanced Q1/Intermediate Q4 established for the build-graph incident, now applied to cache-key verification specifically.
- **Why correct:** Directly reapplies this module's own established risk-proportionate periodic-backstop pattern to a different specific verification need, demonstrating the pattern's reusability.
- **Common mistakes:** Proposing either no verification at all (trusting cache correctness indefinitely) or full, expensive verification on every build (recreating the exact cost problem periodic backstops exist to avoid).
- **Follow-ups:** "What would you do differently if the periodic sampled check found a divergence?" (Immediately disable the specific cache (or the specific key dimension implicated) pending investigation, rather than allowing the discovered-incomplete cache to continue silently serving potentially-stale artifacts while the root cause is investigated — treating a confirmed gap differently from the absence-of-evidence state the periodic check otherwise provides.)
-
-4. **Q: How would you design pipeline-as-code governance (§Intermediate Q9) to prevent a security-weakening pipeline change from being silently merged, without creating so much review friction that legitimate, frequent pipeline iteration becomes impractical?**
- **A:** Apply risk-tiered review (this course's now-thoroughly-established principle) to pipeline-definition changes specifically: changes touching a narrowly-defined, high-risk category (required-check removal, secret-scope additions, security-scan-stage modification or removal) require mandatory security-team-inclusive review as a specifically-tagged, higher-scrutiny change class — enforceable mechanically via a CODEOWNERS-style rule requiring specific reviewer groups for changes touching specific pipeline-definition file sections — while the vast majority of ordinary pipeline iteration (adding a new build step, adjusting a timeout, adding a new test category) proceeds through normal, lightweight review, exactly as it would for any other code change. This mirrors §Advanced Q8's plan-review tiering precisely, applied to pipeline-as-code changes: uniform maximum scrutiny on every pipeline change would recreate the reviewer-fatigue problem that framework specifically warned against, while zero specialized scrutiny for security-relevant pipeline changes recreates §Intermediate Q9's silent-weakening risk.
- **Why correct:** Applies risk-tiered review specifically and mechanically (via a concrete enforcement mechanism, not just a stated policy) to the narrow, genuinely high-risk subset of pipeline changes, avoiding both under- and over-scrutiny extremes.
- **Common mistakes:** Either requiring uniform, maximum-scrutiny review for every pipeline change (causing reviewer fatigue and slower iteration on routine changes) or leaving pipeline-definition changes entirely to ordinary, non-specialized review (missing the specific, high-leverage security risk).
- **Follow-ups:** "How would you technically enforce that a change touching a defined 'high-risk pipeline section' actually requires the specialized reviewer, rather than relying on reviewers noticing on their own?" (A CODEOWNERS file (or equivalent) mapping specific pipeline-definition file paths/sections to required reviewer groups, mechanically blocking merge without their approval — removing reliance on a general reviewer noticing the change's security relevance unprompted.)
-
-5. **Q: A team's CI pipeline for a monorepo project takes 45 minutes end-to-end, and engineers have begun the habit of merging without waiting for CI to complete, planning to "fix forward" if something breaks. Diagnose the underlying incentive problem and design a fix that doesn't simply mandate "wait for CI" as an unenforceable policy.**
- **A:** A 45-minute pipeline creates a genuine, rational incentive to bypass waiting — the cost (45 minutes of blocked progress) is concrete and immediate, while the benefit (catching a regression before merge rather than after) is probabilistic and often, for any single change, doesn't materialize; this is the identical friction-driven-bypass dynamic established generally, now manifesting as merge-without-waiting rather than a governance-tool bypass. The fix isn't a policy mandate (unenforceable against a rational, understandable incentive) but addressing the actual friction: (1) apply/the fail-fast ordering and parallelization aggressively to shrink the *typical* feedback time for the common case (most changes don't touch the slowest paths — ensure the pipeline reflects that via affected-project scoping); (2) technically enforce required-status-checks at the merge-gate level (a branch-protection rule preventing merge until CI genuinely completes and passes), removing the *ability* to bypass rather than relying on discipline; (3) if genuine pipeline duration remains a real velocity cost even after optimization, treat that as a legitimate, separate investment case (further parallelization, better caching) rather than accepting bypass as the status quo resolution.
- **Why correct:** Identifies the specific, rational (not merely careless) incentive driving the bypass behavior and proposes both a technical-enforcement fix (removing the ability to bypass) and a root-cause optimization (reducing the friction that motivates the bypass in the first place), rather than a policy mandate alone.
- **Common mistakes:** Responding with a purely policy-based "engineers must wait for CI" mandate without addressing either the technical enforceability gap or the underlying, rational time-cost incentive driving the behavior.
- **Follow-ups:** "Why is technical enforcement (branch protection) more durable than a stated policy alone?" (It removes the *capability* to bypass rather than relying on every individual engineer's discipline under time pressure — the same "make bypass structurally impossible, not merely discouraged" principle established for policy-as-code enforcement.)
-
-6. **Q: How would you design test-flakiness handling in CI such that a genuinely flaky (non-deterministically failing) test doesn't either permanently block merges or silently mask a real, intermittent regression?**
- **A:** Neither extreme is acceptable: treating every flaky-test failure as blocking eventually trains engineers to distrust and route around CI entirely (the same bypass-incentive dynamic as Advanced Q5), while automatically retrying and ignoring any intermittent failure risks masking a genuine, intermittent *regression* (a real race condition or resource-exhaustion bug that manifests non-deterministically) as if it were merely test infrastructure flakiness. The resolution: track each test's failure pattern over time (a dedicated flaky-test detection system correlating failures against code changes) — a test failing intermittently with no correlation to recent changes to the code it exercises is a strong flaky-test signal (quarantine it, non-blocking, with a mandatory, tracked remediation ticket, not indefinite silent tolerance); a test whose failure rate spikes coincident with a specific recent change is a strong regression signal (block merge, investigate as a real bug) regardless of whether the test has historically also shown some baseline flakiness. The key design principle: flaky-test handling must be data-driven (correlated against change history) rather than a blanket policy applied identically to every intermittent failure.
- **Why correct:** Rejects both extremes (always-block, always-ignore) and proposes a data-driven differentiation between genuine flakiness and a masked regression based on correlation with recent changes.
- **Common mistakes:** Applying a uniform policy (always retry-and-ignore, or always hard-block) to every intermittently-failing test, without differentiating based on whether the intermittency correlates with recent, relevant code changes.
- **Follow-ups:** "Why must quarantined flaky tests carry a mandatory, tracked remediation ticket rather than indefinite silent tolerance?" (An indefinitely-quarantined flaky test provides zero ongoing test coverage for whatever it was meant to verify — exactly §Advanced Q9's 'a documented-but-unexercised capability is unverified' principle, applied to test coverage itself, which silently degrades if quarantine becomes permanent rather than a tracked, time-bound exception.)
-
-7. **Q: Design the CI architecture for a monorepo where certain projects require genuinely different toolchains/languages (e.g., a Python data-pipeline project alongside several.NET services) sharing the same build-graph and affected-project computation.**
- **A:** The affected-project *graph computation* itself should remain language/toolchain-agnostic — it reasons about dependency edges between projects regardless of what language each project is written in — while each project's actual build/test *execution* dispatches to a language-appropriate stage (a.NET project's pipeline stage invokes `dotnet build`/`dotnet test`; a Python project's stage invokes the appropriate `pip`/`pytest` toolchain), parameterized by project type rather than hardcoded per-project. This requires the build-graph tool to support (or be extended with) per-project-type dependency-detection rules, since a Python project's dependency mechanism (import statements, `requirements.txt`) differs syntactically from a.NET project's (project references, NuGet package references) even though the underlying "does project A depend on project B" question is conceptually identical — directly extending the static-analysis-blind-spot discussion, since a multi-language monorepo multiplies the surface area across which a dependency-detection gap (the incident) could occur, now across multiple, structurally different dependency-declaration mechanisms simultaneously.
- **Why correct:** Separates the language-agnostic graph-computation concern from the language-specific execution concern, and identifies how multi-language monorepos multiply (rather than merely duplicate) the dependency-detection blind-spot risk this module already established.
- **Common mistakes:** Assuming a single, uniform affected-project detection mechanism transfers unchanged across fundamentally different languages/toolchains without considering each language's distinct dependency-declaration syntax and potential blind spots.
- **Follow-ups:** "Why does this increase the importance of the nightly full-suite backstop (the fix) specifically in a multi-language monorepo?" (More distinct dependency-detection mechanisms, each with its own potential blind spots, means a higher aggregate probability that *some* dependency class in *some* language is mis-detected — the periodic backstop's value as a language-agnostic safety net grows correspondingly.)
-
-8. **Q: A security audit finds that a pipeline's deployment stage has broader cloud IAM permissions than it actually uses (it can create and delete arbitrary resources, but only ever creates a specific, narrow set as part of normal operation). Diagnose why this over-provisioning likely occurred and design the remediation process.**
- **A:** Over-provisioned pipeline permissions typically accumulate the same way over-provisioned application IAM roles do — an initial, broad grant made during early setup (when the exact permission set needed wasn't yet known, and broad access was the path of least resistance to get the pipeline working) that was never subsequently narrowed once actual usage patterns stabilized, since narrowing permissions retroactively requires deliberate effort with no forcing function prompting it. Remediation: (1) analyze the pipeline's actual historical API call/action log (cloud provider access logs,/22's CloudTrail/Activity Log equivalents) over a representative period to determine the genuinely-used permission subset; (2) narrow the pipeline's IAM role to exactly that subset, following a staged rollout (first alerting on any denied action under the new narrower policy in a monitoring-only mode before actually enforcing denial, catching any legitimate-but-infrequent action the historical sample window might have missed); (3) establish a recurring (not one-time) permission-usage audit as a standing practice, since permission needs and actual usage drift over time as the pipeline's responsibilities evolve, and a one-time narrowing exercise will itself become stale without periodic re-verification — directly this course's now-thoroughly-established "one-time fix without ongoing verification eventually decays" pattern.
- **Why correct:** Identifies the realistic, common cause of over-provisioning (initial broad grant, never subsequently narrowed) and designs both a safe narrowing process (staged, monitoring-mode-first) and an ongoing audit practice preventing the same drift from recurring.
- **Common mistakes:** Immediately and abruptly narrowing permissions to the historically-observed subset without a staged, monitoring-mode-first rollout, risking breaking a legitimate but infrequent action the sample window happened not to capture.
- **Follow-ups:** "Why is the staged, monitoring-mode-first rollout specifically important here, more than in some other permission-narrowing contexts?" (A pipeline's deployment stage failing due to an unexpectedly-denied action can itself cause a production incident — the exact scenario this course's deployment-strategy modules exist to prevent — making a safe, staged rollout of the narrowing itself a genuine deployment-risk decision, not merely a security-hygiene exercise.)
-
-9. **Q: How should CI pipeline observability (tying to the monitoring discussion) be designed specifically to detect the class of silent gap represents, before it causes a production incident rather than only after?**
- **A:** Standard CI observability (pipeline duration, pass/fail rate, stage-level timing) says nothing about whether the affected-project computation's *scope* was actually complete for a given change — the specific signal needed is different: instrument and track, over time, the *ratio* of "projects tested" to "projects that exist in the monorepo" per commit, alerting on anomalous drops (a change to a widely-depended-upon shared library that somehow triggers testing for an unusually small number of downstream projects, relative to that library's typical historical footprint, is a plausible signal that the dependency graph missed something for this specific change) — a statistical, historically-calibrated anomaly signal rather than a binary pass/fail, since there's no ground-truth "correct" affected-project count to compare against directly, only a plausibility check against the library's own historical footprint pattern.
- **Why correct:** Identifies that standard CI observability metrics don't address this specific gap, and proposes a concrete, historically-calibrated anomaly-detection signal (rather than a binary correctness check that isn't actually computable) as the practical mitigation.
- **Common mistakes:** Assuming standard pipeline observability (duration, pass rate) provides any visibility into affected-project-computation completeness, when it's an entirely orthogonal dimension the standard metrics don't address at all.
- **Follow-ups:** "Why can't this be a hard, binary correctness check rather than a statistical anomaly signal?" (There's no independently-computable ground truth for "the exact correct set of affected projects" to compare against without itself requiring the same complete dependency knowledge the tool is trying to compute — the anomaly-detection approach is a practical proxy, not a definitive verification, which is itself worth stating explicitly rather than overclaiming its guarantees.)
-
-10. **Q: As a Principal Engineer establishing CI pipeline architecture standards for an organization, design the specific set of standing architectural reviews and automated checks you would require, synthesizing this entire module.**
- **A:** (1) Mandatory fail-fast stage ordering review for any new pipeline template, verifying cheap/fast checks precede expensive ones. (2) Mandatory cache-key completeness review for any new caching layer, paired with a periodic (not one-time) sampled disable-and-compare verification (§Advanced Q3) as a standing practice, not a one-off audit. (3) Mandatory periodic full-suite backstop for any monorepo affected-project-detection system, sized to the organization's actual risk tolerance for detection latency (§Advanced Q1), plus a required, PR-time dependency-annotation process for any new dynamic-loading pattern against shared libraries. (4) Risk-tiered pipeline-definition-change review (§Advanced Q4), mechanically enforced via reviewer-group requirements on security-relevant pipeline-definition sections specifically. (5) Recurring (not one-time) CI-runner permission audits (§Advanced Q8) following a staged, monitoring-mode-first narrowing process whenever over-provisioning is discovered. Each standard directly extends this course's now-thoroughly-established governance philosophy — mandatory-by-default rather than voluntary, risk-tiered rather than uniform, and periodically re-verified rather than trusted from a one-time or historical absence-of-incident record — into CI pipeline architecture specifically, completing this domain's first module as a direct continuation of the entire Kubernetes/Docker/DevOps governance arc (Modules 73–88).
- **Why correct:** Synthesizes the module's specific findings (fail-fast ordering, cache-key completeness with periodic verification, affected-project backstop with proactive annotation, risk-tiered pipeline-change review, recurring permission audits) into concrete, reviewable, and — critically — *periodically re-verified* organizational controls, rather than one-time policies.
- **Common mistakes:** Proposing one-time audits or fixes for each finding without the periodic, standing re-verification discipline that prevents each control from silently decaying exactly as this course's prior findings (rotation runbooks, golden-path templates, drift-detection coverage) demonstrated happens without it.
- **Follow-ups:** "Which of these five would you prioritize first for an organization just beginning to formalize CI governance?" (Typically fail-fast stage ordering and cache-key completeness — both are foundational, low-cost-to-implement, and don't depend on the organization already having a monorepo or sophisticated pipeline-template-sharing infrastructure in place, unlike items 3 and 4.)
-
----
-
-## 11. Coding Exercises
-
-### Easy — Fail-fast stage-ordering validator
-**Problem:** Given a list of pipeline stages, each annotated with an estimated duration and a cost-tier, validate that stages are ordered from cheapest/fastest to most expensive/slowest, flagging any out-of-order pair.
-
-```csharp
-public sealed record PipelineStage(string Name, TimeSpan EstimatedDuration, int CostTier);
-
-public static class StageOrderingValidator
-{
-    public static IReadOnlyList<string> FindOrderingViolations(IReadOnlyList<PipelineStage> stages)
-    {
-        var violations = new List<string>;
-
-        for (int i = 1; i < stages.Count; i++)
-        {
-            var previous = stages[i - 1];
-            var current = stages[i];
-
-            if (current.CostTier < previous.CostTier ||
-                (current.CostTier == previous.CostTier && current.EstimatedDuration < previous.EstimatedDuration))
-            {
-                violations.Add(
-                    $"Stage '{current.Name}' (tier {current.CostTier}, {current.EstimatedDuration}) " +
-                        $"is cheaper/faster than preceding stage '{previous.Name}' " +
-                        $"(tier {previous.CostTier}, {previous.EstimatedDuration}) -- consider reordering.");
-            }
-        }
-
-        return violations;
-    }
-}
-```
-**Time complexity:** O(n) where n is the number of stages.
-**Space complexity:** O(v) where v is the number of violations found.
-**Optimized solution:** In practice, some stages are legitimately unordered relative to cost (e.g., two independent, parallel lint checks with similar tiers) — extend the model to mark stages as belonging to an explicit sequential "phase" (only phases, not individual same-phase stages, need strict cost ordering relative to each other) to avoid false-positive violations on stages that are intentionally parallel rather than sequential.
-
-### Medium — Build cache key completeness checker (§Advanced Q3)
-**Problem:** Given a declared list of "cache-relevant inputs" for a build (e.g., source file hash, compiler version, flags) and the actual set of environment/configuration values a build script reads, identify any input the build reads that is *not* included in the declared cache key — a direct proxy for detecting an incomplete cache key before it causes a stale-cache-hit incident.
-
-```csharp
-public sealed class CacheKeyCompletenessChecker
-{
-    public IReadOnlyList<string> FindMissingInputs(
-        IReadOnlySet<string> declaredCacheKeyInputs,
-            IReadOnlySet<string> actualBuildScriptReads)
-    {
-        // Any input the build script genuinely reads but the cache key doesn't
-        // account for is a completeness gap -- a change to that input could
-        // silently change build output without changing the cache key.
-        var missing = new List<string>;
-
-        foreach (var actualInput in actualBuildScriptReads)
-        {
-            if (!declaredCacheKeyInputs.Contains(actualInput))
-                missing.Add(actualInput);
-        }
-
-        return missing;
-    }
-}
-```
-**Time complexity:** O(a) where a is the number of actual build-script reads (each checked once against the declared set, itself an O(1) hash-set lookup).
-**Space complexity:** O(m) where m is the number of missing inputs found.
-**Optimized solution:** In a real system, "actual build-script reads" isn't manually enumerable — instrument the build process itself (via a sandboxed or traced execution, recording every environment variable, file, and configuration value actually accessed during a real build run) to derive `actualBuildScriptReads` empirically rather than relying on a manually-maintained, easily-incomplete list — directly closing the same "declared vs. actual" gap this checker exists to catch, but now applied recursively to the checker's own input data.
-
-### Hard — Monorepo affected-project graph with reflection-dependency annotation overlay
-**Problem:** Given a statically-derived dependency graph (from import analysis) and a supplementary, manually-maintained list of reflection/dynamic-loading dependency edges, compute the complete affected-project set for a given changed project — directly implementing the fix.
-
-```csharp
-public sealed class MonorepoAffectedProjectCalculator
-{
-    private readonly Dictionary<string, HashSet<string>> _staticDependents; // project -> projects that statically depend on it
-    private readonly Dictionary<string, HashSet<string>> _dynamicDependents; // project -> projects with a manually-annotated reflection/dynamic dependency
-
-    public MonorepoAffectedProjectCalculator(
-        Dictionary<string, HashSet<string>> staticDependents,
-            Dictionary<string, HashSet<string>> dynamicDependents)
-    {
-        _staticDependents = staticDependents;
-        _dynamicDependents = dynamicDependents;
-    }
-
-    public IReadOnlySet<string> ComputeAffectedProjects(string changedProject)
-    {
-        var affected = new HashSet<string> { changedProject };
-        var queue = new Queue<string>;
-        queue.Enqueue(changedProject);
-
-        while (queue.Count > 0)
-        {
-            var current = queue.Dequeue;
-
-            // Combine BOTH static (import-analysis-derived) and dynamic
-            // (manually-annotated, closing Sec4's reflection blind spot) edges --
-            // missing either source reproduces the incident's exact gap.
-            var allDependents = new HashSet<string>;
-            if (_staticDependents.TryGetValue(current, out var staticDeps))
-                allDependents.UnionWith(staticDeps);
-            if (_dynamicDependents.TryGetValue(current, out var dynamicDeps))
-                allDependents.UnionWith(dynamicDeps);
-
-            foreach (var dependent in allDependents)
-            {
-                if (affected.Add(dependent)) // only enqueue newly-discovered projects
-                    queue.Enqueue(dependent);
-            }
-        }
-
-        return affected;
-    }
-}
-```
-**Time complexity:** O(p + e) where p is the number of transitively-affected projects and e is the number of dependency edges traversed (a standard BFS over the combined dependency graph).
-**Space complexity:** O(p) for the affected-set and traversal queue.
-**Optimized solution:** For very large monorepos where this computation runs on every commit, precompute and cache the full transitive-closure graph (rather than re-traversing per commit) whenever the dependency graph itself changes (a new static or dynamic edge added/removed) — trading graph-update cost (infrequent, only when dependencies genuinely change) for per-commit query cost (frequent, and now O(1) lookup into a precomputed transitive-closure map) — the same "cache what's expensive and infrequently-changing, computed fresh what's cheap" principle underlying the caching discussion, applied to the affected-project computation itself.
-
----
-
-## 12. System Design
-
-**Prompt:** Design a CI platform for an organization operating a large monorepo (thousands of projects) with hundreds of committers per day, requiring fast, correct affected-project detection, reliable caching, and defense against the dependency-graph-blind-spot incident class.
-
-**Functional requirements:** Compute an accurate affected-project set per commit, combining static dependency analysis with a manually-maintained dynamic-dependency annotation overlay; cache dependency downloads and build artifacts with verifiably-complete cache keys; run a periodic (nightly) full-suite backstop independent of the per-commit affected-project computation; provide pipeline-as-code with centrally-maintained, versioned shared templates for common stages.
-
-**Non-functional requirements:** Per-commit CI feedback time must remain fast enough to not incentivize the bypass behavior described in Advanced Q5; the affected-project computation must scale to thousands of projects without becoming itself a pipeline bottleneck; cache-key completeness must be continuously, not just initially, verified.
-
-**Architecture:**
 ```mermaid
 graph TB
  subgraph "Commit Trigger"
@@ -455,27 +477,8 @@ graph TB
  GraphAudit -.-> DynamicOverlay
 ```
 
-**Database/state selection:** The dependency graph (static edges plus dynamic annotations) is itself a versioned artifact requiring the same review rigor as a shared infrastructure module — stored alongside the codebase, updated via PR, with the precomputed transitive closure cached and invalidated only when the underlying graph changes (the optimization).
+**13. Low-Level Design**
 
-**Caching:** Dependency and build-artifact caches use keys verified for completeness via the periodic sampled disable-and-compare check (§Advanced Q3), not merely assumed correct at initial design time.
-
-**Messaging:** Nightly full-suite failures and cache-key-completeness-check divergences route through the organization's alerting infrastructure, risk-tiered by the specific shared library/project's actual consumer footprint (directly the SBOM-style impact-query pattern, applied to monorepo project dependents).
-
-**Scaling:** The precomputed transitive-closure cache keeps per-commit affected-project queries O(1) regardless of monorepo size, avoiding the affected-project computation itself becoming the pipeline's bottleneck as the codebase grows into thousands of projects.
-
-**Failure handling:** If the affected-project computation service itself is unavailable, the pipeline must fail safe toward running a broader (or full) test scope for the affected commit rather than silently skipping testing entirely — the identical fail-safe-not-fail-open principle established for canary analysis-engine unavailability.
-
-**Monitoring:** Per-commit affected-project-set size relative to the changed project's historical footprint (§Advanced Q9's anomaly-detection signal), nightly full-suite discrepancy rate (how often it catches something the per-commit computation missed — a direct measure of the affected-project computation's real-world completeness), and cache-key-completeness sample-check divergence rate over time.
-
-**Trade-offs:** Investing in the dynamic-dependency-annotation overlay and precomputed transitive-closure caching trades upfront engineering complexity for both correctness (closing the specific blind spot) and continued scalability as the monorepo grows — directly this module's central finding that an affected-project computation's real value depends entirely on actively managing and verifying its known blind spots, not merely deploying the underlying build-graph tool and trusting its output.
-
----
-
-## 13. Low-Level Design
-
-**Requirements:** Design the cache-key generation component as an extensible system supporting multiple cache-relevant-input sources (source hashes, tool versions, environment variables, build flags) with built-in completeness verification.
-
-**Class diagram (conceptual):**
 ```mermaid
 classDiagram
  class ICacheKeyInputSource {
@@ -511,121 +514,225 @@ classDiagram
  CacheKeyCompletenessAuditor --> IBuildInstrumentation
 ```
 
-**Sequence diagram:** `CacheKeyBuilder` composes a cache key from every registered `ICacheKeyInputSource` → the build executes normally, using the composed key to check/populate the cache → periodically (per §Advanced Q3's sampling), `CacheKeyCompletenessAuditor` runs a traced build via `IBuildInstrumentation`, capturing every input the build *actually* read → compares the actual reads against the declared key's inputs → surfaces any gap as a completeness violation requiring a new `ICacheKeyInputSource` to be added.
+### Module 90 — CI/CD: Test Automation Strategy — Test Pyramid, Flakiness, Coverage & Quality Gates
+*Source: `02-TestAutomationStrategy-Pyramid-Flakiness-Coverage-Quality-Gates.md`*
 
-**Design patterns used:** **Strategy/Composite** for `ICacheKeyInputSource` (multiple independent input sources composed into one complete key, directly this course's now-repeated pluggable-source architecture). **Decorator**-shaped `CacheKeyCompletenessAuditor` wrapping the ordinary `CacheKeyBuilder` with an additional, periodic verification behavior without altering the builder's core responsibility.
+**12. System Design**
 
-**SOLID mapping:** Open/Closed — adding a new cache-relevant input dimension (e.g., a newly-relevant environment variable) requires only a new `ICacheKeyInputSource`, never a change to `CacheKeyBuilder`'s composition logic. Single Responsibility — key composition, build-instrumentation/tracing, and completeness auditing are each one class's concern. Dependency Inversion — `CacheKeyCompletenessAuditor` depends only on the `ICacheKeyInputSource` and `IBuildInstrumentation` interfaces, enabling testing against fakes without a real build system.
+```mermaid
+graph TB
+ subgraph "Per-Service Test Execution"
+ TestRun["Test run (unit/integration/E2E)"]
+ ShardBalancer["Duration-aware shard balancer<br/>(Sec11 Hard, recalibrated on composition change)"]
+ end
+ subgraph "Cross-Cutting Quality Signals"
+ CoverageEngine["Coverage measurement"]
+ MutationEngine["Periodic mutation-testing sampler<br/>(gradual rollout, not immediate blocking)"]
+ FlakyClassifier["Flaky-test correlation classifier<br/>(Sec11 Medium)"]
+ end
+ subgraph "Governance Layer"
+ QuarantineRegistry["Quarantine registry:<br/>mandatory remediation tickets"]
+ ShapeMonitor["Pyramid-shape drift monitor<br/>(Sec11 Easy, trend over time)"]
+ FixtureSource["Single canonical, synthetic<br/>test-fixture data source"]
+ end
+ subgraph "Quality Gate Decision"
+ Gate["Combined gate: coverage + mutation-kill-rate<br/>+ zero non-quarantined flaky failures"]
+ end
 
-**Extensibility:** A newly-discovered cache-relevant input (found via a completeness-audit gap) is closed by adding one new `ICacheKeyInputSource` implementation — zero changes to the existing key-composition or auditing logic.
+ TestRun --> ShardBalancer
+ TestRun --> CoverageEngine --> Gate
+ TestRun --> MutationEngine --> Gate
+ TestRun --> FlakyClassifier --> QuarantineRegistry --> Gate
+ FixtureSource --> TestRun
+ TestRun -.-> ShapeMonitor
+```
 
-**Concurrency/thread safety:** Cache-key composition for independent, concurrent builds is fully independent and stateless per invocation; the periodic completeness-auditor's traced build runs are deliberately isolated (their own dedicated, non-cached build execution) to avoid interfering with or being interfered by concurrent, real cached builds happening simultaneously across the pipeline fleet.
+**13. Low-Level Design**
 
----
+```mermaid
+classDiagram
+ class ITestResultSource {
+ <<interface>>
+ +GetRecentRuns(testId) TestRunResult[]
+ }
+ class JUnitResultSource
+ class XUnitResultSource
+ ITestResultSource <|.. JUnitResultSource
+ ITestResultSource <|.. XUnitResultSource
 
-## 14. Production Debugging
+ class IChangeCorrelator {
+ <<interface>>
+ +Classify(testId, recentRuns) FailureClassification
+ }
+ class TimestampFileOverlapCorrelator
+ IChangeCorrelator <|.. TimestampFileOverlapCorrelator
 
-**Incident:** A pipeline's test-sharding configuration, previously running reliably across four parallel shards for months, begins silently reporting overall pipeline success even though shard 3 has actually been failing consistently for the past several days — the failure was only discovered when a change that shard 3 alone would have caught reached production and broke.
+ class IRemediationTracker {
+ <<interface>>
+ +CreateTicket(testId, classification) TicketId
+ +GetBacklogAge(testId) TimeSpan
+ }
+ class JiraRemediationTracker
 
-**Root cause:** A recent, unrelated pipeline-configuration change (adding a fifth, new experimental shard for a newly-introduced test category) accidentally altered the fan-in aggregation logic's shard-count assumption — the aggregation step had been hardcoded to check "did shards 1 through 4 all report success," and the new fifth shard's addition shifted the numbering such that what the aggregation logic checked as "shard 3" was, after the renumbering, actually evaluating a different, newly-passing shard, while the genuinely-failing original shard 3's content (now shard 4 under the new numbering) was silently excluded from the hardcoded check entirely.
+ class QuarantineOrchestrator {
+ -ITestResultSource resultSource
+ -IChangeCorrelator correlator
+ -IRemediationTracker tracker
+ +EvaluateAsync(testId) QuarantineDecision
+ }
+ QuarantineOrchestrator --> ITestResultSource
+ QuarantineOrchestrator --> IChangeCorrelator
+ QuarantineOrchestrator --> IRemediationTracker
+ IRemediationTracker <|.. JiraRemediationTracker
+```
 
-**Investigation:** The pipeline's summary UI showed "4/4 required checks passed" — technically true under the (incorrectly) hardcoded check list, masking that the actual, current shard structure had five shards and the check list hadn't been updated to match. Reviewing the fan-in aggregation logic's source directly (not merely its reported summary output) revealed the hardcoded shard-count/naming assumption that had silently desynchronized from the actual, current shard configuration.
+### Module 91 — CI/CD: Artifact Management & Reproducible Builds
+*Source: `03-ArtifactManagement-ReproducibleBuilds-RetentionPolicies.md`*
 
-**Tools:** Direct inspection of the fan-in aggregation script/configuration (not the pipeline UI's summary presentation) was the necessary diagnostic step, since the UI's "N/N passed" summary was internally consistent with the (wrong) hardcoded expectation and gave no visible indication anything was amiss.
+**Retention Policy — Three Independent Constraints, Not One Age Rule**
 
-**Fix:** Immediate: correct the fan-in logic to dynamically enumerate and require every currently-defined shard (rather than a hardcoded count/list), eliminating the entire class of desynchronization between "shards that exist" and "shards the aggregation logic checks." Root-cause fix: treat the fan-in aggregation's shard-enumeration as derived directly and dynamically from the same pipeline-definition source that defines the shards themselves (a single source of truth), rather than two independently-maintained lists (the shard definitions, and a separate, hardcoded aggregation check) that can silently drift apart exactly as occurred here.
+```mermaid
+graph TB
+ Artifact["Candidate artifact for cleanup"]
+ AgeCheck["Age check: older than N days?"]
+ RefCheck["Reference check: still pointed to by ANY\ncurrent deployment OR rollback-candidate?"]
+ ComplianceCheck["Compliance check: subject to a\nregulatory retention requirement?"]
+ Decision{"ALL THREE must clear\nbefore deletion is permitted"}
 
-**Prevention:** (1) The dynamic-enumeration fix above, structurally eliminating the specific desynchronization class. (2) Add a pipeline-definition validation step (run in CI, on any change to the pipeline definition itself) asserting that the fan-in/aggregation logic's shard references are dynamically derived, never hardcoded — a policy-as-code check applied to the pipeline definition's own internal consistency. (3) Recognize and generalize this incident's pattern: any fan-in/aggregation mechanism with an independently-maintained enumeration of "what must all pass," separate from the actual, current set of parallel branches, is a latent desynchronization risk — audit every existing matrix-build/sharded-pipeline configuration in the organization for the identical hardcoded-count pattern, since this specific incident's root cause is generic enough to plausibly recur wherever the same anti-pattern exists elsewhere.
+ Artifact --> AgeCheck --> Decision
+ Artifact --> RefCheck --> Decision
+ Artifact --> ComplianceCheck --> Decision
+ Decision -->|any check fails| Retain["RETAIN"]
+ Decision -->|all checks pass| Delete["Safe to delete"]
+```
 
----
+**12. System Design**
 
-## 15. Architecture Decision
+```mermaid
+graph TB
+ subgraph "Artifact Repository"
+ Artifacts["Immutable, digest-identified artifacts"]
+ DigestLedger["Lightweight digest ledger<br/>(retained independently, even post-GC)"]
+ end
+ subgraph "Retention Decision (Sec2.6, Sec11 Medium)"
+ RetentionEval["Three-constraint evaluator"]
+ RollbackRegistry["Rollback-candidate registry<br/>(expiring designations, Sec Intermediate Q9)"]
+ ComplianceService["Compliance-classification service"]
+ DeploymentState["Current + historical<br/>deployment state"]
+ end
+ subgraph "Reproducibility Verification (Sec Advanced Q4/Q5)"
+ RiskTiering["Risk-tiered sampling scheduler"]
+ RebuildVerifier["Periodic rebuild-and-diff verifier"]
+ Bisector["Bisection tool (on regression detected)"]
+ end
+ subgraph "Deployment Enforcement"
+ PolicyGate["Policy-as-code: digest-only<br/>deployment enforcement"]
+ end
 
-**Context:** An organization must choose its primary CI platform for a large, growing monorepo, needing sophisticated affected-project detection, caching, and pipeline-as-code support.
+ Artifacts --> DigestLedger
+ RetentionEval --> RollbackRegistry
+ RetentionEval --> ComplianceService
+ RetentionEval --> DeploymentState
+ RetentionEval -.->|safe to delete?| Artifacts
+ RiskTiering --> RebuildVerifier --> Artifacts
+ RebuildVerifier -->|mismatch found| Bisector
+ PolicyGate -.-> Artifacts
+```
 
-**Option A — A general-purpose CI platform (GitHub Actions/GitLab CI/Azure Pipelines) with a separately-adopted build-graph tool (Bazel/Nx/Turborepo) layered on top:**
-- *Advantages:* Leverages the organization's likely-already-adopted source-control-integrated CI platform with minimal migration; the build-graph tool specifically specializes in the affected-project/caching problem this module centers on, typically more mature and purpose-built for it than a general CI platform's native capabilities alone.
-- *Disadvantages:* Two separately-maintained systems (the general CI platform's pipeline-as-code definitions, and the build-graph tool's own configuration/dependency-declaration format) that must be kept consistent — a genuine integration surface where the two could drift or interact unexpectedly.
-- *Cost/complexity:* Moderate — leverages existing CI investment, adds one additional, specialized tool's operational and learning-curve cost.
+**13. Low-Level Design**
 
-**Option B — A fully-integrated, build-graph-native CI system (e.g., Bazel's own remote-execution and caching infrastructure, used as the primary CI orchestrator, not merely a build tool layered on a separate CI platform):**
-- *Advantages:* Tightest possible integration between dependency-graph computation, caching, and execution — potentially the strongest correctness and performance characteristics for exactly this module's central concerns, since there's no integration seam between a separate CI platform and build tool to manage.
-- *Disadvantages:* A much larger operational and migration investment, adopting an entire ecosystem (build-file conventions, remote-execution infrastructure) rather than layering a tool onto existing, familiar CI infrastructure; steeper organization-wide learning curve, particularly for teams/languages the build-graph-native ecosystem supports less maturely.
-- *Cost/complexity:* Highest upfront investment and migration cost, in exchange for the strongest architectural coherence for large-scale monorepo needs specifically.
+```mermaid
+classDiagram
+ class IRetentionConstraint {
+ <<interface>>
+ +Evaluate(artifact) ConstraintResult
+ }
+ class AgeConstraint
+ class RollbackCandidateConstraint
+ class ComplianceRetentionConstraint
+ class CurrentDeploymentConstraint
+ IRetentionConstraint <|.. AgeConstraint
+ IRetentionConstraint <|.. RollbackCandidateConstraint
+ IRetentionConstraint <|.. ComplianceRetentionConstraint
+ IRetentionConstraint <|.. CurrentDeploymentConstraint
 
-**Option C — A custom-built, in-house affected-project computation layered directly into existing CI pipeline-as-code definitions:**
-- *Advantages:* Maximum flexibility to tailor the dependency-detection logic (including the dynamic/reflection-annotation overlay this module's incident specifically required) to the organization's exact codebase patterns.
-- *Disadvantages:* The organization now owns the entire, genuinely hard correctness problem (the blind-spot class) with no community-maintained tool's accumulated hardening to draw on — reinventing a problem space mature, purpose-built tools already address, with a real risk of rediscovering already-known failure modes (like reflection-based blind spots) independently and expensively.
-- *Cost/complexity:* Highest ongoing maintenance burden, since the organization bears full responsibility for a problem space (correct, complete dependency-graph computation at scale) that specialized tools have already invested years of hardening into.
+ class ConstraintResult {
+ +bool SafeToDelete
+ +string Reason
+ }
 
-**Recommendation:** **Option A** for most organizations — leveraging an already-adopted general CI platform's broad ecosystem/integration support while adopting a mature, purpose-built build-graph tool specifically for the affected-project/caching problem, accepting the two-system integration surface as a manageable, well-understood cost relative to either Option B's much larger migration investment or Option C's reinvention risk. Option B becomes the right choice specifically for an organization whose monorepo has grown large and complex enough that the integration seam's friction (Option A's stated disadvantage) has itself become a genuine, measured operational burden — directly this course's established complexity-matching discipline applied to CI-platform architecture. Option C should essentially never be the default choice given mature alternatives already exist and have already encountered and addressed failure modes like the incident — reinventing this specific wheel is rarely justified.
+ class RetentionPolicyEvaluator {
+ -IRetentionConstraint[] constraints
+ +Evaluate(artifact) RetentionDecision
+ }
+ RetentionPolicyEvaluator --> IRetentionConstraint
+ IRetentionConstraint --> ConstraintResult
 
----
+ class RetentionDecision {
+ +bool SafeToDelete
+ +string[] BlockingReasons
+ }
+```
 
-## 16. Enterprise Case Study
+### Module 92 — CI/CD: CD Pipeline Orchestration — Environment Promotion, Progressive Delivery Integration & Release Governance (Capstone)
+*Source: `04-CDPipelineOrchestration-EnvironmentPromotion-ProgressiveDelivery-ReleaseGovernance.md`*
 
-**Organization archetype:** A Google/Meta-style organization operating one of the industry's largest monorepos, with tens of thousands of projects and an extremely high commit frequency across a correspondingly large engineering organization.
+**Normal Promotion Chain — Strategy + Gates per Stage**
 
-**Architecture:** The organization's CI platform is built around a build-graph-native system (Option B's approach) with remote build execution and a distributed, content-addressed cache shared across the entire engineering organization — every build's cache key is derived from a comprehensive, tool-enforced input declaration (source files, all transitive build-tool dependencies, compiler/toolchain versions) that the build system itself mechanically enforces rather than leaving to individual project authors' discipline, directly closing the cache-key-completeness concern at the platform level rather than per-project.
+```mermaid
+graph LR
+ Artifact["Immutable artifact<br/>(digest)"] --> Dev["Dev"]
+ Dev -->|auto gate: smoke tests| Staging["Staging"]
+ Staging -->|auto gate: integration tests +<br/>policy-as-code (Sec2.2)| Canary["Canary (5% traffic,<br/> Sec2.3 strategy)"]
+ Canary -->|automated canary analysis| Decision{"Analysis verdict"}
+ Decision -->|pass + manual approval| Prod["Production (100%)"]
+ Decision -->|fail| Rollback["Automated rollback<br/>to last-known-good digest"]
+ Prod -.->|post-promotion health<br/>regression detected| Rollback
+```
 
-**Challenges:** At this organization's scale, even a small percentage of builds affected by a dependency-detection blind spot (the incident class) translates to a very large absolute number of affected projects — the organization found that reflection/dynamic-loading-based dependencies specifically (the exact blind-spot class identified) were disproportionately common in certain plugin-heavy subsystems, making a purely reactive, incident-driven annotation process (discover a gap, add an annotation, repeat) inadequate at their scale — too many potential gaps to wait for each to surface via an actual production incident first.
+**GitOps Reconciliation vs. Push-Based Trigger**
 
-**Scaling:** The organization moved to **mandatory static-analyzability requirements** for any new dependency-injection or plugin-loading pattern introduced against widely-depended-upon shared code — rather than only reactively annotating discovered dynamic dependencies after the fact, new code introducing a dynamic-loading pattern against a shared library is required, at review time, to either use a build-system-recognized dependency-injection mechanism (one the static analysis *can* see, by construction) or to include an explicit, mandatory dependency annotation in the same change — converting the blind-spot problem from "discover gaps reactively via incidents" into "prevent new gaps proactively via a review-time requirement," directly extending this module's own §Advanced Q1 fix from a reactive to a fully proactive posture.
+```mermaid
+graph TB
+ subgraph GitOps["GitOps (pull-based)"]
+ GitRepo["Git repo: desired state"] --> Controller["Reconciliation controller"]
+ Controller -->|continuously diffs & applies| Cluster1["Cluster: actual state"]
+ Cluster1 -.->|drift detected, auto-corrected| Controller
+ end
+ subgraph PushCD["Push-based CD"]
+ Pipeline["Pipeline run"] -->|one-shot, imperative apply| Cluster2["Cluster: actual state"]
+ Cluster2 -.->|drift persists silently<br/>until next pipeline run| Pipeline
+ end
+```
 
-**Lessons:** The single most consequential insight, at this organization's scale, was that **a reactive "discover a dependency-detection blind spot via an incident, then annotate it" process doesn't scale once the space of possible blind spots (every reflection/plugin/dynamic-loading pattern across tens of thousands of projects) becomes large enough that waiting for each to surface via an actual production incident is itself an unacceptable, compounding risk** — the durable fix at extreme scale shifts from reactive detection-and-patching toward proactive, review-time prevention of new blind spots from being introduced at all, a natural escalation of this module's own reactive backstop (the nightly full-suite run) once an organization's scale makes even a bounded, 24-hour-latency reactive backstop's aggregate risk exposure too large to accept.
+**12. System Design**
 
----
+```mermaid
+graph TB
+ subgraph "Control Plane"
+ API["Promotion API"]
+ Orchestrator["Promotion Orchestrator<br/>(state machine per Sec13)"]
+ LockStore["Distributed lock store<br/>(Sec11 Expert)"]
+ AuditLog["Audit log store<br/>(every gate verdict, every path)"]
+ RiskEngine["Risk-tiering engine<br/>(Sec Basic Q8)"]
+ end
+ subgraph "Gate Evaluators"
+ CanaryEngine["Canary analysis engine<br/>(Sec2.3, Sec11 Hard)"]
+ PolicyEngine["Policy-as-code engine<br/>(Sec2.2)"]
+ ApprovalService["Manual approval service"]
+ end
+ subgraph "Execution Targets"
+ GitOpsController["GitOps controller<br/>(desired-state updates)"]
+ PushDeployer["Push-based deployer"]
+ end
 
-## 17. Principal Engineer Perspective
-
-**Business impact:** CI pipeline architecture directly gates engineering organization-wide velocity — a Principal Engineer should frame investment in fail-fast ordering, correct caching, and accurate affected-project detection in terms of the specific, multiplicative cost these decisions impose across every commit, every engineer, every day, not as an abstract "tooling" concern; a poorly-ordered or incorrectly-cached pipeline's cost compounds continuously across the organization's entire commit volume in a way few other individual engineering decisions do.
-
-**Engineering trade-offs:** This module's central tension — an affected-project computation's velocity benefit versus its inherent, structural blind-spot risk for dependency mechanisms static analysis can't see — requires the explicit, risk-proportionate response this course has established repeatedly (a periodic backstop bounding detection latency, not abandoning the optimization entirely per Advanced Q2's rejected overreaction), a trade-off a Principal Engineer must make deliberately rather than defaulting to either extreme.
-
-**Technical leadership:** Establishing centrally-maintained, versioned pipeline-as-code templates and a mandatory, periodic (not one-time) cache-key and dependency-graph verification discipline (§Advanced Q3, §Advanced Q1) as platform-wide defaults — rather than best-practice documentation each team independently adopts or forgets — is this course's now-thoroughly-established governance pattern, reaching into CI pipeline architecture as its natural extension.
-
-**Cross-team communication:** A build-graph-blind-spot incident or a fan-in desynchronization bug should be communicated to affected teams with the specific mechanism it revealed (a reflection-based dependency invisible to static analysis; a hardcoded shard count silently drifting from the actual shard configuration), not merely "CI had a bug" — this course's consistently-validated principle that concrete failure-mechanism communication drives durable behavioral change more effectively than abstract policy statements.
-
-**Architecture governance:** Pipeline-definition changes touching security-relevant configuration (required checks, secret scopes, scan-stage presence) deserve the same risk-tiered review rigor this course established for infrastructure modules, golden-path templates, and canary-analysis templates (§Advanced Q4) — a Principal Engineer should ensure this review tier is mechanically enforced (via reviewer-group requirements), not merely documented as an expectation.
-
-**Cost optimization:** Correct fail-fast stage ordering and complete, correctly-scoped affected-project detection have a direct, continuous compute-cost dimension beyond developer feedback-loop time — an organization running unnecessarily broad test scopes (either from a conservative "test everything" default, or paradoxically from an incorrectly-narrow affected-project computation causing repeated incident-driven expansions) pays a real, ongoing infrastructure cost that compounds with commit volume and codebase growth.
-
-**Risk analysis:** This module's single highest-leverage risk for upward communication is the same one this entire course's DevOps arc converges on, restated in CI-specific terms: **an automated computation (the affected-project graph, a cache key, a fan-in aggregation check) that has run correctly for a long period is not proof it's structurally complete — it may simply not yet have encountered the specific input pattern that reveals its blind spot** — a concrete, decision-relevant framing justifying continued, periodic (not one-time) investment in the verification backstops this module establishes, even for mechanisms with an currently-unblemished track record.
-
-**Long-term maintainability:** An organization's CI pipeline architecture accumulates the identical categories of debt this course established for infrastructure, configuration, deployment, and policy governance — cache keys that were correct when written but never re-verified as build inputs evolved, affected-project dependency graphs with accumulating undetected blind spots as new dynamic-loading patterns are introduced, and pipeline templates that drift from their canonical source exactly as found for golden-path scaffolding — the identical periodic, recurring platform-health review discipline this course has established as its consistent capstone pattern remains the necessary, ongoing countermeasure here as well.
-
----
-
-## 18. Revision
-
-### Key Takeaways
-- Pipeline-as-code brings CI's own delivery-pipeline definition under the same review/diff/history discipline this course established for infrastructure and configuration — and pipeline-definition changes touching security-relevant configuration deserve the identical risk-tiered review rigor (§Advanced Q4).
-- Fail-fast stage ordering (cheapest/fastest checks first) is a deliberate economic optimization, not an arbitrary convention — getting it wrong doesn't change what's caught, only how expensively and slowly.
-- Cache correctness is entirely a function of key completeness — an incomplete key produces a silent, dangerous stale-hit failure, categorically different from and worse than a safe, merely-slower cache miss.
-- Monorepo affected-project detection is a declared computation subject to this course's entire "declared ≠ actual" theme — static-analysis-based dependency graphs have a structural blind spot for reflection/dynamic-loading dependencies, requiring both proactive annotation and a periodic, independent full-suite backstop.
-- This module's incidents (build-graph blind spot, fan-in desynchronization) both confirm and extend the capstone synthesis: cover every dependency-detection path, verify rather than merely trust a declared computation, and prefer dynamically-derived over independently-hardcoded enumeration wherever two related lists must stay in sync.
-
-### Interview Cheatsheet
-- Fail-fast: **cheapest/fastest checks first** — a deliberate cost-ordering decision, not convention.
-- Caching: correctness is **entirely a cache-key-completeness problem** — an incomplete key is a silent correctness bug, not a safe slowdown.
-- Monorepo affected-project detection: **static analysis has a structural blind spot** for reflection/dynamic dependencies — always pair with a periodic full-suite backstop.
-- Fan-in: **aggregate every parallel branch's result** before declaring success — a hardcoded, independently-maintained shard/check count is a desynchronization risk.
-- Pipeline security: **untrusted PR runs ≠ trusted merged-branch runs** in secret access — ephemeral runners plus least-privilege scoping.
-
-### Things Interviewers Love
-- Precisely distinguishing a cache miss (safe, slow) from an incomplete-cache-key stale hit (silent, dangerous) rather than treating all cache-related issues as one undifferentiated category.
-- Recognizing a monorepo build-graph tool's affected-project computation as a "declared state" requiring independent verification, directly connecting to this course's recurring theme rather than treating it as a CI-specific quirk.
-- Proposing risk-proportionate responses (a periodic backstop) to a discovered gap rather than overreacting to the maximum-safety extreme (Advanced Q2).
-
-### Things Interviewers Hate
-- Treating stage ordering, cache-key design, or fan-in aggregation as implementation details unworthy of deliberate design attention.
-- Assuming a build-graph tool's dependency computation is complete simply because it's produced correct results historically, without considering its structural blind spots.
-- Proposing "always run everything" as the correct response to any discovered CI-correctness gap, without weighing a risk-proportionate, cheaper alternative first.
-
-### Common Traps
-- Assuming a "clean cache" (few reported cache misses) is evidence of a well-functioning cache, rather than checking whether cache *hits* are actually correct via a completeness audit (§Advanced Q3).
-- Treating a matrix build's "all green" summary as proof every combination genuinely passed, without checking whether every combination is actually configured as a required, blocking check (§Intermediate Q7).
-- Believing pipeline-as-code's benefit is purely developer convenience, missing its role as a security control whose own silent weakening deserves the same scrutiny as any other security-relevant change (§Intermediate Q9).
-
-### Revision Notes
-Before an interview, be able to narrate the incident end-to-end from memory — the build-graph tool's year-long, seemingly flawless track record, the reflection-based dependency invisible to its static analysis, and the three-week-silent authentication-bypass gap discovered only by an unrelated audit — and be ready to connect it explicitly, by name, to the capstone principle (cover every path, verify rather than merely trust a declaration, make compliant the easiest path), since this module's entire contribution is demonstrating that principle recurring in CI's own core optimization mechanisms, confirming the principle's generality across this course's full Kubernetes/Docker/DevOps/CI-CD arc.
+ API --> Orchestrator
+ Orchestrator --> LockStore
+ Orchestrator --> RiskEngine
+ Orchestrator --> CanaryEngine
+ Orchestrator --> PolicyEngine
+ Orchestrator --> ApprovalService
+ Orchestrator --> AuditLog
+ Orchestrator -->|coordinated rollback:<br/>updates Git desired state| GitOpsController
+ Orchestrator -->|or, non-GitOps targets| PushDeployer
+```
