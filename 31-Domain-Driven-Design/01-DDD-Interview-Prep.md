@@ -389,9 +389,9 @@ For in-context consistency where the business accepts atomicity (e.g., updating 
 ## 11. DDD + CQRS, Event Sourcing & Sagas
 
 **Key concepts**
-- **CQRS:** the write side uses aggregates (invariants); the read side uses projections/read models optimized for queries (often fed by domain/integration events). Avoids bending aggregates to serve screens. See [[../34-CQRS]].
-- **Event sourcing:** persist an aggregate as its stream of domain events; rebuild state by replay; full audit/history; projections for reads. Valuable for ledgers/audit-heavy domains; adds complexity (versioning events, snapshots). See [[../35-Event-Sourcing]].
-- **Sagas/process managers** coordinate long-running processes across aggregates/contexts with compensations. See [[../36-Saga]].
+- **CQRS:** the write side uses aggregates (invariants); the read side uses projections/read models optimized for queries (often fed by domain/integration events). Avoids bending aggregates to serve screens. See [[../34-CQRS/01-CQRS-Interview-Prep]].
+- **Event sourcing:** persist an aggregate as its stream of domain events; rebuild state by replay; full audit/history; projections for reads. Valuable for ledgers/audit-heavy domains; adds complexity (versioning events, snapshots). See [[../35-Event-Sourcing/01-Event-Sourcing-Interview-Prep]].
+- **Sagas/process managers** coordinate long-running processes across aggregates/contexts with compensations. See [[../36-Saga/01-Saga-Interview-Prep]].
 - None of these are required by DDD — use them where the domain needs them.
 
 **Common interview question**

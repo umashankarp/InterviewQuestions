@@ -3,7 +3,7 @@
 > Domain: Microservices | Audience: 14+ yrs, C#/.NET, interviewing for **Technical Lead / Solutions Architect / Application Architect**
 > Source: distilled from `17-Microservices/` Modules 49, 50, 51, 135, 136, 137, 138, 139, 173
 > Companion: [[../11-Design-Patterns/00-Design-Patterns-Interview-Master-Guide-DotNet-TechLead]] — the in-process GoF patterns
-> Prerequisite context: [[../16-Distributed-Systems/01-Distributed-Systems-Interview-Prep]], [[../36-Saga/01-Saga-Pattern-Deep-Dive]], [[../37-Outbox/01-Transactional-Outbox]], [[../31-Domain-Driven-Design/01-Strategic-Design-Bounded-Contexts]]
+> Prerequisite context: [[../16-Distributed-Systems/01-Distributed-Systems-Interview-Prep]], [[../36-Saga/01-Saga-Interview-Prep]], [[../37-Outbox/01-Outbox-Interview-Prep]], [[../31-Domain-Driven-Design/01-DDD-Interview-Prep]]
 
 ---
 

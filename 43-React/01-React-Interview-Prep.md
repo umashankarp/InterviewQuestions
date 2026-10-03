@@ -1,22 +1,535 @@
-# Module 159 — React Fundamentals: Virtual DOM, Fiber Reconciliation & Hooks — Comparative Against Angular
+# React — Complete Interview Prep (All Topics, One File)
 
-> Domain: React | Level: Beginner → Expert | Prerequisite: [[../42-Angular/01-Angular-Fundamentals-Components-DI-ChangeDetection-RxJS]] (this module is written comparatively against it, per this repo's established sibling-domain treatment — Azure vs. AWS, Modules 65-72 — mapping concepts and flagging genuine divergences rather than re-deriving fundamentals)
+> Domain: React | Level: Beginner → Expert | Prerequisite: [[../42-Angular/01-Angular-Interview-Prep]] (comparative baseline), [[../41-OAuth2-OIDC-JWT-PKCE/01-OAuth2-OIDC-JWT-Interview-Prep]] §10 (SPA security, BFF)
+> **Quick-prep edition** (consolidated 2026-10-03). This one file replaces Modules 159–161. Originals: `git show ebb2d5c:43-React/<file>.md`
+> Each topic has: **Key concepts → TypeScript/JSX code → Most common interview questions with answers.** Targets React 18/19 (concurrent rendering, Actions, React Compiler).
 
->
-> **Scope note:** `43-React` scoped as three modules (159-161), mirroring `42-Angular`'s depth exactly, so each module maps directly onto its Angular counterpart: this module ↔ (rendering/reactivity substrate), ↔ (state management/performance/micro-frontends), ↔ (capstone case study). Where a concept is functionally identical to its Angular counterpart, this module states that explicitly and moves on rather than re-deriving it; time is spent specifically on genuine divergences.
+| # | Topic | # | Topic |
+|---|---|---|---|
+| 1 | React's model: UI = f(state); vs Angular | 9 | Server state: TanStack Query |
+| 2 | JSX, components, props & composition | 10 | Forms & React 19 Actions |
+| 3 | Virtual DOM, reconciliation & Fiber | 11 | Error boundaries & Suspense |
+| 4 | Keys & list rendering | 12 | Concurrent rendering: transitions, deferred values, tearing |
+| 5 | State & hooks: useState, useReducer, rules of hooks | 13 | Performance & React Compiler |
+| 6 | useEffect, stale closures & cleanup | 14 | Routing, SSR/RSC & Next.js |
+| 7 | Memoization: memo, useMemo, useCallback | 15 | Security, testing & accessibility |
+| 8 | Context, custom hooks & client state (Redux Toolkit, Zustand) | 16 | Capstone: TradeView-React (vs Angular) |
+| | | 17 | Top 35 rapid-fire + Principal · 18 Mistakes checklist |
 
 ---
 
-## 1. Fundamentals
+## 1. React's Model: UI = f(state); vs Angular
 
-**What:** React is an unopinionated, library-not-framework approach to building component-based UIs, built around three load-bearing subsystems that map onto, but diverge sharply from, the four: a **Virtual DOM and reconciliation algorithm** (React's counterpart to Ivy's compiled-instruction model, but architecturally opposite —), **Fiber** (React's incremental, interruptible rendering engine, with no direct Angular counterpart), and **Hooks** (`useState`, `useEffect`, `useContext`, `useReducer`, and friends — React's reactivity primitive family, replacing what Angular splits across DI, RxJS, and lifecycle hooks).
+**Key concepts**
+- React is a **UI library**: components are functions that return a description of UI from props and state; when state changes React **re-renders** the component and reconciles the result to the DOM.
+- **One-way data flow**: data down via props, events up via callbacks.
+- Ecosystem choices you own: routing (React Router/TanStack Router), data fetching (TanStack Query/RTK Query), state (Redux Toolkit/Zustand), forms (React Hook Form), framework (Next.js/Remix-React Router v7).
 
-**Why:** The single most consequential divergence between the two frameworks, established immediately and referenced throughout both this module and-161: **Angular's default behavior is "check everything on any async event, unless you opt into `OnPush`"; React's default behavior is "re-run this entire component function on every state change, unless you opt into memoization" (below).** Both defaults produce the identical practical risk — unnecessary, potentially expensive re-work — but from architecturally opposite starting points, and a candidate who has only used one framework will systematically misapply that framework's specific opt-in-vs-opt-out intuition to the other.
+| Concern | Angular | React |
+|---|---|---|
+| Nature | Framework (DI, router, forms, HTTP) | Library + ecosystem |
+| Rendering update | Change detection (Zone.js/signals) checks bindings | Re-render component → diff virtual DOM |
+| Opt-out of work | OnPush, signals | memo/useMemo/useCallback, React Compiler |
+| DI | Hierarchical injector | Context (thinner; no per-instance scopes by default) |
+| List identity | `track` | `key` |
+| Global state | NgRx | Redux Toolkit / Zustand |
+| Templates | HTML templates + control flow | JSX (JavaScript expressions) |
 
-**When:** React's unopinionated nature (routing, state management, and forms are all third-party choices, unlike Angular's first-party, all-in-one suite) makes it a common choice where a team wants to select best-of-breed libraries per concern, or where an existing team's skill set and ecosystem preference already lean that direction — this course's Elite FinTech Interview Panel lens treats the Angular-vs-React choice as largely a team/ecosystem/organizational decision (the calibration-to-actual-context principle) rather than either framework being categorically superior for financial-services UI specifically.
+**Common interview question**
 
-**How (30,000-ft view):**
+**Q. Why choose React over Angular (or vice versa) for an enterprise?**
+React: flexibility, huge ecosystem/hiring pool, Next.js for SSR/RSC; the cost is assembling and governing your own stack. Angular: one opinionated toolkit (DI, forms, router, testing) with consistent conventions across many teams. Choose on team skills, consistency needs, SSR requirements and the organization's ability to govern ecosystem choices.
+
+---
+
+## 2. JSX, Components, Props & Composition
+
+**Key concepts**
+- **JSX** compiles to `jsx()` calls producing elements (plain objects). Expressions in `{}`; `className`; conditional rendering with `&&`/ternaries.
+- **Function components** only in modern code; props are read-only.
+- **Composition over inheritance:** `children`, render props, component slots via props; compound components.
+- **Controlled vs uncontrolled** inputs: value in state vs DOM (`ref`).
+- React 19: `ref` as a normal prop (no `forwardRef` needed), `<Context>` as provider, document metadata (`<title>`) in components.
+
+```tsx
+type Position = { isin: string; qty: number; price: number };
+
+function PositionRow({ position, onClose }: { position: Position; onClose: (isin: string) => void }) {
+  const marketValue = position.qty * position.price;
+  return (
+    <tr>
+      <td>{position.isin}</td>
+      <td>{position.qty}</td>
+      <td>{marketValue.toLocaleString('en-GB', { style: 'currency', currency: 'EUR' })}</td>
+      <td><button onClick={() => onClose(position.isin)}>Close</button></td>
+    </tr>
+  );
+}
+
+function Card({ title, children }: { title: string; children: React.ReactNode }) {
+  return <section className="card"><h3>{title}</h3>{children}</section>;   // composition via children
+}
 ```
+
+**Common interview question**
+
+**Q. Controlled vs uncontrolled components?**
+Controlled: React state is the source of truth (`value` + `onChange`) — easy validation and derived UI, re-renders per keystroke. Uncontrolled: the DOM holds the value, read via ref or form submission — fewer re-renders, simpler for large forms (React Hook Form uses this approach).
+
+---
+
+## 3. Virtual DOM, Reconciliation & Fiber
+
+**Key concepts**
+- **Render phase:** call components to produce a new element tree; **reconciliation** diffs it against the previous tree; **commit phase** applies minimal DOM changes and runs layout effects/effects.
+- **Diff heuristics (O(n)):** different element types → replace subtree; same type → update props and recurse; lists matched by **key**.
+- **Fiber:** the reconciler's unit-of-work data structure, enabling **interruptible, prioritized rendering** (concurrent features): render work can be paused, resumed or discarded; commit is synchronous.
+- **Batching:** state updates are batched automatically (React 18+), including in promises/timeouts.
+- Contrast with Angular Ivy: Angular compiles templates to update instructions and checks bindings; React re-executes components and diffs output.
+
+**Common interview questions**
+
+**Q1. What happens when you call `setState`?**
+React schedules an update with a priority (lane), batches it with other updates, re-renders the component (and by default its children) in the render phase, reconciles against the previous tree, then commits DOM changes and runs effects.
+
+**Q2. Is the virtual DOM "fast"?**
+It's not inherently faster than direct DOM manipulation; it's a programming model that makes declarative UI practical with reasonable performance. Cost comes from re-rendering components — the main optimization lever is avoiding unnecessary renders and keeping render functions cheap.
+
+---
+
+## 4. Keys & List Rendering
+
+- `key` gives list items a stable identity across renders so React can move/update items instead of recreating them.
+- Use **stable IDs** (trade ID, ISIN), not array indexes when the list can reorder/insert/delete — index keys cause **state attached to the wrong row** (input values, focus, expanded state) and unnecessary re-renders.
+- Changing a component's key intentionally **resets its state** (a useful trick).
+
+```tsx
+{trades.map(t => <TradeRow key={t.id} trade={t} />)}
+<TradeForm key={selectedAccountId} accountId={selectedAccountId} />   {/* reset form state when the account changes */}
+```
+
+**Common interview question**
+
+**Q. Why are index keys a bug, not just a performance issue?**
+When items are inserted or reordered, the index now points to a different item, so React reuses the wrong component instance — its local state (typed text, checkboxes, expanded rows) appears on the wrong record. In a trading blotter that's a correctness problem.
+
+---
+
+## 5. State & Hooks: useState, useReducer, Rules of Hooks
+
+**Key concepts**
+- **`useState`** — local state; updates are asynchronous and batched; use the **functional updater** (`setCount(c => c + 1)`) when based on previous state; state must be **updated immutably**.
+- **`useReducer`** — complex state transitions in a pure reducer (actions) — testable, predictable.
+- **`useRef`** — mutable value that doesn't trigger renders; DOM refs.
+- **Rules of Hooks:** call hooks only at the top level of components/custom hooks, never conditionally or in loops — React identifies hook state by **call order**.
+- **Derive, don't store:** compute derived values during render instead of syncing extra state with effects.
+- React 19: `use(promise | context)` can be called conditionally (exception to the rule), `useOptimistic`, `useActionState`, `useFormStatus`.
+
+```tsx
+type State = { status: 'idle' | 'submitting' | 'done' | 'error'; error?: string };
+type Action = { type: 'submit' } | { type: 'success' } | { type: 'failure'; error: string };
+
+function reducer(state: State, action: Action): State {
+  switch (action.type) {
+    case 'submit':  return { status: 'submitting' };
+    case 'success': return { status: 'done' };
+    case 'failure': return { status: 'error', error: action.error };
+  }
+}
+
+function OrderTicket({ price, limit }: { price: number; limit: number }) {
+  const [qty, setQty] = useState(0);
+  const [state, dispatch] = useReducer(reducer, { status: 'idle' });
+  const notional = qty * price;                 // derived during render — no extra state/effect
+  const overLimit = notional > limit;
+  return (
+    <>
+      <input type="number" value={qty} onChange={e => setQty(Number(e.target.value))} />
+      <p>Notional: {notional}</p>
+      {overLimit && <p className="warn">Exceeds your limit</p>}
+      <button disabled={overLimit || state.status === 'submitting'} onClick={() => dispatch({ type: 'submit' })}>Send</button>
+    </>
+  );
+}
+```
+
+**Common interview questions**
+
+**Q1. Why can't hooks be called conditionally?**
+React stores hook state in a list per component instance and matches hooks by call order on each render. A conditional call shifts the order, so the wrong state is read. Lint with `eslint-plugin-react-hooks`.
+
+**Q2. Why doesn't my state update immediately after `setState`?**
+State updates are scheduled and batched; the variable in the current render is a snapshot. The new value appears on the next render. Use the functional updater for sequential updates and derived values for computed data.
+
+---
+
+## 6. useEffect, Stale Closures & Cleanup
+
+**Key concepts**
+- **`useEffect`** synchronizes a component with an **external system** (subscriptions, WebSockets, timers, non-React widgets, analytics) after commit. **Not for** derived state or handling user events ("You might not need an effect").
+- **Dependency array**: effect re-runs when listed values change; omitting dependencies causes **stale closures** (the effect sees old props/state).
+- **Cleanup** function runs before the next effect and on unmount → unsubscribe, abort fetches, clear timers.
+- **Strict Mode** (dev) mounts → unmounts → remounts to surface missing cleanup.
+- **Race conditions in fetching**: ignore/abort stale responses (AbortController) — or use TanStack Query.
+- `useLayoutEffect` for measuring layout before paint; `useEffectEvent` (React 19.2) to read the latest values without re-subscribing.
+
+```tsx
+function usePriceStream(isin: string) {
+  const [price, setPrice] = useState<number | null>(null);
+  useEffect(() => {
+    const ws = new WebSocket(`wss://md.example.com/prices/${isin}`);
+    ws.onmessage = e => setPrice(JSON.parse(e.data).price);
+    return () => ws.close();                     // cleanup: no leaked sockets when isin changes/unmounts
+  }, [isin]);                                     // re-subscribe when isin changes
+  return price;
+}
+
+// Stale closure bug and fix
+function Ticker() {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setCount(c => c + 1), 1000);   // functional update avoids stale `count`
+    return () => clearInterval(id);
+  }, []);
+  return <span>{count}</span>;
+}
+```
+
+**Common interview questions**
+
+**Q1. What is a stale closure in React?**
+A function created in an earlier render captures that render's props/state. If an effect or callback isn't recreated when those values change (missing dependency), it keeps using old values — e.g., an interval always seeing `count = 0`. Fix with correct dependencies, functional updates, refs or `useEffectEvent`.
+
+**Q2. Why does my effect run twice in development?**
+Strict Mode deliberately mounts, unmounts and remounts components to reveal effects without proper cleanup. It doesn't happen in production; the fix is idempotent effects with cleanup.
+
+---
+
+## 7. Memoization: memo, useMemo, useCallback
+
+**Key concepts**
+- By default, **a parent re-render re-renders all children** (the inverse of Angular OnPush).
+- **`React.memo(Component)`** skips re-render if props are shallowly equal.
+- **`useMemo`** caches an expensive computed value; **`useCallback`** caches a function identity so memoized children don't re-render.
+- Memoization helps only when props are stable — new object/array/function literals each render break it.
+- **React Compiler** (stable 1.0, 2025) auto-memoizes components and hooks at build time → much less manual `useMemo`/`useCallback`.
+- Other levers: move state down (colocate), lift content up (`children`), split contexts, virtualize lists.
+
+```tsx
+const TradeRow = memo(function TradeRow({ trade, onSelect }: { trade: Trade; onSelect: (id: string) => void }) {
+  return <tr onClick={() => onSelect(trade.id)}><td>{trade.id}</td><td>{trade.qty}</td></tr>;
+});
+
+function Blotter({ trades, filter }: { trades: Trade[]; filter: string }) {
+  const [selected, setSelected] = useState<string>();
+  const visible = useMemo(() => trades.filter(t => t.symbol.includes(filter)), [trades, filter]);
+  const onSelect = useCallback((id: string) => setSelected(id), []);   // stable identity for memoized rows
+  return <table><tbody>{visible.map(t => <TradeRow key={t.id} trade={t} onSelect={onSelect} />)}</tbody></table>;
+}
+```
+
+**Common interview question**
+
+**Q. Should you wrap everything in useMemo/useCallback?**
+No. Memoization has costs (memory, comparisons, complexity) and only helps when it prevents expensive work or re-renders of memoized children. Profile first; fix structure (state colocation, children composition); with React Compiler most manual memoization becomes unnecessary.
+
+---
+
+## 8. Context, Custom Hooks & Client State (Redux Toolkit, Zustand)
+
+**Key concepts**
+- **Context** passes values through the tree without prop drilling (theme, auth user, locale). **Every consumer re-renders when the value changes** → split contexts, memoize values, avoid high-frequency data in context.
+- Context is DI-adjacent but thinner than Angular DI: no per-instance scoping/resolution modifiers by default (you create a provider per subtree to emulate scoping).
+- **Custom hooks** extract reusable stateful logic (`usePriceStream`, `useAuth`).
+- **Client state libraries:** **Redux Toolkit** (slices, Immer, RTK Query; structural parity with NgRx — actions/reducers/selectors/middleware), **Zustand** (minimal store with selector subscriptions), Jotai (atoms).
+- **Server state ≠ client state** → server data belongs in TanStack Query/RTK Query caches, not global client stores.
+
+```tsx
+// Per-desk store with Zustand + context (emulating Angular's per-component provider scope)
+const createDeskStore = () => createStore<DeskState>()(set => ({
+  filter: '', positions: [],
+  setFilter: filter => set({ filter }),
+  setPositions: positions => set({ positions }),
+}));
+const DeskStoreContext = createContext<ReturnType<typeof createDeskStore> | null>(null);
+
+function DeskProvider({ children }: { children: React.ReactNode }) {
+  const [store] = useState(createDeskStore);                         // one store per <DeskProvider> instance
+  return <DeskStoreContext value={store}>{children}</DeskStoreContext>;
+}
+function useDesk<T>(selector: (s: DeskState) => T) {
+  const store = useContext(DeskStoreContext);
+  if (!store) throw new Error('useDesk must be used inside DeskProvider');
+  return useStore(store, selector);                                  // re-render only when the selected slice changes
+}
+```
+
+**Common interview questions**
+
+**Q1. Context vs Redux?**
+Context is a transport for low-frequency values; every consumer re-renders on change and there are no selectors. Redux/Zustand provide stores with selector-based subscriptions, middleware, devtools — suited to frequently changing shared state. Server data should live in a query cache instead.
+
+**Q2. How do you get per-component-instance state scope like Angular's component providers?**
+Create the store inside a provider component (`useState(createStore)`), expose it via context, and consume with selector hooks — each provider instance owns a separate store.
+
+---
+
+## 9. Server State: TanStack Query
+
+**Key concepts**
+- Server state is **remote, shared, async, potentially stale** → caching, deduplication, background refetching, stale-while-revalidate, retries, pagination, optimistic updates, invalidation.
+- **Query keys** identify cache entries — include **every parameter** (account, tenant, filters) or users see each other's/wrong data (cache-key scoping bug).
+- `staleTime` vs `gcTime`; `invalidateQueries` after mutations; `useSuspenseQuery`.
+
+```tsx
+const positionsQuery = (accountId: string) => queryOptions({
+  queryKey: ['positions', accountId],                 // key includes all inputs
+  queryFn: ({ signal }) => fetch(`/api/accounts/${accountId}/positions`, { signal }).then(r => r.json() as Promise<Position[]>),
+  staleTime: 30_000,
+});
+
+function Positions({ accountId }: { accountId: string }) {
+  const { data, isPending, error } = useQuery(positionsQuery(accountId));
+  if (isPending) return <Spinner />;
+  if (error) return <ErrorPanel error={error} />;
+  return <PositionsTable rows={data} />;
+}
+
+function useClosePosition(accountId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (isin: string) => fetch(`/api/accounts/${accountId}/positions/${isin}/close`,
+      { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['positions', accountId] }),
+  });
+}
+```
+
+**Common interview question**
+
+**Q. Why not fetch in useEffect and store results in Redux?**
+You'd re-implement caching, dedupe, race handling, retries, background refresh and invalidation — usually with bugs. Query libraries handle server-state concerns declaratively; Redux stays for genuinely client-owned state.
+
+---
+
+## 10. Forms & React 19 Actions
+
+- **React Hook Form** (uncontrolled, performant) + **Zod** schemas for validation; or Formik (older).
+- **React 19 Actions:** `<form action={fn}>`, **`useActionState`** (pending state + result), **`useFormStatus`**, **`useOptimistic`** (optimistic UI with automatic rollback); works with Server Actions in frameworks.
+- Double-submit protection, idempotency keys and server-side validation remain mandatory for payments.
+
+```tsx
+function PaymentForm() {
+  const [state, submit, isPending] = useActionState(async (_prev: { error?: string } | null, form: FormData) => {
+    const res = await fetch('/api/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': String(form.get('idemKey')) },
+      body: JSON.stringify({ iban: form.get('iban'), amount: Number(form.get('amount')) }),
+    });
+    return res.ok ? null : { error: (await res.json()).title as string };
+  }, null);
+  const [idemKey] = useState(() => crypto.randomUUID());
+  return (
+    <form action={submit}>
+      <input type="hidden" name="idemKey" value={idemKey} />
+      <input name="iban" required pattern="[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}" />
+      <input name="amount" type="number" min="0.01" step="0.01" required />
+      <button disabled={isPending}>Pay</button>
+      {state?.error && <p role="alert">{state.error}</p>}
+    </form>
+  );
+}
+```
+
+---
+
+## 11. Error Boundaries & Suspense
+
+**Key concepts**
+- **Error boundaries** catch errors **during rendering, lifecycle and constructors** of descendants and show fallback UI. They do **not** catch errors in event handlers, async code (promises, setTimeout), SSR, or the boundary itself → handle those with try/catch and state, or rethrow into render.
+- Still class-only (`getDerivedStateFromError`, `componentDidCatch`) — commonly used via `react-error-boundary`.
+- **Suspense** shows a fallback while children wait (lazy components, `use(promise)`, suspense-enabled data libraries); nested boundaries control loading granularity.
+
+```tsx
+const RiskChart = lazy(() => import('./RiskChart'));
+
+<ErrorBoundary fallbackRender={({ error, resetErrorBoundary }) => <ErrorPanel error={error} onRetry={resetErrorBoundary} />}>
+  <Suspense fallback={<ChartSkeleton />}>
+    <RiskChart accountId={accountId} />
+  </Suspense>
+</ErrorBoundary>
+```
+
+**Common interview question**
+
+**Q. Will an error boundary catch a failed fetch in onClick?**
+No — event handlers and async callbacks run outside rendering. Catch the error and set error state (or use a query library's error state); with `react-error-boundary`, `showBoundary(error)` can forward it to the nearest boundary.
+
+---
+
+## 12. Concurrent Rendering: Transitions, Deferred Values, Tearing
+
+- **`startTransition`/`useTransition`** — mark updates as non-urgent (filtering a big list) so urgent ones (typing) stay responsive; React can interrupt and restart the transition render.
+- **`useDeferredValue`** — render with a lagging copy of a value for expensive children.
+- **Tearing:** with interruptible rendering, components reading an **external mutable store** could show inconsistent values within one render → use **`useSyncExternalStore`** (Redux/Zustand do) for external stores; never read mutable globals during render.
+
+```tsx
+function InstrumentFilter({ instruments }: { instruments: Instrument[] }) {
+  const [query, setQuery] = useState('');
+  const deferredQuery = useDeferredValue(query);                    // typing stays responsive
+  const results = useMemo(() => instruments.filter(i => i.name.includes(deferredQuery)), [instruments, deferredQuery]);
+  return <>
+    <input value={query} onChange={e => setQuery(e.target.value)} />
+    <div style={{ opacity: query !== deferredQuery ? 0.6 : 1 }}><InstrumentList items={results} /></div>
+  </>;
+}
+
+// External store (market data) read safely under concurrent rendering
+const price = useSyncExternalStore(marketData.subscribe, () => marketData.getPrice(isin));
+```
+
+**Common interview question**
+
+**Q. What is tearing and how do you prevent it?**
+In concurrent rendering, a render can be paused while an external store changes, so parts of the UI render with old values and parts with new — an inconsistent screen (dangerous in a trading UI). `useSyncExternalStore` forces consistent snapshots; state managed by React (useState/useReducer) is safe.
+
+---
+
+## 13. Performance & React Compiler
+
+**Checklist**
+- Measure with React DevTools Profiler and Core Web Vitals (INP especially).
+- Colocate state; avoid high-frequency values in context; split components.
+- React Compiler or targeted `memo`/`useMemo`/`useCallback`.
+- **Virtualize** long lists (TanStack Virtual, react-window) with stable keys.
+- Batch high-frequency updates (market ticks) — buffer and flush per animation frame; use transitions for non-urgent updates.
+- Code splitting with `lazy` + Suspense, route-based chunks; analyze bundles.
+- Avoid expensive work in render; web workers for heavy computation.
+- SSR/streaming and RSC to reduce client JS.
+
+---
+
+## 14. Routing, SSR/RSC & Next.js
+
+- **Client routing:** React Router (v7 also as a framework mode), TanStack Router (type-safe); route-level code splitting and loaders.
+- **SSR** renders HTML on the server then **hydrates**; **streaming SSR** with Suspense; **React Server Components (RSC)**: components that run only on the server (zero client JS, direct data access), mixed with `'use client'` components; **Server Actions** for mutations.
+- **Next.js App Router** implements RSC, streaming, caching and server actions — choose it when SEO/first-paint matter; internal dashboards are often fine as SPAs (Vite) behind a BFF.
+- Security with RSC/Server Actions: they're public endpoints — authenticate and authorize every action; don't leak server-only data into client props.
+
+**Common interview question**
+
+**Q. SPA or Next.js for an internal trading dashboard?**
+Usually a Vite SPA behind a BFF: authenticated users, no SEO needs, heavy real-time client interactivity. Next.js/RSC shines for public, content-heavy or SEO-sensitive apps and for reducing client JS; it adds server infrastructure and caching complexity.
+
+---
+
+## 15. Security, Testing & Accessibility
+
+- **XSS:** JSX escapes by default; `dangerouslySetInnerHTML` only with sanitized content (DOMPurify); validate URLs (`javascript:` in `href`); CSP.
+- **Auth:** BFF pattern with HttpOnly cookies + CSRF protection; or OIDC code + PKCE with in-memory tokens; never secrets in the bundle; client-side route protection is UX only.
+- **Testing:** Vitest/Jest + **React Testing Library** (test behaviour via roles/labels), MSW for API mocking, Playwright for E2E.
+- **Accessibility:** semantic HTML, labels, focus management in modals (focus trap, return focus), `aria-live` for streaming updates, keyboard support; eslint-plugin-jsx-a11y; axe in CI.
+
+```tsx
+test('shows API error on failed payment', async () => {
+  server.use(http.post('/api/payments', () => HttpResponse.json({ title: 'Insufficient funds' }, { status: 422 })));
+  render(<PaymentForm />);
+  await userEvent.type(screen.getByRole('textbox', { name: /iban/i }), 'GB82WEST12345698765432');
+  await userEvent.type(screen.getByRole('spinbutton', { name: /amount/i }), '100');
+  await userEvent.click(screen.getByRole('button', { name: /pay/i }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('Insufficient funds');
+});
+```
+
+---
+
+## 16. Capstone: TradeView-React (vs Angular)
+
+Rebuilding the Angular trading dashboard ([[../42-Angular/01-Angular-Interview-Prep]] §16) in React:
+- **Inherits cleanly:** feature-based structure, BFF auth, Module Federation micro-frontends (near-total parity), Redux Toolkit for cross-desk state (parity with NgRx), virtualization with stable keys (`key` ≈ `track`), server state in TanStack Query.
+- **The missing primitive:** no native per-component-instance DI scope → per-desk stores via provider components + context + selector hooks (§8).
+- **New failure mode:** concurrent rendering + external market-data store → **tearing** risk → `useSyncExternalStore` for the price store; `useDeferredValue` only for non-critical views (never for the price shown on the order ticket at submit time).
+- **High-frequency updates:** buffer ticks outside React, flush per animation frame into the store; rows subscribe by instrument ID selector.
+- **Order entry:** Actions/`useActionState` or React Hook Form, disabled while pending, idempotency key, server validation, confirmation for large orders, error boundary per panel so a failing chart doesn't take down order entry.
+
+**Common interview question**
+
+**Q. What's genuinely different when porting an Angular trading app to React?**
+Mostly parity (stores, federation, virtualization). The real differences: no hierarchical DI (emulate scoped stores with context providers), default re-render-everything semantics (need memoization/compiler and selector subscriptions), and concurrent rendering's tearing risk with external stores (use `useSyncExternalStore`).
+
+---
+
+## 17. Top 35 Rapid-Fire Questions + Principal Questions
+
+1. **React?** UI library; UI = f(state).
+2. **JSX?** Syntax compiled to element objects.
+3. **Props vs state?** Inputs vs internal memory.
+4. **Reconciliation?** Diff new vs old tree.
+5. **Fiber?** Interruptible, prioritized render work units.
+6. **Batching?** Automatic in React 18+.
+7. **Keys?** Stable identity in lists; not indexes.
+8. **Key reset trick?** Change key to remount.
+9. **Rules of hooks?** Top level only; call order.
+10. **Functional updater?** `setX(x => …)`.
+11. **useReducer?** Complex transitions in pure reducer.
+12. **useRef?** Mutable value without re-render.
+13. **useEffect purpose?** Sync with external systems.
+14. **Stale closure?** Old render's values captured.
+15. **Effect twice in dev?** Strict Mode remount check.
+16. **Cleanup?** Unsubscribe/abort/clear.
+17. **memo?** Skip re-render on equal props.
+18. **useMemo vs useCallback?** Value vs function identity.
+19. **React Compiler?** Automatic memoization.
+20. **Context pitfall?** All consumers re-render.
+21. **Redux Toolkit?** Slices + Immer + RTK Query.
+22. **Zustand?** Minimal selector-based store.
+23. **Server state?** TanStack Query.
+24. **Query key rule?** Include every input.
+25. **Error boundaries miss?** Events, async, SSR.
+26. **Suspense?** Declarative loading fallbacks.
+27. **useTransition?** Non-urgent updates.
+28. **useDeferredValue?** Lagging value for expensive renders.
+29. **Tearing?** Inconsistent external store reads → useSyncExternalStore.
+30. **useActionState?** Form action state + pending.
+31. **useOptimistic?** Optimistic UI with rollback.
+32. **RSC?** Server-only components, no client JS.
+33. **Server Actions security?** Public endpoints — authorize.
+34. **dangerouslySetInnerHTML?** Sanitize or avoid.
+35. **Testing?** RTL + MSW + Playwright.
+
+**Principal-level questions**
+
+**P1. Standardize the React stack for 15 teams.**
+A paved road: Vite (or Next.js where SSR/SEO matters), TypeScript strict, React Router/TanStack Router, TanStack Query for server state, Zustand/RTK for client state with a decision guide, React Hook Form + Zod, shared design system with accessibility, BFF auth, React Compiler, lint rules (hooks, a11y), RTL/MSW/Playwright templates, performance budgets in CI, and an architecture review for deviations.
+
+**P2. React or Angular for a new bank-wide platform?**
+Assess team skills and hiring, consistency needs, existing component libraries, SSR needs and governance capacity. Angular reduces stack decisions and enforces consistency; React offers ecosystem breadth and Next.js. Either works with a strong paved road; mixing both doubles platform cost unless micro-frontend boundaries justify it.
+
+---
+
+## 18. Mistakes Checklist (say why each is wrong)
+- [ ] Index keys on dynamic lists · mutating state in place
+- [ ] Hooks called conditionally · missing effect dependencies (stale closures)
+- [ ] Effects for derived state or event handling · no cleanup for subscriptions
+- [ ] Fetching in effects without race handling · server data in Redux
+- [ ] Query keys missing tenant/account parameters
+- [ ] High-frequency data in context · memoizing everything blindly
+- [ ] Reading mutable external stores during render (tearing)
+- [ ] Expecting error boundaries to catch async/event errors
+- [ ] Tokens in localStorage · `dangerouslySetInnerHTML` with user content · unauthorized Server Actions
+
+---
+
+## Architecture Diagrams (preserved from the original modules)
+
+> All 10 Mermaid/ASCII diagrams from the original `43-React/` files, kept verbatim and grouped by source module. Originals: `git show ebb2d5c:43-React/<file>.md`.
+
+### Module 159 — React Fundamentals: Virtual DOM, Fiber Reconciliation & Hooks — Comparative Against Angular
+*Source: `01-React-Fundamentals-VirtualDOM-Fiber-Hooks-vs-Angular.md`*
+
+**1. Fundamentals**
+
+```text
 JSX (declarative UI description, compiled to React.createElement calls)
  │
  Component function re-executes on every state change (re-render)
@@ -36,37 +549,7 @@ JSX (declarative UI description, compiled to React.createElement calls)
  ngOnInit/ngOnDestroy PLUS manual RxJS subscription management combined
 ```
 
----
-
-## 2. Deep Dive
-
-### 2.1 Virtual DOM diffing and Fiber — the architectural inverse of Ivy
-
-Earlier analysis established that Ivy compiles templates into instruction functions that already know, at compile time, exactly which DOM node each binding affects — change detection *executes* pre-known update instructions. React's Virtual DOM model does the structural opposite: on every re-render, React builds an entirely new, in-memory tree of lightweight element descriptors, then **diffs** that tree against the previous render's tree at runtime to compute the minimal set of actual DOM mutations needed — the "which nodes changed" question is answered by comparison at runtime, not known in advance from compilation. **Fiber** (React's reconciler since React 16) is what makes this diffing-and-committing process **incremental and interruptible**: rather than walking the whole component tree in one uninterruptible synchronous pass (Angular's model), Fiber breaks rendering work into units it can pause, prioritize (a user keystroke's update can preempt a lower-priority background re-render already in progress), and resume — a capability with no Angular counterpart at all, since Angular's change-detection tree walk is not natively interruptible or priority-schedulable in the same way.
-
-### 2.2 The `key` prop — React's `trackBy`, but mandatory-by-convention and present in every list render by default
-
-**This is the single most direct, load-bearing comparison this module makes to.** React's reconciler, when diffing a list of child elements, uses each element's `key` prop as its identity across renders — structurally identical in *purpose* to Angular's `trackBy`: both tell the framework "this specific rendered output, previously representing item X, should now be understood as representing item Y" when a list reorders. **The divergence:** Angular's `trackBy` is an explicit, opt-in performance/correctness parameter developers must deliberately add (defaulting to no `trackBy` function at all, which falls back to Angular's own internal object-identity tracking, not index-based by default) — whereas React's `key` prop is asked for on *every single list render* via a console warning if omitted, making the "you need a stable identity for reordering lists" lesson far more front-loaded and visible in React than in Angular, even though the exact same underlying failure mode (using array index as the identity source for a reorderable list) is possible, common, and just as silently incorrect in both frameworks. **React's warning nudges developers toward providing *a* key; it does not and cannot verify that the key they chose is actually semantically stable** — an index-based key silences the warning while reproducing the identical incident mechanism exactly.
-
-### 2.3 Re-render defaults and `memo`/`useMemo`/`useCallback` — React's inverse of `OnPush`
-
-Earlier analysis established `OnPush` as an opt-in narrowing of Angular's default "check everything" behavior. React's default is the mirror image: **a component function re-executes in full on every state change anywhere that affects it, including re-creating every inline object, array, and function literal defined in its body on every single render** — `React.memo` (wrapping a component to skip re-rendering when its props are shallowly unchanged, directly analogous to `OnPush`'s reference-identity check) and `useMemo`/`useCallback` (memoizing a specific computed value or function reference across renders, so a *child* wrapped in `memo` actually sees a stable prop reference rather than a fresh one every parent re-render) are the opt-in narrowing tools. **The critical, distinctly-React footgun this produces:** passing an inline arrow function or object literal as a prop to a `memo`-wrapped child (`<Child onClick={ => doThing} />`) creates a *new* function reference on every parent render, defeating `memo`'s shallow-comparison optimization even though the child's actual behavior never changed — the React-specific instance I2's exact reference-identity gotcha, but arising from the *opposite* structural direction (React creates new references by default and must be told to stabilize them; Angular's `OnPush` assumes stable references by default and is broken by in-place mutation instead).
-
-### 2.4 Hooks — call-order-based state identity and the Rules of Hooks
-
-`useState` and `useReducer` hold a component instance's state across re-renders not by any named field (as Angular's class-based components use named class properties) but by **the *order* in which hooks are called within the component function** — React's runtime maintains an internal, per-component-instance list of hook state slots, indexed by call order, and matches each `useState` call in a given render to its corresponding slot from the *previous* render strictly by position. This is why the **Rules of Hooks** (never call a hook conditionally, never call a hook inside a loop, always call hooks in the same order on every render) are not a style preference but a structural correctness requirement — a hook called conditionally can shift every subsequent hook's call-order index, causing React to match the wrong stored state to the wrong hook, silently. **This has no meaningful Angular analogue**: Angular's DI-resolved, class-property-based state has no equivalent call-order-dependent identity mechanism, since a class instance's fields are always accessed by name, not by declaration-order position.
-
-### 2.5 `useEffect` and the stale-closure problem — React's most distinctive, most-tested footgun
-
-`useEffect(=> {... }, [dependencies])` is React's mechanism for side effects (subscriptions, data fetching, manual DOM work) — the rough functional-component equivalent of Angular's `ngOnInit`/`ngOnDestroy` pair, but implemented as a *closure* captured fresh on every render, not a stable class-instance method. **The single most distinctive React-specific bug class this creates, with no direct Angular counterpart:** an effect's callback closes over whatever values were in scope *at the time that specific render's effect was created* — if the effect's dependency array omits a value the closure actually reads, the effect will keep running with that value's *original, stale* snapshot indefinitely, never seeing subsequent updates, even though the component itself has since re-rendered many times with fresh values. Angular's equivalent subscription-management code can certainly leak (fail to unsubscribe) or race, but it does not have this specific *stale-closure-over-a-since-changed-variable* failure mode, because Angular's class-based `ngOnDestroy`/service-injected state isn't re-created fresh, closure-style, on every render the way a function component's body is.
-
-### 2.6 Context API — React's DI-adjacent, but structurally thinner, mechanism
-
-React's `Context` (`createContext`/`useContext`) lets a value be provided at one point in the component tree and consumed by any descendant without prop-drilling through every intermediate level — structurally similar in *purpose* to Angular's hierarchical injector tree, including the same "nearest provider wins, allowing scoped overrides at any subtree" resolution behavior. **The divergence:** Angular's DI is a full container — services are resolved by *type* (an injection token), can themselves have their own injected dependencies resolved transitively, and integrate with the framework's own instantiation lifecycle. React's Context provides *values* (which can certainly be objects, including objects with methods) to consuming components via a hook, with no equivalent formal dependency-graph resolution, no automatic constructor-style injection of one context's value into another's provider — any "DI-like" behavior beyond simple value-provision in React is a convention teams build on top of Context (or a third-party DI library), not a first-party framework capability the way Angular's injector is.
-
----
-
-## 3. Visual Architecture
+**3. Visual Architecture**
 
 ```mermaid
 graph TB
@@ -78,412 +561,11 @@ graph TB
  end
 ```
 
-```
-Ivy vs. Virtual DOM+Fiber (this module) — opposite directions:
+**12. System Design**
 
- Ivy: compile-time-known instructions → runtime executes them (cheap per-binding checks)
- React: runtime builds a NEW full tree → runtime DIFFS it against the old one
-
-Angular OnPush (opt-IN to skip checking) vs. React memo (opt-IN to skip re-rendering)
- — same opt-in shape, OPPOSITE default starting point
-```
-
-```
-trackBy (Angular,/158) vs. key (React) — same PURPOSE, different DEFAULT VISIBILITY:
-
- Angular: trackBy is silent-by-default (no warning if omitted) — the incident
- went undetected until production specifically because nothing flagged its absence.
- React: key triggers a console warning if omitted from ANY list render — more visible,
- but the warning only checks PRESENCE, never SEMANTIC STABILITY (index-as-key
- silences the warning while reproducing the identical incident mechanism).
-```
-
----
-
-## 4. Production Example
-
-**Problem:** A brokerage's React-based order-entry widget subscribed to a live WebSocket price feed inside a `useEffect`, using the current order's proposed price as part of a client-side pre-trade sanity check (flagging if the proposed price deviated more than a threshold from the live market price) before allowing submission.
-
-**Architecture:** A functional component holding `orderPrice` (from a controlled form input) and `livePrice` (from the WebSocket feed) as separate `useState` values, with a `useEffect` establishing the WebSocket subscription once on mount, intended to run the sanity check inside the message handler using both values.
-
-**Implementation / What happened:** The `useEffect`'s dependency array was written as `[]` (run once on mount only, a common, deliberate pattern for "subscribe once, don't resubscribe on every render") — but the WebSocket message handler *inside* that effect read `orderPrice` directly from the surrounding closure. Because the effect (and its closure) was created exactly once, at mount, with whatever `orderPrice` value existed *at that moment*, every subsequent price-tick message for the rest of the component's lifetime ran the sanity check against that original, stale `orderPrice` value — never the trader's actual, currently-typed order price — silently comparing live market moves against a snapshot from whenever the form happened to be empty or hold an initial default value, producing a sanity check that was, in practice, permanently checking against the wrong number and either firing false warnings or (more dangerously) failing to fire genuine ones.
-
-**Trade-offs:** The empty dependency array was not a careless mistake but a deliberate, individually-reasonable choice to avoid the WebSocket subscription being torn down and re-established on every keystroke in the order-price input (which *would* have been a genuine, separate performance problem) — the team correctly avoided one failure mode (resubscription thrashing) while not recognizing that the same fix silently introduced the stale-closure failure mode instead, since both share the identical `useEffect` dependency-array configuration point.
-
-**Lessons learned:** **A `useEffect`'s dependency array is not merely a performance-tuning knob (how often does this re-run) — it is a correctness contract about which values the effect's closure is allowed to safely read**, and omitting a value the closure genuinely uses doesn't merely risk "a slightly stale UI," it can silently and permanently disconnect a safety-relevant check from the value it was supposed to validate against, with the framework providing zero runtime signal (React's `eslint-plugin-react-hooks` *exhaustive-deps* lint rule is a static, opt-in check catching exactly this class of bug at write-time — but only if enabled and heeded, not a runtime guarantee). This is React's own, structurally distinct instance of the "individually-correct-seeming configuration choice silently wrong for the actual usage" composition-risk shape, occurring specifically at the closure-capture seam that has no Angular counterpart at all.
-## 10. Interview Questions
-
-### Basic (10)
-
-**B1. What is the Virtual DOM, and how does React use it?**
-*Ideal Answer:* An in-memory, lightweight tree representation of the UI that React builds fresh on every re-render, then diffs against the previous render's tree to compute the minimal set of actual DOM mutations needed.
-*Why correct:* Matches.
-*Common mistakes:* Describing the Virtual DOM as making updates instant or free, rather than as a mechanism for computing a *minimal* update relative to a full DOM rebuild.
-*Follow-up:* How does this differ architecturally from Angular's Ivy compiler's approach?
-
-**B2. What is Fiber, and what capability does it provide that Angular's change detection lacks?**
-*Ideal Answer:* React's reconciler engine, enabling rendering work to be broken into interruptible, prioritizable units — a high-priority update (e.g., user input) can preempt a lower-priority one already in progress, unlike Angular's single, uninterruptible synchronous tree walk.
-*Why correct:* Matches/.
-*Common mistakes:* Describing Fiber merely as "React's rendering engine" without the specific interruptible/prioritizable capability that distinguishes it.
-*Follow-up:* Name a React 18+ API that directly exposes this prioritization capability to application code.
-
-**B3. What is the `key` prop for, and why does React warn if it's missing from a list render?**
-*Ideal Answer:* Tells the reconciler each list item's stable identity across renders, so it can correctly distinguish "this item moved" from "this position now holds a different item" — the warning exists because omitting it risks exactly this kind of misidentification.
-*Why correct:* Matches.
-*Common mistakes:* Describing `key` purely as a performance hint rather than a correctness-relevant identity mechanism.
-*Follow-up:* Does React's warning verify that a provided `key` is actually semantically stable, or only that one was provided at all?
-
-**B4. Why does calling a Hook conditionally break a component?**
-*Ideal Answer:* Hooks are matched to their stored state by call-order position, not by name — a conditionally-skipped hook call shifts every subsequent hook's position, causing React to associate the wrong stored state with the wrong hook.
-*Why correct:* Matches.
-*Common mistakes:* Describing this as an arbitrary style rule ("the Rules of Hooks say so") rather than explaining the underlying call-order-identity mechanism that makes it a structural requirement.
-*Follow-up:* Does Angular have an equivalent call-order-dependent state-identity mechanism? Why or why not?
-
-**B5. What does `React.memo` do, and what is its Angular counterpart?**
-*Ideal Answer:* Wraps a component so it skips re-rendering when its props are shallowly unchanged — the direct counterpart to Angular's `OnPush` change-detection strategy.
-*Why correct:* Matches.
-*Common mistakes:* Describing `memo` as caching the component's rendered output permanently, rather than as a per-render shallow-props-comparison gate.
-*Follow-up:* What specifically defeats `memo`'s optimization when a parent passes an inline arrow function as a prop?
-
-**B6. What is a stale closure in the context of `useEffect`?**
-*Ideal Answer:* When an effect's callback reads a value from its surrounding scope that isn't included in the effect's dependency array, causing the effect to keep using that value's original snapshot from whenever the closure was created, never seeing subsequent updates.
-*Why correct:* Matches.
-*Common mistakes:* Confusing a stale closure with a subscription-leak bug — the two are distinct failure modes, one about reading outdated data, the other about failing to tear down a subscription at all.
-*Follow-up:* What ESLint rule specifically helps catch this bug class at write-time?
-
-**B7. What does React's Context API provide, and how does it differ from Angular's dependency injection?**
-*Ideal Answer:* Context lets a value be provided at one point in the component tree and consumed by descendants without prop-drilling, with the same "nearest provider wins" scoping behavior as Angular's injector — but it provides values via a hook, with no equivalent formal, type-resolved dependency graph or transitive injection the way Angular's DI container provides.
-*Why correct:* Matches.
-*Common mistakes:* Treating Context as a full DI-container replacement with feature parity to Angular's injector.
-*Follow-up:* What would a team need to build on top of Context to approximate Angular's transitive dependency resolution?
-
-**B8. Why does JSX require sanitization to be opted out of explicitly, rather than opted into?**
-*Ideal Answer:* JSX interpolation (`{expression}`) automatically escapes rendered values by default to prevent XSS; rendering raw, unescaped HTML requires the explicit, deliberately alarmingly-named `dangerouslySetInnerHTML` prop.
-*Why correct:* Matches, directly paralleling Angular's default-safe sanitization.
-*Common mistakes:* Assuming React requires manual escaping by default, rather than recognizing escaping as React's own default-safe posture.
-*Follow-up:* What governance discipline should apply to every `dangerouslySetInnerHTML` call site?
-
-**B9. What is `useState`'s functional-update form, and when should it be used?**
-*Ideal Answer:* `setState(prevState => newState)` — computing the new state from the previous state via a function argument rather than reading the outer closure's state variable directly, avoiding a category of stale-closure bugs specifically for state updates that depend on the prior value.
-*Why correct:* Matches.
-*Common mistakes:* Assuming the functional-update form is merely a stylistic alternative rather than a specific fix for a specific closure-related correctness risk.
-*Follow-up:* Why doesn't the functional-update form help with the incident specifically, which involved reading state inside a WebSocket message handler rather than updating it?
-
-**B10. What React 18+ capability has no Angular equivalent, and why?**
-*Ideal Answer:* Fiber's interruptible, priority-scheduled rendering, exposed via APIs like `startTransition`/`useDeferredValue` — Angular's change-detection tree walk is a single, synchronous, uninterruptible pass with no native prioritization mechanism.
-*Why correct:* Matches/.
-*Common mistakes:* Naming a feature (e.g., hooks generally) that does have a rough Angular counterpart (Signals), rather than specifically identifying Fiber's prioritization capability, which genuinely doesn't.
-*Follow-up:* What kind of user-facing responsiveness problem does this capability specifically address?
-
-### Intermediate (10)
-
-**I1. Walk through precisely why the `useEffect` with an empty dependency array produced a permanently stale `orderPrice` value inside the WebSocket handler.**
-*Ideal Answer:* An empty dependency array tells React "only re-run this effect once, on mount" — meaning the effect's callback closure is created exactly once, capturing whatever value `orderPrice` held at that single moment. Every subsequent WebSocket message handled by that same, never-recreated closure reads that original, captured value — not the component's current, re-rendered `orderPrice` state — because the closure itself was never regenerated to capture a fresh value.
-*Why correct:* Matches/the precise mechanics.
-*Common mistakes:* Assuming the effect somehow "re-reads" the latest state on each message automatically, missing that a closure captures its enclosing scope's values at creation time, not dynamically at each later invocation.
-*Follow-up:* What's the minimal, correct fix that preserves the "subscribe once" behavior while avoiding the stale value?
-
-**I2. Design the corrected version of the `useEffect`, preserving the "subscribe once" behavior while reading current `orderPrice` correctly.**
-*Ideal Answer:* Keep the WebSocket subscription itself in a `useEffect` with an empty dependency array (correctly avoiding resubscription thrashing), but use a `useRef` to hold the current `orderPrice` value, updated via a separate, lightweight effect (or directly during render) whenever `orderPrice` changes — the WebSocket handler then reads `orderPriceRef.current` inside its closure, which always reflects the latest value because a ref's `.current` property is mutated in place, not captured by value at closure-creation time the way a plain variable is.
-*Why correct:* Correctly identifies `useRef` as the idiomatic fix for exactly this "need current value, but only want to subscribe once" tension — a very common, specifically-React pattern.
-*Common mistakes:* Proposing to simply add `orderPrice` to the dependency array, which reintroduces the exact resubscription-thrashing problem the empty array was originally chosen to avoid.
-*Follow-up:* Why does mutating `.current` in place not trigger a re-render, and why is that specifically desirable for this use case?
-
-**I3. Compare the visibility of Angular's `trackBy` omission against React's `key` omission, and evaluate which framework's default better prevents the underlying incident class.**
-*Ideal Answer:* Angular provides no warning at all if `trackBy` is omitted, silently falling back to its own internal identity tracking — the incident occurred specifically because nothing flagged the index-based `trackBy` choice as risky. React's console warning fires whenever `key` is omitted entirely, providing strictly more visibility for the *presence* question — but neither framework's warning (React's, or Angular's complete absence of one) actually verifies *semantic stability* of whatever identity value is provided, meaning an index-based `key` in React silences the warning while reproducing the identical incident mechanism examined. React's default is therefore meaningfully better at catching *complete omission*, but equally vulnerable to the *wrong-but-present* variant of the same mistake.
-*Why correct:* Correctly distinguishes the two frameworks' actual, different levels of protection while precisely identifying the shared residual risk neither framework's tooling addresses.
-*Common mistakes:* Concluding React's warning "solves" the problem examined, missing that an index-based key silences the warning while remaining just as incorrect.
-*Follow-up:* What lint rule or code-review practice would catch an index-based `key` specifically, given React's own tooling doesn't?
-
-**I4. Explain mechanically why passing `<Child onClick={ => doThing} />` to a `memo`-wrapped `Child` defeats the memoization, and design the fix.**
-*Ideal Answer:* The inline arrow function ` => doThing` is a *new* function object created fresh on every parent render — `memo`'s shallow prop comparison sees a different `onClick` reference every time, regardless of whether `doThing`'s actual behavior changed, and re-renders `Child` accordingly. Fix: wrap the handler in `useCallback(=> doThing, [doThing])` in the parent, so the same function reference is passed across renders unless `doThing` itself genuinely changes, letting `memo`'s shallow comparison actually succeed.
-*Why correct:* Matches the precise mechanics with the concrete, idiomatic fix.
-*Common mistakes:* Proposing to remove `memo` entirely rather than correctly stabilizing the prop reference, which defeats the optimization's purpose rather than fixing its actual defeat mechanism.
-*Follow-up:* Does this same "new reference every render" problem apply to inline object/array literals passed as props, not just functions? Why?
-
-**I5. Design an ESLint configuration that would have caught the incident before it reached production.**
-*Ideal Answer:* Enable `eslint-plugin-react-hooks`'s `exhaustive-deps` rule, configured to error (not merely warn) on any `useEffect` whose callback reads a value not present in its dependency array — this rule would have flagged the WebSocket handler's `orderPrice` read against the empty `[]` dependency array directly at write time, forcing the team to either add the dependency (reintroducing the resubscription concern, prompting the correct `useRef`-based fix, I2) or explicitly, visibly suppress the rule with a comment requiring justification.
-*Why correct:* Correctly identifies the specific, mechanical, already-available tooling that directly targets this exact bug class, rather than proposing a generic "review more carefully" recommendation.
-*Common mistakes:* Proposing only manual code-review discipline, missing that this exact class of bug is precisely what a well-known, purpose-built lint rule already exists to catch mechanically.
-*Follow-up:* What's the risk of a team routinely suppressing `exhaustive-deps` warnings with `// eslint-disable-next-line` comments rather than fixing the underlying dependency issue?
-
-**I6. Compare Fiber's rendering prioritization to Angular's zoneless Signals-based change detection — do they solve the same problem?**
-*Ideal Answer:* No — they solve genuinely different problems. Zoneless Signals narrow *which components are even candidates for re-checking* (precise dependency tracking replacing Zone.js's blanket triggering) — a *scope* reduction. Fiber's prioritization doesn't reduce how much work a given render requires; it changes *when* and in what *order* already-necessary work is performed, letting high-priority updates preempt lower-priority ones — a *scheduling* improvement, not a scope reduction. A React application could have Fiber's full prioritization benefit while still doing unnecessarily broad re-renders if `memo`/`useMemo` aren't applied; conversely a React application with excellent memoization but no use of `startTransition` still commits all its (now-smaller) necessary work in a single, unprioritized batch.
-*Why correct:* Correctly distinguishes scope-reduction (Signals, memoization) from scheduling/prioritization (Fiber) as two independent, non-substitutable performance dimensions.
-*Common mistakes:* Treating Fiber and Signals as solving "the same performance problem" in different frameworks, missing that they address genuinely different aspects (scheduling vs. scope) of the overall cost model.
-*Follow-up:* Could React benefit from adding a Signals-like scope-reduction primitive on top of Fiber's existing scheduling benefit? What would that combination provide that neither alone does?
-
-**I7. A team migrating from Angular to React expects Context to provide the same transitive dependency resolution Angular's DI container provides. What specifically will surprise them?**
-*Ideal Answer:* Angular's DI resolves a service's own constructor-declared dependencies automatically and transitively, walking the injector tree as needed — Context provides only the *value* placed into a given Provider, with no automatic mechanism for one Context's value to itself receive other Context values injected into it the way an Angular service's constructor does; any such composition must be built manually (e.g., a Provider component that itself consumes other Context values via hooks and constructs the value it then provides), which is straightforward but is application code the team must write, not a capability Context itself provides out of the box.
-*Why correct:* Matches the precise divergence with a concrete illustration of what specifically differs in practice.
-*Common mistakes:* Describing Context as "basically the same as Angular DI," missing the specific transitive-resolution capability gap.
-*Follow-up:* What third-party library patterns exist in the React ecosystem specifically to approximate Angular-DI-like transitive resolution, and what trade-off do they introduce?
-
-**I8. Why does React's default "re-render the whole function" model make `useMemo` valuable even for a pure, synchronous computation with no side effects?**
-*Ideal Answer:* Because the entire component function body re-executes on every re-render by default, even an expensive, side-effect-free computation (e.g., filtering/sorting a large array) re-runs on every render regardless of whether its actual inputs changed, unless explicitly wrapped in `useMemo` to skip recomputation when its dependency array's values are unchanged — a cost Angular's `OnPush`-gated, per-binding-check model doesn't impose in the same way, since a check that determines "nothing changed" for a given binding doesn't require re-executing an equivalent arbitrary computation from scratch.
-*Why correct:* Correctly connects `useMemo`'s value specifically to React's function-re-execution default, distinguishing it from Angular's different underlying cost model.
-*Common mistakes:* Describing `useMemo` purely as "for expensive computations" without connecting its necessity specifically to React's re-execute-the-whole-function default.
-*Follow-up:* Would `useMemo` provide meaningfully less value in a hypothetical React variant that used Ivy-style compiled instructions instead of re-executing the full function body? Why?
-
-**I9. Design a code-review checklist item specifically targeting the stale-closure risk class, distinct A4's `trackBy` checklist item.**
-*Ideal Answer:* "Does this `useEffect`'s callback (including any nested callbacks, like a WebSocket or event-listener handler defined inside it) read any component state or props not listed in the dependency array? If the dependency array is intentionally narrower than what the closure reads (e.g., to avoid resubscription), is a `useRef` or equivalent pattern used to access the current value instead of relying on the stale closure?" — distinct from the `trackBy`-focused checklist item (A4) because it targets a fundamentally different mechanism (closure capture over time) rather than list-rendering identity.
-*Why correct:* Correctly designs a checklist item targeting the specific, distinct mechanism (closures, not list-reconciliation identity) this bug class involves, and explicitly distinguishes it from the superficially-similar-sounding but mechanically different Angular `trackBy` checklist item.
-*Common mistakes:* Reusing or conflating this checklist item with the `trackBy`-focused one, missing that stale closures and identity-tracking bugs are mechanically unrelated despite both being common framework-specific footguns.
-*Follow-up:* Which of the two checklist items (this one, or A4's) is more amenable to full automation via a lint rule, and why?
-
-**I10. Why might a financial-services platform choose Angular over React specifically for its all-in-one, opinionated structure, independent of any technical performance comparison?**
-*Ideal Answer:* Angular's first-party routing, forms, HTTP client, and DI mean a large team building a long-lived, compliance-sensitive platform inherits one consistent, framework-enforced structure across every contributor and every feature area — reducing the variance-across-independently-chosen-libraries risk this course has repeatedly identified as a composition-risk source (A2's per-service validation-logic variance, now at the frontend-tooling-choice layer) — whereas React's unopinionated nature requires the *organization itself* to make and enforce equivalent structural consistency decisions (which state library, which forms library, which DI-equivalent pattern) across every team, a governance burden Angular's opinionated defaults absorb by design.
-*Why correct:* Correctly identifies the organizational-consistency trade-off as the primary driver, independent of raw technical/performance comparison, matching this course's recurring emphasis on organizational-scale reasoning over purely technical framework comparison.
-*Common mistakes:* Answering purely with a technical/performance argument, missing that the two frameworks' most consequential difference at genuine enterprise scale is opinionated-structure-versus-flexibility, not raw rendering performance.
-*Follow-up:* What specific risk does a large, multi-team React platform face if it does *not* establish and enforce equivalent organizational conventions Angular would have provided by default?
-
-### Advanced (10)
-
-**A1. Design a complete migration checklist for a team moving the stale-closure-prone WebSocket integration pattern to a correct, idiomatic React implementation, addressing every mechanism this module has established.**
-*Ideal Answer:* (1) Move the current-value read into a `useRef`, updated on every render or via a dedicated effect (I2); (2) enable and enforce `exhaustive-deps` (I5) across the codebase, requiring explicit, commented justification for any suppressed instance; (3) add an integration test specifically simulating a state update *after* the effect's initial mount, then a subsequent WebSocket message, asserting the handler uses the *current*, not the mount-time, state value — directly analogous to the end-to-end composition test, here targeting the closure-staleness seam specifically; (4) document the `useRef` pattern as the team's standing convention for "subscribe once, read current value" scenarios, so future features reuse the correct pattern by default rather than reinventing the empty-dependency-array mistake independently.
-*Why correct:* Synthesizes the fix, the mechanical prevention tooling, a verification test, and an organizational-consistency measure into one complete checklist, mirroring the structure A1 established for its own capstone incident.
-*Common mistakes:* Proposing only the immediate code fix (I2) without the mechanical prevention (I5) and verification (a specific test) layers that would catch a *future* instance of the same mistake in a different feature.
-*Follow-up:* How would you retroactively audit the rest of the codebase for other instances of this same pattern, given `exhaustive-deps` wasn't enabled from the start?
-
-**A2. Critique: "Since React's `key` prop triggers a console warning when missing, React is structurally safer than Angular against the incident class."**
-*Ideal Answer:* Overstated, per I3's precise analysis — React's warning provides strictly better protection against *complete omission* of an identity mechanism, but the actual incident involved a *present but semantically wrong* `trackBy` (index-based), and React's `key` warning provides zero protection against the analogous *present but semantically wrong* `key` (also commonly index-based) — the exact incident mechanism examined is fully reproducible in React with no warning firing at all, since a key was technically provided. "Structurally safer" is true only for the narrower claim "better protected against complete omission," not the broader claim the statement makes.
-*Why correct:* Correctly scopes the claim to what React's tooling actually verifies (presence) versus what it doesn't (semantic stability), avoiding the overstated generalization.
-*Common mistakes:* Accepting the claim because React's warning is a real, genuine improvement over Angular's silence, without precisely bounding what specific risk that improvement does and doesn't cover.
-*Follow-up:* Design a lint rule or static-analysis check that WOULD catch an index-based `key` specifically, closing the gap React's built-in warning leaves open.
-
-**A3. Design a Fiber-aware performance strategy for a high-frequency trading-tick component tree, using `startTransition`/`useDeferredValue` alongside `memo`/`useMemo`, and explain why both categories of technique are independently necessary.**
-*Ideal Answer:* Wrap the tick-driven grid update's `setState` call in `startTransition` (or derive the grid's rendered value via `useDeferredValue`) so that a burst of rapid tick updates doesn't block higher-priority work (e.g., the user actively typing into an order-entry field) — this addresses *scheduling/prioritization* (I6). Independently, wrap the grid's row components in `memo` with correctly-stabilized props (`useCallback`/`useMemo` for any function/object props) so that when a render *does* commit, it touches only the rows whose data actually changed — this addresses *scope*. Per I6, these are non-substitutable: `startTransition` alone would still commit an unnecessarily-broad re-render eventually (just at a better-scheduled time), and `memo` alone would still block on a burst of updates with no prioritization if a genuinely higher-priority interaction arrives mid-burst.
-*Why correct:* Correctly applies both, independently-necessary technique categories with clear justification for why neither alone suffices, directly building on I6's scope-vs-scheduling distinction.
-*Common mistakes:* Applying only one category (commonly just `memo`/`useMemo`, since it's more familiar) and claiming the performance strategy is complete, missing the independent scheduling benefit Fiber-aware APIs provide.
-*Follow-up:* How would you measure, empirically, whether `startTransition` is providing genuine benefit for this specific component tree versus adding complexity with no measurable improvement?
-
-**A4. A React codebase's `useEffect` dependency arrays are extensively, correctly exhaustive per `exhaustive-deps`, yet a stale-closure-shaped bug still occurs. What's the remaining failure mode, and how does it differ from the incident?**
-*Ideal Answer:* `exhaustive-deps` verifies that every value the closure *reads* is present in the dependency array — but it cannot verify that the *effect re-running* on every one of those dependency changes is actually the *desired* behavior for the use case; a correctly-exhaustive dependency array on a WebSocket-subscribing effect would now correctly re-subscribe (tearing down and re-establishing the connection) on every dependency change, which — if the dependency changes frequently (e.g., on every keystroke, exactly the resubscription-thrashing concern the original, incorrect empty array was trying to avoid) — reintroduces a different, equally real problem: connection churn, not staleness. The remaining failure mode is that `exhaustive-deps` guarantees closure-read correctness but says nothing about whether the resulting re-run *frequency* is appropriate for the effect's actual side effect (a cheap computation re-running frequently is fine; a WebSocket reconnecting frequently is not).
-*Why correct:* Correctly identifies the boundary of what `exhaustive-deps` actually verifies (dependency completeness) versus what it doesn't (whether the resulting re-run frequency is desirable), distinguishing this from the original, different-shaped bug.
-*Common mistakes:* Assuming `exhaustive-deps` fully "solves" the `useEffect` dependency problem category, missing that fixing the closure-staleness risk (this checklist item) can reintroduce the connection-churn risk the original, buggy code was trying (incorrectly) to avoid — requiring the `useRef` pattern (I2) specifically, not merely an exhaustive dependency array.
-*Follow-up:* Why is `useRef`'s pattern specifically the correct resolution to this tension, rather than either extreme (empty array, or fully exhaustive array)?
-
-**A5. Design a test verifying `memo`'s optimization is actually effective for a specific component, distinct from testing the component's functional correctness.**
-*Ideal Answer:* A test that renders a parent component twice with props/state that should NOT affect a specific `memo`-wrapped child (i.e., the child's own props are unchanged across the two parent renders), then asserts — via a render-count spy/mock on the child, or React DevTools Profiler's programmatic API — that the child rendered exactly once, not twice; a second, negative-style test verifying the child DOES re-render when its actual props genuinely change, confirming the memoization isn't simply "stuck," directly reusing this course's recurring negative-test-coverage discipline.
-*Why correct:* Correctly designs both a positive (memoization prevents unnecessary re-render) and negative (memoization doesn't prevent necessary re-renders) test, matching the same dual-test structure established for Angular's `OnPush`.
-*Common mistakes:* Testing only that the component renders correct output (functional correctness), which says nothing about whether it re-rendered more often than necessary — a `memo` wrapper that provides zero actual optimization benefit would still pass a purely functional-correctness test.
-*Follow-up:* How would you extend this test to catch A4's specific "inline prop reference" defeat mechanism directly, rather than only the memoization's aggregate render-count behavior?
-
-**A6. How does the `useRef`-based fix from I2 relate to Angular's `ChangeDetectorRef.markForCheck` conceptually, despite the two solving superficially different-looking problems?**
-*Ideal Answer:* Both are escape hatches that let application code explicitly bypass a framework's default state-tracking mechanism when that default doesn't fit a specific need: `markForCheck` lets a component explicitly signal "re-check me" outside `OnPush`'s normal reference-identity-triggered checks; `useRef` lets a closure explicitly read a *mutable, always-current* value outside React's normal state-triggers-re-render model. Both represent the same underlying pattern — an escape hatch for reading or signaling state changes outside a framework's primary, automatic reactivity mechanism — applied to two different frameworks' different primary mechanisms (change-detection triggering vs. closure-capture-based effects).
-*Why correct:* Correctly identifies the shared underlying pattern (an explicit escape hatch around each framework's own primary automatic mechanism) despite the two APIs looking unrelated on the surface, demonstrating genuine comparative synthesis rather than surface-level feature listing.
-*Common mistakes:* Describing the two as "solving completely different problems" because their concrete syntax and immediate use cases look dissimilar, missing the shared underlying architectural role both play.
-*Follow-up:* Does Angular have anything structurally equivalent to `useRef`'s "mutable value with no re-render/re-check trigger" property specifically, distinct from `markForCheck`'s "trigger a check" property?
-
-**A7. Design an organizational governance recommendation for a large, multi-team React platform (this course's Elite FinTech Interview Panel context) addressing the specific risk I10 identifies — React's lack of Angular's enforced, opinionated structure.**
-*Ideal Answer:* Establish and mechanically enforce (via a shared ESLint configuration, a shared component-library/design-system, and a documented, mandatory architectural decision record for state-management/forms/routing library choice) a single, platform-wide set of conventions functionally replacing what Angular provides by default — directly reusing A2's centralized-governance-over-per-team-independent-choice principle, now applied to React's ecosystem-fragmentation risk specifically rather than a security-validation-logic risk; critically, this governance should be established *before* multiple teams independently make divergent choices (state library, effect patterns, memoization conventions), since retrofitting consistency after divergence has already occurred is a substantially harder, more disruptive migration than establishing it upfront.
-*Why correct:* Correctly designs a governance response directly targeting the specific organizational risk I10 identified, reusing this course's established centralized-governance pattern rather than proposing an unrelated technical fix.
-*Common mistakes:* Proposing only technical linting without the broader organizational decision-record/design-system layer, or proposing the governance without noting the significant cost advantage of establishing it before divergence occurs rather than after.
-*Follow-up:* What early warning signal would indicate that a multi-team React platform's conventions are beginning to diverge dangerously, before it becomes a full-blown, costly-to-fix fragmentation problem?
-
-**A8. Explain why `useMemo`/`useCallback` are described in the React community as "not a semantic guarantee" — what does this mean for a developer relying on them for correctness rather than performance?**
-*Ideal Answer:* React's documentation explicitly reserves the right to occasionally "forget" a memoized value under certain conditions (e.g., under experimental concurrent-rendering optimizations) and recompute it anyway — `useMemo`/`useCallback` are officially a *performance* optimization hint, not a correctness guarantee that a value will *never* be recomputed. A developer relying on `useMemo`'s memoization for actual correctness (e.g., assuming a specific object reference will *never* change across renders in order to avoid a genuinely necessary side effect) is relying on an implementation detail the framework does not contractually guarantee, unlike, for example, a `useRef`'s `.current` mutation, which genuinely is a stable, guaranteed-not-to-be-reset-by-the-framework reference.
-*Why correct:* Correctly identifies the precise, non-obvious distinction between `useMemo`'s advertised performance role and what it does not guarantee, a genuinely subtle point most Intermediate-level React developers get wrong.
-*Common mistakes:* Treating `useMemo` and `useRef` as interchangeable "stable value" mechanisms, missing that only `useRef` provides an actual, contractual stability guarantee.
-*Follow-up:* Given this distinction, was `useMemo` ever the correct tool for I2's stale-closure fix, or was `useRef` specifically required? Why?
-
-**A9. A team benchmarks their React application's reconciliation cost against an equivalent Angular application's change-detection cost for an identical workload and finds React noticeably faster. Should this result be generalized into a platform-wide framework recommendation?**
-*Ideal Answer:* No, not without significant qualification — per the identical caution about overgeneralizing framework-level performance claims, this benchmark result is specific to this workload's particular shape (its actual re-render frequency, list-reordering behavior, memoization discipline in the React version, `OnPush` discipline in the Angular version) and does not generalize to a different workload with a different profile; a workload dominated by frequent, broad state changes with poor memoization discipline might show the opposite result, and vice versa for a workload matching each framework's specific strengths (Fiber's prioritization for bursty, interactive UIs; Ivy's compiled-instruction efficiency for static-heavy, `OnPush`-disciplined templates).
-*Why correct:* Correctly refuses to generalize a single benchmark into a universal claim, matching this course's repeated caution (A6) against overgeneralized, workload-independent performance claims specifically applied to a cross-framework comparison.
-*Common mistakes:* Accepting the benchmark result as generalizable evidence for a platform-wide recommendation without qualifying it against the specific workload's characteristics and each framework implementation's discipline level.
-*Follow-up:* What would a genuinely fair, generalizable comparison require that a single benchmark on one workload doesn't provide?
-
-**A10. Synthesize this module's divergences against this course's recurring "declared ≠ actual" theme — is React's version of this theme sharper or softer than Angular's `OnPush` instance (A10), and why?**
-*Ideal Answer:* Arguably sharper, specifically because of the stale-closure mechanism: Angular's `OnPush` gap (A10) is a *reference-identity* mismatch — the underlying data genuinely changed, but the framework's narrower definition of "changed" (reference equality) didn't register it, a comparatively legible, single-dimension gap once understood. React's stale-closure gap is a *temporal* mismatch — the effect's closure is not merely comparing values incorrectly, it is holding an entirely different, frozen point-in-time snapshot of the world that the rest of the component has already moved past, silently, for the closure's entire remaining lifetime — a gap that is harder to reason about because it requires understanding not just what changed, but *when* the closure stopped being able to see subsequent changes at all, a temporal rather than purely comparative form of "declared ≠ actual."
-*Why correct:* Correctly compares the two frameworks' respective sharpest "declared ≠ actual" instances and provides a substantive, specific argument for why one is arguably sharper (temporal snapshot-freezing vs. reference-comparison mismatch), rather than merely restating both without genuine comparative judgment.
-*Common mistakes:* Declining to make a genuine comparative judgment, or asserting one is sharper without articulating the specific structural reason (temporal vs. comparative gap) that justifies the claim.
-*Follow-up:* Does the upcoming coverage of React state-management libraries introduce any *additional* instance of this theme beyond what `useEffect`'s stale closures and `key`'s semantic-stability gap already establish?
-
----
-
-## 11. Coding Exercises
-
-### Easy — Symbol-stable `key` for a reorderable list
-
-**Problem:** Implement the `key` prop correctly for a reorderable "Top Movers" list, mirroring the `trackBy` fix.
-
-**Solution (TSX):**
-```tsx
-interface Position { symbol: string; price: number; changePercent: number; }
-
-function TopMoversList({ positions }: { positions: Position[] }) {
-  return (
-    <ul>
-    {positions.map(position => (
-          // key = stable, unique identifier — NEVER array index for a reorderable list.
-          <li key={position.symbol}>
-          {position.symbol}: {position.price.toFixed(2)} ({position.changePercent}%)
-          </li>
-    ))}
-    </ul>
-  );
-}
-```
-**Time complexity:** O(n) per render (n = position count), same reconciliation cost class as the Angular equivalent. **Space complexity:** O(n).
-
-**Optimized solution:** For very large lists, combine with `react-window` or `react-virtualized` (React's ecosystem equivalent of Angular CDK's virtual scrolling) to bound DOM-node count independent of dataset size — the `key`-correctness requirement applies identically whether or not virtualization is layered on top.
-
-### Medium — `useRef`-based current-value access avoiding stale closures
-
-**Problem:** Fix the incident: implement a WebSocket subscription that runs once on mount but reads the *current* `orderPrice` inside its message handler.
-
-**Solution (TSX):**
-```tsx
-function OrderEntryWidget {
-  const [orderPrice, setOrderPrice] = useState(0);
-  const orderPriceRef = useRef(orderPrice);
-
-  // Keep the ref in sync with the latest render's state — this effect
-  // is cheap and intentionally has NO subscription/side-effect cost
-  // just a plain mutation, so re-running it on every orderPrice change is fine.
-  useEffect(=> {
-      orderPriceRef.current = orderPrice;
-    }, [orderPrice]);
-
-  useEffect(=> {
-      const ws = new WebSocket('wss://market-data.internal/prices')
-      ws.onmessage = (event) => {
-        const livePrice = JSON.parse(event.data).price;
-        // Reads the REF's.current — always up to date, regardless of when
-        // this closure was originally created. Fixes the exact incident.
-        const deviation = Math.abs(livePrice - orderPriceRef.current) / livePrice;
-        if (deviation > 0.02) {
-          console.warn(`Price deviation alert: order=${orderPriceRef.current}, live=${livePrice}`);
-        }
-      };
-      return => ws.close;
-    }, []); // correctly empty — subscribes exactly once, no resubscription thrashing
-
-  return <input value={orderPrice} onChange={e => setOrderPrice(Number(e.target.value))} />;
-}
-```
-**Time complexity:** O(1) per message. **Space complexity:** O(1).
-
-**Optimized solution:** Enable `eslint-plugin-react-hooks`'s `exhaustive-deps` rule (Intermediate Q5) so any *future* similar effect that reads a non-ref'd, non-dependency-listed value is flagged automatically at write time, rather than depending on every future developer independently rediscovering this exact pattern.
-
-### Hard — `memo`-safe child with stabilized callback and object props
-
-**Problem:** Fix Advanced Q4's `memo`-defeating inline-prop-reference pattern for a grid row component receiving both a callback and a configuration object as props.
-
-**Solution (TSX):**
-```tsx
-const GridRow = memo(function GridRow({
-      position,
-        onSelect,
-        displayConfig
-    }: {
-      position: Position;
-      onSelect: (symbol: string) => void;
-      displayConfig: { decimals: number; showPercent: boolean };
-  }) {
-    return (
-      <div onClick={ => onSelect(position.symbol)}>
-      {position.symbol}: {position.price.toFixed(displayConfig.decimals)}
-      {displayConfig.showPercent && ` (${position.changePercent}%)`}
-      </div>
-    );
-});
-
-function PositionGrid({ positions }: { positions: Position[] }) {
-  const [selected, setSelected] = useState<string | null>(null);
-
-  // Stabilized across renders — memo on GridRow now actually works
-  // since this reference doesn't change unless setSelected itself changes
-  // (which it never does, being a useState setter — stable by React's own guarantee).
-  const handleSelect = useCallback((symbol: string) => setSelected(symbol), []);
-
-  // Stabilized object reference — WITHOUT this, a new {decimals, showPercent}
-  // object literal on every PositionGrid render would defeat memo exactly
-  // as the inline-function case does (Advanced Q4's object-literal variant).
-  const displayConfig = useMemo(=> ({ decimals: 2, showPercent: true }), []);
-
-  return (
-    <>
-    {positions.map(p => (
-          <GridRow key={p.symbol} position={p} onSelect={handleSelect} displayConfig={displayConfig} />
-    ))}
-    </>
-  );
-}
-```
-**Time complexity:** O(1) per row per render when `memo` correctly skips (the common case); O(n) when a genuine data change requires re-rendering all rows. **Space complexity:** O(n) for the position list.
-
-**Optimized solution:** Verify the memoization is actually effective using Advanced Q5's render-count test pattern rather than assuming correctness from the code's structure alone — `useCallback`/`useMemo` with an incorrect or overly-broad dependency array can silently fail to provide the intended stability, and only an explicit render-count assertion catches this reliably.
-
-### Expert — Fiber-aware buffered tick ingestion with `useDeferredValue`
-
-**Problem:** Implement the React equivalent of the buffered WebSocket tick-ingestion pattern, additionally using `useDeferredValue` so a burst of tick updates doesn't block higher-priority user input (e.g., typing in the order-entry field).
-
-**Solution (TSX):**
-```tsx
-interface Tick { symbol: string; price: number; timestamp: number; }
-
-function useBufferedTicks: Tick[] {
-  const [ticks, setTicks] = useState<Tick[]>([]);
-  const bufferRef = useRef<Map<string, Tick>>(new Map);
-
-  useEffect(=> {
-      const ws = new WebSocket('wss://market-data.internal/ticks')
-      ws.onmessage = (event) => {
-        const tick: Tick = JSON.parse(event.data);
-        bufferRef.current.set(tick.symbol, tick); // dedupe-to-latest-per-symbol, same as
-      };
-
-      // Flush the buffer on a fixed interval — the React equivalent of
-      // RxJS's bufferTime(100), bounding state-update (and therefore
-      // reconciliation) FREQUENCY, independent of Fiber's scheduling.
-      const flushInterval = setInterval(=> {
-          if (bufferRef.current.size > 0) {
-            setTicks(Array.from(bufferRef.current.values));
-            bufferRef.current.clear;
-          }
-        }, 100);
-
-      return => {
-        ws.close;
-        clearInterval(flushInterval);
-      };
-    }, []);
-
-  return ticks;
-}
-
-function TickGrid {
-  const ticks = useBufferedTicks;
-
-  // Fiber-aware SCOPE/SCHEDULING lever, independent of the buffering-frequency
-  // lever above — lets React deprioritize rendering this potentially-large
-  // grid update behind more urgent work (e.g., active user input elsewhere).
-  const deferredTicks = useDeferredValue(ticks);
-
-  return (
-    <div>
-    {deferredTicks.map(tick => (
-          <GridRow key={tick.symbol} position={tickToPosition(tick)} onSelect={ => {}} displayConfig={{ decimals: 2, showPercent: false }} />
-    ))}
-    </div>
-  );
-}
-```
-**Time complexity:** O(k) per buffer flush (k = distinct symbols ticked within the window). **Space complexity:** O(distinct symbols) for the buffer.
-
-**Optimized solution:** Combine with `react-window` virtualization (Easy exercise's note) and the Hard exercise's `memo`-safe `GridRow` for the full, composed performance strategy this module's/A3 established — buffering bounds update *frequency*, `useDeferredValue` bounds update *priority/scheduling*, `memo` bounds re-render *scope*, and virtualization bounds *DOM-node count* — the React-ecosystem equivalent of the four-lever composed architecture, mapped onto React's specific primitives.
-
----
-
-## 12. System Design
-
-**Requirements:** Functionally identical to the TradeView requirements (real-time multi-desk grids, order-entry with async validation, cross-desk aggregation, independent per-team deployment) — this section focuses specifically on what changes in the React implementation.
-
-**Architecture:**
-```
+```text
  Shell (React) — Module Federation (same underlying Webpack mechanism as
-; the shared-dependency-negotiation risk 
+; the shared-dependency-negotiation risk
  applies IDENTICALLY to a React-based federation setup — this is a case
  of genuine parity, not divergence, since the risk lives in Webpack's
  runtime, not either framework's own reactivity model)
@@ -500,18 +582,9 @@ function TickGrid {
  └─ Order-entry form with useRef-based current-value access (Medium exercise)
 ```
 
-**Database/Caching/Messaging/Scaling/Failure handling/Monitoring:** Identical in substance to — the backend and cross-cutting infrastructure concerns are framework-agnostic; only the client-side implementation primitives differ, as detailed throughout this module.
+**13. Low-Level Design**
 
-**Trade-offs:** React's unopinionated flexibility (choose your own state-management, forms, and DI-equivalent libraries) versus Angular's enforced consistency (/I10/A7) is this system design's most consequential divergence from the — a React-based TradeView requires the organization to *build* the equivalent governance Angular provides by default.
-
----
-
-## 13. Low-Level Design
-
-**Requirements:** Model the `useRef`-based stale-closure fix, `memo`-safe prop stabilization, and buffered-ingestion patterns as a cohesive, reusable structure — the React counterpart to the Angular LLD.
-
-**Class/hook diagram (textual):**
-```
+```text
 useBufferedTicks (custom Hook, Expert exercise)
  ├─ internal useRef<Map> buffer, internal useState<Tick[]> flushed output
  └─ returns Tick[] — consumed via useDeferredValue for Fiber-aware scheduling
@@ -532,66 +605,130 @@ orderPriceRef pattern (Medium exercise)
  └─ generalizes to any "subscribe once, read current value" scenario
 ```
 
-**Design patterns used:** Observer (React's own re-render-on-state-change model, plus WebSocket event handling); Memoization (`memo`/`useMemo`/`useCallback`, React's opt-in performance pattern, contrasted throughout with Angular's opt-in `OnPush`); Custom Hook as Facade (`useBufferedTicks` presenting a clean, buffered stream over raw WebSocket events, the React idiom replacing the injectable Angular service for the equivalent responsibility).
+### Module 160 — Advanced React: State Management, Data Fetching, Error Boundaries & Micro-Frontends — Comparative Against Angular
+*Source: `02-Advanced-React-StateManagement-DataFetching-Performance-vs-Angular.md`*
 
-**SOLID mapping:** SRP — `useBufferedTicks` only handles ingestion/buffering, `GridRow` only renders, each independently testable; OCP — a new data source can implement the same custom-hook-returns-an-array contract without modifying consuming components; DIP — components depend on a Hook's returned data/callbacks, never directly instantiating WebSocket connections themselves, mirroring the DI-based dependency-abstraction principle even though React has no formal DI container providing it structurally.
+**3. Visual Architecture**
 
-**Concurrency/thread safety:** As throughout this domain, JavaScript's single-threaded model means the relevant discipline is async-ordering correctness — Fiber's own internal scheduling guarantees (not application-code concern) ensure a component's render is never torn mid-execution by a higher-priority interruption; the *application-level* discipline (I2/Medium exercise's `useRef` pattern, ensuring a closure reads current rather than stale values) is the React-specific analogue of the atomic-update discipline this course's backend and Angular modules established via different concrete mechanisms.
+```mermaid
+graph TB
+ subgraph "Server state (React Query) — architecturally SEPARATE from client state"
+ RQ[React Query Cache]
+ QK["Query Key: ['positions', accountId]<br/>(the load-bearing identity)"]
+ RQ --> QK
+ end
 
----
+ subgraph "Client-local state (Redux/RTK ≈ NgRx, or Zustand — no direct Angular parallel)"
+ Store[Redux/RTK Store or Zustand]
+ end
 
-## 14. Production Debugging
+ Component[Component] -->|useQuery| RQ
+ Component -->|useSelector / store hook| Store
 
-**Incident:** Following the Medium exercise's `useRef`-based fix being rolled out platform-wide as the team's new standard pattern, a different desk's order-entry widget begins occasionally validating against a `orderPriceRef.current` value that is one render *behind* the input the user can visibly see on screen — a much narrower staleness window than the original incident, but still a genuine, detectable data-lag.
+ subgraph "Rendering boundaries"
+ Suspense["<Suspense fallback>"]
+ EB["ErrorBoundary (class component ONLY)"]
+ Suspense -->|catches suspended work| Component
+ EB -->|catches RENDER errors only —<br/>NOT event handlers/async,| Component
+ end
+```
 
-**Root cause:** The team's second `useEffect` (syncing `orderPriceRef.current = orderPrice`) ran with a dependency array of `[orderPrice]`, correct in isolation — but this desk's specific input component used React's uncontrolled-input pattern combined with a debounced `onChange` handler updating `orderPrice` state, meaning the *visible* DOM input value could update (uncontrolled, directly by the browser) one or more keystrokes ahead of the debounced state update that would eventually trigger the ref-sync effect — a timing gap specific to this desk's particular input-handling choice, not present in the original controlled-input implementation the pattern was originally built and tested against.
+**12. System Design**
 
-**Investigation:** React DevTools' Profiler, correlated against manually-logged `orderPriceRef.current` values at each WebSocket message, showed the ref's value updating with a small but measurable lag behind the visible input's displayed value specifically during rapid typing — distinguishing this from a complete staleness failure (the original incident, where the ref/state never updated at all) and pointing instead at a timing/debouncing interaction specific to this desk's input implementation.
+```text
+ Shell (React) — Module Federation, IDENTICAL risk profile to
 
-**Tools:** React DevTools Profiler (correlating render timing against ref-value logging); a targeted comparison of this desk's input-handling code against the original, `useRef`-pattern-establishing desk's controlled-input implementation, which surfaced the uncontrolled-input-plus-debounce divergence as the specific, desk-local variation the shared pattern's original design and testing never covered.
+ ├─ Shared QueryClient config (A9's governed defaults: explicit
+ │ staleTime requirement, typed key-factory enforcement)
+ │
+ ├─ Client-local cross-desk state: Redux/RTK or Zustand (I7)
+ │
+ └── Remote: Equities Desk
+ ├─ DeskErrorBoundary (Hard exercise) at the remote's root
+ ├─ usePositions (Easy exercise) — typed, fully-scoped query key
+ ├─ usePositionFillInvalidation (Medium exercise) — event-driven freshness
+ ├─ useCacheConsistencyCanary (Expert exercise) — production safety net
+ └─ explicit try/catch around order-submission onClick (Hard/I3)
+```
 
-**Fix:** Standardized every desk's order-price input on the controlled-input pattern (the DOM input's value is always driven directly by React state, with no browser-native uncontrolled lag possible) specifically for any field feeding into a safety-relevant `useRef`-based current-value pattern, documenting this as a hard requirement of the shared pattern's contract, not merely an implementation detail left to each desk team's discretion.
+**13. Low-Level Design**
 
-**Prevention:** A shared, platform-wide pattern (the `useRef`-based current-value fix) that was correctly verified against its *original* implementation context can still be silently invalidated when a different team combines it with a different, individually-reasonable implementation choice (uncontrolled inputs plus debouncing) the original pattern's design and testing never anticipated — directly recurring this course's now-repeated finding that a shared pattern's prior hardening bounds risk only for its originally-examined scope, reinforcing that any shared pattern's documented contract must explicitly state its *preconditions* (here: "assumes a controlled input"), not merely its implementation, so a consuming team can verify compatibility before reuse rather than discovering an incompatibility in production.
+```text
+positionKeys (typed key factory, Easy exercise)
+ └─ byAccount(deskId, accountId): structurally prevents under-scoped keys
 
----
+usePositions (Easy exercise)
+ └─ useQuery with governed key + explicit staleTime
 
-## 15. Architecture Decision
+usePositionFillInvalidation (Medium exercise)
+ └─ WebSocket-driven queryClient.invalidateQueries — bridges real-time
+ events into React Query's otherwise passive staleness model
 
-**Decision:** For a large, multi-team financial-services platform choosing between Angular and React, how should the decision be made?
+ErrorBoundaryImpl / DeskErrorBoundary (Hard exercise)
+ ├─ class component (STRUCTURALLY REQUIRED,/A4)
+ └─ functional-component-friendly wrapper — most consuming code never
+ touches the class directly, matching modern Hooks-first React style
 
-**Option A — Choose based on raw rendering/reconciliation performance benchmarks:**
-*Advantages:* Ostensibly objective, measurable. *Disadvantages:* Per Advanced Q9, a single benchmark's result is workload-specific and does not generalize — this course has found performance claims of this shape (A6's identical caution) consistently overstated when generalized beyond their specific measured conditions, and neither framework is categorically faster across all realistic enterprise workloads. *Cost:* Low decision cost, but potentially high downstream cost if the benchmark doesn't represent the platform's actual eventual workload profile. *Risk:* High risk of an unjustified, non-generalizable decision basis.
+useCacheConsistencyCanary (Expert exercise)
+ └─ periodic self-consistency check, independent of and complementary to
+ the query-key governance layer — catches what governance MISSES,
+ not a substitute for correct governance
+```
 
-**Option B — Choose based purely on individual developer/team familiarity, with no organizational governance layer:**
-*Advantages:* Fast initial velocity, no ramp-up cost. *Disadvantages:* For React specifically, this risks exactly I10/A7's organizational-fragmentation exposure — without deliberate, upfront governance, independent teams will make independently-reasonable but divergent choices (state libraries, effect patterns) that compound into platform-wide inconsistency; Angular's opinionated defaults partially protect against this even without explicit governance, but not entirely (this module's own incident shows even Angular's more prescriptive structure doesn't eliminate cross-team divergence risk). *Cost:* Low upfront. *Risk:* High and compounding, specifically for React, as team count grows.
+### Module 161 — React Capstone: Enterprise-Scale Real-Time Trading Dashboard — Comparative Rebuild Against the Angular Original
+*Source: `03-Capstone-TradeView-React-ComparativeRebuild.md`*
 
-**Option C — Choose based on organizational fit (team structure, existing ecosystem investment, governance capacity), with the losing framework's key disciplines (Angular's enforced structure, or React's Fiber-based scheduling/`exhaustive-deps` tooling) deliberately, explicitly replicated via governance regardless of which framework is chosen (recommended):**
-*Advantages:* Grounds the decision in the dimension (organizational fit, the ATAM-style trade-off framing) most predictive of long-term platform health at genuine enterprise multi-team scale, rather than a raw technical metric unlikely to generalize; explicitly ports each framework's structural strengths into governance regardless of the choice, closing both frameworks' respective largest organizational risk (React's fragmentation exposure, and — less severe but real — Angular's own capacity for cross-team pattern-reuse-without-precondition-verification, per this module's incident).
-*Disadvantages:* Requires genuine, ongoing governance investment regardless of which framework is chosen — there is no "free" choice that avoids this cost entirely. *Cost:* Moderate, but proportional to the platform's actual multi-team scale. *Risk:* Low, contingent on the governance actually being established and maintained, per this course's now-repeated contingency caveat for every centralization/governance recommendation it has made.
+**1. Fundamentals**
 
-**Recommendation: Option C as the standing default.** The generalizable principle, closing this comparative module: **the Angular-versus-React choice is, at genuine enterprise scale, an organizational-governance decision wearing a technical-framework-choice costume** — every one of this module's genuine technical divergences (Fiber's scheduling, the stale-closure risk, `key`'s presence-only warning, Context's thinner DI) matters less to a platform's long-term health than whether the organization deliberately, explicitly builds the governance discipline (shared conventions, precondition-documented patterns, mechanical lint enforcement) that lets many independent teams compose correctly on top of whichever framework's specific strengths and specific footguns they've chosen to live with.
+```text
+Shell (React) — Module Federation (IDENTICAL risk to the Angular shell)
+ │
+ ├─ Redux/RTK store (cross-desk state ONLY, ≈ the NgRx scoping discipline)
+ │
+ ├── Remote: Equities Desk
+ │ ├─ React Query (buying-power validation via async-safe query, positions via
+ │ │ correctly-scoped cache keys, the fix applied from day one)
+ │ ├─ react-window virtualized grid, memo-wrapped rows, key=symbol ('s
+ │ │ lesson applied from day one — NOT this capstone's incident)
+ │ ├─ useDeferredValue-scheduled tick updates (Fiber-aware,/)
+ │ └─ "Mini Portfolio" widget — per-account isolated state (THIS capstone's new ground,
+ │ — approximating Angular's component-scoped DI with no native equivalent)
+ │
+ └── DeskErrorBoundary per remote
+```
 
----
+**3. Visual Architecture**
 
-## 17. Principal Engineer Perspective
+```mermaid
+graph TB
+ subgraph "Fiber's intentional lag — the torn-render risk"
+ TickState[Raw tick state — updates immediately, synchronously]
+ Deferred["useDeferredValue(tickState)<br/>— may LAG behind during bursts"]
+ TickState --> Deferred
 
-**Business impact:** the incident — a safety-relevant sanity check silently validating against a frozen, stale snapshot for a trading platform's entire session — carries the same class of real financial and compliance consequence as the Angular capstone incident, reinforcing across two entirely different frameworks that frontend rendering-and-reactivity correctness is a production-reliability concern at the same severity tier as backend correctness, independent of which framework a given platform happens to use.
+ Header["Summary Header<br/>(reads TickState directly — ALWAYS current)"]
+ Grid["Top Movers Grid<br/>(reads Deferred — MAY LAG, by design)"]
+ TickState --> Header
+ Deferred --> Grid
 
-**Engineering trade-offs:** This module's central comparative finding — Angular's opt-out-of-blanket-checking default versus React's opt-out-of-full-re-render default — produces structurally mirror-image, equally-real risk if either framework's respective opt-in optimization tools (`OnPush`, `memo`) are applied without discipline; neither framework's default is "safer" in an absolute sense, only differently-shaped.
+ Header -.->|"during a burst: Header already shows<br/>NEW top mover, Grid still highlights OLD one"| Torn[Momentary torn/inconsistent view]
+ Grid -.-> Torn
+ end
+```
 
-**Technical leadership:** The diagnostic habit this module's own incidents reinforce, alongside the identical finding: a shared, previously-hardened pattern's *documented preconditions* (here: "assumes a controlled input") are exactly as important to communicate and verify as the pattern's implementation itself — a Principal-level engineer reviewing a team's reuse of an existing pattern should verify the *precondition match*, not merely that the pattern's code was copied correctly.
+**13. Low-Level Design**
 
-**Cross-team communication:** the incident, like/158's own recurring finding, traces to one team's individually-reasonable implementation choice (debounced, uncontrolled input handling) interacting unexpectedly with another team's already-hardened, seemingly-unrelated pattern — reinforcing this course's now firmly cross-domain finding that shared-pattern reuse requires transferring the pattern's *preconditions and reasoning*, not merely its code, across team boundaries.
+```text
+useMiniPortfolioState(accountId) (Easy exercise)
+ └─ ALL state declared via useState INSIDE the hook body — genuine per-instance
+ isolation, verified by the cross-instance isolation test (I5)
 
-**Architecture governance:** `exhaustive-deps` enforcement, `key`-correctness review discipline, `memo`-effectiveness verification (Advanced Q5), and explicit precondition documentation for any shared, reusable pattern should each be standing, platform-wide React governance artifacts — the React-ecosystem-specific instantiation of the identical governance discipline-158 established for Angular, confirming this course's finding that the *need* for such governance is framework-agnostic even where its *specific mechanical form* (a lint rule, a documented convention) differs.
+TopMoversGrid (Hard exercise)
+ ├─ useDeferredValue(currentTicks) — intentional, documented lag
+ ├─ isLagging derived via reference comparison
+ └─ explicit "Updating…" indicator — closes the coordination gap
 
-**Cost optimization:** Option C's organizational-fit-driven framework choice, paired with deliberate governance investment regardless of the choice, directly optimizes for this course's now-repeated finding that a framework choice's long-term cost is dominated by organizational-consistency risk at scale, not by any single technical performance dimension a benchmark might favor one direction or the other.
-
-**Risk analysis:** The dominant risk pattern across this module's own incidents, and across its full comparison against, is — once more — a mechanism (a closure, a shared pattern, a memoization wrapper) that is correct and verified for its own originally-examined scope while a genuinely different, individually-reasonable adjacent choice (a different input-handling pattern, a different list's reordering behavior) silently falls outside that scope, reinforcing that this finding is not merely cross-domain (through 155) or cross-framework (Angular through React) but appears to be a structural property of composed software systems generally, independent of the specific technology stack examined.
-
-**Long-term maintainability:** Closing this module and setting up the advanced-state-management coverage: React's specific technical primitives (Fiber, closures, `key`, Context) differ substantially from Angular's (Ivy, Zone.js, `trackBy`, the injector tree) in their concrete mechanics, but this module's own two incidents demonstrate the identical underlying maintainability challenge this entire course has traced across 158 prior modules — a system's correctness is not a property established once by choosing the right framework or the right individual pattern, but one that must be continuously, structurally re-verified against every new team, every new usage context, and every new adjacent implementation choice that composes with what was previously, correctly built.
-
----
-
-**Next in this run:** Module 160 — Advanced React: State Management (Redux/Zustand/Context), Data Fetching, Performance & Micro-Frontends — Comparative Against Angular, mapping directly onto Module 157's NgRx/Signals/Reactive-Forms/Module-Federation coverage.
+useTornRenderCanary (Medium exercise)
+ └─ periodic cross-view comparison — production safety net, independent
+ of and complementary to the Hard exercise's proactive UI fix
+```

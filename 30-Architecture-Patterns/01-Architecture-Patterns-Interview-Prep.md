@@ -1,6 +1,6 @@
 # Architecture Patterns — Complete Interview Prep (All Topics, One File)
 
-> Domain: Architecture Patterns | Level: Beginner → Expert | Prerequisite: [[../17-Microservices/00-Microservices-Interview-Master-Guide-DotNet-TechLead-Architect]] (decomposition, communication, Part V Principal depth). Internal structure: [[../31-Domain-Driven-Design/01-DDD-Interview-Prep]], [[../32-Clean-Architecture]], [[../33-Hexagonal-Architecture]]
+> Domain: Architecture Patterns | Level: Beginner → Expert | Prerequisite: [[../17-Microservices/00-Microservices-Interview-Master-Guide-DotNet-TechLead-Architect]] (decomposition, communication, Part V Principal depth). Internal structure: [[../31-Domain-Driven-Design/01-DDD-Interview-Prep]], [[../32-Clean-Architecture/01-Clean-Architecture-Interview-Prep]], [[../33-Hexagonal-Architecture/01-Hexagonal-Architecture-Interview-Prep]]
 > **Quick-prep edition** (consolidated 2026-10-03). This one file replaces Modules 105–108. Originals: `git show ebb2d5c:30-Architecture-Patterns/<file>.md`
 > Each topic has: **Key concepts → code/artifact example → Most common interview questions with answers.**
 

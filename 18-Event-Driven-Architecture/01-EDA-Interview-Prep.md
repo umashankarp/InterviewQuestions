@@ -52,7 +52,7 @@ When the caller needs the result synchronously, when the flow is simple CRUD, wh
 |---|---|---|---|
 | **Event notification** (thin) | IDs + type ("Order 42 changed") | small, no data duplication, always-fresh fetch | consumers call back the producer (coupling, load, availability dependency) |
 | **Event-carried state transfer** (fat) | the full relevant state | consumers are self-sufficient (local copies), no callbacks | bigger messages, duplicated data, schema coupling, PII spread |
-| **Event sourcing** | the event stream *is* the system of record | full history, replay, audit | complexity (see [[../35-Event-Sourcing]]) |
+| **Event sourcing** | the event stream *is* the system of record | full history, replay, audit | complexity (see [[../35-Event-Sourcing/01-Event-Sourcing-Interview-Prep]]) |
 | **Domain vs integration events** | internal model events vs public, stable contract events | — | don't publish internal domain events as external contracts |
 
 **Common interview questions**
@@ -143,7 +143,7 @@ Kafka for high-throughput event streams with many consumers, replay and long ret
 - **Transactional outbox:** write the event to an outbox table in the same DB transaction; a relay publishes it (at-least-once).
 - **CDC** (Debezium) can publish outbox rows or table changes from the transaction log.
 - **Publish ordering** per aggregate: partition by aggregate ID; publish outbox rows in order.
-- Details and SQL: [[../37-Outbox]] and [[../16-Distributed-Systems/01-Distributed-Systems-Interview-Prep]] §11.
+- Details and SQL: [[../37-Outbox/01-Outbox-Interview-Prep]] and [[../16-Distributed-Systems/01-Distributed-Systems-Interview-Prep]] §11.
 
 ```csharp
 // EF Core: business change + outbox row in ONE SaveChanges (one transaction)

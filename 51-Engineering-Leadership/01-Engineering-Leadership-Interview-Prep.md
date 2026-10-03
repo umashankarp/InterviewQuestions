@@ -1,189 +1,1316 @@
-# Module 169 — Engineering Leadership: Technical Leadership, Staff+/Principal Engineering, Software Architecture & Engineering Management
+# Engineering Leadership (Tech Lead, Staff+, Principal, Architect, EM) — Complete Interview Prep (All Topics, One File)
 
-> Domain: Engineering Leadership (merged 51-55) | Level: Staff → Principal → Director | Prerequisite: the entire preceding course (Modules 1-168) — this module is where every technical discipline this course has built converts into organizational judgment, not a new technical subject in its own right.
+> Domain: Engineering Leadership | Level: Senior → Principal/Architect | Prerequisite: [[../30-Architecture-Patterns/01-Architecture-Patterns-Interview-Prep]] (ADRs, fitness functions), [[../17-Microservices/00-Microservices-Interview-Master-Guide-DotNet-TechLead-Architect]] Part V (Principal depth)
+> **Quick-prep edition** (consolidated 2026-10-03). This one file replaces Modules 169–172 and 187 (and covers the never-written Module 188, Engineering Management, in §9). Originals: `git show ebb2d5c:51-Engineering-Leadership/<file>.md`
+> Each topic has: **Key concepts → a concrete artifact/template → Most common interview questions with model answers.** Behavioural answers use **STAR+L** (Situation, Task, Action, Result, **Lesson**) with numbers.
 
->
-> **Scope note:** `51-Engineering-Leadership` is a single-file, merged domain consolidating the originally-separate Modules 51-55 (Technical Leadership, Staff+ Engineering, Principal Engineering, Software Architecture, Engineering Management) per explicit user direction — one file, not five module files or five subfolders. It closes the full 55-domain curriculum. Five sections follow, each with its own fundamentals and curated interview Q&A (not the full 40-per-topic treatment used elsewhere in this course, deliberately, per the same explicit compression instruction), followed by one closing synthesis connecting this module to the entire course.
-
----
-
-## 0. How the five threads relate
-
-These five domains are not five unrelated skills — they are **five different answers to the same question, "how does one engineer's judgment scale beyond what they can personally build?"**, differentiated by *mechanism* and *scope*:
-
-| Track | Mechanism of scaling | Typical scope |
-|---|---|---|
-| **Technical Leadership** | Influence without formal authority — convincing, not commanding | A team or a cross-team initiative |
-| **Staff Engineering** | Direct, hands-on multiplication — unblocking, glue work, exemplary code | A group of teams (2-8) |
-| **Principal Engineering** | Setting technical strategy and standards others build within | An org or the whole engineering organization |
-| **Software Architecture** (as a role) | Structuring systems and decisions so good outcomes are the path of least resistance | A system, a domain, or a platform |
-| **Engineering Management** | Formal authority over people — hiring, growth, performance, org design | A team, growing to multiple teams (an EM's technical judgment matters, but their scaling mechanism is fundamentally people-management, not code) |
-
-The Staff+/Principal/Architect tracks are the **individual-contributor (IC) ladder's senior rungs**; Engineering Management is a **parallel, not superior, ladder** — a genuinely different job, not a promotion from senior engineer. Technical Leadership is a **behavior**, exercised at every level from senior engineer through Principal and by good EMs too, not a title. This distinction — title/ladder versus behavior — is itself the first thing an Elite FinTech Interview Panel candidate must get right, since conflating "I want to be technical" with "I don't want to manage people" (true) against "I don't need leadership skills" (false, and the single most common Staff+ interview failure mode) is exactly the confusion this section exists to close.
+| # | Topic | # | Topic |
+|---|---|---|---|
+| 1 | How the leadership roles differ | 7 | Software architecture as a role |
+| 2 | Technical leadership: influence without authority | 8 | Governance, golden paths & fitness functions |
+| 3 | Written leverage: RFCs, ADRs, strategy docs | 9 | Engineering management: people, performance, hiring, org design |
+| 4 | Disagree & commit; technical debt as business narrative | 10 | Working with executives, regulators & product |
+| 5 | Staff+ engineering: archetypes, problem selection, glue work | 11 | Behavioural question bank with model answers |
+| 6 | Principal engineering: org-wide strategy, build vs buy, risk | 12 | Top 30 rapid-fire + Principal · 13 Mistakes checklist |
 
 ---
 
-## 1. Technical Leadership
+## 1. How the Leadership Roles Differ
 
-**Fundamentals:** Technical leadership is the practice of driving a technical outcome — a migration, a standard, an architectural direction — through **influence, not authority**: building consensus, writing the design doc that becomes the reference everyone defers to, being the person whose review comment ends the debate not because of title but because of track record and clarity of reasoning. It is exercised identically whether or not the exerciser has a "Staff" title; a senior engineer leading a migration and a Principal Engineer setting an org-wide standard are both, in this specific moment, doing technical leadership.
+| Role | Primary scope | Main lever | Success looks like |
+|---|---|---|---|
+| **Senior engineer** | features/components | own code and designs | reliable delivery of complex work |
+| **Tech lead** | one team's technical direction | design reviews, planning, unblocking | team ships coherent, maintainable systems |
+| **Staff engineer** | multiple teams / a domain | technical strategy, cross-team alignment, hard problems | multi-team outcomes that wouldn't happen otherwise |
+| **Principal engineer** | org-wide (department/company) | decision systems, strategy, risk ownership, executive partnership | org-level technical direction and capability |
+| **Software/solutions/enterprise architect** | system/solution/portfolio structure | constraints, standards, reference architectures, stakeholder translation | coherent, compliant, evolvable architecture adopted by teams |
+| **Engineering manager** | people and team health | hiring, growth, performance, process, org design | high-performing, sustainable teams delivering outcomes |
 
-**Core mechanisms:**
-- **Written communication as the primary leverage tool** — a design doc, an RFC, an ADR read by 50 engineers scales an argument the way no meeting can; technical leaders are disproportionately measured by the quality and reach of their writing, not their meeting presence.
-- **Disagree and commit** — the discipline of raising a strong, evidenced objection during the decision window, then fully supporting the decided direction once made, even if it wasn't one's own preference — the single most tested behavioral competency at this level, because its absence (relitigating a decided decision, or silently undermining it) is directly organizationally corrosive in a way this course's own "composition risk" vocabulary would recognize: an org where decisions don't durably stick is an org that cannot compose decisions reliably at all.
-- **Technical debt narrative-building** — translating "this code is messy" (an engineer's frustration) into "this specific debt is costing us N incidents/quarter and blocking this specific roadmap item" (a business case a non-technical stakeholder can act on) — this course's own Modules throughout (the honest, non-laundered decision matrices;-161's incident narratives) are themselves worked examples of exactly this translation skill.
-- **Mentorship and multiplying others** — technical leadership is measured partly by whether the people around the leader get measurably better, not merely by what the leader personally ships.
+- **The mechanism changes with level:** seniors solve problems; staff choose problems and align teams; principals design the **systems that make decisions** (standards, review forums, paved roads) and own aggregate risk.
+- IC and management tracks are **parallel**, not ranks of each other; principals partner with directors/VPs.
 
-### Interview Questions — Technical Leadership
+**Common interview question**
 
-**Q1. You strongly disagreed with a technical decision your team made. It's been decided. What do you do?**
-*Ideal Answer:* Voice the disagreement clearly and with evidence *during* the decision process — once decided, commit fully: implement it well, defend it to others, and don't relitigate it unless genuinely new information emerges. If the decision proves wrong, raise that with data, not "I told you so."
-*Why it matters:* Tests "disagree and commit" — the single most load-bearing behavioral competency for technical leadership, since an org that can't make decisions stick can't execute.
-*Common mistakes:* Describing passive-aggressive compliance ("I did what they said but made sure everyone knew it was a mistake") — this fails the "commit" half completely.
-*Follow-up:* What's the difference between committing to a decision and staying silent about later evidence it was wrong?
-
-**Q2. How do you drive a technical initiative across teams that don't report to you?**
-*Ideal Answer:* Build the business/technical case first (a doc, with data); find and align key stakeholders one-on-one before any group forum; identify what's in it for each affected team, not just the initiative's own goal; use a lightweight, visible tracking mechanism (not authority) to maintain momentum; escalate specifically and narrowly when genuinely blocked, not broadly and often.
-*Why it matters:* This is influence-without-authority in its most concrete, testable form.
-*Follow-up:* What do you do when a team simply deprioritizes your initiative indefinitely with no explicit refusal?
-
-**Q3. Describe a time you had to deliver technical feedback that was likely to be unwelcome.**
-*Ideal Answer:* A specific example structured around: the concrete, observable issue (not a character judgment); the business/technical impact; a constructive path forward; delivered privately first where appropriate, with genuine two-way dialogue rather than a pronouncement.
-*Why it matters:* Directness paired with respect is a specifically, frequently-tested Staff+ competency, since avoidance of hard feedback is one of the most common failure modes promoted-too-fast engineers exhibit.
-
-**Q4. How do you decide when a technical debate needs a formal design doc/RFC versus a Slack thread?**
-*Ideal Answer:* Scope and reversibility (the own framework): a decision affecting multiple teams, hard to reverse, or setting precedent for future similar decisions warrants a written, reviewable artifact; a narrow, easily-reversible, single-team decision doesn't need that ceremony — over-formalizing every decision is itself a leadership failure (slows the org down for no commensurate benefit).
-*Follow-up:* How do you handle a debate that keeps recurring in Slack threads despite feeling "settled" — what does that recurrence usually signal?
+**Q. What is the difference between a Staff and a Principal engineer?**
+Staff engineers drive outcomes across several teams — choosing the right problems, setting technical direction in a domain, and aligning teams. Principal engineers operate at org level: they shape strategy with executives, design decision-making mechanisms (architecture governance, golden paths), make or guide org-wide bets like build-vs-buy, and own aggregate technical risk. The principal's output is mostly multiplied through others and through systems, not through their own code.
 
 ---
 
-## 2. Staff+ Engineering
+## 2. Technical Leadership: Influence Without Authority
 
-**Fundamentals:** "Staff engineer" (and Senior Staff, Distinguished Engineer) describes an IC role whose primary value is **multiplying the effectiveness of engineers around them**, not merely writing more code personally. Will Larson's widely-referenced taxonomy — **Tech Lead** (owns a team's or initiative's technical direction), **Architect** (owns the technical vision and coherence of a larger domain), **Solver** (deployed against the org's hardest, most ambiguous problems), **Right Hand** (extends a senior leader's attention and judgment across an org) — describes distinct *archetypes*, not a hierarchy; a given Staff engineer typically operates predominantly in one archetype while drawing on the others situationally.
+**Key concepts**
+- Authority-based models fail mechanically in engineering: you rarely control the teams, priorities or budgets you need → **influence** through credibility, clarity, and shared goals.
+- **Influence toolkit:** understand others' incentives and constraints; frame proposals in their goals; build coalitions early (pre-wire); data and prototypes over opinions; make it easy to say yes (incremental, reversible steps); give credit generously.
+- **Credibility ledger:** you earn it by being right, delivering, admitting mistakes, and helping others succeed; you spend it on asks — don't overdraw on low-value battles.
+- **Failure modes:** hero-mode (doing everything yourself), ivory tower (designs without delivery), bike-shedding, avoiding conflict, winning arguments but losing relationships.
 
-**Core mechanisms:**
-- **"Glue work"** — the unglamorous, often invisible work of unblocking others, writing the doc no one else will write, running the retro, coordinating the cross-team dependency — genuinely necessary work that individual-contributor performance-review systems historically undervalue (rewarding shipped code over enabled shipping), and a well-known Staff+ trap: doing too much glue work at the expense of any deep, exemplary technical contribution erodes the credibility the role depends on.
-- **Scope over depth, but not instead of depth** — a Staff engineer's technical judgment must remain sharp and current (this entire 168-module course's own depth is exactly the kind of foundation this scope-widening is built on top of, not a replacement for); the failure mode isn't "too broad," it's "broad with no remaining depth to draw credibility from."
-- **Picking the right problems** — Staff+ impact is measured heavily by *problem selection*, not merely execution quality; choosing to work on the org's actual highest-leverage problem, even when it's less interesting or less visible than an adjacent one, is itself the skill.
-- **"Eng strategy" as a deliverable** — a Staff engineer's most durable output is often a written technical strategy (which platform to standardize on, which class of incident to systematically prevent) that outlives any single project.
+**Common interview questions**
 
-### Interview Questions — Staff+ Engineering
+**Q1. How do you get teams you don't manage to adopt your proposal?**
+Start with their problems: interview the teams, quantify the pain, and co-design the solution with influential engineers from those teams. Pre-wire key stakeholders before the forum, propose an incremental path with a pilot that proves value, make adoption easy (templates, migration tooling, support), and publicize early wins with credit to the adopting teams. If it's mandatory (e.g., security), get explicit leadership sponsorship and still reduce the cost of compliance.
 
-**Q1. Which Staff engineer archetype best matches this role, and why does that matter for how you'd approach the first 90 days?**
-*Ideal Answer:* Identify the specific archetype (Tech Lead/Architect/Solver/Right Hand) the role's actual scope implies, and describe a correspondingly different 90-day plan — a Solver role warrants deep-diving the org's stated hardest problem immediately; an Architect role warrants a broad listening tour mapping the domain's actual current coherence/incoherence before proposing direction.
-*Why it matters:* Tests whether the candidate understands Staff+ is not one undifferentiated "senior senior engineer" job.
-
-**Q2. Describe the highest-leverage piece of "glue work" you've done, and how you decided it was worth your time relative to writing code yourself.**
-*Ideal Answer:* A specific example with an explicit cost/benefit judgment — what code-writing opportunity was foregone, and why the glue work's multiplying effect (unblocking N engineers, preventing a recurring cross-team miscommunication) exceeded that opportunity cost, evidenced concretely, not asserted.
-*Why it matters:* Tests self-awareness about the glue-work trap and genuine, evidenced prioritization judgment.
-
-**Q3. How do you maintain technical depth while your scope widens across many teams?**
-*Ideal Answer:* Deliberate, scheduled hands-on work (not merely reviewing others'); picking specific areas to go genuinely deep rather than attempting uniform shallow coverage everywhere; treating code review itself as a depth-maintaining practice, not merely a gatekeeping one.
-*Follow-up:* How do you know when your depth in a specific area has actually eroded to the point your judgment there is no longer reliable?
-
-**Q4. Tell me about a technical strategy document you wrote. What made it durable/effective, or what would you change?**
-*Ideal Answer:* A concrete example demonstrating the doc actually changed subsequent decisions/behavior (not merely "was well-received"), with honest reflection on what didn't work — this course's own the "honest, non-laundered decision matrices" is the exact standard this answer should be held to.
-
-**Q5. How do you evaluate whether you're solving the org's actual highest-leverage problem, versus the most interesting one available to you?**
-*Ideal Answer:* An explicit, evidenced prioritization method (impact × likelihood-you're-uniquely-positioned-to-solve-it, or similar) applied to a real example, with honest acknowledgment of a time the interesting problem won out over the higher-leverage one and what that cost.
+**Q2. How do you handle a strong senior engineer who disagrees with your design?**
+Separate facts from preferences: ask them to make the strongest case, agree on decision criteria (requirements, risks, costs), test assumptions with data or a spike, and decide through the agreed process (owner/ADR). Record dissent in the ADR, then disagree and commit. Often they're seeing a real risk — incorporate it.
 
 ---
 
-## 3. Principal Engineering
+## 3. Written Leverage: RFCs, ADRs, Strategy Docs
 
-**Fundamentals:** Principal Engineer (and Distinguished/Fellow at the largest firms) operates at **org-wide or company-wide technical scope** — setting standards, technology choices, and architectural direction that multiple Staff engineers and teams build within, and holding the organization's deepest technical judgment on its highest-stakes, longest-horizon bets (a multi-year platform migration, a build-versus-buy decision affecting the entire engineering org, the technology choice underlying a new product line).
+**Key concepts**
+- Writing scales your thinking across time zones, teams and time; it forces clarity and creates an audit trail (valued highly in regulated firms).
+- **RFC/design doc:** context, goals/non-goals, options with trade-offs, recommendation, risks, rollout/rollback, open questions — reviewed asynchronously, decided in a forum with a named decider.
+- **ADR:** short, immutable record of one decision (context → decision → consequences → status).
+- **Strategy doc:** diagnosis → guiding policy → coherent actions (Rumelt), with time horizons and measurable outcomes.
 
-**Core mechanisms:**
-- **Technical strategy as a first-class artifact, reviewed and revised like any other strategy** — a Principal's technical direction should be as rigorously reasoned, documented, and revisited as a VP's business strategy, using the identical trade-off-comparison discipline established (advantages/disadvantages/cost/risk/reversibility), never asserted from authority alone.
-- **Cross-org technical governance** — establishing and maintaining the standards (which this course's own Modules 106, 152-155, 163-167 modeled in miniature) that let dozens of independent teams compose correctly without a central bottleneck reviewing every decision — the Principal-level instantiation of this entire course's own recurring finding: governance must scale with system complexity via distributed ownership (the own Hard exercise), not a single overloaded reviewer.
-- **Build-versus-buy and technical-debt-at-scale judgment** — deciding, for the whole org, when a capability warrants building in-house versus adopting a vendor/open-source solution, and when accumulated technical debt in a specific system warrants a dedicated remediation investment versus continued, managed coexistence — decisions this entire course's own domain-by-domain architecture-decision sections (of nearly every module) were direct, worked training for.
-- **Cost and risk ownership at organizational scale** — a Principal's decisions carry real, large-scale financial and regulatory consequence (this course's Elite FinTech lens has made this concrete throughout — the cross-organizational trust decisions, the MCP-adoption risk), requiring genuine business fluency alongside technical depth.
+```markdown
+# ADR-042: Use the transactional outbox for payment event publication
+Status: Accepted (2026-05-12) · Decider: Payments Architecture Forum · Supersedes: ADR-017
+## Context
+Dual writes between SQL Server and Kafka lost 0.02% of PaymentSettled events in Q1 (3 reconciliation breaks, 1 regulatory report delay).
+## Decision
+All services publishing domain events use the shared outbox library (MassTransit EF outbox) with idempotent consumers (inbox).
+## Options considered
+1. Outbox + polling relay (chosen) — simple, proven, ~1s latency.  2. CDC/Debezium — lower latency, needs Kafka Connect ops.  3. Status quo — unacceptable loss rate.
+## Consequences
++ No lost events; consistent pattern across 14 services.  − Outbox table growth (purge job); at-least-once ⇒ consumers must dedupe.
+## Verification
+Fitness function: CI check fails builds that reference IProducer directly outside the relay. Monthly reconciliation reports zero missing events.
+```
 
-### Interview Questions — Principal Engineering
+**Common interview question**
 
-**Q1. Walk through a build-versus-buy decision you drove at organizational scale.**
-*Ideal Answer:* A structured comparison (the ATAM-style framework) covering cost, risk, time-to-value, vendor lock-in, and long-term maintainability, with an explicit recommendation and — critically — a account of how the decision was actually revisited/validated after the fact, not merely made once and assumed correct.
-*Why it matters:* Tests whether "Principal-level judgment" is a real, evidenced practice or an assumed title.
-
-**Q2. How do you establish a technical standard across an organization with dozens of independently-operating teams, without becoming a bottleneck reviewing every decision?**
-*Ideal Answer:* Directly reuses this course's own recurring governance-scaling finding: distributed ownership of specific standards by domain experts, mechanical/structural enforcement where feasible (CI gates, shared platform defaults /139), and a clear, narrow escalation path for genuine exceptions — never a model requiring the Principal's own personal sign-off on every instance.
-*Follow-up:* How do you detect when a "standard" has silently drifted from actual practice across the org — directly recurring this course's own "verify the verifier" theme?
-
-**Q3. Describe the largest technical-debt-versus-new-feature trade-off you've influenced at the organizational level.**
-*Ideal Answer:* A concrete example quantifying the debt's actual, measured cost (incident rate, velocity impact — the error-budget-style framing) versus the foregone feature value, with the actual decision made and its outcome, not a hypothetical.
-
-**Q4. How do you maintain technical credibility at a scope where you can no longer personally review most of the code affecting your area?**
-*Ideal Answer:* Selective, deep engagement on the highest-leverage decisions and highest-risk systems; investing in the standards/tooling (this course's own fitness-functions) that let correctness be verified without personal review of everything; periodic, deliberate hands-on work maintaining genuine currency, not merely delegated oversight.
-
-**Q5. A VP asks you to make a technical recommendation you believe is wrong for short-term business reasons you don't fully agree with. How do you handle it?**
-*Ideal Answer:* Voice the technical risk clearly and with evidence, quantify the specific, concrete cost of the shortcut (never a vague objection); if the business genuinely, knowingly accepts that risk with full information, support the decision (this section's own "disagree and commit," now at the highest stakes) while ensuring the risk and its owner are explicitly, durably documented — never silently comply without ensuring the risk is visible and attributable.
-
----
-
-## 4. Software Architecture (as a role, not a pattern set)
-
-**Fundamentals:** This section is deliberately scoped narrowly, since Modules 30-38 already cover architecture *patterns* in full depth — this section covers the **Software/Enterprise Architect role**: the person (Staff+, Principal, or a dedicated Architect title depending on the org) responsible for a system or domain's overall technical coherence, structuring decisions so that good outcomes are the easy, default path, not merely documented as the recommended one.
-
-**Core mechanisms:**
-- **Architect as facilitator, not dictator** — the most durable architectural decisions are made *with* the teams that must live with them (directly recurring this course's own ADR-and-decentralized-decision-making finding), with the architect's role being to structure the decision process (present real options, ensure trade-offs are honestly compared) rather than unilaterally imposing a single "correct" answer.
-- **Architecture as continuously verified, not once-declared** — this entire course's central finding, restated at its most explicit for this role specifically: an architecture diagram or ADR is a *claim*; fitness functions, governed conventions (the golden-path scaffolding), and this course's own now-168-times-demonstrated "verify the verifier" discipline are what keep the claim true over time, not the diagram's own existence.
-- **The Architect's actual leverage: making the right choice the default, not merely the documented one** — the golden-path finding restated: an architectural standard that requires every team to independently, correctly remember and apply it will drift; an architecture embedded in shared tooling/scaffolding is the one that actually holds.
-- **Trade-off communication to non-technical stakeholders** — translating architectural risk (a monolith's coupling cost, a migration's risk profile) into terms a business stakeholder can genuinely weigh, exactly the discipline the own "honest decision matrices" were built to teach.
-
-### Interview Questions — Software Architecture
-
-**Q1. How do you make an architectural decision durable — i.e., actually followed — rather than merely documented?**
-*Ideal Answer:* Embed the decision in shared, default tooling/scaffolding wherever feasible (the golden-path pattern), back it with a fitness function or CI check where mechanically enforceable, and treat any documentation-only decision as inherently at risk of drift, requiring periodic, explicit re-verification.
-*Why it matters:* Directly tests this course's own central, most-repeated finding, applied to the architect role specifically.
-
-**Q2. Describe a time an architecture you designed or approved turned out to be wrong once actually in use. What did you do?**
-*Ideal Answer:* An honest account (this course's own "no-retrofit, but honest documentation of what changed and why" pattern) of what specifically was wrong, how it was discovered (ideally via a genuine measurement/incident, not merely a feeling), and the actual remediation path — including whether a full redesign or an incremental correction was chosen, and why.
-*Why it matters:* Tests intellectual honesty and the ability to course-correct rather than defend a prior decision indefinitely.
-
-**Q3. How do you balance being the architecture's ultimate technical authority against genuinely empowering teams to make their own decisions?**
-*Ideal Answer:* Distinguish which decisions genuinely require centralized, cross-team coherence (a shared data contract, a security boundary) from which are safely, better left to the owning team's own judgment (internal implementation details) — the identical scope-matching discipline this entire course applied at every technical layer, now applied to organizational decision rights.
-
-**Q4. How would you evaluate whether a proposed migration to a new architectural pattern (e.g., monolith to microservices) is actually warranted for a specific team, versus premature?**
-*Ideal Answer:* Directly reuses the own finding — decompose based on genuine, demonstrated organizational/scaling need (Conway's Law fit, independent-deployment necessity), never on pattern fashion; require the case to be made with the same rigor as any other build-versus-buy or investment decision.
+**Q. What makes a design doc effective?**
+It states the problem and goals/non-goals crisply, compares real options with explicit trade-offs and costs, makes a clear recommendation, addresses risks, rollout and rollback, names the decider and timeline, and is short enough to be read. Its purpose is a better decision and alignment, not documentation for its own sake.
 
 ---
 
-## 5. Engineering Management
+## 4. Disagree & Commit; Technical Debt as Business Narrative
 
-**Fundamentals:** Engineering Management is a **parallel career track, not a promotion from senior IC** — its scaling mechanism is formal authority over people (hiring, performance, growth, org design), and its core skill set (coaching, performance management, org design, cross-functional stakeholder management) is substantially disjoint from, though benefiting from, deep technical skill.
+**Disagree and commit — the precise discipline**
+- Argue fully **before** the decision (with data, in the right forum); once decided by the accountable owner, **commit fully** — no passive resistance, no "I told you so".
+- Commit ≠ silence forever: agree on **revisit triggers** (metrics, dates) up front; raise new information through the process.
+- Exception: ethical, legal or safety issues → escalate, don't commit.
 
-**Core mechanisms:**
-- **The manager's actual job: creating the conditions for the team to do its best work**, not personally solving every technical problem — a common, costly failure mode for engineers new to management is continuing to be the team's primary IC contributor rather than shifting fully into enabling others.
-- **Performance management as a continuous, not annual, practice** — regular, specific, timely feedback (positive and corrective) rather than surprises delivered only at review time; calibration discipline (comparing performance assessments across managers for consistency) as a fairness mechanism.
-- **Hiring as a force multiplier decision** — the compounding cost of a bad hire (team morale, redone work, eventual difficult exit) versus a slow, rigorous hiring bar, and structured interviewing (consistent rubrics, calibrated interviewer panels) as the mechanism reducing hiring variance the same way this course's own governance mechanisms reduce technical-decision variance.
-- **Org design as an architectural decision applied to people** — team boundaries, reporting lines, and communication structures directly determine (Conway's Law) the systems those teams build; an EM's org-design choices are, in a very real sense, architecture decisions.
-- **The EM/Staff+ partnership** — the most effective engineering orgs pair a strong EM (people, process, prioritization, stakeholder management) with a strong Staff+/Principal (technical direction, depth) leading the same team/domain jointly, neither role subordinate to the other.
+**Technical debt as a business narrative**
+- Executives fund risk reduction and outcomes, not "refactoring". Translate debt into **cost of delay, incident risk, regulatory exposure, lost revenue, slower delivery**, with numbers.
+- Template: *"Our settlement engine's batch design causes ~4 hours of manual reconciliation daily (2 FTE, £180k/yr), produced 3 Sev-2 incidents last quarter, and blocks T+1 settlement required by May 2027. A 2-quarter, 4-engineer investment removes the manual work, reduces incident risk and meets the regulatory deadline."*
+- Fund debt via a standing capacity allocation (e.g., 20%), tie big items to business initiatives, and show progress with metrics.
 
-### Interview Questions — Engineering Management
+**Common interview questions**
 
-**Q1. How do you handle an underperforming engineer on your team?**
-*Ideal Answer:* Specific, timely, documented feedback identifying the concrete gap (not a vague "not meeting expectations"); a clear, time-bound improvement plan with explicit, measurable success criteria; genuine support (pairing, adjusted scope) during the plan; and a clear, fair path to a decision (successful improvement or, if not, an honest, respectful exit) — never indefinite ambiguity, which harms both the individual and the team.
-*Why it matters:* Tests whether the candidate has a genuine, structured practice versus conflict-avoidant vagueness.
+**Q1. How do you convince leadership to invest in paying down technical debt?**
+Quantify impact in business terms (incidents, lead time, manual effort, compliance risk, cost), connect it to upcoming business goals it blocks, propose an incremental plan with milestones and measurable outcomes, and offer options (do nothing/minimal/full) with risks. Report results to build credibility for the next ask.
 
-**Q2. How do you decide when to grow your team by hiring versus reorganizing existing capacity?**
-*Ideal Answer:* An explicit capacity/roadmap analysis distinguishing a genuine, sustained capacity gap from a temporary prioritization mismatch better solved by reprioritization or reorganization — hiring is a slow, compounding, hard-to-reverse investment (this course's own reversibility-calibrated-rigor principle,, applied to headcount) and shouldn't be the reflexive first response to every capacity pressure.
-
-**Q3. Describe your approach to giving negative feedback to a strong performer about a specific blind spot.**
-*Ideal Answer:* Direct, specific, and delivered with genuine respect for the person's overall strong track record — praising strength while being unambiguous about the specific gap, avoiding both over-softening (the feedback doesn't land) and demoralizing over-correction (undermines a genuinely strong contributor's confidence disproportionately).
-
-**Q4. How do you structure your team's boundaries and ownership to avoid the "distributed monolith" anti-pattern identified at the code level, now at the org level?**
-*Ideal Answer:* Ensure team boundaries align with genuine, independent-deployability-relevant seams (Conway's Law applied deliberately, not accidentally) rather than arbitrary headcount-driven splits — a team boundary requiring constant, tight cross-team coordination for ordinary work is the organizational instance of the identical tight-coupling anti-pattern this course examined at the code and service layer throughout.
-
-**Q5. How do you balance your own remaining technical depth against the time management responsibilities require?**
-*Ideal Answer:* An honest, explicit answer acknowledging depth necessarily narrows with management scope, paired with a deliberate strategy (staying current on architecture/direction-level decisions even without daily code involvement, leaning on the team's own Staff+ ICs for deep technical judgment rather than attempting to personally retain it) — the EM/Staff+ partnership pattern stated explicitly as the answer to this tension, not personally resisted.
+**Q2. Tell me about a time you disagreed with a decision but committed.**
+(STAR+L) Situation: leadership chose a vendor platform I believed would limit flexibility. Action: I presented a cost/risk comparison, lost the decision, then committed — led the integration, built an abstraction layer to reduce lock-in, and defined metrics to revisit at 12 months. Result: delivered on schedule; the review later confirmed the vendor met 90% of needs. Lesson: my concerns improved the design (the abstraction) without blocking the decision.
 
 ---
 
-## 6. Closing Synthesis — This Module, and the Full 55-Domain Course
+## 5. Staff+ Engineering: Archetypes, Problem Selection, Glue Work
 
-**Why these five threads close the course, not merely conclude it:** Every one of the preceding 168 modules taught a specific technical discipline and, repeatedly, discovered the identical underlying finding: a system's declared correctness is only as strong as the governance discipline actively, continuously verifying it, and that gap concentrates specifically at the seams between independently-developed components. **This module is where that finding stops being a technical observation and becomes an organizational one**: Technical Leadership is the practice of getting an organization's many independent engineers to actually honor a shared decision once made (closing the "decisions don't durably stick" gap at the human level). Staff+ Engineering is the practice of being the seam-spanning multiplier this course's own composition-risk finding says every sufficiently complex system needs. Principal Engineering is the practice of setting the standards that let many independent teams compose correctly without a central bottleneck. Software Architecture (as a role) is the practice of making the correct technical choice the default, easy path rather than merely the documented one — directly answering this course's own repeated finding that documentation-only governance decays. Engineering Management is the practice of building and structuring the human organization whose team boundaries, per Conway's Law, become the system's own architectural seams.
+**Key concepts**
+- **Archetypes** (Will Larson): **Tech Lead** (guides a team's approach), **Architect** (direction in a critical area), **Solver** (deep-dives into hard problems), **Right Hand** (extends an executive's reach). Knowing yours sets expectations for scope and evaluation.
+- **Problem selection is the dominant term in impact:** work on problems that are important, urgent-but-neglected, and where you have unique leverage; stop working on things that would happen without you. Avoid "snacking" (easy, low-impact work) and "preening" (visible but low-impact).
+- **Glue work** (onboarding, coordination, documentation, process) is valuable and often invisible → make it visible, time-box it, tie it to outcomes, and make sure it's recognized in promotion; don't let it crowd out technical leadership.
+- **Technical strategy** as the durable deliverable: a written path for a domain over 1–3 years.
+- **Sponsorship vs mentorship:** mentoring gives advice; sponsoring spends your credibility to give people opportunities (nominate for high-visibility projects).
 
-**The throughline, stated once, for the whole course:** From the CLR internals through the AI-systems composition risk, this course has demonstrated, at every layer examined — language runtime, database engine, distributed system, identity protocol, two frontend frameworks, and AI systems — that a declared guarantee is only as strong as what was actually, continuously verified, and that the gap between the two concentrates at the boundaries between independently-built components. **This closing domain's own finding is that the same is true one level up: an organization's declared technical strategy, standards, and decisions are only as strong as the leadership practice — technical and managerial — that continuously keeps them true, and that gap concentrates at exactly the boundaries between the organization's own independently-operating teams.** A Principal Engineer, a Staff+ engineer, an Architect, and an Engineering Manager are, each in their own way, the human instantiation of the "verify the verifier" discipline this entire course has built toward — not people who eliminate the gap this course found 168 times, but people whose job is the continuous, skilled practice of narrowing it, in exactly the domain (organizations of people, not merely systems of code) this course's technical modules could describe but not, themselves, fully close.
+**Common interview questions**
+
+**Q1. How do you decide what to work on as a staff engineer?**
+I map the org's top goals and biggest risks, find where technical problems block them and nobody owns the solution, check where I have leverage (domain knowledge, relationships), and validate with my manager/director. I revisit quarterly and drop work that's no longer the highest-leverage, including work I enjoy.
+
+**Q2. How do you scale yourself?**
+Through writing (strategies, ADRs, guides), building paved roads and tooling, mentoring and sponsoring engineers to own areas, setting up review forums, and delegating ownership with clear context — measuring success by what happens without me in the room.
 
 ---
 
-**This module closes `51-Engineering-Leadership` and the full 55-domain curriculum (Modules 1–169).**
+## 6. Principal Engineering: Org-Wide Strategy, Build vs Buy, Risk
+
+**Key concepts**
+- **Change of mechanism:** from making decisions to **designing the decision system** — who decides what (decision rights), forums, standards, escalation paths, reversible vs irreversible decisions ("one-way vs two-way doors").
+- **Build vs buy at org scale:** core differentiation → build; commodity → buy/SaaS/open source. Consider total cost of ownership (licensing, integration, operations, exit cost), vendor risk (concentration, third-party risk management — DORA in EU finance), talent, time-to-market, regulatory requirements, data residency, and exit strategy.
+- **Org-wide technical strategy:** diagnosis of current state with data, target state, guiding principles, investment roadmap, measurable outcomes, governance for exceptions.
+- **Owning aggregate risk:** individual teams optimize locally; principals see systemic risks (single points of failure, end-of-life platforms, concentration on one vendor/region, key-person dependencies, skills gaps) → risk register with owners and mitigation plans.
+- **Executive partnership:** concise, decision-oriented communication; bring options with trade-offs and a recommendation; speak in money, risk and time.
+
+**Common interview questions**
+
+**Q1. How do you approach a build-vs-buy decision for a core banking component?**
+Clarify whether it differentiates us; define requirements including regulatory and resilience needs; shortlist options (build, buy, open source + support); compare 5-year TCO, time to value, fit, integration effort, operational burden, vendor viability and concentration risk, data residency and exit strategy; run a time-boxed proof of concept on the riskiest requirements; involve procurement, security, risk and architecture; decide with an ADR including revisit triggers.
+
+**Q2. How would you set technical strategy for a 300-engineer organization?**
+Diagnose: interview leaders and teams, gather data (incidents, lead times, costs, tech radar, risk register). Define a few guiding policies (e.g., "event-driven integration via the platform", "cloud-native on paved roads", "no new mainframe dependencies"). Translate into a sequenced roadmap tied to business outcomes, with owners, metrics and funding. Socialize and iterate with stakeholders, publish it, and review quarterly against outcomes.
+
+---
+
+## 7. Software Architecture as a Role
+
+**Key concepts**
+- **The architect's product is constraints** (standards, principles, reference architectures) — every constraint has a cost to teams; impose only those that pay for themselves (security, interoperability, resilience, compliance).
+- **Facilitator, not adjudicator:** help teams make good decisions with clear options and trade-offs; reserve mandates for cross-cutting or irreversible concerns.
+- **Make the right thing the default:** golden paths/templates/platforms beat documents and review boards.
+- **Architecture is a claim requiring continuous verification:** declared architecture ≠ actual system → fitness functions, dependency checks, runtime telemetry, periodic reviews.
+- **Stakeholder translation** both ways: business goals → architectural decisions; technical risk → business language.
+- **Why EA functions fail:** ivory tower standards nobody follows, slow review boards, no delivery accountability, diagrams disconnected from reality, being seen as gatekeepers → fix with embedded architects, lightweight decision records, paved roads, and measuring adoption and outcomes.
+- **Architecture views:** C4 (context, container, component, code), arc42, quality attribute scenarios, ATAM-style trade-off analysis.
+
+**Common interview questions**
+
+**Q1. Teams ignore the enterprise architecture standards. What do you do?**
+Find out why — usually the standards are costly, unclear or don't solve their problems. Cut to the few constraints that truly matter, explain the why, provide golden paths and tooling that make compliance the easiest option, embed architects with teams, automate checks (fitness functions) instead of review boards, offer a fast exception process, and measure adoption.
+
+**Q2. How do you evaluate a colleague's architecture proposal?**
+Check it against the problem and quality attributes (scalability, availability, security, compliance, cost, operability); ask about failure modes, data consistency, migration and rollback, ownership and operational load; compare against simpler alternatives; and give specific, prioritized feedback separating must-fix risks from preferences.
+
+---
+
+## 8. Governance, Golden Paths & Fitness Functions
+
+**Key concepts**
+- **Lightweight governance:** decision rights matrix (team vs domain vs org decisions), ADRs, an architecture forum for cross-cutting/irreversible decisions with SLAs (decide within 2 weeks), exception process with expiry.
+- **Golden paths/paved roads:** service templates with logging, auth, CI/CD, observability, security scanning baked in → compliance by default (key in regulated firms for SOX/PCI evidence).
+- **Fitness functions:** automated checks of architectural characteristics — dependency rules (ArchUnitNET/NetArchTest), latency budgets in performance tests, security scans, cost thresholds, policy-as-code (OPA) in pipelines.
+- **Tech radar:** adopt/trial/assess/hold for technologies.
+- **Measuring success:** DORA metrics, incident trends, adoption of paved roads, cost per transaction, time to first deploy for new services.
+
+```csharp
+// Fitness function: domain layer must not depend on infrastructure (NetArchTest)
+[Fact]
+public void Domain_does_not_depend_on_infrastructure()
+{
+    var result = Types.InAssembly(typeof(Payment).Assembly)
+        .That().ResideInNamespace("Payments.Domain")
+        .ShouldNot().HaveDependencyOnAny("Payments.Infrastructure", "Microsoft.EntityFrameworkCore", "Confluent.Kafka")
+        .GetResult();
+    Assert.True(result.IsSuccessful, string.Join(", ", result.FailingTypeNames ?? []));
+}
+```
+
+**Common interview question**
+
+**Q. How do you govern architecture across 40 teams without slowing them down?**
+Clear decision rights so most decisions stay with teams; a small set of non-negotiable standards enforced automatically (fitness functions, policy-as-code, golden paths); a time-bound forum only for cross-cutting/irreversible decisions; ADRs for transparency; fast exceptions with expiry; and metrics to verify both compliance and delivery speed.
+
+---
+
+## 9. Engineering Management: People, Performance, Hiring, Org Design
+
+**Key concepts**
+- **People systems:** regular 1:1s, clear expectations (career ladders/leveling), feedback (timely, specific, behaviour + impact), growth plans, recognition, psychological safety.
+- **Performance management:** set clear goals; address underperformance early with specific feedback and support; document; performance improvement plans as a last resort with real support; distinguish skill vs will vs context problems; handle high performers too (stretch, sponsorship, retention).
+- **Hiring:** structured interviews with defined competencies and rubrics, calibrated interviewers, diverse panels, work-sample tasks, fast decisions, good candidate experience; hire for the team's gaps.
+- **Delivery & process:** planning with clear priorities, limiting WIP, removing blockers, healthy on-call (load, compensation, follow-ups), sustainable pace.
+- **Org design:** **Team Topologies** — stream-aligned, platform, enabling, complicated-subsystem teams; interaction modes (collaboration, X-as-a-service, facilitating); **Conway's law** / inverse Conway maneuver; team size 5–9; minimize cognitive load and handoffs.
+- **Metrics:** DORA + SPACE (satisfaction, performance, activity, communication, efficiency) — measure teams and systems, not individuals' lines of code.
+
+**Common interview questions**
+
+**Q1. How do you handle an underperforming engineer?**
+Diagnose first (skills, motivation, personal circumstances, unclear expectations, wrong role). Give clear, specific feedback early with examples and expectations; agree on a plan with support (mentoring, pairing, smaller scoped goals) and regular check-ins; document progress. If there's no improvement, follow the formal process fairly with HR. Often clarity and support resolve it.
+
+**Q2. How would you organize 60 engineers building a payments platform?**
+Stream-aligned teams per business capability (pay-ins, payouts, ledger, reconciliation, fraud) owning services end to end; a platform team providing paved roads (CI/CD, observability, Kafka, K8s); an enabling team for security/SRE practices; a complicated-subsystem team if needed (e.g., ISO 20022 messaging engine). Align team boundaries with domain boundaries (inverse Conway), keep teams 5–9 people, and define interaction modes.
+
+**Q3. How do you run a hiring process for senior engineers?**
+Define the competencies (system design, coding, collaboration, ownership) and rubrics; train and calibrate interviewers; structured interviews with realistic problems; debrief with evidence against the rubric, not gut feel; move fast; sell the role honestly; review funnel metrics and fairness.
+
+---
+
+## 10. Working with Executives, Regulators & Product
+
+- **Executives:** start with the conclusion and the ask; options with cost/risk/time; one page; know the business metrics; bring problems early with a plan.
+- **Regulators/auditors:** factual, evidence-based, consistent; show controls, monitoring and audit trails; never speculate; coordinate with compliance/legal; commit only to what you can deliver.
+- **Product:** shared outcomes, not feature lists; make technical constraints and opportunities visible; joint prioritization of debt/reliability work with explicit trade-offs; error budgets as a shared language for reliability vs speed.
+- **Incidents:** calm communication, regular updates, clear ownership, blameless postmortems with tracked actions.
+
+**Common interview question**
+
+**Q. How do you say no to a senior executive's request?**
+Understand the underlying goal; explain the impact of the request in their terms (risk, cost, delays to other priorities); offer alternatives that meet the goal (smaller scope, phased approach, different timeline); make the trade-off explicit and let the accountable person decide — escalating with data if it creates unacceptable risk (security, compliance).
+
+---
+
+## 11. Behavioural Question Bank with Model Answers (STAR+L)
+
+**B1. Tell me about the most complex system you designed.**
+Situation: legacy batch settlement (nightly, 6-hour window) couldn't support T+1. Task: redesign for near-real-time settlement with zero data loss. Action: event-driven architecture with outbox, sagas for multi-party settlement, reconciliation service, strangler migration by currency; led design reviews across 5 teams. Result: settlement latency from hours to minutes, manual breaks −85%, no Sev-1 during migration. Lesson: reconciliation must be designed in from day one, not added later.
+
+**B2. Describe a major production incident you led.**
+Situation: payment API latency spiked to 8s at peak. Action: incident commander; stabilized by shedding non-critical traffic and scaling; root cause: thread-pool starvation from sync-over-async in a new library version; fixed and added load tests and an analyzer rule. Result: 45-minute recovery, no lost payments. Lesson: performance tests must run on dependency upgrades; blameless postmortem led to platform-level guardrails.
+
+**B3. Tell me about a time you influenced a decision without authority.**
+Proposed standardizing on OpenTelemetry across 20 teams; interviewed teams about debugging pain, built a pilot with two teams showing MTTR −40%, provided a library and templates; adoption reached 80% in two quarters. Lesson: data from a pilot persuades better than slides.
+
+**B4. Tell me about a failure.**
+I pushed a microservices split too early for a small team; operational load slowed delivery. I recognized it via cycle-time metrics, proposed merging services back into a modular monolith, and documented the lesson in an ADR. Lesson: match architecture to team size and maturity; set revisit triggers.
+
+**B5. How did you grow other engineers?**
+Mentored three seniors toward staff: gave them ownership of cross-team initiatives, reviewed their design docs, sponsored them in forums; two were promoted within 18 months. Lesson: sponsorship (opportunities) matters more than advice.
+
+**B6. Handling conflict between two teams.**
+Two teams disputed ownership of customer data. I facilitated a session mapping the domain (event storming), proposed bounded contexts with clear ownership and integration events, documented in an ADR approved by both leads. Result: duplicated work stopped, integration incidents fell.
+
+**B7. Balancing delivery pressure with quality.**
+A regulatory deadline vs. known debt: I negotiated scope (MVP meeting the regulation), protected essential quality gates (tests, security), scheduled debt paydown right after with leadership agreement, and tracked it. Delivered on time; paydown completed next quarter.
+
+---
+
+## 12. Top 30 Rapid-Fire Questions + Principal Questions
+
+1. **Staff vs principal?** Multi-team outcomes vs org-wide decision systems and risk.
+2. **Influence tools?** Credibility, data, pre-wiring, pilots, coalitions.
+3. **Credibility ledger?** Earn by delivering; spend on asks.
+4. **RFC contents?** Context, goals/non-goals, options, recommendation, risks, rollout.
+5. **ADR?** One immutable decision record.
+6. **Strategy structure?** Diagnosis, guiding policy, coherent actions.
+7. **Disagree & commit?** Argue before, commit after, revisit triggers.
+8. **Tech debt pitch?** Business impact in money/risk/time.
+9. **Staff archetypes?** Tech lead, architect, solver, right hand.
+10. **Problem selection?** Important, neglected, where you have leverage.
+11. **Glue work?** Valuable; make visible; time-box.
+12. **Sponsorship?** Spending credibility for others' opportunities.
+13. **One-way vs two-way doors?** Irreversible vs reversible decisions.
+14. **Build vs buy?** Differentiation, TCO, risk, exit.
+15. **Third-party risk?** Vendor concentration, exit plans (DORA).
+16. **Aggregate risk?** Systemic risks across teams.
+17. **Architect's product?** Constraints with a cost.
+18. **Make it default?** Golden paths.
+19. **Fitness functions?** Automated architecture checks.
+20. **EA failure causes?** Ivory tower, slow boards, no verification.
+21. **C4?** Context, container, component, code.
+22. **Decision rights?** Who decides what, explicitly.
+23. **Team Topologies?** Stream-aligned, platform, enabling, complicated-subsystem.
+24. **Conway's law?** Systems mirror communication structures.
+25. **Underperformance?** Diagnose, feedback, support, document.
+26. **Hiring?** Structured, rubric-based, calibrated.
+27. **Metrics?** DORA + SPACE, not individual LOC.
+28. **Exec communication?** Conclusion and ask first.
+29. **Regulator communication?** Evidence, no speculation.
+30. **Saying no?** Goal, trade-offs, alternatives, decider.
+
+**Principal-level questions**
+
+**P1. You join as principal and find 12 teams with inconsistent architectures and frequent incidents. First 90 days?**
+Days 1–30: listen — meet leaders and teams, review incidents, metrics, architecture and risks; build relationships. Days 31–60: diagnose and publish a short assessment with top risks and opportunities; pick 1–2 high-leverage, visible wins (e.g., incident-review process, observability standard). Days 61–90: propose strategy with guiding principles, decision rights and a roadmap; set up lightweight governance (ADRs, forum, fitness functions); get executive sponsorship and measurable goals.
+
+**P2. How do you measure your own impact as a principal?**
+Outcomes the org achieved because of decisions/systems I shaped: incident reduction, delivery speed (DORA), cost savings, risk retired, adoption of paved roads, quality of decisions (ADRs revisited and validated), and engineers grown into larger scope.
+
+---
+
+## 13. Mistakes Checklist (say why each is wrong)
+- [ ] Leading by authority or title · winning arguments while losing allies
+- [ ] Designs without delivery ownership (ivory tower) · hero mode
+- [ ] Undocumented decisions · design docs with no options or decider
+- [ ] Passive resistance after a decision · committing without revisit triggers
+- [ ] Pitching debt in technical terms · no metrics
+- [ ] Snacking on easy work · invisible, endless glue work
+- [ ] Standards without paved roads or verification · slow review boards
+- [ ] Measuring individuals by activity metrics · org design ignoring Conway's law
+- [ ] Behavioural answers without results, numbers or lessons
+
+---
+
+## Architecture Diagrams (preserved from the original modules)
+
+> All 24 Mermaid/ASCII diagrams from the original `51-Engineering-Leadership/` files, kept verbatim and grouped by source module. Originals: `git show ebb2d5c:51-Engineering-Leadership/<file>.md`.
+
+### Module 170 — Technical Leadership: Influence Without Authority, Written Leverage & Disagree-and-Commit
+*Source: `02-TechnicalLeadership-InfluenceWithoutAuthority-WrittenLeverage-DisagreeAndCommit.md`*
+
+**1. Fundamentals**
+
+```text
+   A technical outcome that needs work from people you cannot direct
+                        │
+                        ▼
+   1. ESTABLISH THE PROBLEM IS REAL
+      Evidence, not assertion -- incident counts, latency, cost in
+      currency, velocity drag. Measured, not claimed.
+                        │
+                        ▼
+   2. WRITE IT DOWN
+      Design doc / RFC / ADR, with options compared honestly.
+      This is the leverage step: a document read by 50 people
+      scales an argument no meeting can.
+                        │
+                        ▼
+   3. SOCIALIZE BEFORE YOU CONVENE
+      1:1s with each affected owner BEFORE any group forum, so
+      objections surface privately -- where changing your mind
+      is still cheap.
+                        │
+                        ▼
+   4. DECIDE -- AND CLOSE THE WINDOW
+      Explicit decision, explicit owner, explicit date.
+      Disagree-and-commit starts HERE, not before.
+                        │
+                        ▼
+   5. MAKE IT THE DEFAULT PATH
+      Scaffolding, CI gate, template, lint rule. A decision that
+      requires everyone to remember it will drift.
+                        │
+                        ▼
+   6. VERIFY IT ACTUALLY HELD
+      Measure adoption, not announcement. "Verify the verifier" --
+      this course's most-repeated finding, applied to a human
+      decision rather than to a system.
+```
+
+**2.2 Written artifacts as the primary leverage mechanism**
+
+```text
+ REVERSIBLE IRREVERSIBLE
+ ┌──────────────────┬──────────────────────┐
+ MULTI-TEAM │ Short RFC │ Full design doc │
+ / EXTERNAL │ (1-2 pages) │ + review board │
+ │ │ + ADR │
+ ├──────────────────┼──────────────────────┤
+ SINGLE-TEAM │ Slack thread / │ ADR (1 page) │
+ / INTERNAL │ PR description │ │
+ └──────────────────┴──────────────────────┘
+```
+
+**3.1 The decision lifecycle — and where each failure mode attaches**
+
+```mermaid
+stateDiagram-v2
+ [*] --> Identified: Problem observed (with evidence)
+ Identified --> Documented: RFC / design doc written
+ Documented --> Socialized: 1:1s with each affected owner
+ Socialized --> Documented: Objection changes the proposal
+ Socialized --> Decided: Decision window closes
+ Decided --> Defaulted: Embedded in scaffolding / CI gate
+ Defaulted --> Verified: Adoption measured
+ Verified --> [*]: Holding
+ Verified --> Revisited: Falsification condition met
+ Revisited --> Documented: New evidence, new options
+
+ note right of Socialized
+ MOST INITIATIVES DIE HERE.
+ Not because the idea is wrong —
+ because nobody absorbs the cost
+ of the alignment work.
+ end note
+
+ note right of Decided
+ "Disagree and commit" begins at
+ THIS transition, not before.
+ Before it, disagreement is a duty.
+ After it, relitigating is corrosive.
+ end note
+
+ note right of Verified
+ MOST STANDARDS DIE HERE.
+ Announced ≠ adopted.
+ This is the org-level instance of
+ this course's most-repeated finding.
+ end note
+```
+
+**3.2 Influence propagation vs. authority propagation**
+
+```mermaid
+flowchart TB
+    subgraph AUTH["AUTHORITY PATH — routes up, then back down"]
+        direction TB
+        VP[VP] --> DirA[Director A]
+        VP --> DirB[Director B]
+        DirA --> TA1[Team A]
+        DirB --> TB1[Team B]
+    end
+
+    subgraph INFL["INFLUENCE PATH — routes across"]
+        direction TB
+        Eng[Engineer + written proposal]
+        Eng --> TA2[Team A<br/>owns it]
+        Eng --> TB2[Team B<br/>owns it]
+        Eng --> TC2[Team C<br/>owns it]
+    end
+```
+
+**Architecture**
+
+```mermaid
+flowchart TB
+ subgraph Authoring
+ A1[ADR markdown in repo<br/>docs/adr/NNNN-title.md]
+ A2[PR review = decision review<br/>Approvals ARE the record]
+ end
+
+ subgraph Index
+ B1[Indexer: scans all repos<br/>on merge to main]
+ B2[(Decision store<br/>Postgres: id, status,<br/>scope, owner, revisit_by)]
+ B3[Search + web UI]
+ end
+
+ subgraph Enforcement
+ C1[Fitness functions in shared CI<br/>each links to its ADR]
+ C2[Adoption collector:<br/>per-service compliance signal]
+ C3[Exception register<br/>approver + expiry + risk owner]
+ end
+
+ subgraph Feedback
+ D1[Adoption dashboard per decision]
+ D2[Revisit-due alerts<br/>revisit_by / condition met]
+ D3[Weekly digest to<br/>architecture group]
+ end
+
+ A1 --> A2 --> B1 --> B2 --> B3
+ B2 --> C1
+ C1 --> C2 --> D1
+ C3 --> D1
+ B2 --> D2 --> D3
+ D1 --> D3
+```
+
+**Class diagram**
+
+```mermaid
+classDiagram
+ class DecisionRecord {
+ +DecisionId Id
+ +string Title
+ +DecisionStatus Status
+ +Scope Scope
+ +OwnerRef Owner
+ +DecisionId? Supersedes
+ +DateOnly? RevisitBy
+ +IReadOnlyList~Dissent~ Dissents
+ +IAdoptionSignal Signal
+ +Accept(Approver) Result
+ +Supersede(DecisionId, Approver) Result
+ +RecordDissent(Dissent) Result
+ }
+
+ class DecisionStatus {
+ <<enumeration>>
+ Proposed
+ Accepted
+ Superseded
+ Withdrawn
+ }
+
+ class Dissent {
+ +OwnerRef Dissenter
+ +string Position
+ +RiskAcceptance? AcceptedRisk
+ }
+
+ class RiskAcceptance {
+ +string Risk
+ +OwnerRef RiskOwner
+ +IReadOnlyList~string~ Mitigations
+ }
+
+ class IAdoptionSignal {
+ <<interface>>
+ +Evaluate(ServiceRef) AdoptionResult
+ }
+
+ class PackageVersionSignal {
+ +PackageId Package
+ +SemVerRange Range
+ +Evaluate(ServiceRef) AdoptionResult
+ }
+
+ class CiCheckSignal {
+ +string CheckName
+ +Evaluate(ServiceRef) AdoptionResult
+ }
+
+ class CompositeSignal {
+ +IReadOnlyList~IAdoptionSignal~ All
+ +Evaluate(ServiceRef) AdoptionResult
+ }
+
+ class ManualSignal {
+ +Evaluate(ServiceRef) AdoptionResult
+ }
+
+ class AdoptionResult {
+ <<enumeration>>
+ Compliant
+ NonCompliant
+ Unknown
+ }
+
+ class Exception {
+ +DecisionId Decision
+ +ServiceRef Service
+ +OwnerRef Approver
+ +OwnerRef RiskOwner
+ +DateOnly ExpiresOn
+ +bool IsActive(DateOnly asOf)
+ }
+
+ DecisionRecord --> DecisionStatus
+ DecisionRecord "1" --> "*" Dissent
+ Dissent --> RiskAcceptance
+ DecisionRecord --> IAdoptionSignal
+ IAdoptionSignal <|.. PackageVersionSignal
+ IAdoptionSignal <|.. CiCheckSignal
+ IAdoptionSignal <|.. CompositeSignal
+ IAdoptionSignal <|.. ManualSignal
+ IAdoptionSignal --> AdoptionResult
+ DecisionRecord "1" --> "*" Exception
+```
+
+**Sequence diagram — adoption evaluation, failing closed**
+
+```mermaid
+sequenceDiagram
+ participant S as Scheduler
+ participant C as AdoptionCollector
+ participant R as DecisionRepository
+ participant Sig as IAdoptionSignal
+ participant Inv as ServiceInventory
+ participant St as AdoptionStore
+
+ S->>C: EvaluateAll(asOf)
+ C->>R: GetAccepted
+ R-->>C: decisions[]
+ loop per decision
+ C->>Inv: ServicesInScope(decision.Scope)
+ Inv-->>C: services[]
+ loop per service
+ C->>Sig: Evaluate(service)
+ alt signal resolves
+ Sig-->>C: Compliant | NonCompliant
+ else signal errors or data stale
+ Sig-->>C: Unknown
+ Note over C,Sig: NEVER infer Compliant.<br/>Fail closed — an unverified<br/>claim of compliance is the<br/>failure mode this whole<br/>system exists to prevent.
+ end
+ C->>C: apply active exceptions (asOf)
+ C->>St: Record(decision, service, result, asOf)
+ end
+ end
+ C-->>S: summary(compliant, nonCompliant, unknown)
+```
+
+### Module 171 — Staff+ Engineering: Archetypes, Problem Selection, Glue Work & Technical Strategy
+*Source: `03-StaffPlusEngineering-Archetypes-ScopeSelection-GlueWork-TechnicalStrategy.md`*
+
+**1. Fundamentals**
+
+```text
+   MAINTAIN A MODEL OF THE ORG'S TECHNICAL REALITY
+   Where the seams are. What keeps breaking. What is slow and why.
+   Who is blocked on what. Built from incidents, cycle-time data,
+   and conversations -- not from architecture diagrams.
+                            │
+                            ▼
+   SELECT the highest-leverage problem you are UNIQUELY positioned
+   to solve. Not the hardest, not the most interesting: the one
+   where (impact x your unique positioning) is maximal.
+                            │
+           ┌────────────────┼────────────────┐
+           ▼                ▼                ▼
+           SOLVE            MULTIPLY         DOCUMENT
+           directly         others           durably
+           (deep work,      (design review,  (strategy,
+           prototypes)      pairing,         reference impl,
+                            sponsorship)     ADR)
+           │                │                │
+           └────────────────┼────────────────┘
+                            ▼
+   HAND OFF to a team that will own it permanently. A Staff
+   engineer who still owns everything they have built has
+   stopped being able to select new problems.
+                            │
+                            └──────>  back to the top (loop)
+```
+
+**2.3 Problem selection — the dominant term in the impact equation**
+
+```text
+Leverage = Impact × Uniqueness × Tractability
+ ───────────────────────────────────────
+ Cost
+
+ Impact — what changes if this is solved? (incidents removed,
+ velocity unblocked, risk retired, cost saved)
+ Uniqueness — would this get solved anyway without me? If a team
+ already owns it and is competent, my marginal
+ contribution is small even if impact is large.
+ Tractability — is it actually solvable in a reasonable horizon by
+ someone in my position? Or is it a re-org problem
+ wearing a technical costume?
+ Cost — my time, plus the organizational cost of the change.
+```
+
+**3.1 Where Staff+ scope sits relative to org structure**
+
+```mermaid
+flowchart LR
+    subgraph ORG["ORG CHART — partitions people"]
+        direction TB
+        A1[Team A]:::box
+        B1[Team B]:::box
+        C1[Team C]:::box
+        D1[Team D]:::box
+    end
+
+    subgraph TOPO["PROBLEM TOPOLOGY — where failures live"]
+        direction TB
+        A2[Team A] --- B2[Team B]
+        B2 --- C2[Team C]
+        A2 --- D2[Team D]
+        D2 --- C2
+    end
+
+    classDef box fill:#eef,stroke:#88a
+```
+
+**3.2 Archetype selection as a function of organizational state**
+
+```mermaid
+flowchart TD
+ Start[New Staff+ role] --> Q1{Is something<br/>actively on fire?}
+ Q1 -->|Yes, one hard<br/>specific problem| Solver[SOLVER<br/>Go deep immediately.<br/>A listening tour is<br/>the wrong move here.]
+ Q1 -->|No| Q2{Do multiple teams<br/>build incompatible<br/>things?}
+ Q2 -->|Yes| Architect[ARCHITECT<br/>Listening tour first.<br/>Map actual incoherence<br/>before proposing coherence.]
+ Q2 -->|No| Q3{Is there one<br/>large initiative<br/>needing direction?}
+ Q3 -->|Yes| TechLead[TECH LEAD<br/>Ship something small<br/>and real early, to<br/>establish you deliver<br/>before you direct.]
+ Q3 -->|No| Q4{Does a senior leader<br/>need their judgment<br/>extended across<br/>more surface area?}
+ Q4 -->|Yes| RightHand[RIGHT HAND<br/>Learn their actual<br/>decision criteria first.<br/>Be explicit about<br/>which hat you wear.]
+ Q4 -->|No| Ambiguous[AMBIGUOUS ROLE<br/>This is itself the<br/>finding. Clarify it<br/>before starting —<br/>an undefined Staff role<br/>fails by default.]
+
+ Solver -.risk.-> R1[Leaves no capability<br/>behind; becomes<br/>a firefighter]
+ Architect -.risk.-> R2[Ivory tower;<br/>designs nobody<br/>implements]
+ TechLead -.risk.-> R3[Becomes a de-facto<br/>manager; depth decays]
+ RightHand -.risk.-> R4[Borrowed authority<br/>mistaken for earned<br/>credibility]
+```
+
+**Architecture**
+
+```mermaid
+flowchart TB
+ subgraph Sources
+ S1[Distributed traces<br/>OTel collector]
+ S2[CI/CD events<br/>build, deploy webhooks]
+ S3[Incident records<br/>PagerDuty / ServiceNow]
+ S4[Source control<br/>PR opened/merged]
+ S5[Service catalog<br/>ownership, tier]
+ end
+
+ subgraph Ingest
+ I1[Kafka topics<br/>partitioned by service]
+ I2[Trace sampler + aggregator<br/>edge dedup, 5-min windows]
+ end
+
+ subgraph Store
+ D1[(Postgres<br/>events, deploys,<br/>incidents, catalog)]
+ D2[(Graph snapshot<br/>materialized daily +<br/>rolling 7d)]
+ D3[(ClickHouse<br/>trace-derived edge<br/>aggregates, high volume)]
+ end
+
+ subgraph Compute
+ C1[Metric jobs<br/>lead time, CFR,<br/>incident concentration]
+ C2[Graph analysis<br/>SCC, blast radius,<br/>effective availability]
+ C3[What-if engine<br/>recompute on a<br/>mutated graph]
+ end
+
+ subgraph Serve
+ V1[Problem-selection dashboard]
+ V2[Query API]
+ V3[Drill-down to raw events]
+ end
+
+ S1 --> I2 --> I1
+ S2 --> I1
+ S3 --> I1
+ S4 --> I1
+ S5 --> D1
+ I1 --> D1
+ I2 --> D3
+ D3 --> D2
+ D1 --> C1 --> V1
+ D2 --> C2 --> V1
+ D2 --> C3 --> V2
+ D1 --> V3
+ C1 --> V2
+```
+
+**Class diagram**
+
+```mermaid
+classDiagram
+ class GraphSnapshot {
+ <<immutable>>
+ +SnapshotId Id
+ +DateOnly AsOf
+ +SnapshotQuality Quality
+ +IReadOnlyList~ServiceNode~ Nodes
+ +IReadOnlyList~DependencyEdge~ Edges
+ +Condense CondensedGraph
+ }
+
+ class SnapshotQuality {
+ <<enumeration>>
+ Complete
+ Degraded
+ Unusable
+ }
+
+ class DependencyEdge {
+ +int CallerId
+ +int CalleeId
+ +CallSemantics Semantics
+ +ClassificationMethod Method
+ +long CallVolume
+ +double CalleeAvailability
+ }
+
+ class CallSemantics {
+ <<enumeration>>
+ Synchronous
+ Asynchronous
+ Unknown
+ }
+
+ class ClassificationMethod {
+ <<enumeration>>
+ Instrumented
+ MessagingBoundary
+ TimingInferred
+ }
+
+ class IGraphAnalysis~TResult~ {
+ <<interface>>
+ +Analyze(GraphSnapshot) AnalysisResult~TResult~
+ }
+
+ class AnalysisResult~T~ {
+ +T? Value
+ +Confidence Confidence
+ +IReadOnlyList~string~ Caveats
+ +bool IsUsable
+ }
+
+ class Confidence {
+ <<enumeration>>
+ High
+ Qualified
+ Insufficient
+ }
+
+ class SccAnalysis {
+ +Analyze(GraphSnapshot) AnalysisResult~List~Cluster~~
+ }
+ class BlastRadiusAnalysis {
+ +int TargetService
+ +Analyze(GraphSnapshot) AnalysisResult~HashSet~int~~
+ }
+ class AvailabilityAnalysis {
+ +int EntryPoint
+ +Analyze(GraphSnapshot) AnalysisResult~double~
+ }
+ class WhatIfAnalysis~T~ {
+ +IReadOnlyList~Mutation~ Mutations
+ +IGraphAnalysis~T~ Inner
+ +Analyze(GraphSnapshot) AnalysisResult~T~
+ }
+
+ GraphSnapshot --> SnapshotQuality
+ GraphSnapshot "1" --> "*" DependencyEdge
+ DependencyEdge --> CallSemantics
+ DependencyEdge --> ClassificationMethod
+ IGraphAnalysis <|.. SccAnalysis
+ IGraphAnalysis <|.. BlastRadiusAnalysis
+ IGraphAnalysis <|.. AvailabilityAnalysis
+ IGraphAnalysis <|.. WhatIfAnalysis
+ WhatIfAnalysis --> IGraphAnalysis: decorates
+ IGraphAnalysis --> AnalysisResult
+```
+
+**Sequence diagram — a what-if query carrying confidence through**
+
+```mermaid
+sequenceDiagram
+ participant U as Staff Engineer
+ participant API as Query API
+ participant Cache as ResultCache
+ participant WI as WhatIfAnalysis
+ participant Snap as SnapshotStore
+ participant Inner as AvailabilityAnalysis
+
+ U->>API: "If order-service→risk-service becomes async,<br/>what is checkout's availability?"
+ API->>Cache: TryGet(snapshotId, mutations, analysis)
+ alt cache hit
+ Cache-->>API: AnalysisResult
+ else miss
+ API->>Snap: Load(latest)
+ Snap-->>API: GraphSnapshot (Quality=Degraded,<br/>3 services missing trace data)
+ API->>WI: Analyze(snapshot)
+ WI->>WI: apply mutations → derived snapshot<br/>(still immutable; original untouched)
+ WI->>Inner: Analyze(mutatedSnapshot)
+ Inner->>Inner: traverse sync subgraph,<br/>multiply availabilities once per service
+ Note over Inner: 2 edges on the path are<br/>TimingInferred → Confidence<br/>degrades to Qualified
+ Inner-->>WI: AnalysisResult(0.9962, Qualified,<br/>["2 of 7 edges timing-inferred"])
+ WI-->>API: result + mutation caveats
+ API->>Cache: Put(key, result)
+ end
+ API-->>U: 99.62%, QUALIFIED<br/>Caveats: 2 of 7 edges timing-inferred;<br/>snapshot degraded — 3 services missing.<br/>Do not use for a funding decision<br/>without instrumenting those edges.
+```
+
+### Module 172 — Principal Engineering: Org-Wide Strategy, Governance at Scale, Build-vs-Buy & Risk Ownership
+*Source: `04-PrincipalEngineering-OrgWideStrategy-GovernanceAtScale-BuildVsBuy-RiskOwnership.md`*
+
+**1. Fundamentals**
+
+```text
+   MAINTAIN AN AGGREGATE MODEL OF TECHNICAL RISK & CAPABILITY
+   Not systems -- the *distribution*. Where is the firm fragile?
+   What is it structurally unable to do? What is it paying for and
+   not getting? Built from portfolio-level data, never from personal
+   familiarity (which no longer scales).
+                            │
+           ┌────────────────┼────────────────┐
+           ▼                ▼                ▼
+           SET              DESIGN THE       MAKE THE FEW
+           DIRECTION        DECISION SYSTEM  BETS PERSONALLY
+
+           Multi-year       Who decides      Build-vs-buy at
+           technical        what. Golden     org scale.
+           strategy.        paths so most    Platform choices.
+           Explicit         decisions need   5-10 year horizons.
+           non-goals.       not be made.     Irreversible, high
+                            Exceptions with  blast radius.
+                            expiry.          ~2-4 per year.
+                            Mechanical
+                            verification.
+           │                │                │
+           └────────────────┼────────────────┘
+                            ▼
+   DEVELOP THE STAFF+ LAYER THAT EXECUTES ALL OF IT
+   This is not a side activity. A Principal without a capable Staff+
+   population has no execution mechanism and is structurally limited
+   to whatever they can personally do -- i.e. they are a Staff
+   engineer with a larger title.
+                            │
+                            ▼
+   VERIFY IN AGGREGATE
+   Not "did this team comply" but "what is the distribution of
+   compliance, and is it moving?" Point-in-time approval verifies
+   intent; continuous measurement verifies reality.
+```
+
+**3.1 The mechanism shift, drawn**
+
+```mermaid
+flowchart TB
+    subgraph STAFF["STAFF+ MECHANISM — personal, caps at ~5-8 teams"]
+        direction TB
+        SE["Staff Engineer<br/><i>every significant decision<br/>routes through this person</i>"]
+        SE --> STA[Team A]
+        SE --> STB[Team B]
+        SE --> STC[Team C]
+    end
+
+    subgraph PRIN["PRINCIPAL MECHANISM — systemic, scales with the org"]
+        direction TB
+        DS["DECISION SYSTEM<br/>decision rights · default paths<br/>mechanical verification · expiring exceptions"]
+        P["Principal<br/><i>personally decides only ~2-4 bets/year:<br/>irreversible, org-wide, 5-10 yr horizon</i>"]
+        SL["Staff+ layer<br/><i>executes within the system —<br/>developed BY the Principal</i>"]
+        Teams["20+ teams decide locally,<br/>safely, in parallel"]
+        P -->|designs & maintains| DS
+        DS --> SL --> Teams
+    end
+```
+
+**Architecture**
+
+```mermaid
+flowchart TB
+ subgraph Authoring
+ T1[Service templates<br/>versioned, in git]
+ T2[Infrastructure modules<br/>Terraform, versioned]
+ T3[Shared libraries<br/>observability, resilience,<br/>auth, messaging]
+ end
+
+ subgraph Provisioning
+ P1[Scaffolding CLI / portal<br/>'new service' in one command]
+ P2[Repo creation + CI wiring<br/>+ infra PR + registry entry]
+ end
+
+ subgraph Runtime
+ R1[Service mesh / sidecar<br/>mTLS, retries, telemetry]
+ R2[Config + secrets injection<br/>from vault, no local secrets]
+ R3[Workload identity<br/>no long-lived credentials]
+ end
+
+ subgraph Conformance
+ C1[Policy engine<br/>OPA/Rego or equivalent]
+ C2[CI gate: pre-merge checks<br/>linked to the ADR that set them]
+ C3[Continuous scanner<br/>evaluates the running estate]
+ C4[Exception register<br/>approver, risk owner, EXPIRY]
+ end
+
+ subgraph Feedback
+ F1[Conformance distribution<br/>per standard, over time]
+ F2[Adoption curves<br/>+ template usage rate]
+ F3[Exception count + trend<br/>= standard health metric]
+ F4[Decisions-removed counter<br/>= platform leverage]
+ end
+
+ T1 & T2 & T3 --> P1 --> P2
+ P2 --> R1 & R2 & R3
+ T1 --> C2
+ C1 --> C2 & C3
+ C3 --> F1
+ C4 --> F1 & F3
+ P1 --> F2 & F4
+ F1 & F3 --> C1
+```
+
+**Class diagram**
+
+```mermaid
+classDiagram
+ class Policy {
+ +PolicyId Id
+ +string Name
+ +DecisionRef SourceDecision
+ +Severity Severity
+ +IReadOnlyList~EnforcementPoint~ EnforcedAt
+ +IPolicyRule Rule
+ }
+
+ class IPolicyRule {
+ <<interface>>
+ +Evaluate(ServiceContext) EvaluationOutcome
+ }
+
+ class EvaluationOutcome {
+ <<enumeration>>
+ Unknown
+ Conformant
+ NonConformant
+ }
+
+ class ConformanceResult {
+ +PolicyId Policy
+ +ServiceRef Service
+ +EvaluationOutcome Outcome
+ +ExceptionRef? AppliedException
+ +DateTimeOffset EvaluatedAt
+ +string Explanation
+ +bool BlocksMerge
+ }
+
+ class Exception_ {
+ +PolicyId Policy
+ +ServiceRef Service
+ +OwnerRef Approver
+ +OwnerRef RiskOwner
+ +string AcceptedRisk
+ +DateOnly ExpiresOn
+ +bool IsActiveAt(DateOnly)
+ }
+
+ class IExceptionRegistry {
+ <<interface>>
+ +FindActive(PolicyId, ServiceRef, DateOnly) Exception_?
+ }
+
+ class ConformanceEvaluator {
+ +Evaluate(Policy, ServiceContext, DateOnly) ConformanceResult
+ }
+
+ class CompositeRule {
+ +IReadOnlyList~IPolicyRule~ All
+ +Evaluate(ServiceContext) EvaluationOutcome
+ }
+ class PackageRule
+ class ConfigAssertionRule
+ class RuntimeAttributeRule
+ class ManualAttestationRule
+
+ class PolicyHealth {
+ +PolicyId Policy
+ +int ServicesInScope
+ +int ActiveExceptions
+ +double ExceptionRate
+ +HealthVerdict Verdict
+ }
+
+ Policy --> IPolicyRule
+ Policy --> DecisionRef
+ IPolicyRule <|.. CompositeRule
+ IPolicyRule <|.. PackageRule
+ IPolicyRule <|.. ConfigAssertionRule
+ IPolicyRule <|.. RuntimeAttributeRule
+ IPolicyRule <|.. ManualAttestationRule
+ IPolicyRule --> EvaluationOutcome
+ ConformanceEvaluator --> IExceptionRegistry
+ ConformanceEvaluator --> ConformanceResult
+ ConformanceResult --> Exception_
+ PolicyHealth --> Policy
+```
+
+**Sequence diagram — evaluation with exception and health feedback**
+
+```mermaid
+sequenceDiagram
+ participant CI as CI Pipeline
+ participant Ev as ConformanceEvaluator
+ participant R as IPolicyRule
+ participant Ex as IExceptionRegistry
+ participant St as ConformanceStore
+ participant H as PolicyHealthJob
+
+ CI->>Ev: Evaluate(policy, serviceContext, today)
+ Ev->>R: Evaluate(context)
+ alt rule can determine
+ R-->>Ev: NonConformant
+ else data missing / source unreachable
+ R-->>Ev: Unknown
+ Note over Ev,R: Unknown is NEVER coerced to<br/>Conformant. False assurance is the<br/>failure this system exists to prevent.
+ end
+
+ alt outcome is NonConformant
+ Ev->>Ex: FindActive(policy, service, today)
+ alt active exception exists
+ Ex-->>Ev: Exception (expires 2027-06-30, risk owner: J. Patel)
+ Ev->>Ev: BlocksMerge = false, but outcome<br/>REMAINS NonConformant
+ Note over Ev: The exception suppresses the GATE,<br/>never the FACT. Reporting must still<br/>show non-conformance, or the<br/>exception count becomes invisible<br/>and the standard-health signal is lost.
+ else none
+ Ex-->>Ev: null
+ Ev->>Ev: BlocksMerge = (Severity >= Blocking)
+ end
+ end
+
+ Ev->>St: Record(result)
+ Ev-->>CI: result + explanation + link to SourceDecision
+
+ Note over H,St: Separately, nightly:
+ H->>St: exception count / services in scope, per policy
+ H->>H: rate > 0.4 → Verdict = StandardLikelyWrong
+ H-->>H: surface for revision, NOT for enforcement
+```
+
+### Module 187 — Software Architecture as a Role: Decision Rights, Golden Paths & Stakeholder Translation
+*Source: `05-SoftwareArchitecture-AsARole-DecisionRights-GoldenPaths-StakeholderTranslation.md`*
+
+**1. Fundamentals**
+
+```text
+   1. UNDERSTAND WHAT ACTUALLY EXISTS
+      Not the diagram -- the running estate: what calls what, what
+      data flows where, what is actually load-bearing. Most
+      architecture functions skip this and describe the estate they
+      believe in rather than the one that exists.
+                            │
+                            ▼
+   2. DECIDE WHAT MUST BE COMMON, AND WHAT MUST NOT
+      The whole job is this boundary. Constrain interfaces, controls,
+      and shared data. Leave implementation alone. Over-constraining
+      is the failure that kills the function.
+                            │
+                            ▼
+   3. MAKE THE CONSTRAINT THE PATH OF LEAST RESISTANCE
+      Reference implementation, template, library, scaffold. A
+      constraint that costs teams effort to honour will be honoured
+      on paper only. This step separates an architect who changes
+      outcomes from one who writes documents.
+                            │
+                            ▼
+   4. VERIFY CONTINUOUSLY THAT IT HELD
+      Fitness functions, conformance checks, drift detection. An
+      architecture diagram is a CLAIM; something must keep the claim
+      true, or it becomes fiction on a schedule.
+                            │
+                            ▼
+   5. TRANSLATE, IN BOTH DIRECTIONS
+      Business intent  ->  technical constraint.
+      Technical risk   ->  business consequence.
+      This is half the job in a bank, and is why the role often sits
+      organizationally between engineering and the business.
+```
+
+**3.2 The drift problem, drawn**
+
+```mermaid
+flowchart TB
+    subgraph DECL["DECLARED — the diagram, drawn once"]
+        direction TB
+        A1[API] --> D1[Domain] --> R1[Repository] --> DB1[(Database)]
+    end
+
+    subgraph OBS["OBSERVED — what actually runs"]
+        direction TB
+        A2[API] --> D2[Domain] --> R2[Repository] --> DB2[(Database)]
+        A2 -.->|"perf fix, 2024"| DB2
+        D2 -.->|"bypass, 2025"| C2[(Cache)]
+        C2 -.->|"nobody remembers why"| DB2
+    end
+```
+
+**Architecture**
+
+```mermaid
+flowchart TB
+ subgraph Observed
+ O1[APM / distributed traces<br/>modern services]
+ O2[Network flow logs<br/>legacy + on-prem]
+ O3[Integration platform config<br/>ESB / iPaaS routing]
+ O4[DB audit logs<br/>data flows]
+ O5[CI/CD + registry<br/>what is actually deployed]
+ O6[IaC state<br/>Terraform, ARM]
+ end
+
+ subgraph Declared
+ D1[Architecture-as-code<br/>in git: boundaries,<br/>allowed relationships,<br/>trust zones]
+ D2[Data classification<br/>per system]
+ D3[Business service map<br/>service → systems]
+ end
+
+ subgraph Model
+ M1[Ingest + normalize<br/>to a common edge model]
+ M2[(Estate graph<br/>Postgres: nodes, edges,<br/>observation windows,<br/>source + confidence)]
+ M3[Rolling 30-day union<br/>+ daily snapshot]
+ end
+
+ subgraph Analysis
+ A1[Drift computation<br/>declared vs observed,<br/>classified by consequence]
+ A2[Blast radius<br/>+ classification propagation]
+ A3[Change-coupling<br/>from commit history]
+ A4[Regulatory estate map<br/>business service → tech]
+ end
+
+ subgraph Serve
+ S1[Engineer-facing:<br/>dependency lookup,<br/>incident impact]
+ S2[Architecture-facing:<br/>drift report, conformance]
+ S3[Risk-facing:<br/>concentration, estate map]
+ S4[Query API]
+ end
+
+ O1 & O2 & O3 & O4 & O5 & O6 --> M1 --> M2 --> M3
+ D1 & D2 & D3 --> A1
+ M3 --> A1 & A2 & A3 & A4
+ A1 --> S2
+ A2 --> S1 & S3
+ A3 --> S2
+ A4 --> S3
+ M3 --> S1 & S4
+```
+
+**Class diagram**
+
+```mermaid
+classDiagram
+ class EstateModel {
+ <<immutable>>
+ +ModelVersion Version
+ +DateOnly AsOf
+ +ModelCompleteness Completeness
+ +IReadOnlyList~SourceState~ Sources
+ +IReadOnlyList~ObservedEdge~ Edges
+ +EdgesFrom(NodeId) IEnumerable~ObservedEdge~
+ +EdgesTo(NodeId) IEnumerable~ObservedEdge~
+ }
+
+ class ModelCompleteness {
+ <<enumeration>>
+ Degraded
+ Partial
+ Complete
+ }
+
+ class SourceState {
+ +string SourceName
+ +DateTimeOffset LastIngest
+ +long VolumeVsExpected
+ +bool IsHealthy
+ }
+
+ class ObservedEdge {
+ +NodeId From
+ +NodeId To
+ +string Protocol
+ +EdgeSource Source
+ +Confidence Confidence
+ +DateTimeOffset FirstSeen
+ +DateTimeOffset LastSeen
+ +long Volume
+ }
+
+ class Confidence {
+ <<enumeration>>
+ Unknown
+ Inferred
+ Observed
+ Instrumented
+ }
+
+ class DeclaredArchitecture {
+ +IReadOnlyList~AllowedRelationship~ Allowed
+ +IReadOnlyDictionary~NodeId,TrustZone~ TrustZones
+ +IReadOnlyDictionary~NodeId,DataClass~ Classifications
+ }
+
+ class IDriftClassifier {
+ <<interface>>
+ +Classify(ObservedEdge, DeclaredArchitecture) DriftAssessment?
+ }
+
+ class TrustBoundaryClassifier
+ class DataClassificationClassifier
+ class RegulatoryPathClassifier
+ class CrossSystemClassifier
+ class ChainedClassifier {
+ +IReadOnlyList~IDriftClassifier~ InOrder
+ }
+
+ class DriftAssessment {
+ +DriftSeverity Severity
+ +string Reason
+ +Confidence AssessmentConfidence
+ }
+
+ class IQueryGuard {
+ <<interface>>
+ +CanAnswer(EstateModel, QueryKind) GuardResult
+ }
+
+ EstateModel --> ModelCompleteness
+ EstateModel "1" --> "*" SourceState
+ EstateModel "1" --> "*" ObservedEdge
+ ObservedEdge --> Confidence
+ IDriftClassifier <|.. TrustBoundaryClassifier
+ IDriftClassifier <|.. DataClassificationClassifier
+ IDriftClassifier <|.. RegulatoryPathClassifier
+ IDriftClassifier <|.. CrossSystemClassifier
+ IDriftClassifier <|.. ChainedClassifier
+ ChainedClassifier --> IDriftClassifier
+ IDriftClassifier --> DriftAssessment
+```
+
+**Sequence diagram — a regulatory query against a degraded model**
+
+```mermaid
+sequenceDiagram
+ participant U as Risk Analyst
+ participant API as Query API
+ participant G as IQueryGuard
+ participant M as EstateModel
+ participant Q as BlastRadiusQuery
+
+ U->>API: "Which systems support the payment service?"<br/>(regulatory estate map)
+ API->>M: LoadCurrent
+ M-->>API: EstateModel(Completeness=Degraded,<br/>flow-log source stale 3 days)
+ API->>G: CanAnswer(model, QueryKind.RegulatoryEstateMap)
+
+ alt model complete
+ G-->>API: Allowed
+ API->>Q: Execute(model)
+ Q-->>API: systems[] + confidence mix
+ API-->>U: result + "derived 2026-07-25, all sources healthy,<br/>3 edges inferred (low confidence)"
+ else model degraded AND query requires completeness
+ G-->>API: Refused("flow-log source stale since 2026-07-22;<br/>legacy estate edges may be missing")
+ Note over G,API: HARD REFUSAL, not a warning.<br/>An understated estate map submitted<br/>to a regulator is materially worse<br/>than a delayed one. The guard makes<br/>the wrong answer unavailable rather<br/>than merely discouraged.
+ API-->>U: 409 — cannot answer while degraded.<br/>Missing source, expected recovery,<br/>and who to contact.
+ end
+```

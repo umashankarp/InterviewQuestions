@@ -1,6 +1,6 @@
 # Security — Complete Interview Prep (All Topics, One File)
 
-> Domain: Security | Level: Beginner → Expert | Prerequisite: [[../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep]] (authN/authZ), [[../03-REST-APIs/01-REST-APIs-Interview-Prep]] (OWASP API Top 10), [[../25-DevOps/01-DevOps-Interview-Prep]] (DevSecOps). Identity protocols: [[../40-IAM]], [[../41-OAuth2-OIDC-JWT-PKCE]]
+> Domain: Security | Level: Beginner → Expert | Prerequisite: [[../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep]] (authN/authZ), [[../03-REST-APIs/01-REST-APIs-Interview-Prep]] (OWASP API Top 10), [[../25-DevOps/01-DevOps-Interview-Prep]] (DevSecOps). Identity protocols: [[../40-IAM/01-IAM-Interview-Prep]], [[../41-OAuth2-OIDC-JWT-PKCE/01-OAuth2-OIDC-JWT-Interview-Prep]]
 > **Quick-prep edition** (consolidated 2026-10-03). This one file replaces Modules 97–100. Originals: `git show ebb2d5c:28-Security/<file>.md`
 > Each topic has: **Key concepts → .NET code/config → Most common interview questions with answers.**
 
