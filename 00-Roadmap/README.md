@@ -20,8 +20,7 @@ Two content tracks appear in the Progress Log below:
 E:\Interview Questions\
  ├─ 00-Roadmap\README.md                 ← this file (master index, updated as we go)
  ├─ 01-CSharp\
- │   ├─ 01-CLR-JIT-GC-Memory-Management.md   ← Module 1 (current)
- │   ├─ 02-...
+ │   ├─ 01-CSharp-Interview-Prep.md   ← all C# topics in one file (consolidated 2026-10-03)
  ├─ 02-DotNet-AspNetCore\
  ├─ 03-REST-APIs\
  ├─ 04-SQL-Server\
@@ -79,7 +78,7 @@ E:\Interview Questions\
                                  were deleted and replaced by Modules 194–198, written from the Microsoft Learn EF Core
                                  docs and the entityframeworktutorial.net EF Core tutorial — 4 modules plus a top-50
                                  Lead/Principal interview Q&A capstone. Domain complete. Folder name kept because
-                                 other files reference it; LINQ language internals live in 01-CSharp/05-LINQ-Internals.
+                                 other files reference it; LINQ language internals live in 01-CSharp/01-CSharp-Interview-Prep.
 ```
 
 Two files sit outside this scheme and are not modules:
@@ -125,23 +124,23 @@ None formally — you already have the professional baseline (C#, .NET, SQL Serv
 ---
 
 ## Progress Log
-- ✅ **Module 1**: C# → CLR, JIT, Garbage Collector, and Memory Management — [`01-CSharp/01-CLR-JIT-GC-Memory-Management.md`](../01-CSharp/01-CLR-JIT-GC-Memory-Management.md)
-- ✅ **Module 2**: C# → Async/Await, Task, and Threading Internals — [`01-CSharp/02-Async-Await-Internals.md`](../01-CSharp/02-Async-Await-Internals.md)
-- ✅ **Module 3**: C# → `Span<T>`, `Memory<T>` & Low-Allocation Code Patterns — [`01-CSharp/03-Span-Memory-Low-Allocation.md`](../01-CSharp/03-Span-Memory-Low-Allocation.md)
-- ✅ **Module 4**: C# → Delegates, Events, Closures & Multicast Internals — [`01-CSharp/04-Delegates-Events-Closures.md`](../01-CSharp/04-Delegates-Events-Closures.md)
-- ✅ **Module 5**: C# → LINQ Internals (`IEnumerable` vs `IQueryable`, Deferred Execution, Iterator State Machines) — [`01-CSharp/05-LINQ-Internals.md`](../01-CSharp/05-LINQ-Internals.md)
-- ✅ **Module 6**: C# → Generics, Variance & Generic Constraints — [`01-CSharp/06-Generics-Variance.md`](../01-CSharp/06-Generics-Variance.md)
-- ✅ **Module 7**: C# → Records, Pattern Matching & Immutability — [`01-CSharp/07-Records-Pattern-Matching-Immutability.md`](../01-CSharp/07-Records-Pattern-Matching-Immutability.md)
-- ✅ **Module 8**: C# → Exception Handling, SEH Internals & Custom Exception Design — [`01-CSharp/08-Exception-Handling-Custom-Exceptions.md`](../01-CSharp/08-Exception-Handling-Custom-Exceptions.md) — **`01-CSharp` domain complete (Modules 1–8)**
-- ✅ **Module 9**: .NET/ASP.NET Core → Middleware Pipeline & Request Processing Internals — [`02-DotNet-AspNetCore/01-Middleware-Pipeline-Request-Internals.md`](../02-DotNet-AspNetCore/01-Middleware-Pipeline-Request-Internals.md)
-- ✅ **Module 10**: .NET/ASP.NET Core → Dependency Injection Container Internals — [`02-DotNet-AspNetCore/02-DI-Container-Internals.md`](../02-DotNet-AspNetCore/02-DI-Container-Internals.md)
-- ✅ **Module 11**: .NET/ASP.NET Core → Minimal APIs vs Controllers, MVC Filters & Model Binding Internals — [`02-DotNet-AspNetCore/03-MinimalAPIs-vs-Controllers-ModelBinding.md`](../02-DotNet-AspNetCore/03-MinimalAPIs-vs-Controllers-ModelBinding.md)
-- ✅ **Module 12**: .NET/ASP.NET Core → Authentication & Authorization Deep Dive — [`02-DotNet-AspNetCore/04-Authentication-Authorization-Deep-Dive.md`](../02-DotNet-AspNetCore/04-Authentication-Authorization-Deep-Dive.md)
-- ✅ **Module 13**: .NET/ASP.NET Core → Configuration & Options Pattern Internals — [`02-DotNet-AspNetCore/05-Configuration-Options-Pattern.md`](../02-DotNet-AspNetCore/05-Configuration-Options-Pattern.md)
-- ✅ **Module 14**: .NET/ASP.NET Core → Health Checks & Observability Integration — [`02-DotNet-AspNetCore/06-HealthChecks-Observability.md`](../02-DotNet-AspNetCore/06-HealthChecks-Observability.md) — **`02-DotNet-AspNetCore` core complete (Modules 9–14)**
-- ✅ **Module 15**: REST APIs → Design Fundamentals, HTTP Semantics & Versioning — [`03-REST-APIs/01-REST-Design-Fundamentals.md`](../03-REST-APIs/01-REST-Design-Fundamentals.md)
-- ✅ **Module 16**: REST APIs → API Security & Rate Limiting Patterns — [`03-REST-APIs/02-API-Security-Rate-Limiting.md`](../03-REST-APIs/02-API-Security-Rate-Limiting.md)
-- ✅ **Module 17**: REST APIs → API Documentation, Contract Testing & OpenAPI — [`03-REST-APIs/03-API-Documentation-Contract-Testing.md`](../03-REST-APIs/03-API-Documentation-Contract-Testing.md) — **`03-REST-APIs` domain complete (Modules 15–17)**
+- ✅ **Module 1**: C# → CLR, JIT, Garbage Collector, and Memory Management — [`01-CSharp/01-CSharp-Interview-Prep.md`](../01-CSharp/01-CSharp-Interview-Prep.md)
+- ✅ **Module 2**: C# → Async/Await, Task, and Threading Internals — [`01-CSharp/01-CSharp-Interview-Prep.md`](../01-CSharp/01-CSharp-Interview-Prep.md)
+- ✅ **Module 3**: C# → `Span<T>`, `Memory<T>` & Low-Allocation Code Patterns — [`01-CSharp/01-CSharp-Interview-Prep.md`](../01-CSharp/01-CSharp-Interview-Prep.md)
+- ✅ **Module 4**: C# → Delegates, Events, Closures & Multicast Internals — [`01-CSharp/01-CSharp-Interview-Prep.md`](../01-CSharp/01-CSharp-Interview-Prep.md)
+- ✅ **Module 5**: C# → LINQ Internals (`IEnumerable` vs `IQueryable`, Deferred Execution, Iterator State Machines) — [`01-CSharp/01-CSharp-Interview-Prep.md`](../01-CSharp/01-CSharp-Interview-Prep.md)
+- ✅ **Module 6**: C# → Generics, Variance & Generic Constraints — [`01-CSharp/01-CSharp-Interview-Prep.md`](../01-CSharp/01-CSharp-Interview-Prep.md)
+- ✅ **Module 7**: C# → Records, Pattern Matching & Immutability — [`01-CSharp/01-CSharp-Interview-Prep.md`](../01-CSharp/01-CSharp-Interview-Prep.md)
+- ✅ **Module 8**: C# → Exception Handling, SEH Internals & Custom Exception Design — [`01-CSharp/01-CSharp-Interview-Prep.md`](../01-CSharp/01-CSharp-Interview-Prep.md) — **`01-CSharp` domain complete (Modules 1–8)**
+- ✅ **Module 9**: .NET/ASP.NET Core → Middleware Pipeline & Request Processing Internals — [`02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md`](../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md)
+- ✅ **Module 10**: .NET/ASP.NET Core → Dependency Injection Container Internals — [`02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md`](../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md)
+- ✅ **Module 11**: .NET/ASP.NET Core → Minimal APIs vs Controllers, MVC Filters & Model Binding Internals — [`02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md`](../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md)
+- ✅ **Module 12**: .NET/ASP.NET Core → Authentication & Authorization Deep Dive — [`02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md`](../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md)
+- ✅ **Module 13**: .NET/ASP.NET Core → Configuration & Options Pattern Internals — [`02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md`](../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md)
+- ✅ **Module 14**: .NET/ASP.NET Core → Health Checks & Observability Integration — [`02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md`](../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md) — **`02-DotNet-AspNetCore` core complete (Modules 9–14)**
+- ✅ **Module 15**: REST APIs → Design Fundamentals, HTTP Semantics & Versioning — [`03-REST-APIs/01-REST-APIs-Interview-Prep.md`](../03-REST-APIs/01-REST-APIs-Interview-Prep.md)
+- ✅ **Module 16**: REST APIs → API Security & Rate Limiting Patterns — [`03-REST-APIs/01-REST-APIs-Interview-Prep.md`](../03-REST-APIs/01-REST-APIs-Interview-Prep.md)
+- ✅ **Module 17**: REST APIs → API Documentation, Contract Testing & OpenAPI — [`03-REST-APIs/01-REST-APIs-Interview-Prep.md`](../03-REST-APIs/01-REST-APIs-Interview-Prep.md) — **`03-REST-APIs` domain complete (Modules 15–17)**
 - ✅ **Module 18**: SQL Server → Indexing & Query Execution Plans — [`04-SQL-Server/01-Indexing-Query-Execution-Plans.md`](../04-SQL-Server/01-Indexing-Query-Execution-Plans.md)
 - ✅ **Module 19**: SQL Server → Transactions, Isolation Levels & Locking — [`04-SQL-Server/02-Transactions-Isolation-Locking.md`](../04-SQL-Server/02-Transactions-Isolation-Locking.md)
 - ✅ **Module 20**: SQL Server → Query Optimization Patterns & Anti-patterns — [`04-SQL-Server/03-Query-Optimization-Patterns.md`](../04-SQL-Server/03-Query-Optimization-Patterns.md) — **`04-SQL-Server` domain complete (Modules 18–20)**
@@ -306,7 +305,7 @@ None formally — you already have the professional baseline (C#, .NET, SQL Serv
 
 - ✅ **Module 173**: Microservices → Load Balancing on AWS — ALB, NLB, Target Groups, Route 53 & Global Accelerator — [`17-Microservices/09-LoadBalancing-AWS-ALB-NLB-TargetGroups-Route53-GlobalAccelerator.md`](../17-Microservices/09-LoadBalancing-AWS-ALB-NLB-TargetGroups-Route53-GlobalAccelerator.md)
 
-- ✅ **Module 174**: LINQ & EF Core → LINQ Deep Dive — Execution Engines, Iterator Fusion, Expression Trees, Allocation-Level Performance & PLINQ — *file removed 2026-09-19 (explicit instruction to clear `56-LINQ-EFCore` and rebuild it from the Microsoft Learn EF Core docs and the entityframeworktutorial.net EF Core tutorial; the domain is now EF Core — Modules 194–198; recoverable at commit `7613339`; LINQ language internals remain in [`01-CSharp/05-LINQ-Internals.md`](../01-CSharp/05-LINQ-Internals.md))*
+- ✅ **Module 174**: LINQ & EF Core → LINQ Deep Dive — Execution Engines, Iterator Fusion, Expression Trees, Allocation-Level Performance & PLINQ — *file removed 2026-09-19 (explicit instruction to clear `56-LINQ-EFCore` and rebuild it from the Microsoft Learn EF Core docs and the entityframeworktutorial.net EF Core tutorial; the domain is now EF Core — Modules 194–198; recoverable at commit `7613339`; LINQ language internals remain in [`01-CSharp/01-CSharp-Interview-Prep.md`](../01-CSharp/01-CSharp-Interview-Prep.md))*
 - ✅ **Module 175**: System Design → Rate Limiting, Throttling & Load-Shedding Algorithms (Algorithmic Deep Dive) — [`14-System-Design/15-RateLimiting-Throttling-LoadShedding-Algorithms.md`](../14-System-Design/15-RateLimiting-Throttling-LoadShedding-Algorithms.md)
 - ✅ **Module 176**: System Design → The Interview Execution Playbook — Clock Management, Estimation & the Staff/Principal Rubric — [`14-System-Design/16-Interview-Execution-Playbook-Estimation-Rubric.md`](../14-System-Design/16-Interview-Execution-Playbook-Estimation-Rubric.md)
 - ✅ **Module 177**: System Design → Designing a URL Shortener & Distributed Unique ID Generation — [`14-System-Design/17-Designing-URL-Shortener-Distributed-ID-Generation.md`](../14-System-Design/17-Designing-URL-Shortener-Distributed-ID-Generation.md)
@@ -336,13 +335,17 @@ None formally — you already have the professional baseline (C#, .NET, SQL Serv
 
 A term-frequency audit of `01-CSharp` against a Principal/Staff C# panel found several standard interview areas untested (`volatile`, `HashSet`, `string intern`, `CultureInfo`, nullable reference types, operator overloading). Five files added; folder now runs 13 files / **390 Q&A**. See `CLAUDE.md` §A9 for the audit-driven gap-fill pattern this follows.
 
-- ✅ [`01-CSharp/09-Threading-Concurrency-Memory-Model.md`](../01-CSharp/09-Threading-Concurrency-Memory-Model.md) — shared-state concurrency: memory model, `volatile`/`Interlocked`/`lock`, deadlock/livelock/starvation, `SemaphoreSlim` as async-compatible lock.
-- ✅ [`01-CSharp/10-Collections-BCL-Internals.md`](../01-CSharp/10-Collections-BCL-Internals.md) — `List<T>`/`Dictionary<K,V>` internals, `Equals`/`GetHashCode` contract, `SortedList` vs `SortedDictionary`, `FrozenDictionary`.
-- ✅ [`01-CSharp/11-Resource-Management-Disposal-Nullability.md`](../01-CSharp/11-Resource-Management-Disposal-Nullability.md) — ownership/disposal (Dispose pattern, `SafeHandle`, `IAsyncDisposable`, DI lifetime rules) and nullable reference types.
-- ✅ [`01-CSharp/12-Reflection-Attributes-SourceGenerators.md`](../01-CSharp/12-Reflection-Attributes-SourceGenerators.md) — reflection vs source generators vs `dynamic`, thread-safe reflection caching, `AssemblyLoadContext`, AOT/trimming.
-- ✅ [`01-CSharp/13-Strings-Text-Encoding-Globalization.md`](../01-CSharp/13-Strings-Text-Encoding-Globalization.md) — `StringComparison` correctness, Unicode normalization, encoding, `string.Intern`, `InvariantGlobalization`.
+- ✅ [`01-CSharp/01-CSharp-Interview-Prep.md`](../01-CSharp/01-CSharp-Interview-Prep.md) — shared-state concurrency: memory model, `volatile`/`Interlocked`/`lock`, deadlock/livelock/starvation, `SemaphoreSlim` as async-compatible lock.
+- ✅ [`01-CSharp/01-CSharp-Interview-Prep.md`](../01-CSharp/01-CSharp-Interview-Prep.md) — `List<T>`/`Dictionary<K,V>` internals, `Equals`/`GetHashCode` contract, `SortedList` vs `SortedDictionary`, `FrozenDictionary`.
+- ✅ [`01-CSharp/01-CSharp-Interview-Prep.md`](../01-CSharp/01-CSharp-Interview-Prep.md) — ownership/disposal (Dispose pattern, `SafeHandle`, `IAsyncDisposable`, DI lifetime rules) and nullable reference types.
+- ✅ [`01-CSharp/01-CSharp-Interview-Prep.md`](../01-CSharp/01-CSharp-Interview-Prep.md) — reflection vs source generators vs `dynamic`, thread-safe reflection caching, `AssemblyLoadContext`, AOT/trimming.
+- ✅ [`01-CSharp/01-CSharp-Interview-Prep.md`](../01-CSharp/01-CSharp-Interview-Prep.md) — `StringComparison` correctness, Unicode normalization, encoding, `string.Intern`, `InvariantGlobalization`.
 
 All five follow the lighter gap-fill template (§1 Topic Description, §2–4 Beginner/Intermediate/Expert-Architect Q&A, §5 Reference Material — omitted on new files), not the main module template.
+
+### Consolidation: `01-CSharp` → one quick-prep file (2026-10-03)
+
+On explicit instruction (one-week interview prep; "cover all C# points with small sample code in a single file"), the 13 `01-CSharp` files (Modules 1–8 plus the five gap-fill files above) were merged into **[`01-CSharp/01-CSharp-Interview-Prep.md`](../01-CSharp/01-CSharp-Interview-Prep.md)** (renamed from the Module 1 file via `git mv`). It covers all 13 topics with key points, sample code and likely questions, plus a C# 12 section (with C# 13/14 notes), a top-25 Q&A list and a mistakes checklist. Module numbers 1–8 stay as logged above and now all point at this file. Inbound links in 15 files were rewritten to the new path. The full originals are recoverable with `git show ebb2d5c:01-CSharp/<file>.md`. This is the pilot for condensing the other domain folders.
 
 ---
 
@@ -350,10 +353,18 @@ All five follow the lighter gap-fill template (§1 Topic Description, §2–4 Be
 
 An audit of `02-DotNet-AspNetCore` against the Elite FinTech Interview Panel bar found the domain covered only the *request/response* half of ASP.NET Core: every module assumed a short-lived HTTP request, so **persistent connections** and **binary service-to-service contracts** — both routine at this bar (streaming market data, push notifications, internal RPC between services) — were untested. Two files added; folder now runs 8 files.
 
-- ✅ [`02-DotNet-AspNetCore/07-RealTime-SignalR-WebSockets-SSE.md`](../02-DotNet-AspNetCore/07-RealTime-SignalR-WebSockets-SSE.md) — SignalR/WebSockets/SSE transport choice, connection lifecycle, authenticating a persistent connection, backplane scale-out, backpressure.
-- ✅ [`02-DotNet-AspNetCore/08-gRPC-Service-To-Service-Contracts.md`](../02-DotNet-AspNetCore/08-gRPC-Service-To-Service-Contracts.md) — gRPC vs. REST for internal calls, Protobuf schema evolution, streaming modes, deadlines/cancellation, mTLS and workload identity.
+- ✅ [`02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md`](../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md) — SignalR/WebSockets/SSE transport choice, connection lifecycle, authenticating a persistent connection, backplane scale-out, backpressure.
+- ✅ [`02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md`](../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md) — gRPC vs. REST for internal calls, Protobuf schema evolution, streaming modes, deadlines/cancellation, mTLS and workload identity.
 
 Both follow the lighter gap-fill template (§1 Topic Description, §2–4 Beginner/Intermediate/Expert-Architect Q&A — 30 Q&A per file), not the main module template, and are therefore logged as an unnumbered block rather than as Modules (`CLAUDE.md` §A9, variant 2).
+
+### Consolidation: `02-DotNet-AspNetCore` → one quick-prep file (2026-10-03)
+
+Second folder in the in-place condensing pass (see the `01-CSharp` consolidation above). The 8 files (Modules 9–14 plus the two gap-fill files above) were merged into **[`02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md`](../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep.md)** (renamed from the Module 9 file). It has 12 sections: hosting, middleware, DI, minimal APIs/controllers/binding, auth, configuration, health and observability, real-time, gRPC, built-in production features (rate limiting, output cache, HybridCache, resilience, `IExceptionHandler`), a top-30 list and a mistakes checklist. Every topic has key concepts, code examples and the most common interview questions with answers. Inbound links in 10 files were rewritten. Originals: `git show ebb2d5c:02-DotNet-AspNetCore/<file>.md`.
+
+### Consolidation: `03-REST-APIs` → one quick-prep file (2026-10-03)
+
+Modules 15–17 were merged into **[`03-REST-APIs/01-REST-APIs-Interview-Prep.md`](../03-REST-APIs/01-REST-APIs-Interview-Prep.md)** (renamed from the Module 15 file). It has 15 sections: REST fundamentals and resource design, methods and status codes, idempotency and retries, ETags and caching, pagination/filtering/bulk, versioning and breaking changes, ProblemDetails errors, long-running operations and webhooks, data formats, the OWASP API Top 10, rate limiting, OpenAPI and contract testing, REST vs GraphQL/gRPC, top-30 plus Principal questions, and a mistakes checklist. Inbound links in 7 files were rewritten. Originals: `git show ebb2d5c:03-REST-APIs/<file>.md`.
 
 ---
 

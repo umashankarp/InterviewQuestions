@@ -1,6 +1,6 @@
 # Module 33 — Data Structures: Arrays, Linked Lists, Trees, Heaps & Hash Tables
 
-> Domain: Data Structures | Level: Beginner → Expert | Prerequisite: [[../01-CSharp/01-CLR-JIT-GC-Memory-Management]] (stack/heap, object header overhead), [[../04-SQL-Server/01-Indexing-Query-Execution-Plans]] (B+ trees)
+> Domain: Data Structures | Level: Beginner → Expert | Prerequisite: [[../01-CSharp/01-CSharp-Interview-Prep]] (stack/heap, object header overhead), [[../04-SQL-Server/01-Indexing-Query-Execution-Plans]] (B+ trees)
 
 ---
 

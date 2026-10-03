@@ -1,6 +1,6 @@
 # Module 48 — Distributed Systems: Failure Detection, Idempotency & the Outbox Pattern
 
-> Domain: Distributed Systems | Level: Beginner → Expert | Prerequisite: [[01-Consensus-Consistency-Distributed-Transactions]], [[../03-REST-APIs/01-REST-Design-Fundamentals]] (idempotency, revisited here at full distributed-systems generality), [[../05-PostgreSQL/02-Partitioning-Replication-Logical-Decoding]] (CDC, directly reused for Outbox)
+> Domain: Distributed Systems | Level: Beginner → Expert | Prerequisite: [[01-Consensus-Consistency-Distributed-Transactions]], [[../03-REST-APIs/01-REST-APIs-Interview-Prep]] (idempotency, revisited here at full distributed-systems generality), [[../05-PostgreSQL/02-Partitioning-Replication-Logical-Decoding]] (CDC, directly reused for Outbox)
 
 ---
 

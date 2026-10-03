@@ -1,368 +1,910 @@
-# Module 15 — REST APIs: Design Fundamentals, HTTP Semantics & Versioning
+# REST APIs — Complete Interview Prep (All Topics, One File)
 
-> Domain: REST APIs | Level: Beginner → Expert | Prerequisite: [[../02-DotNet-AspNetCore/03-MinimalAPIs-vs-Controllers-ModelBinding]] (DTOs, mass-assignment), [[../02-DotNet-AspNetCore/04-Authentication-Authorization-Deep-Dive]]
+> Domain: REST APIs | Level: Beginner → Expert | Prerequisite: [[../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep]] (controllers/minimal APIs, auth, rate limiter), [[../01-CSharp/01-CSharp-Interview-Prep]]
+> **Quick-prep edition** (consolidated 2026-10-03). This one file replaces the 3 former REST modules (15–17). Originals: `git show ebb2d5c:03-REST-APIs/<file>.md`
+> Each topic has: **Key concepts → Code example → Most common interview questions with answers.**
 
----
-
-## 1. Topic Description
-
-### Definition
-
-REST is an architectural style in which state is exposed as **resources** identified by URIs, manipulated through **representations**, using HTTP's uniform interface — where the method carries the semantics (safe, idempotent, cacheable), the status code carries the outcome, and headers carry metadata such as caching directives, concurrency tokens and content negotiation. In practice, "REST design" at senior level is less about conformance to Fielding's constraints and more about designing a **contract that survives** — one whose clients can retry safely, page consistently, handle errors programmatically, and keep working when the provider changes.
-
-### Core sub-concepts
-
-- **Resource modelling** — nouns over verbs, sub-resources, and how to model genuinely action-shaped operations (`approve`, `cancel`, `retry`).
-- **HTTP method semantics** — safe versus idempotent versus cacheable; why `PUT`/`DELETE` are idempotent and `POST` is not.
-- **Status code selection** — 201 with `Location`, 202 for async, 400 versus 422, 401 versus 403, 409, 412/428, 429 with `Retry-After`.
-- **Idempotency keys** — making non-idempotent operations retry-safe; storage, retention, and the concurrent-duplicate case.
-- **Conditional requests and optimistic concurrency** — `ETag`, `If-Match`, `If-None-Match`, 412, and last-write-wins as the alternative.
-- **Pagination** — offset versus cursor/keyset; stability under concurrent writes; server-enforced maximum page size.
-- **Versioning strategies** — URI path, header, media type; operability versus purity; contract-versus-implementation versioning.
-- **Breaking versus non-breaking change** — the classification, including the enum-addition trap and client tolerance rules.
-- **Error contract design** — machine-readable code, safe human message, correlation ID, field-level validation lists, `ProblemDetails`.
-- **PUT versus PATCH** — full replacement versus partial modification, and specifying a patch format.
-- **Async and long-running operations** — 202 plus a status resource, webhooks, and status-record retention.
-- **Bulk operations** — all-or-nothing versus per-item outcomes, batch bounds, and client-supplied item references.
-- **Caching and content negotiation** — `Cache-Control`, `Vary`, and private-versus-shared responses.
-- **Wire-format conventions for time and money** — ISO-8601 with offsets; minor units or decimal strings with an explicit currency.
-- **HATEOAS** — what it promises, why it is rarely adopted, and the state-dependent-actions subset that is genuinely useful.
-
-### Where it fits
-
-The REST contract is the integration surface between a service and everything that consumes it — SPAs, mobile clients, partner systems, and other services. Below it sit the framework's routing, binding and serialisation; above it sit clients whose code you cannot change on your schedule. That asymmetry is the whole point: an internal implementation can be rewritten in a sprint, while a published contract with many consumers takes years to change, so contract decisions deserve disproportionate design effort.
-
-### Why it matters at scale
-
-Every distributed client retries, so an API without an idempotency mechanism *will* produce duplicate orders and double charges — not as an edge case but as normal operation under packet loss. Offset pagination over a mutating dataset silently gives clients duplicated and missing rows, corrupting any consumer doing reconciliation. An unbounded list endpoint is a denial-of-service primitive requiring no attacker skill. And a contract coupled to internal entities means every domain refactor becomes a coordinated multi-team migration, which is how organisations end up unable to change code they own.
-
-### Common pitfalls / anti-patterns
-
-- **Returning 200 with an error body** — clients cannot branch on status, so every consumer must parse the body to know whether the call worked, and infrastructure-level error metrics become meaningless.
-- **No idempotency mechanism on state-changing operations** — an ambiguous timeout leaves the client choosing between a duplicate and a lost operation, and duplicates reach production immediately.
-- **Offset pagination over an actively-written collection** — inserts and deletes shift rows between requests, so a client walking pages sees some rows twice and misses others entirely.
-- **Unbounded list endpoints** — the client controls how much work the server does; one request can exhaust memory or saturate the database.
-- **`DELETE` that returns 404 on a repeat call** — breaks idempotency in practice, because a retrying client interprets the 404 as failure rather than as "already done".
-- **`NOT`-versioned breaking changes shipped as additive** — adding a required field, tightening validation, or changing an enum's meaning breaks clients while looking like a minor change in the diff.
-- **Serialising domain entities as the response type** — every internal rename is an external break, and every field added to the entity is exposed by default.
-- **Money as a JSON floating-point number** — binary floats cannot represent decimal fractions exactly, so rounding errors accumulate in a financial contract.
-
-> Scope note: authentication, authorization, rate-limiting enforcement and transport security belong to `02-API-Security-Rate-Limiting`; OpenAPI, SDK generation and contract testing to `03-API-Documentation-Contract-Testing`. Framework-level model binding and endpoint style live in `02-DotNet-AspNetCore/03-MinimalAPIs-vs-Controllers-ModelBinding`.
+| # | Topic | # | Topic |
+|---|---|---|---|
+| 1 | REST fundamentals & resource design | 9 | Data formats: time, money, IDs, content negotiation |
+| 2 | HTTP methods & status codes | 10 | API security (OWASP API Top 10) |
+| 3 | Idempotency & safe retries | 11 | Rate limiting, quotas & load shedding |
+| 4 | Concurrency (ETags) & caching | 12 | OpenAPI, documentation & contract testing |
+| 5 | Pagination, filtering, sorting, bulk | 13 | REST vs GraphQL vs gRPC vs WebSockets/webhooks |
+| 6 | Versioning & breaking changes | 14 | Top 30 rapid-fire + Principal questions |
+| 7 | Error handling (ProblemDetails) | 15 | Mistakes checklist |
+| 8 | Long-running operations & webhooks | | |
 
 ---
 
-## 2. Beginner (10 Q&A)
+## 1. REST Fundamentals & Resource Design
 
+**Key concepts**
+- **REST** = REpresentational State Transfer (Roy Fielding, 2000), an architectural style. Its constraints: **client–server**, **stateless** (each request carries everything needed), **cacheable**, **uniform interface** (resources, representations, self-descriptive messages, HATEOAS), **layered system**, and optional **code-on-demand**.
+- **Richardson Maturity Model:** L0 a single endpoint (RPC over HTTP) → L1 resources → L2 HTTP verbs + status codes (where most "REST" APIs sit) → L3 hypermedia (HATEOAS).
+- **Resources are nouns, plural, hierarchical where ownership is real:** `/customers/{id}/orders`. Keep nesting shallow (max ~2 levels).
+- **Action-shaped operations** (approve, cancel, refund): model as a state-change sub-resource `POST /payments/{id}/refunds`, or a controller resource `POST /orders/{id}:cancel` / `POST /orders/{id}/cancellation`. Don't force them into `PUT` on a status field when side effects follow.
+- **Naming:** lowercase, hyphens in paths (`/payment-methods`), consistent camelCase in JSON, no verbs in paths, no file extensions.
+- **Statelessness** enables horizontal scaling: no server session; auth comes from the token on every request.
+- **Don't expose your database or domain entities** — design the API for the consumer (DTOs, stable contract).
+- **HATEOAS** (links to possible next actions): rarely adopted fully; useful for state-dependent actions (e.g., include `refund` only when the payment is refundable).
 
-**Q1. What does it mean for a method to be safe versus idempotent, and why does the distinction matter operationally?**
-**A:** Safe means it does not change state — `GET`, `HEAD`, `OPTIONS` — so intermediaries may cache and prefetch it freely. Idempotent means repeating it produces the same end state as doing it once, which is true of `PUT` and `DELETE` but not `POST`. It matters because retries are unavoidable: a client that times out does not know whether the server acted, so for idempotent operations a retry is safe, and for `POST` it is a potential duplicate. Every distributed system retries, so an API that ignores this distinction will produce duplicate records in production.
-*Follow-up: `DELETE` on an already-deleted resource — 404 or 204? Justify your answer.*
-
-**Q2. Walk me through choosing between 400, 401, 403, 404, 409 and 422.**
-**A:** 400 for a malformed request the server cannot parse or that violates the syntactic contract; 401 for missing or invalid authentication with a challenge; 403 for authenticated but not permitted; 404 for a resource that does not exist *or* that the caller may not know exists; 409 for a conflict with current state, such as a concurrency or uniqueness violation; 422 for a syntactically valid request that fails a semantic or business rule. The distinctions matter because clients branch on them — conflating 400 and 422 stops a client distinguishing "fix your code" from "fix your data," and conflating 401 and 403 causes infinite re-authentication loops.
-*Follow-up: When would you deliberately return 404 instead of 403, and what's the trade-off?*
-
-**Q3. How should a `POST` that creates a resource respond?**
-**A:** 201 Created with a `Location` header pointing at the new resource, and usually the created representation in the body so the client does not need a second round trip. Returning 200 with just an ID works but loses the standard semantics that clients and tooling understand. If creation is asynchronous, 202 Accepted with a status resource is the honest answer — returning 201 for something that has not been created yet means clients will immediately `GET` a URL that 404s.
-*Follow-up: The resource is created asynchronously and may fail. What does the client's flow look like?*
-
-**Q4. Explain optimistic concurrency with ETags.**
-**A:** The server returns an `ETag` representing the resource's current version; the client sends it back on an update as `If-Match`. If the resource has changed since, the ETag no longer matches and the server responds 412 Precondition Failed, so the client knows to re-read and retry rather than blindly overwriting. Without it you have last-write-wins, where two concurrent edits silently discard one — a data-loss bug that is invisible in testing and common in production. Requiring `If-Match` on updates, and returning 428 when it is absent, makes the protection mandatory rather than optional.
-*Follow-up: What do you use as the ETag value, and what's wrong with hashing the whole representation?*
-
-**Q5. Offset versus cursor pagination — what's the actual difference in behaviour?**
-**A:** Offset pagination (`?page=3&size=50`) is simple and allows jumping to a page, but it is computed against the dataset at query time: if rows are inserted or deleted between requests, items shift, so a client walking pages sees duplicates and misses others. It also degrades on large offsets because the database must skip rows. Cursor pagination passes an opaque marker representing the last item's position, so results are stable under concurrent writes and performance is constant. For anything mutating or large, cursor is the correct choice; offset is acceptable for small, static datasets where random page access matters.
-*Follow-up: A client needs "jump to page 50." How do you support that with cursors, or do you refuse?*
-
-**Q6. What is an idempotency key and when do you need one?**
-**A:** A client-generated unique value sent with a non-idempotent request — conventionally in an `Idempotency-Key` header — that the server records with the result. A retry with the same key returns the original outcome instead of performing the operation again. You need it whenever the operation has real-world side effects that must not be duplicated: payments, orders, notifications, anything charging money or sending something. Without it, an ambiguous timeout leaves the client with only bad options: retry and risk a duplicate, or do not retry and risk losing the operation.
-*Follow-up: How long do you retain idempotency keys, and what happens when the same key arrives with a different body?*
-
-**Q7. What are the main versioning strategies and their trade-offs?**
-**A:** URI path versioning (`/v2/orders`) is explicit, cache-friendly and trivially visible in logs and routing, at the cost of being unRESTful in purist terms and duplicating URLs for unchanged resources. Header or media-type versioning keeps URIs stable and is more elegant, but is invisible in logs and browser testing and easy for clients to get wrong. Query-parameter versioning is easy but interacts badly with caching. In practice URI versioning wins on operability for most organisations — you can route, log, monitor and deprecate by version trivially — and operability usually matters more than purity.
-*Follow-up: How do you avoid duplicating the entire API surface when only one endpoint changes?*
-
-**Q8. What makes a change breaking, and what does not?**
-**A:** Breaking: removing or renaming a field, changing a type, making an optional field required, adding a required request field, tightening validation, changing status codes for existing conditions, or changing the meaning of an existing value. Non-breaking: adding an optional request field, adding a response field (if clients tolerate unknown fields), adding a new endpoint, or adding a new enum value *if* clients were told to handle unknowns. The last one is the trap: adding an enum value breaks any client that switches exhaustively, which is why the tolerance rules must be documented from day one rather than assumed.
-*Follow-up: You must remove a field that a client still uses. What's the process?*
-
-**Q9. What should an error response contain?**
-**A:** A machine-readable code the client can branch on, a human-readable message for developers, a correlation ID for support, and — for validation failures — a structured list of field-level problems rather than only the first. `ProblemDetails` gives a standard shape worth adopting so clients learn it once. What it must not contain is stack traces, internal type names, SQL, or anything revealing internal structure, both because it is an information-disclosure risk and because clients will start depending on it. The message is for humans; the code is the contract.
-*Follow-up: How do you version error codes as the API evolves?*
-
-**Q10. When is `PUT` the right choice versus `PATCH`?**
-**A:** `PUT` replaces the resource entirely with the supplied representation, which makes it idempotent and simple, but requires the client to send the whole object and risks wiping fields it did not know about. `PATCH` applies a partial modification, which is more efficient and avoids clobbering, but is not inherently idempotent and needs a defined patch format — JSON Patch or JSON Merge Patch — because "send the fields you want to change" leaves absent-versus-null ambiguous. For most APIs I would offer `PUT` for full replacement and a well-specified `PATCH` where partial updates are genuinely needed, rather than an ad hoc partial `PUT`.
-*Follow-up: How do you make `PATCH` idempotent, and does it need to be?*
-
----
-
-## 3. Intermediate (10 Q&A)
-
-
-**Q1. A client reports duplicate orders after a network blip. Walk me through the diagnosis and the fix.**
-**A:** The client timed out, did not know whether the `POST` succeeded, and retried — and since `POST` is not idempotent, the server created a second order. This is a design gap rather than a bug: any API without an idempotency mechanism will produce duplicates under real network conditions. The fix is an idempotency key stored with the request outcome, so a repeat returns the original result; the subtleties are choosing the storage with the right durability, deciding the retention window, and handling the concurrent case where the retry arrives while the first request is still in flight, which needs a lock or a uniqueness constraint rather than a read-then-write.
-*Follow-up: Two identical requests arrive simultaneously with the same key. What exactly happens?*
-
-**Q2. How would you design pagination for an endpoint over a large, actively-written dataset?**
-**A:** Cursor-based, with the cursor encoding a stable sort key — typically an indexed monotonic column plus a tiebreaker for uniqueness — so results are consistent under concurrent inserts and the database can seek rather than skip. I would make the cursor opaque so its encoding can change without breaking clients, enforce a maximum page size server-side regardless of what is requested, and always return a next-cursor rather than requiring clients to construct one. I would also decide explicitly what "consistent" means: a cursor walk gives a stable-ish view but is not a snapshot, and clients doing reconciliation need to know that.
-*Follow-up: A client needs a genuine point-in-time snapshot of a million rows. What do you offer instead?*
-
-**Q3. How do you model an operation that isn't naturally a resource — "approve", "cancel", "retry"?**
-**A:** Either as a sub-resource representing the *outcome* (`POST /orders/{id}/cancellation`) or as a state transition via `PATCH` on a status field, depending on whether the action has its own attributes and history. I would resist contorting a genuinely action-shaped operation into a pure resource model, because the result is worse for consumers than a pragmatic action endpoint. The considerations that actually matter are idempotency, whether the action is auditable and therefore deserves its own record, and whether the transition can be expressed such that a retry is safe. Purity is worth much less than a client being able to safely retry a cancellation.
-*Follow-up: "Approve" must be recorded with who and when. Does that change your modelling?*
-
-**Q4. How would you handle an operation that takes minutes to complete?**
-**A:** Return 202 Accepted immediately with a `Location` pointing at a status resource, do the work asynchronously, and let the client poll or receive a webhook. Holding a connection for minutes breaks under load-balancer idle timeouts, wastes a request slot, and leaves the client with no recovery path if the connection drops. The status resource should expose progress, a terminal outcome, and a link to the result — and it needs a retention policy so status records do not accumulate forever. If clients object to polling, webhooks or server-sent events are the alternative, each with their own delivery-guarantee complexity.
-*Follow-up: The client can't accept webhooks and polling is too chatty. What else can you offer?*
-
-**Q5. How do you version an API in practice without doubling your maintenance burden?**
-**A:** By versioning the *contract*, not the implementation: one internal model with mapping layers per supported version, so v1 and v2 are two projections rather than two codebases. Support a small number of versions with a published deprecation policy and actual telemetry on who uses what, because the maintenance burden comes from versions you cannot retire, not from versions you support. I would also avoid versioning where an additive change suffices, since most changes teams think require a new version do not. The organisational half is having an owner empowered to sunset a version, otherwise you accumulate them permanently.
-*Follow-up: One large client refuses to migrate off v1. How do you handle it?*
-
-**Q6. What's your approach to designing a bulk endpoint?**
-**A:** Decide the failure semantics first, since that is the whole design: all-or-nothing (transactional, simple for clients, but one bad item fails everything) or per-item outcomes (a 207-style response with a result per item, more complex but usually what clients actually need). Then bound it: a maximum batch size, its own rate limit, and its own idempotency treatment — a retried batch must not partially reapply. I would also make sure the response identifies items by a client-supplied reference rather than by index, because index-based correlation breaks the moment anything reorders. Bulk endpoints are where partial-failure handling gets skipped and then discovered in production.
-*Follow-up: A batch of 1,000 has 3 failures. What exactly does the client receive, and what should it do?*
-
-**Q7. How do you decide response shape — nesting, expansion and field selection?**
-**A:** Default to a shape that serves the common case in one round trip without being enormous, then offer explicit expansion (`?expand=customer`) for related data rather than either always including it or forcing N+1 calls. Sparse fieldsets (`?fields=`) help large representations but add caching and testing complexity, so I would add them when there is evidence of need. What I would avoid is a response whose shape depends on the caller in undocumented ways, because that makes the contract untestable. The underlying principle is that the API should not force clients into chatty patterns, and should not ship kilobytes nobody reads.
-*Follow-up: Expansion lets a client request three levels of nesting. What's the risk and how do you bound it?*
-
-**Q8. How should an API behave under overload?**
-**A:** Reject quickly and honestly: 429 with `Retry-After` for rate limiting and 503 for capacity, rather than queuing and timing out — a fast rejection lets clients back off, while a slow timeout consumes resources on both sides and triggers retry storms. The contract should document the limits, the headers that expose remaining quota, and the expected backoff behaviour, because a client that does not know the rules will hammer you. I would also differentiate limits by cost, since a cheap read and an expensive report should not share one budget.
-*Follow-up: Clients ignore `Retry-After` and retry immediately. What do you do?*
-
-**Q9. What does "consumer-first" API design mean in practice?**
-**A:** Designing from the client's use cases and writing the client code first, before the implementation — which surfaces awkwardness immediately, such as needing four calls to render one screen. It also means naming things in the domain language consumers use rather than the internal one, and being willing to shape endpoints around workflows rather than around your database. The failure it prevents is an API that is a thin projection of internal tables, which is convenient to build and expensive for every consumer forever. The practical technique is a design review with an actual consumer team before implementation, not after.
-*Follow-up: The consumer wants an endpoint that's awkward for your data model. How do you decide?*
-
-**Q10. How do you handle time and money in an API contract?**
-**A:** Time as ISO-8601 with explicit offsets, always UTC on the wire, never a naive local timestamp — and be precise about whether a field is an instant or a calendar date, because those need different types and different handling. Money as a minor-unit integer or a string decimal plus an explicit currency code, never a floating-point number, because binary floats cannot represent decimal fractions exactly and the errors accumulate. These sound like details and are actually among the most common sources of real financial defects, which is why they belong in a shared contract convention rather than being decided per endpoint.
-*Follow-up: A client sends an amount as a JSON number and it's 0.1 + 0.2. What breaks and where?*
-
----
-
-## 4. Expert / Architect (10 Q&A)
-
-
-**Q1. How do you govern API design across an organisation without becoming a bottleneck?**
-**A:** Encode the standard rather than reviewing every case: a written style guide backed by an automated linter on the OpenAPI document in CI, checking naming, status codes, pagination, error shapes and versioning. Provide templates and a shared library implementing the conventions so the default path is compliant. Reserve human review for genuinely new patterns and for public-facing APIs, and make the review a design conversation early rather than an approval gate late. The governance failure I would design against is a central body reviewing everything, which becomes a queue and gets routed around; the linter scales and the humans focus on judgement.
-*Follow-up: A team's API passes the linter but is badly designed. What does that tell you about your standard?*
-
-**Q2. Public API versus internal API — what genuinely changes?**
-**A:** The cost of change and therefore the required rigour. A public API's contract must be treated as immutable in practice, with long deprecation windows, formal versioning, published SLAs, and defensive design against clients you cannot contact. An internal API with a known set of consumers can evolve much faster with coordinated changes, and over-engineering it with public-API ceremony wastes real time. The mistake in both directions is common: teams ship internal APIs to external partners without hardening, and apply public-API process to an internal endpoint with one consumer. I would classify each API explicitly and attach the appropriate process to the classification.
-*Follow-up: An internal API acquires an external consumer without anyone noticing. How do you prevent that?*
-
-**Q3. How would you plan a breaking change across an API with many unknown consumers?**
-**A:** Start from measurement, because you cannot plan a migration you cannot observe: instrument usage per field and per client so you know who is actually affected rather than guessing. Then run both versions in parallel with a published timeline, communicate through every channel you have, add deprecation headers so client tooling surfaces the warning, and consider a temporary shim that translates old requests to the new behaviour. Brownout testing — briefly disabling the old version during announced windows — is effective at flushing out consumers who ignored every notice. The organisational reality is that a deprecation without an owner and a date never completes, so both must be assigned at the start.
-*Follow-up: On cutover day 5% of traffic is still on v1 from unidentified clients. What do you do?*
-
-**Q4. When is REST the wrong choice, and what would you use instead?**
-**A:** For high-volume internal service-to-service calls where latency and payload size matter, gRPC's binary protocol and streaming are materially better and the contract is enforced by generated code. For clients that need flexible, aggregated reads across many resources — typically rich UIs — GraphQL removes over-fetching and round trips at the cost of caching complexity, unbounded query cost and a harder security model. For event distribution, neither: that is messaging. REST remains right for public, cacheable, broadly-consumable APIs where ubiquity and tooling matter most. I would choose per boundary rather than organisation-wide, while being conscious that each additional style is a permanent operational and skills cost.
-*Follow-up: A team proposes GraphQL for a public API. What are your specific concerns?*
-
-**Q5. How does API design interact with multi-tenancy and data isolation?**
-**A:** The tenant must never be a client-supplied parameter — it comes from the authenticated principal, because any design where a client can name the tenant is one missing check away from cross-tenant access. Resource identifiers should be non-sequential and non-guessable so enumeration is not trivially possible, though that is defence in depth rather than a control. Rate limits and quotas need to be per tenant so one tenant cannot exhaust shared capacity, and error messages must not confirm the existence of another tenant's resources, which is why 404 is often the right response to an unauthorised access attempt. These are contract-level decisions, not implementation details.
-*Follow-up: A partner integration genuinely needs to act across tenants. How do you model that?*
-
-**Q6. How would you approach the caching design for a read-heavy public API?**
-**A:** Make cacheability an explicit design property: correct `Cache-Control` directives per resource class, `ETag`s for conditional requests so unchanged resources cost a 304 rather than a full payload, and `Vary` set correctly so caches do not serve one caller's response to another — which is the mechanism behind real cross-user data leaks through CDNs. Personalised responses must be marked private or not cached at all. I would push aggressively for caching at the edge for genuinely shared resources, since it removes load and latency simultaneously, and be equally aggressive about excluding anything user-specific, since a caching bug there is a security incident rather than a performance one.
-*Follow-up: A response varies by a header you forgot to declare in `Vary`. What's the worst outcome?*
-
-**Q7. What's your position on HATEOAS?**
-**A:** Theoretically appealing and rarely worth the cost. The premise is that clients discover capabilities from links rather than hardcoding URLs, which would decouple client and server — but in practice clients hardcode anyway, generated SDKs do not use the links, and the added payload and complexity buy nothing measurable. Where it does earn its place is workflow-heavy APIs where the available *actions* legitimately vary by state, since returning the permitted transitions is genuinely useful and hard to express otherwise. My position is to include state-dependent action links where they carry real information, and to skip the full hypermedia model, which almost no consumer will exploit.
-*Follow-up: How would you convey "this order can now be cancelled but not amended" without full HATEOAS?*
-
-**Q8. How do you design an API that must be operable during partial failures of its own dependencies?**
-**A:** By deciding, per endpoint, what a degraded but useful response looks like and encoding that in the contract — returning core data with a documented indication that an enrichment is unavailable is far better than a 500, and it must be part of the contract so clients handle it rather than being surprised. That requires distinguishing essential from non-essential dependencies at design time, applying timeouts and circuit breakers so a slow dependency cannot consume the request budget, and making sure the client can tell the difference between "no data" and "data unavailable" — a distinction that is frequently lost and causes clients to cache emptiness. I would also make sure retry guidance is explicit in the response, since clients otherwise invent their own.
-*Follow-up: An enrichment service is down. Do you return 200 with partial data or 503? Justify.*
-
-**Q9. How do you decide the granularity of API resources in a microservices architecture?**
-**A:** Resource granularity should follow the consumer's needs and the service boundary, not the database schema — exposing one resource per table forces clients into chatty orchestration and leaks your internal model. Where a consumer genuinely needs a composite view spanning services, that aggregation belongs in a purpose-built layer (a BFF or an aggregation service) rather than in each client or in a service reaching across a boundary. The tension to manage is that aggregation layers accumulate logic and become a coupling point of their own, so I would keep them thin and client-specific rather than building one universal aggregator that every team must change.
-*Follow-up: Three client teams want three different aggregations. One BFF or three?*
-
-**Q10. What do you look at first to judge whether an API will age well?**
-**A:** Whether the contract is separable from the implementation — if the response types are the domain entities, the API will break every time the model changes, and that single fact predicts most future pain. Then: is there a versioning and deprecation policy with an owner; are errors machine-readable and consistent; is pagination bounded and stable; is there an idempotency story for state-changing operations; and can the team enumerate their consumers. An API that scores well on those can evolve for years; one that does not will accumulate compatibility shims until nobody dares change it. I would raise these at design time, because retrofitting them after a hundred consumers exist is a multi-year programme rather than a refactor.
-*Follow-up: You inherit an API failing most of those tests with 200 consumers. What's your first move?*
-
----
-
-## 5. Reference Material
-
-> Retained from the original module: deep-dive internals, diagrams, production examples, exercises, system/low-level design, debugging walkthroughs and the Principal Engineer perspective.
-
-### 1. Fundamentals
-**REST** (Representational State Transfer, Roy Fielding's 2000 dissertation) is an architectural style for networked systems built on: resources identified by URIs, a uniform interface (standard HTTP methods with well-defined semantics), statelessness (each request contains everything needed to process it — no server-side session dependency), and representations (JSON/XML) transferred between client and server. It exists because ad-hoc, RPC-style HTTP APIs (endpoints named like remote procedure calls — `/getUser`, `/updateUserStatus`) don't leverage HTTP's own built-in semantics (caching, idempotency, status codes), forcing every client to learn bespoke, inconsistent conventions per API. REST's uniform interface lets HTTP infrastructure (caches, proxies, load balancers) and generic client tooling work correctly without API-specific knowledge.
-
-### 2. Deep Dive
-
-#### 2.1 HTTP Method Semantics — Precisely
-- **GET**: safe (no side effects) and idempotent (repeating it produces the same result) — must never be used for state-changing operations; caches/proxies/prefetchers may call it speculatively, so a GET with side effects is a genuine correctness/security hazard.
-- **POST**: neither safe nor idempotent by default — creates a new resource or triggers a non-idempotent action; calling it twice may create two resources.
-- **PUT**: idempotent (calling it N times with the same body produces the same end state as calling it once) — a full **replacement** of the resource at the given URI.
-- **PATCH**: partial update — idempotency is **not guaranteed** by the method itself and depends on the patch semantics used (a JSON Merge Patch replacing specific fields is typically idempotent; a JSON Patch `"op": "add"` to an array is not).
-- **DELETE**: idempotent — deleting an already-deleted resource should return the same successful outcome (or a 404, per API convention), not an error indicating "delete failed."
-
-#### 2.2 Idempotency — the Precise Definition and Why It Matters for Reliability
-Idempotency means **the same request, executed multiple times, produces the same end state as executing it once** — this is the single most important property for building **reliable retry logic** (the retry-with-backoff patterns) on top of an unreliable network: a client that times out waiting for a response to a PUT/DELETE genuinely doesn't know if the request succeeded — safely retrying requires the operation to be idempotent, or the retry could cause an unintended duplicate side effect. For genuinely non-idempotent operations that must tolerate retries (POST creating a payment), the standard solution is an explicit **idempotency key** (a client-generated unique ID sent in a header, e.g., `Idempotency-Key`) that the server persists and checks — a repeated request with the same key returns the original result without re-executing the side effect.
-
-#### 2.3 Status Code Semantics Beyond the Basics
-- **200 vs 201 vs 204**: 200 (OK, has a body), 201 (Created, includes a `Location` header pointing to the new resource), 204 (No Content — success, deliberately no body, common for DELETE/PUT).
-- **400 vs 422**: 400 (malformed request — can't even be parsed/understood), 422 (Unprocessable Entity — well-formed but semantically invalid, e.g., a business-rule validation failure) — a distinction many APIs blur, but a precise API design keeps them separate.
-- **409 Conflict**: the request conflicts with the resource's current state (e.g., optimistic-concurrency version mismatch) — distinct from 400/422, since the request itself is valid, just conflicting with concurrent state.
-
-#### 2.4 Versioning Strategies
-- **URI versioning** (`/v1/orders`): simplest, most visible, but "pollutes" the URI (arguably violating REST's "URI identifies a resource, not a version of an API" purity) and requires duplicating route definitions.
-- **Header versioning** (`Api-Version: 2` or `Accept: application/vnd.company.v2+json`): keeps URIs stable/pure, but less discoverable/debuggable (can't just paste a URL in a browser to see a specific version).
-- **Query-string versioning** (`?api-version=2`): a middle ground, easy to test manually, but easy to omit accidentally (silently falling back to a default version).
-No universal "correct" choice — the trade-off is discoverability/simplicity (URI) vs. REST purity/cache-friendliness (header) vs. ease-of-testing (query string); most large-scale APIs (Stripe, GitHub) use header-based versioning specifically for its cache-key cleanliness and REST-purity properties.
-
-#### 2.5 Optimistic Concurrency via ETags
-`ETag` (a version/hash identifier for a resource's current state) combined with `If-Match`/`If-None-Match` conditional request headers implements optimistic concurrency control over HTTP itself: a client GETs a resource (receiving its `ETag`), later PUTs an update with `If-Match: <etag>` — the server rejects with `412 Precondition Failed` if the resource has changed since the client's GET, preventing a classic lost-update race (two clients concurrently reading, modifying, and blindly overwriting) without any application-level locking.
-
-#### 2.6 HATEOAS — Hypermedia as the Engine of Application State
-The often-unimplemented "fourth constraint" — responses include **links** to related/next-available actions (`"actions": {"cancel": {"href": "/orders/123/cancel"}}`), letting clients navigate the API's state machine dynamically rather than hardcoding URL construction logic. Genuinely powerful for long-lived API consumers that must tolerate URL-structure evolution, but adds real payload/complexity overhead most REST APIs in practice skip entirely — a legitimate, common "level 2, not level 3, Richardson Maturity Model" pragmatic choice worth explicitly justifying rather than treating as an oversight.
-
-### 3. Visual Architecture
-```
-GET /orders/123 -> 200 {... } (ETag: "abc123")
-PUT /orders/123 -> 412 Precondition Failed (If-Match: "abc123" doesn't match current "xyz789")
-POST /payments -> 201 Created (Idempotency-Key: "client-generated-uuid")
-POST /payments (retry, same Idempotency-Key) -> 201 Created (SAME result, no duplicate charge)
+```http
+GET    /api/v1/customers/42/orders?status=paid&limit=20     # list a sub-collection
+GET    /api/v1/orders/9f1c...                               # single resource
+POST   /api/v1/orders                                       # create
+PUT    /api/v1/orders/9f1c...                               # replace
+PATCH  /api/v1/orders/9f1c...                               # partial update
+DELETE /api/v1/orders/9f1c...                               # remove
+POST   /api/v1/payments/7a2b.../refunds                     # action as a sub-resource
 ```
 
-### 4. Production Example
-**Scenario**: A payments API without idempotency-key support experienced duplicate charges during a mobile-network flakiness period — clients retrying a timed-out POST created genuine duplicate payment records, since POST is non-idempotent by HTTP semantics and no application-level deduplication existed. **Fix**: implemented `Idempotency-Key` header support — the server persists (key → result) mappings with a TTL, returning the cached original result for a repeated key instead of re-processing. **Lesson**: idempotency isn't automatic for POST — it must be deliberately engineered for any operation that must tolerate client retries, exactly the retry-safety discipline applied at the API-contract level.
-
-### 11. Coding Exercises
-
-#### Easy — Correct 201 with Location header
-```csharp
-app.MapPost("/orders", async (CreateOrderRequest request, IOrderService service) =>
-    {
-        var order = await service.CreateAsync(request);
-        return Results.Created($"/orders/{order.Id}", order); // Location header + 201, not a bare 200
-});
-```
-
-#### Medium — ETag generation and `If-Match` validation
-```csharp
-app.MapPut("/orders/{id}", async (string id, UpdateOrderRequest request, HttpRequest http, IOrderRepository repo) =>
-    {
-        var order = await repo.GetByIdAsync(id);
-        if (order is null) return Results.NotFound;
-
-        var currentETag = $"\"{order.Version}\"";
-        if (http.Headers.IfMatch.Count > 0 && http.Headers.IfMatch[0]!= currentETag)
-            return Results.StatusCode(StatusCodes.Status412PreconditionFailed);
-
-        order.ApplyUpdate(request);
-        order.Version++;
-        await repo.SaveAsync(order);
-        return Results.Ok(order);
-});
-```
-
-#### Hard — Idempotency-key middleware with concurrent-duplicate handling
-```csharp
-public class IdempotencyMiddleware
+```json
 {
-    private readonly RequestDelegate _next;
-    private readonly IDistributedCache _cache;
-
-    public IdempotencyMiddleware(RequestDelegate next, IDistributedCache cache) { _next = next; _cache = cache; }
-
-    public async Task InvokeAsync(HttpContext context)
-    {
-        if (!context.Request.Headers.TryGetValue("Idempotency-Key", out var key) || string.IsNullOrEmpty(key))
-        {
-            await _next(context);
-            return;
-        }
-
-        string cacheKey = $"idem:{context.User.FindFirstValue(ClaimTypes.NameIdentifier)}:{key}";
-        var existing = await _cache.GetStringAsync(cacheKey);
-
-        if (existing == "InProgress")
-        {
-            context.Response.StatusCode = StatusCodes.Status409Conflict;
-            return;
-        }
-        if (existing is not null)
-        {
-            context.Response.StatusCode = StatusCodes.Status200OK;
-            await context.Response.WriteAsync(existing); // cached final response
-            return;
-        }
-
-        await _cache.SetStringAsync(cacheKey, "InProgress", new DistributedCacheEntryOptions
-            {
-                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5)
-        });
-
-        var originalBody = context.Response.Body;
-        using var buffer = new MemoryStream;
-        context.Response.Body = buffer;
-
-        await _next(context);
-
-        buffer.Seek(0, SeekOrigin.Begin);
-        var responseText = await new StreamReader(buffer).ReadToEndAsync;
-        await _cache.SetStringAsync(cacheKey, responseText, new DistributedCacheEntryOptions
-            {
-                AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(24)
-        });
-
-        buffer.Seek(0, SeekOrigin.Begin);
-        await buffer.CopyToAsync(originalBody);
-    }
+  "id": "pay_7a2b",
+  "status": "captured",
+  "amount": { "value": "125.50", "currency": "USD" },
+  "_links": {
+    "self":   { "href": "/api/v1/payments/pay_7a2b" },
+    "refund": { "href": "/api/v1/payments/pay_7a2b/refunds", "method": "POST" }
+  }
 }
 ```
-**Discussion**: The response-body-buffering pattern here directly reuses the request-body-buffering technique from the Minimal-APIs-vs-Controllers module (`EnableBuffering`/position-reset), applied to the *response* side instead — swapping `context.Response.Body` temporarily, capturing the written content, then replaying it both into the cache and back to the real output stream.
 
-#### Expert — Combined optimistic-concurrency + idempotency-key payment flow
-```csharp
-app.MapPost("/payments", async (
-        ProcessPaymentRequest request, HttpRequest http, IPaymentService service, IIdempotencyStore idemStore) =>
-    {
-        if (!http.Headers.TryGetValue("Idempotency-Key", out var key))
-            return Results.BadRequest("Idempotency-Key header is required.");
+**Common interview questions**
 
-        var existing = await idemStore.TryGetAsync(key!, request); // validates body hash matches, per Advanced Q8
-        if (existing is { Status: IdempotencyStatus.InProgress }) return Results.StatusCode(409);
-        if (existing is { Status: IdempotencyStatus.Completed }) return Results.Ok(existing.CachedResult);
-        if (existing is { Status: IdempotencyStatus.KeyReusedWithDifferentPayload })
-            return Results.Conflict("Idempotency-Key was reused with a different request payload.");
+**Q1. What makes an API RESTful?**
+Resources identified by URIs, manipulated through a uniform interface (standard HTTP methods), stateless requests, cacheable responses, a layered architecture, and ideally hypermedia. Most real APIs are Richardson Level 2 — resources + verbs + status codes — which is "pragmatic REST".
 
-        await idemStore.MarkInProgressAsync(key!, request);
+**Q2. Explain the Richardson Maturity Model.**
+Level 0: everything is a POST to one endpoint (SOAP-like). Level 1: separate resource URIs. Level 2: correct HTTP methods and status codes. Level 3: responses include hypermedia links that drive the client's next steps.
 
-        // Payment charge, idempotency-record completion, and outbox event insert -- ONE transaction (Advanced Q5).
-        var result = await service.ProcessPaymentInSingleTransactionAsync(request, key!);
-        return Results.Created($"/payments/{result.PaymentId}", result);
-});
-```
-**Discussion**: `TryGetAsync` returning a `KeyReusedWithDifferentPayload` case is the concrete fix for Advanced Q8's bug scenario — comparing a hash of the incoming request body against what was originally recorded for that key, rejecting a mismatch explicitly rather than silently serving a wrong cached result.
+**Q3. How do you model an operation like "approve" or "cancel"?**
+As a resource representing the action or its result: `POST /orders/{id}/cancellation` (creates a cancellation, returns 201/202) or `POST /payments/{id}/refunds`. This keeps the verb set standard, gives the action an auditable identity, and supports idempotency keys. Avoid `GET /cancelOrder?id=` (GET must be safe).
 
-### 12. System Design
-A payments platform's idempotency middleware (Hard/Expert exercises) is the module's central production pattern — every non-idempotent, side-effect-triggering endpoint routes through it, with per-client-scoped keys and a short-TTL cache backed by Redis for fleet-wide consistency (the distributed-cache reasoning applied here).
+**Q4. Why should REST APIs be stateless?**
+Any instance can serve any request → easy horizontal scaling, load balancing and failover, with no sticky sessions or session replication. The state lives in the client (token) or in the database.
 
-### 13. Low-Level Design
-A shared `IIdempotencyStore` abstraction (used identically by the Expert exercise) centralizes key-validation, in-progress-tracking, and payload-hash-comparison logic once, reusable across every non-idempotent endpoint in a codebase, rather than each team re-implementing subtly different idempotency logic independently.
+**Q5. How deep should URL nesting go?**
+Usually no more than `/parents/{id}/children`. Deep nesting couples clients to the hierarchy and makes URLs fragile. If a child has a globally unique ID, expose `/children/{id}` directly too.
 
-### 14. Production Debugging
-The signature incident for this module: duplicate payment charges from unhandled POST retries during network flakiness — diagnosed by correlating duplicate charges with client-side retry logs showing a timeout on the original request followed by an identical retry with no idempotency key at all.
+**Q6. What's your view on HATEOAS?**
+Full HATEOAS-driven clients are rare and the cost is high. The valuable subset is including links for **state-dependent actions** and pagination (`next`), so clients don't duplicate business rules about what's allowed.
 
-### 15. Architecture Decision
-Header-based versioning is recommended as the default for new large-scale/long-lived public APIs (cache-key cleanliness, REST purity); URI versioning remains acceptable for simpler, smaller APIs prioritizing discoverability/manual testability over those concerns.
-
-### 16. Enterprise Case Study
-Stripe's and GitHub's publicly-documented API versioning approaches (both header/date-based) are directly citable, large-scale precedents for the header-versioning recommendation — both explicitly chose this specifically to avoid URI fragmentation across API versions at massive integration scale.
-
-### 17. Principal Engineer Perspective
-Treat idempotency-key support as a mandatory, non-negotiable requirement for any payment/order-creation endpoint from day one — retrofitting it after a duplicate-charge incident is far more disruptive (requiring careful backfill/reconciliation of already-affected records) than building it into the initial design.
-
-### 18. Revision
-**Key takeaways**: Idempotent = same request repeated → same end state (GET, PUT, DELETE; not POST by default). Idempotency keys make POST safely retryable. ETags + `If-Match` prevent lost updates. 400 = malformed, 422 = semantically invalid, 409 = conflicts with current state. Versioning strategy is a genuine trade-off, not a solved question.
+**Q7. How do you decide resource granularity in microservices?**
+Align resources with the service's bounded context and the consumer's use cases. Avoid chatty fine-grained APIs (N calls per screen) and huge "god" resources. Use composition/BFF or `?expand=` for aggregated views.
 
 ---
 
-**Next**: Continuing autonomously to Module 16 — API Security & Rate Limiting Patterns (throttling, API gateways, request signing).
+## 2. HTTP Methods & Status Codes
+
+**Key concepts**
+
+| Method | Safe | Idempotent | Cacheable | Typical response |
+|---|---|---|---|---|
+| GET | ✅ | ✅ | ✅ | 200, 304, 404 |
+| HEAD | ✅ | ✅ | ✅ | like GET, without the body |
+| OPTIONS | ✅ | ✅ | ❌ | allowed methods, CORS preflight |
+| PUT | ❌ | ✅ | ❌ | 200/204 (or 201 if created) |
+| DELETE | ❌ | ✅ | ❌ | 204 (repeat: 204 or 404 — treat 404 as "already gone") |
+| POST | ❌ | ❌ | rarely | 201 + `Location`, 202, 200 |
+| PATCH | ❌ | ❌ (can be made so) | ❌ | 200/204 |
+
+- **Safe** = no server-side state change (crawlers and prefetchers may call it freely). **Idempotent** = repeating it has the same effect as doing it once (retry-safe).
+- **PUT** = replace the full representation (client knows the URI). **PATCH** = partial update with a defined format (JSON Merge Patch `application/merge-patch+json` or JSON Patch `application/json-patch+json`).
+
+**Status codes that get asked**
+
+| Code | When |
+|---|---|
+| **200 OK** | success with body |
+| **201 Created** | created; include `Location` header (+ body) |
+| **202 Accepted** | async processing started; return a status URL |
+| **204 No Content** | success, no body (DELETE, some PUTs) |
+| **301/308** | permanent redirect (308 keeps the method) |
+| **304 Not Modified** | conditional GET, cached copy still valid |
+| **400 Bad Request** | malformed syntax or invalid shape |
+| **401 Unauthorized** | not authenticated (missing or invalid credentials) |
+| **403 Forbidden** | authenticated, not allowed |
+| **404 Not Found** | doesn't exist (or hidden for security) |
+| **405 Method Not Allowed** | wrong verb |
+| **409 Conflict** | state conflict (duplicate, invalid state transition, idempotency key in progress) |
+| **412 Precondition Failed** | `If-Match` ETag mismatch |
+| **415 Unsupported Media Type** | wrong `Content-Type` |
+| **422 Unprocessable Content** | well-formed but violates business rules |
+| **428 Precondition Required** | server requires `If-Match` |
+| **429 Too Many Requests** | rate limited; send `Retry-After` |
+| **500** | unexpected server error |
+| **502/503/504** | bad gateway / unavailable (+ `Retry-After`) / gateway timeout |
+
+```csharp
+// ASP.NET Core minimal API showing correct codes
+app.MapPost("/api/v1/orders", async (CreateOrder req, IOrderService svc, CancellationToken ct) =>
+{
+    var result = await svc.CreateAsync(req, ct);
+    return result switch
+    {
+        { IsSuccess: true }            => Results.Created($"/api/v1/orders/{result.Id}", result.Order),
+        { Error: "DUPLICATE" }         => Results.Conflict(),
+        { Error: "INSUFFICIENT_FUNDS" } => Results.UnprocessableEntity(),
+        _                              => Results.BadRequest()
+    };
+});
+
+app.MapDelete("/api/v1/orders/{id:guid}", async (Guid id, IOrderService svc) =>
+{
+    await svc.DeleteIfExistsAsync(id);    // idempotent: deleting twice is fine
+    return Results.NoContent();
+});
+```
+
+**Common interview questions**
+
+**Q1. Safe vs idempotent — why does it matter?**
+Safe methods don't change state, so caches, crawlers and prefetchers can call them. Idempotent methods can be retried after a timeout without causing duplicate effects — that's what lets clients, proxies and SDKs retry automatically. POST is neither, so retrying it needs an idempotency key.
+
+**Q2. PUT vs PATCH vs POST?**
+PUT replaces the whole resource at a known URI (idempotent). PATCH changes part of it using a defined patch format. POST creates under a collection (the server assigns the ID) or triggers processing — not idempotent.
+
+**Q3. 400 vs 422?**
+400: the request is malformed (invalid JSON, wrong types, missing required fields). 422: syntactically valid but semantically wrong (insufficient funds, end date before start date). Many APIs use 400 for both — be consistent and document it.
+
+**Q4. 401 vs 403?**
+401: no or invalid credentials — authenticate and retry. 403: the server knows who you are and you're not allowed. Mixing them up breaks clients (e.g., re-login loops).
+
+**Q5. 404 or 403 when a user requests another tenant's resource?**
+404 — it doesn't reveal that the resource exists, which prevents enumeration.
+
+**Q6. What should a successful POST that creates something return?**
+201 Created with a `Location` header pointing to the new resource, and usually the representation (or its ID) in the body. If processing is asynchronous, 202 Accepted with a status resource.
+
+**Q7. Is it OK to return 200 with `{ "success": false }`?**
+No. Clients, gateways, monitors and retry logic all branch on the status code. Hiding errors in 200s breaks error-rate metrics and alerting, and forces every client to parse the body.
+
+**Q8. Should a second DELETE return 404 or 204?**
+Either can be defended. The effect is idempotent (it's gone). Many APIs return 204 both times so retrying clients don't treat "already deleted" as a failure; if you return 404, document that clients should treat it as success.
+
+---
+
+## 3. Idempotency & Safe Retries
+
+**Key concepts**
+- Networks fail **ambiguously**: on a timeout the client can't know whether the server processed the request. Retrying a POST can create **duplicates** (double charge, double order).
+- **Idempotency key:** the client generates a unique key (a UUID) per *logical operation* and sends `Idempotency-Key: <uuid>`.
+- **Server logic:**
+  1. Insert the key with status `IN_PROGRESS` under a **unique constraint** (atomic claim).
+  2. If the key exists and is `COMPLETED` → return the **stored response** (same status and body).
+  3. If it exists and is `IN_PROGRESS` → **409** (or wait).
+  4. If the same key arrives with a **different request body hash** → **422**.
+  5. Do the work and store the response **in the same transaction** as the business write.
+  6. Keep keys for a retention window (e.g., 24 h–7 days).
+- **Downstream:** pass the key (or a derived one) to the payment provider (Stripe/Adyen support idempotency keys).
+- **Messaging:** consumers deduplicate by message ID (inbox table).
+- **Retries:** only for transient errors (timeouts, 502/503/504, 429) with **exponential backoff + jitter**, a max attempt count, and a total time budget. Never retry 4xx validation errors.
+- **Reconcile** against external truth (settlement files) even with idempotency.
+
+```sql
+CREATE TABLE IdempotencyKeys (
+    IdempotencyKey  VARCHAR(64)   NOT NULL,
+    ClientId        VARCHAR(64)   NOT NULL,
+    RequestHash     CHAR(64)      NOT NULL,     -- SHA-256 of the canonical request body
+    Status          VARCHAR(16)   NOT NULL,     -- IN_PROGRESS | COMPLETED
+    ResponseStatus  INT           NULL,
+    ResponseBody    NVARCHAR(MAX) NULL,
+    CreatedAt       DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT PK_Idem PRIMARY KEY (ClientId, IdempotencyKey)   -- scoped per client
+);
+```
+
+```csharp
+public async Task<IResult> CreatePayment(HttpRequest http, CreatePayment req, AppDbContext db, CancellationToken ct)
+{
+    if (!http.Headers.TryGetValue("Idempotency-Key", out var key)) return Results.BadRequest("Idempotency-Key required");
+    var hash = Sha256(JsonSerializer.Serialize(req));
+    var clientId = http.HttpContext.User.FindFirst("client_id")!.Value;
+
+    var existing = await db.IdempotencyKeys.FindAsync([clientId, key.ToString()], ct);
+    if (existing is not null)
+    {
+        if (existing.RequestHash != hash) return Results.UnprocessableEntity("Key reused with a different body");
+        if (existing.Status == "IN_PROGRESS") return Results.Conflict("Request in progress");
+        return Results.Text(existing.ResponseBody!, "application/json", statusCode: existing.ResponseStatus);
+    }
+
+    await using var tx = await db.Database.BeginTransactionAsync(ct);
+    db.IdempotencyKeys.Add(new() { ClientId = clientId, IdempotencyKey = key!, RequestHash = hash, Status = "IN_PROGRESS" });
+    await db.SaveChangesAsync(ct);                       // unique constraint = atomic claim (catch duplicate → 409)
+
+    var payment = await _payments.CreateAsync(req, idempotencyKey: key!, ct);   // provider gets the same key
+    var record = await db.IdempotencyKeys.FindAsync([clientId, key.ToString()], ct);
+    record!.Status = "COMPLETED"; record.ResponseStatus = 201; record.ResponseBody = JsonSerializer.Serialize(payment);
+    await db.SaveChangesAsync(ct);
+    await tx.CommitAsync(ct);
+    return Results.Created($"/api/v1/payments/{payment.Id}", payment);
+}
+```
+
+```csharp
+// Client side: retry with backoff + jitter, same key on every attempt
+builder.Services.AddHttpClient<PaymentsClient>()
+    .AddStandardResilienceHandler(o =>
+    {
+        o.Retry.MaxRetryAttempts = 3;
+        o.Retry.BackoffType = DelayBackoffType.Exponential;
+        o.Retry.UseJitter = true;
+    });
+```
+
+**Common interview questions**
+
+**Q1. A customer was charged twice after a network blip. Diagnose and fix it.**
+Likely cause: the client timed out after the server (or the payment provider) had already succeeded, then retried the POST — or a double-click, or a message redelivery. Fix at every layer: a client-generated idempotency key per payment intent; server-side unique-constrained key storage that returns the stored response on replays; the same key passed to the provider; consumer deduplication by message ID; and daily reconciliation against the provider's settlement report to catch anything left. Refund the duplicate and add an alert on duplicate-charge detection.
+
+**Q2. What is an idempotency key and how does the server use it?**
+A client-supplied unique ID for one logical operation. The server records it atomically before doing the work and stores the result; any repeat with the same key gets the original response instead of executing again.
+
+**Q3. What if two requests with the same key arrive at the same time?**
+The unique constraint lets exactly one insert succeed. The other gets a duplicate-key error → return 409 "in progress" (the client retries later) or wait and poll for completion.
+
+**Q4. What if the server crashes after charging the card but before storing the response?**
+The key row stays `IN_PROGRESS`. On retry, don't charge blindly: query the provider using the same idempotency key/reference to learn the real outcome, then complete the record. A sweeper resolves stale `IN_PROGRESS` rows. That's why the provider must receive the same key.
+
+**Q5. Same key, different body?**
+Return 422 — it's a client bug (key reuse). Detect it by storing a hash of the request.
+
+**Q6. Which errors should a client retry?**
+Network timeouts, connection resets, 408, 429 (honour `Retry-After`), 502, 503, 504. Not 400/401/403/404/409/422. And retry POSTs only when an idempotency key is present.
+
+**Q7. Why exponential backoff with jitter?**
+Fixed-interval retries from thousands of clients arrive in synchronized waves (a thundering herd) and keep a recovering service down. Exponential backoff spreads the load over time; jitter de-synchronizes clients.
+
+**Q8. How long do you keep idempotency keys?**
+Longer than the longest realistic client retry window — commonly 24 hours to 7 days — then purge. Document it in the API contract.
+
+---
+
+## 4. Optimistic Concurrency (ETags) & HTTP Caching
+
+**Key concepts — concurrency**
+- **Lost update:** two clients GET version 1, both PUT, and the last write silently wins.
+- **ETag** = a version identifier of the representation (hash or row version). `GET` returns `ETag: "v5"`. The client sends `If-Match: "v5"` on PUT/PATCH/DELETE → the server checks → **412 Precondition Failed** on mismatch. Send **428** if `If-Match` is required but missing.
+- Map ETags to a DB `rowversion`/`xmin` concurrency token.
+
+**Key concepts — caching**
+- `Cache-Control`: `max-age`, `s-maxage` (shared caches/CDN), `no-cache` (revalidate before use), `no-store` (never store — sensitive data), `private` (browser only), `public`, `immutable`, `stale-while-revalidate`.
+- **Conditional GET:** `If-None-Match: "v5"` → **304 Not Modified** (saves bandwidth). `Last-Modified`/`If-Modified-Since` is the weaker alternative.
+- **`Vary`** header: the cache key includes these request headers (`Accept`, `Accept-Encoding`, `Authorization`).
+- Never cache personalized responses in shared caches (use `private` or `no-store`). Financial data is usually `no-store`.
+- CDN for public, cacheable GETs; invalidation via versioned URLs or purge APIs.
+
+```http
+GET /api/v1/accounts/42
+→ 200 OK
+  ETag: "AAAAAAAAB9E="
+  Cache-Control: private, no-cache
+
+PUT /api/v1/accounts/42
+If-Match: "AAAAAAAAB9E="
+→ 204 No Content            (or 412 Precondition Failed if someone changed it)
+
+GET /api/v1/products/7
+If-None-Match: "p7-v12"
+→ 304 Not Modified
+```
+
+```csharp
+app.MapPut("/api/v1/accounts/{id:int}", async (int id, UpdateAccount body, HttpRequest req, AppDbContext db) =>
+{
+    var acc = await db.Accounts.FindAsync(id);
+    if (acc is null) return Results.NotFound();
+    if (!req.Headers.TryGetValue("If-Match", out var etag)) return Results.StatusCode(428);
+    if (etag != $"\"{Convert.ToBase64String(acc.RowVersion)}\"") return Results.StatusCode(412);
+
+    acc.Nickname = body.Nickname;
+    try { await db.SaveChangesAsync(); }                       // EF also checks RowVersion in the WHERE
+    catch (DbUpdateConcurrencyException) { return Results.StatusCode(412); }
+    return Results.NoContent();
+});
+```
+
+**Common interview questions**
+
+**Q1. How do you prevent lost updates in a REST API?**
+Optimistic concurrency with ETags: return an ETag on GET, require `If-Match` on updates, compare it with the current version (the DB row version), and return 412 on mismatch so the client re-fetches and retries or merges.
+
+**Q2. Optimistic vs pessimistic locking for APIs?**
+Optimistic (ETags/row versions) fits stateless HTTP and low-contention data — no locks held between requests. Pessimistic locks across HTTP calls are dangerous (abandoned locks); use them only inside one short server transaction (e.g., seat reservation with a time-limited hold).
+
+**Q3. `no-cache` vs `no-store`?**
+`no-cache` may store the response but must revalidate it with the server before each use. `no-store` must never be stored anywhere — use it for sensitive data (balances, PII).
+
+**Q4. How does a 304 work?**
+The client sends `If-None-Match` with its cached ETag; if unchanged, the server responds 304 with no body, and the client uses its cached copy.
+
+**Q5. How would you design caching for a read-heavy public API?**
+Public, non-personalized GETs get `Cache-Control: public, max-age=..., s-maxage=...` + ETags behind a CDN; versioned or immutable URLs for static data; `Vary` set correctly; `stale-while-revalidate` for resilience; and an explicit purge path. Personalized data is `private` or `no-store`, cached server-side (Redis) if needed.
+
+---
+
+## 5. Pagination, Filtering, Sorting, Field Selection & Bulk
+
+**Key concepts**
+- **Offset pagination** (`?offset=200&limit=50`): simple, allows jumping to a page, but **slow for deep pages** (the DB scans and skips rows) and **unstable** under concurrent inserts/deletes (duplicates and missed rows).
+- **Cursor/keyset pagination** (`?after=<opaque cursor>&limit=50`): `WHERE (created_at, id) < (@lastCreated, @lastId) ORDER BY created_at DESC, id DESC`. Fast at any depth (index seek) and stable. No random page jumps. Make the cursor **opaque** (base64-encoded).
+- **Always enforce a max page size** server-side; default to a sensible limit.
+- Return `next` links/cursors; avoid expensive total counts on huge tables (make them optional).
+- **Filtering:** `?status=paid&createdFrom=2026-01-01`; **sorting:** `?sort=-createdAt,amount`; whitelist the sortable/filterable fields (and make sure they're indexed).
+- **Field selection / expansion:** `?fields=id,status`, `?expand=customer` to reduce over-fetching and chattiness.
+- **Bulk operations:** bounded batch size; decide **all-or-nothing** vs **per-item results** (207-style or a results array with per-item status and a client reference); support idempotency per item.
+
+```http
+GET /api/v1/transactions?accountId=42&limit=50&after=eyJ0IjoiMjAyNi0xMC0wMVQxMDowMDowMFoiLCJpZCI6OTg3fQ
+→ 200 OK
+{
+  "data": [ ... 50 items ... ],
+  "page": { "next": "/api/v1/transactions?accountId=42&limit=50&after=eyJ0Ijoi..." }
+}
+```
+
+```sql
+-- Keyset query (index on AccountId, CreatedAt DESC, Id DESC)
+SELECT TOP (@limit) Id, CreatedAt, Amount
+FROM Transactions
+WHERE AccountId = @accountId
+  AND (CreatedAt < @lastCreated OR (CreatedAt = @lastCreated AND Id < @lastId))
+ORDER BY CreatedAt DESC, Id DESC;
+```
+
+```json
+// Bulk with per-item outcomes
+POST /api/v1/payouts/batch
+{ "items": [ { "clientRef": "a1", "amount": "10.00", "currency": "EUR", "iban": "..." },
+             { "clientRef": "a2", "amount": "-5",    "currency": "EUR", "iban": "..." } ] }
+→ 200 OK
+{ "results": [ { "clientRef": "a1", "status": 201, "id": "po_1" },
+               { "clientRef": "a2", "status": 422, "error": "amount must be positive" } ] }
+```
+
+**Common interview questions**
+
+**Q1. Offset vs cursor pagination?**
+Offset is simple and supports "page 7", but deep pages get slow and results shift when data changes. Cursor/keyset uses the last seen sort key, so it's an index seek at any depth and stable under writes. Use cursors for large or actively-written datasets (transactions, feeds) and offset for small admin lists.
+
+**Q2. How would you paginate a 500M-row, actively-written transactions table?**
+Keyset pagination on `(account_id, created_at, id)` with a matching index, an opaque cursor, a max page size, no total count (or an approximate one), and filters required to narrow the scan (account, date range).
+
+**Q3. Why enforce a maximum page size?**
+Otherwise one client request (`limit=1000000`) can exhaust server memory, saturate the database and hurt everyone. The client must not control unbounded work.
+
+**Q4. How do you design a bulk endpoint?**
+Cap the batch size; let clients send a per-item reference; decide on atomic (one transaction, all-or-nothing) vs partial success with per-item results; make it idempotent (batch key or per-item keys); consider async (202) for big batches.
+
+**Q5. How do you support flexible filtering without SQL injection or slow queries?**
+Whitelist filterable and sortable fields, map them to parameterized queries, require at least one selective filter on large tables, index the common combinations, and cap the result size. For complex search, use a search engine (Elasticsearch/OpenSearch).
+
+**Q6. How do you reduce chattiness for mobile clients?**
+Field selection, `?expand=` for related resources, a BFF (Backend for Frontend) aggregating calls, or GraphQL when client needs vary widely.
+
+---
+
+## 6. Versioning & Breaking Changes
+
+**Key concepts**
+- **Strategies:**
+  - **URI path** `/v1/orders` — visible, easy routing, caching and testing (most common).
+  - **Query string** `?api-version=2024-10-01` — common in Azure APIs.
+  - **Header** `Api-Version: 2` — clean URIs, harder to test and cache.
+  - **Media type** `Accept: application/vnd.acme.v2+json` — purist, the most complex.
+  - **Date-based versions** (Stripe-style, pinned per account) — fine-grained evolution.
+- **Version the contract, not every deployment.** Prefer **additive, backward-compatible change**; bump the major version only for breaking changes.
+- **Breaking:** removing or renaming a field, changing a type or format, making an optional field required, tightening validation, changing meaning (semantics), changing defaults or status codes, **adding an enum value clients don't handle** (if clients use exhaustive switches).
+- **Non-breaking (if clients follow the tolerant reader rule):** adding optional fields, new endpoints, new optional query parameters.
+- **Tolerant reader:** clients ignore unknown fields and handle unknown enum values.
+- **Deprecation:** announce, add `Deprecation` and `Sunset` headers, give a migration guide, measure usage per client, then retire.
+- Run old and new versions side by side via an adapter layer over one implementation (avoid forking the codebase).
+
+```csharp
+// Asp.Versioning package
+builder.Services.AddApiVersioning(o =>
+{
+    o.DefaultApiVersion = new ApiVersion(1, 0);
+    o.AssumeDefaultVersionWhenUnspecified = true;
+    o.ReportApiVersions = true;                         // api-supported-versions header
+    o.ApiVersionReader = new UrlSegmentApiVersionReader();
+});
+
+var v = app.NewApiVersionSet().HasApiVersion(new(1, 0)).HasApiVersion(new(2, 0)).Build();
+app.MapGet("/api/v{version:apiVersion}/orders/{id}", GetOrderV1).WithApiVersionSet(v).MapToApiVersion(1, 0);
+app.MapGet("/api/v{version:apiVersion}/orders/{id}", GetOrderV2).WithApiVersionSet(v).MapToApiVersion(2, 0);
+```
+
+```http
+HTTP/1.1 200 OK
+Deprecation: @1767225600
+Sunset: Thu, 01 Jan 2027 00:00:00 GMT
+Link: <https://docs.example.com/migrate-v2>; rel="deprecation"
+```
+
+**Common interview questions**
+
+**Q1. Which versioning strategy do you prefer?**
+URI path versioning for most public and internal APIs: explicit, easy to route, test, log and cache. Header or media-type versioning is cleaner in theory but harder to operate. The more important decision is minimizing breaking changes, so versions are rare.
+
+**Q2. What counts as a breaking change?**
+Anything that can make an existing correct client fail: removing or renaming fields, type or format changes, new required inputs, stricter validation, changed semantics or defaults, changed status codes, and new enum values for strict clients.
+
+**Q3. Is adding a field to a response breaking?**
+Not for tolerant clients that ignore unknown fields — but it is for strict deserializers or generated clients that reject unknown properties. Document the tolerant-reader expectation in your API guidelines.
+
+**Q4. How do you retire v1 with many unknown consumers?**
+Measure usage per client (API keys/client IDs), announce early with `Deprecation`/`Sunset` headers and docs, contact the top consumers directly, provide a migration guide and tooling, run brownouts (short planned failures) before the sunset date, and keep an emergency extension policy.
+
+**Q5. How do you avoid doubling maintenance when supporting v1 and v2?**
+One domain implementation; versions are thin mapping layers (DTO adapters) at the edge. Keep at most two concurrent major versions, with a clear support window.
+
+**Q6. A field's meaning changed (gross → net) but its name and type stayed the same. Breaking?**
+Yes — it's a **semantic** break. Schema diff tools won't catch it, and every consumer is silently wrong. Add a new field (`netAmount`), deprecate the old one, and never repurpose fields.
+
+---
+
+## 7. Error Handling (ProblemDetails)
+
+**Key concepts**
+- Use **RFC 9457 Problem Details** (`application/problem+json`): `type` (a URI identifying the error type), `title`, `status`, `detail`, `instance`, plus extensions like `traceId`, `errorCode`, field `errors`.
+- **Machine-readable codes** (`INSUFFICIENT_FUNDS`) for client logic; human messages for developers; never parse messages.
+- **Validation errors:** list each field and message.
+- **Never leak internals:** no stack traces, SQL, server names or internal IDs.
+- Return the **trace/correlation ID** so support can find the logs.
+- Consistent across all endpoints and services (shared middleware or library).
+- Document the error codes and their remediation (retryable? user action?).
+
+```json
+HTTP/1.1 422 Unprocessable Content
+Content-Type: application/problem+json
+
+{
+  "type": "https://api.example.com/errors/insufficient-funds",
+  "title": "Insufficient funds",
+  "status": 422,
+  "detail": "Account acc_42 has 50.00 USD available; 125.50 USD requested.",
+  "instance": "/api/v1/payments",
+  "errorCode": "INSUFFICIENT_FUNDS",
+  "retryable": false,
+  "traceId": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+}
+```
+
+```json
+HTTP/1.1 400 Bad Request
+{
+  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+  "title": "One or more validation errors occurred.",
+  "status": 400,
+  "errors": { "amount": ["Must be greater than 0."], "currency": ["Must be a 3-letter ISO code."] },
+  "traceId": "00-..."
+}
+```
+
+```csharp
+builder.Services.AddProblemDetails(o => o.CustomizeProblemDetails = ctx =>
+    ctx.ProblemDetails.Extensions["traceId"] = Activity.Current?.Id ?? ctx.HttpContext.TraceIdentifier);
+app.UseExceptionHandler();
+app.UseStatusCodePages();
+```
+
+**Common interview questions**
+
+**Q1. What should an API error response contain?**
+The correct HTTP status; a stable machine-readable error code; a safe human-readable message; field-level details for validation; a correlation/trace ID; optionally whether it's retryable and a docs link. Use the ProblemDetails format consistently.
+
+**Q2. Why not return exception messages to clients?**
+They leak internals (an information-disclosure security finding), they change between releases (breaking clients that parse them), and they aren't written for consumers.
+
+**Q3. How do you keep errors consistent across 50 microservices?**
+A shared error contract (ProblemDetails + an error-code catalogue) shipped as a library or middleware, linting of OpenAPI specs for error responses, and contract tests covering error cases.
+
+**Q4. How should clients handle errors?**
+Branch on the status code first, then on `errorCode`; retry only retryable errors (5xx/429/timeouts) with backoff; surface validation details to users; log the `traceId`.
+
+---
+
+## 8. Long-Running Operations & Webhooks
+
+**Key concepts**
+- **Asynchronous request-reply:** `POST` → **202 Accepted** + `Location: /operations/{id}` (+ `Retry-After`); the client polls `GET /operations/{id}` → `{ status: running | succeeded | failed, resultUrl }`; on success, link or redirect (303) to the created resource.
+- **Webhooks:** the server calls the client's URL when the state changes. Requirements: **sign payloads** (HMAC-SHA256 with a timestamp to prevent replay), **retries with backoff**, **at-least-once delivery** → receivers must **dedupe by event ID**, ordering isn't guaranteed (include a version or timestamp), a delivery log, and a manual redelivery option. Keep payloads thin ("something changed, fetch it") or full but versioned.
+- Receivers should respond **2xx quickly** and process asynchronously.
+- Combine both: webhooks for timeliness plus polling or reconciliation as the safety net.
+- Alternatives: SSE/WebSockets for real-time UI; message brokers for internal systems.
+
+```http
+POST /api/v1/reports                → 202 Accepted
+                                      Location: /api/v1/operations/op_91
+                                      Retry-After: 5
+GET  /api/v1/operations/op_91       → 200 { "status": "running", "progress": 40 }
+GET  /api/v1/operations/op_91       → 200 { "status": "succeeded", "resultUrl": "/api/v1/reports/rep_7" }
+```
+
+```csharp
+// Verifying a webhook signature (receiver side)
+static bool IsValid(string payload, string timestamp, string signatureHex, string secret)
+{
+    if (DateTimeOffset.UtcNow - DateTimeOffset.FromUnixTimeSeconds(long.Parse(timestamp)) > TimeSpan.FromMinutes(5))
+        return false;                                              // replay protection
+    using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
+    var expected = hmac.ComputeHash(Encoding.UTF8.GetBytes($"{timestamp}.{payload}"));
+    return CryptographicOperations.FixedTimeEquals(expected, Convert.FromHexString(signatureHex)); // constant-time
+}
+```
+
+**Common interview questions**
+
+**Q1. How do you design an API for an operation that takes minutes?**
+Return 202 Accepted with an operation resource URL; process in the background (queue + worker); the client polls with `Retry-After` hints or receives a webhook; the operation resource has a terminal status, an error detail, and a link to the result; keep operation records for a defined retention period.
+
+**Q2. How do you make webhooks reliable and secure?**
+HMAC signatures with a timestamp (verified with a constant-time compare), HTTPS only, retries with exponential backoff over hours, at-least-once delivery with unique event IDs so receivers can dedupe, a delivery dashboard and replay endpoint, secret rotation support, and polling/reconciliation as a fallback.
+
+**Q3. Webhook events arrived out of order — how should the receiver cope?**
+Don't rely on order: include a sequence or version/timestamp per resource, ignore older versions, or treat the webhook as a trigger to fetch the current state from the API.
+
+**Q4. Polling vs webhooks?**
+Polling is simple and firewall-friendly but wasteful and slow to react. Webhooks are timely and efficient but need a public endpoint, security and retry handling. Many providers offer both; clients use webhooks with periodic polling or reconciliation as a safety net.
+
+---
+
+## 9. Data Formats: Time, Money, IDs & Content Negotiation
+
+**Key concepts**
+- **Time:** ISO-8601 / RFC 3339 **with an offset or `Z`** (`2026-10-03T10:15:00Z`); store UTC; keep the user's time zone separately when it matters (business dates like "value date" are plain dates: `2026-10-03`).
+- **Money:** **never a JSON float**. Use a decimal **string** (`"125.50"`) or **integer minor units** (`12550`) **plus an ISO-4217 currency** (`"USD"`). Mind currencies with 0 or 3 decimals (JPY, KWD).
+- **IDs:** opaque, non-sequential (UUID, ULID, prefixed `pay_...`) to prevent enumeration and leaking volumes; treat them as strings in contracts.
+- **Enums:** strings, not integers; clients must tolerate unknown values.
+- **Nulls vs absent:** define semantics (especially for PATCH).
+- **Content negotiation:** `Accept` / `Content-Type`; return **406** if the format can't be produced, **415** for an unsupported request type. JSON by default; also compression (`Accept-Encoding: gzip, br`).
+- **Large payloads/files:** multipart upload or pre-signed URLs (S3/Blob) instead of streaming through your API.
+
+```json
+{
+  "id": "pay_01JA2Z3K9Q8W7E6R5T4Y3U2I1O",
+  "amount": { "value": "1250.00", "currency": "EUR" },
+  "amountMinor": 125000,
+  "createdAt": "2026-10-03T10:15:00Z",
+  "valueDate": "2026-10-05",
+  "status": "captured"
+}
+```
+
+**Common interview questions**
+
+**Q1. How should money be represented in an API?**
+As an exact decimal string or integer minor units, always with an explicit ISO currency code. Never a binary float — rounding errors accumulate and cents get lost.
+
+**Q2. How do you handle dates and times?**
+RFC 3339 timestamps with an offset (prefer UTC `Z`) for instants; plain dates for business dates; never ambiguous local times without a zone; document precision.
+
+**Q3. Why avoid sequential integer IDs in public APIs?**
+They let attackers enumerate other users' resources (making BOLA easier to exploit) and leak business volumes. Use random or opaque IDs — but still enforce authorization.
+
+**Q4. How do you handle file uploads?**
+For large files, issue a pre-signed upload URL (S3/Azure Blob) so the client uploads directly to storage, then notify the API; for small files, multipart/form-data with size limits, content-type validation and malware scanning.
+
+---
+
+## 10. API Security (OWASP API Security Top 10)
+
+**Key concepts — OWASP API Security Top 10 (2023)**
+1. **Broken Object Level Authorization (BOLA/IDOR)** — changing `/orders/123` to `/orders/124` returns someone else's data.
+2. **Broken Authentication** — weak tokens, no expiry, credential stuffing.
+3. **Broken Object Property Level Authorization** — excessive data exposure + mass assignment.
+4. **Unrestricted Resource Consumption** — no limits on size, rate or cost.
+5. **Broken Function Level Authorization** — regular users calling admin endpoints.
+6. **Unrestricted Access to Sensitive Business Flows** — bots abusing checkout, sign-up or ticket buying.
+7. **Server-Side Request Forgery (SSRF)** — the API fetches attacker-supplied URLs (e.g., cloud metadata).
+8. **Security Misconfiguration** — verbose errors, permissive CORS, missing TLS.
+9. **Improper Inventory Management** — forgotten old versions and shadow endpoints.
+10. **Unsafe Consumption of APIs** — blindly trusting third-party API responses.
+
+**Key practices**
+- **Authenticate** with OAuth2/OIDC bearer tokens (JWT, validate `iss`/`aud`/`exp`/signature), mTLS for service-to-service, API keys only to identify partners (hashed, scoped, rotatable).
+- **Authorize every object:** derive the user/tenant from the **token**, never from the body or headers; scope queries by owner.
+- **Response DTOs** expose only allowed fields; **request DTOs** accept only allowed fields.
+- **Input limits:** body size, JSON depth, array lengths, string lengths, timeouts.
+- **Never put secrets or tokens in URLs** (they're logged and leaked via `Referer`).
+- **CORS is not access control** — it only tells browsers which origins may read responses.
+- **TLS 1.2+** everywhere, HSTS; consider TLS internally (zero trust).
+- **Fail closed** when an auth dependency is unavailable.
+- Security headers, a WAF and bot protection at the edge; audit logging of sensitive operations.
+
+```csharp
+// BOLA-safe query: scope by the caller's identity from the token
+app.MapGet("/api/v1/accounts/{id}", async (string id, ClaimsPrincipal user, AppDbContext db) =>
+{
+    var customerId = user.FindFirstValue("customer_id");               // from the token, not the request
+    var acct = await db.Accounts.AsNoTracking()
+        .Where(a => a.Id == id && a.CustomerId == customerId)
+        .Select(a => new AccountDto(a.Id, a.Nickname, a.Balance, a.Currency))  // explicit response DTO
+        .SingleOrDefaultAsync();
+    return acct is null ? Results.NotFound() : Results.Ok(acct);       // 404, not 403
+}).RequireAuthorization("accounts:read");
+
+// Input limits
+builder.WebHost.ConfigureKestrel(k => k.Limits.MaxRequestBodySize = 1_000_000);      // 1 MB
+builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.MaxDepth = 32);
+
+// CORS: explicit origins only
+builder.Services.AddCors(o => o.AddPolicy("web", p => p.WithOrigins("https://app.example.com")
+    .WithMethods("GET", "POST").WithHeaders("Authorization", "Content-Type", "Idempotency-Key")));
+```
+
+**Common interview questions**
+
+**Q1. What is BOLA and why is it the #1 API risk?**
+The endpoint checks that you're logged in but not that you own the specific object, so changing an ID exposes other users' data. It's common because frameworks make endpoint-level auth easy, while object-level checks must be written per query. Fix: scope every data access by the authenticated principal, use resource-based authorization, use non-guessable IDs, and test cross-user access in automated tests.
+
+**Q2. What is mass assignment and how do you prevent it?**
+Binding the request body straight into a model lets attackers set fields like `isAdmin`, `balance` or `tenantId`. Prevent it with dedicated request DTOs containing only allowed fields and explicit mapping.
+
+**Q3. Why must the tenant ID come from the token, not the request?**
+Anything in the body or headers is attacker-controlled. If the API trusts `tenantId` from the payload, a caller can act on another tenant's data. Derive authorization-relevant values from the validated credential.
+
+**Q4. Does CORS protect my API?**
+No. CORS is enforced by browsers only, to stop malicious *web pages* from reading responses cross-origin. curl, scripts, mobile apps and servers ignore it. Real protection is authentication and authorization.
+
+**Q5. Why never put secrets or tokens in URLs?**
+URLs end up in server and proxy logs, browser history, analytics and `Referer` headers to third parties. Put credentials in the `Authorization` header or body.
+
+**Q6. What input limits should every API have?**
+Max request body size, JSON depth, max array/collection lengths, string lengths, max page size, request timeouts, and limits on expensive operations (export size, report date range).
+
+**Q7. How do you secure service-to-service APIs?**
+mTLS (often via a service mesh) for workload identity plus OAuth2 client-credentials tokens with a specific audience and scopes; network policies; no shared static API keys; and least privilege per service.
+
+**Q8. Fail-open or fail-closed when the auth server is unreachable?**
+Fail closed for authentication and authorization — serving data without a check is a breach, not a degradation. Mitigate availability with local JWT validation (cached signing keys) so the auth server isn't in the hot path.
+
+**Q9. How do you respond to a leaked API credential?**
+Revoke or rotate it immediately, review access logs for its use (scope of impact), notify the affected parties per policy and regulation, check for persistence (new keys created), then fix the root cause (e.g., secret scanning in CI).
+
+**Q10. How would you design security for an API handling regulated financial data?**
+OAuth2/OIDC with short-lived tokens and FAPI-style hardening (PKCE, mTLS- or DPoP-bound tokens), strict object-level authorization, encryption in transit and at rest, PII minimization in responses and logs, immutable audit logs, rate limiting and anomaly detection, regular penetration tests, and compliance mapping (PCI-DSS, SOX, GDPR).
+
+---
+
+## 11. Rate Limiting, Quotas & Load Shedding
+
+**Key concepts**
+
+| Algorithm | How it works | Pros / cons |
+|---|---|---|
+| **Fixed window** | count per window (e.g., 100/min) | simple; allows **2× bursts at window boundaries** |
+| **Sliding window log/counter** | weighted count over a rolling window | smoother; slightly more state |
+| **Token bucket** | tokens refill at a rate; each request takes one; bucket size = burst | allows controlled bursts — **most common** |
+| **Leaky bucket** | queue drained at a constant rate | smooths output; adds latency |
+| **Concurrency limit** | max in-flight requests | protects expensive endpoints and dependencies |
+
+- **Rate limit** = protection (requests per second). **Quota** = a commercial allowance (calls per month per plan). **Load shedding** = rejecting work when the server itself is overloaded, regardless of client.
+- **Key on the authenticated client/user/tenant** (API key, client ID), not just IP (NAT shares IPs; attackers rotate them). Use IP for unauthenticated endpoints (login).
+- **Distributed state:** per-instance limiters multiply the limit by the replica count → use a shared store (Redis with an atomic Lua script) or the gateway; decide **fail-open vs fail-closed** if the store is down (usually fail open with a local fallback limit).
+- **Cost-based limits:** expensive endpoints consume more tokens.
+- **Layering:** edge/WAF (DDoS, per IP) → API gateway (per client, plan quotas) → service (per tenant, per endpoint, concurrency) → dependency (bulkheads, circuit breakers).
+- **429 response:** `Retry-After`, plus `RateLimit-Limit`/`RateLimit-Remaining`/`RateLimit-Reset` headers (IETF draft) and which limit was hit.
+
+```lua
+-- Redis token bucket (atomic); KEYS[1]=bucket key; ARGV: capacity, refillPerSec, nowMs
+local b = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
+local tokens = tonumber(b[1]) or tonumber(ARGV[1])
+local ts = tonumber(b[2]) or tonumber(ARGV[3])
+tokens = math.min(tonumber(ARGV[1]), tokens + (tonumber(ARGV[3]) - ts) / 1000 * tonumber(ARGV[2]))
+local allowed = tokens >= 1
+if allowed then tokens = tokens - 1 end
+redis.call('HMSET', KEYS[1], 'tokens', tokens, 'ts', ARGV[3])
+redis.call('PEXPIRE', KEYS[1], 60000)
+return allowed and 1 or 0
+```
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 12
+RateLimit-Limit: 100
+RateLimit-Remaining: 0
+RateLimit-Reset: 12
+Content-Type: application/problem+json
+
+{ "title": "Rate limit exceeded", "status": 429, "errorCode": "RATE_LIMIT_PER_CLIENT" }
+```
+
+**Common interview questions**
+
+**Q1. Compare the rate-limiting algorithms.**
+A fixed window is simplest but lets double bursts through at boundaries. A sliding window fixes that with a bit more state. A token bucket permits bursts up to the bucket size while enforcing an average rate (the standard choice). A leaky bucket smooths the output rate. Concurrency limits cap in-flight work and are best for expensive operations.
+
+**Q2. We deployed a limit of 100 rps but see 1,000 rps. Why?**
+The limiter state is per instance and there are 10 replicas, or it's keyed on something the client can vary (a header or IP behind a proxy). Move the counters to a shared store or the gateway, and key on the authenticated identity.
+
+**Q3. How do you do distributed rate limiting without a single point of failure?**
+Redis (clustered) with atomic Lua scripts; a local in-memory fallback limit if Redis is unavailable (fail open with a conservative cap); or approximate algorithms where each instance gets a share of the budget, synced periodically to reduce round trips.
+
+**Q4. What should you rate-limit on?**
+The authenticated client or tenant (API key, OAuth client ID, user ID), plus per-IP limits on unauthenticated endpoints like login. Never on a client-supplied unauthenticated header.
+
+**Q5. Rate limiting vs quota vs load shedding?**
+Rate limits protect against short bursts per client. Quotas enforce long-term commercial usage (per month or plan). Load shedding protects the server from overall overload by rejecting low-priority work first, even from well-behaved clients.
+
+**Q6. How do you handle endpoints with very different costs?**
+Cost-weighted tokens (a report costs 50 tokens, a GET costs 1), separate limits per endpoint class, concurrency limits on expensive operations, and async processing for heavy jobs.
+
+**Q7. How do you tell abuse from a legitimate spike?**
+Look at the distribution: one client or a few IPs vs broad organic growth; behaviour patterns (sequential IDs → enumeration; failed logins → credential stuffing); correlation with marketing events. Use per-client limits plus anomaly detection, and give known partners higher limits.
+
+---
+
+## 12. OpenAPI, Documentation & Contract Testing
+
+**Key concepts**
+- **OpenAPI** (3.0/3.1) = a machine-readable contract: docs (Swagger UI, Redoc, Scalar), client SDK generation, server stubs, request validation, mock servers, linting (Spectral), and **breaking-change diffing** (oasdiff, openapi-diff) in CI.
+- **Code-first** (generated from code — no drift, less up-front design review) vs **design-first** (spec written and reviewed before code — better design, needs drift checks). Either way: verify the implementation matches the spec in CI.
+- Good docs cover more than schemas: authentication, error codes and remediation, rate limits, idempotency and retry guidance, pagination, versioning and deprecation policy, webhooks, and examples **generated from tests**.
+- **Consumer-driven contract testing (Pact):** each consumer publishes the interactions it relies on; the provider verifies them in its pipeline; the broker's **can-i-deploy** check blocks deployments that break a consumer running in the target environment. Contracts should assert only the fields the consumer actually uses.
+- **Contract tests vs integration/E2E tests:** contract tests are fast, isolated and pairwise; E2E tests are slow, flaky and need everything deployed. Use many contract tests and few E2E tests.
+- **Schema checks miss semantic changes** (meaning, units, defaults) → review and naming discipline.
+- Measure **usage per field and per client** to make deprecation safe.
+
+```csharp
+// .NET 9+ built-in OpenAPI document generation
+builder.Services.AddOpenApi();
+app.MapOpenApi();                                  // serves /openapi/v1.json
+
+app.MapGet("/api/v1/orders/{id:guid}", GetOrder)
+   .WithName("GetOrder")
+   .WithSummary("Get an order by ID")
+   .Produces<OrderDto>(StatusCodes.Status200OK)
+   .ProducesProblem(StatusCodes.Status404NotFound);
+```
+
+```yaml
+# Fragment of an OpenAPI spec
+paths:
+  /api/v1/payments:
+    post:
+      operationId: createPayment
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: { type: string, maxLength: 64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePayment' }
+      responses:
+        '201': { description: Created }
+        '409': { description: Same key still in progress }
+        '422': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+```
+
+```bash
+# CI: fail the build on breaking changes vs the published spec
+oasdiff breaking published/openapi.json build/openapi.json --fail-on ERR
+# Pact: may this version be deployed to prod?
+pact-broker can-i-deploy --pacticipant payments-api --version $GIT_SHA --to-environment production
+```
+
+**Common interview questions**
+
+**Q1. What does OpenAPI give you beyond documentation?**
+A single machine-readable contract for client and server generation, request/response validation, mocks for parallel development, linting of design standards, and automated breaking-change detection in CI.
+
+**Q2. Code-first or design-first?**
+Design-first for public or partner APIs and cross-team contracts (review the design before investing in code); code-first for internal services moving fast. In both cases, generate or verify the spec in CI so it can never drift from the implementation.
+
+**Q3. What is consumer-driven contract testing?**
+Consumers record their expectations of a provider (requests and the response fields they use) as contracts; the provider runs them against its real implementation in CI; a broker tracks which versions are compatible and gates deployments with `can-i-deploy`. It catches integration breaks without full end-to-end environments.
+
+**Q4. Contract tests vs integration tests?**
+Contract tests check pairwise compatibility quickly and deterministically. Integration/E2E tests check composed behaviour but are slow, flaky and hard to attribute. Use contract tests for compatibility and a thin set of E2E smoke tests for critical journeys.
+
+**Q5. How do you catch a breaking change in CI?**
+Generate the OpenAPI document from the build, diff it against the last published version with a breaking-change tool, fail on breaking diffs unless the version is bumped, and run provider verification against consumer contracts.
+
+**Q6. What does a schema diff miss?**
+Semantic changes (a field's meaning or units), changed defaults, behaviour changes (ordering, rounding, timing), and changes in error behaviour. Cover these with design review, explicit naming (`amountNet`) and consumer contract tests on behaviour.
+
+**Q7. How do you handle a third-party API you don't control?**
+Wrap it in an anti-corruption layer (adapter) with your own internal model, validate responses defensively, record and replay contract tests against their sandbox, monitor for drift, and keep fallbacks for failures.
+
+---
+
+## 13. REST vs GraphQL vs gRPC vs WebSockets/SSE vs Webhooks
+
+| | REST | GraphQL | gRPC | WebSockets / SSE | Webhooks |
+|---|---|---|---|---|---|
+| Style | resources + HTTP verbs | query language, one endpoint | RPC with Protobuf over HTTP/2 | persistent connection | server → client HTTP callback |
+| Best for | public APIs, CRUD, caching | varied client data needs (mobile/web BFF) | internal high-performance service calls, streaming | real-time UI | event notification to partners |
+| Caching | HTTP caching, CDN | hard (POST, single endpoint) | none built in | n/a | n/a |
+| Contract | OpenAPI | schema (SDL) | `.proto` | custom | event schema |
+| Watch out | over/under-fetching | N+1 resolvers, query cost limits, authorization per field | browser support, L7 load balancing | scaling stateful connections | security, retries, ordering |
+
+**Common interview questions**
+
+**Q1. When is REST the wrong choice?**
+For high-throughput internal service calls needing low latency and streaming (gRPC); for clients with very diverse data shapes that would cause over- or under-fetching (GraphQL); for real-time bidirectional communication (WebSockets); and for event distribution between internal systems (messaging/Kafka).
+
+**Q2. REST vs GraphQL?**
+REST: simple, cacheable, mature tooling, stable resources. GraphQL: clients ask for exactly what they need in one round trip and the schema is strongly typed — but caching, rate limiting (query cost analysis), N+1 resolver performance and field-level authorization are harder. GraphQL fits a BFF serving many UI variants.
+
+**Q3. REST vs gRPC for internal services?**
+gRPC is faster (binary, HTTP/2 multiplexing), strongly typed, with streaming and generated clients — ideal for internal service-to-service calls. REST is easier to debug, browser-friendly and better for public consumers. Many organizations use gRPC internally and REST at the edge.
+
+---
+
+## 14. Top 30 Rapid-Fire Questions + Principal Questions
+
+1. **REST constraints?** Client–server, stateless, cacheable, uniform interface, layered, (code on demand).
+2. **Richardson L2?** Resources + HTTP verbs + status codes.
+3. **Safe methods?** GET, HEAD, OPTIONS.
+4. **Idempotent methods?** GET, HEAD, OPTIONS, PUT, DELETE.
+5. **PUT vs PATCH?** Full replace vs partial update.
+6. **Create response?** 201 + `Location`.
+7. **Async response?** 202 + a status URL.
+8. **400 vs 422?** Malformed vs business-rule violation.
+9. **401 vs 403?** Unauthenticated vs forbidden.
+10. **409?** Conflict with the current state.
+11. **412?** `If-Match` precondition failed.
+12. **429?** Rate limited + `Retry-After`.
+13. **Idempotency key?** A client UUID per operation; the server stores the response.
+14. **Retry which errors?** Timeouts, 429, 502/503/504 with backoff + jitter.
+15. **ETag use?** Caching (304) and optimistic concurrency (412).
+16. **`no-cache` vs `no-store`?** Revalidate vs never store.
+17. **Offset vs cursor?** Simple/unstable vs fast/stable.
+18. **Max page size?** Always enforced server-side.
+19. **Versioning?** URI path most common; minimize breaking changes.
+20. **Breaking change?** Remove/rename/type change/new required/semantic change.
+21. **Tolerant reader?** Ignore unknown fields, handle unknown enums.
+22. **Error format?** RFC 9457 ProblemDetails + error code + trace ID.
+23. **Money format?** Decimal string or minor units + ISO currency.
+24. **Timestamps?** RFC 3339 with `Z`/offset.
+25. **BOLA?** Missing object-level authorization → scope by owner.
+26. **Mass assignment?** Use request DTOs.
+27. **CORS?** A browser read policy, not access control.
+28. **Token bucket?** Burst + steady rate.
+29. **Webhook security?** HMAC signature + timestamp + dedupe by event ID.
+30. **Contract testing?** Consumer-driven (Pact) + can-i-deploy.
+
+**Principal-level questions**
+
+**P1. How do you govern API design across 100 teams without becoming a bottleneck?**
+Publish API guidelines (naming, errors, pagination, versioning, idempotency); automate enforcement with a Spectral ruleset and breaking-change checks in shared CI templates; provide paved-road libraries (ProblemDetails, auth, rate limiting); reserve human design review for public or cross-domain APIs; and track compliance metrics instead of approving every PR.
+
+**P2. Public vs internal API — what changes?**
+Public: unknown consumers, slow upgrades, strict compatibility and long deprecation windows, design-first specs, SDKs, extensive docs, stronger security and abuse controls, SLAs. Internal: known consumers, faster iteration, consumer-driven contracts can replace long deprecation cycles, and gRPC is an option.
+
+**P3. Plan a breaking change for an API with many unknown consumers.**
+Avoid it if an additive change works. Otherwise: a new version alongside the old, usage telemetry per client, early communication, `Deprecation`/`Sunset` headers, a migration guide or SDK, brownouts, direct outreach to remaining heavy users, and retirement only when usage is near zero or the contract date passes.
+
+**P4. How does API design support multi-tenancy?**
+Tenant derived from the token; every query scoped by tenant (plus database-level enforcement such as RLS); per-tenant rate limits and quotas; tenant-aware audit logs; no cross-tenant IDs exposed; 404 on cross-tenant access.
+
+**P5. How do you design an API to stay usable when its own dependencies partially fail?**
+Timeouts and circuit breakers per dependency; degrade optional parts (omit a recommendations section, flag it in the response); serve stale cached data with an indicator; return 503 + `Retry-After` for truly unavailable operations; accept writes asynchronously (202) when downstream is slow; and make the degradation explicit in the contract.
+
+**P6. What tells you an API will age well?**
+Consumer-oriented resources (not database tables), consistent conventions, explicit contracts with examples, idempotency on writes, cursor pagination, a standard error model, additive-change discipline, usage telemetry, and an owner.
+
+---
+
+## 15. Mistakes Checklist (say why each is wrong)
+- [ ] Verbs in URLs · GET that changes state · exposing DB entities as resources
+- [ ] 200 with an error body · 403 instead of 404 for others' resources · inconsistent error formats
+- [ ] POST without idempotency keys on money movement · retrying non-idempotent calls · retries without backoff and jitter
+- [ ] No ETags → lost updates · caching personalized data in shared caches
+- [ ] Offset pagination over huge, changing tables · unbounded `limit` · total counts on billion-row tables
+- [ ] Breaking changes shipped as "minor" · repurposing a field's meaning · strict deserialization in clients
+- [ ] Money as a float · timestamps without an offset · sequential public IDs · integer enums
+- [ ] `[Authorize]` without object-level checks (BOLA) · tenant ID from the request body · mass assignment
+- [ ] Secrets in URLs · CORS treated as security · no body size or depth limits · failing open on auth
+- [ ] Per-instance rate limiter state · limiting by IP only · 429 without `Retry-After`
+- [ ] Unsigned webhooks · assuming webhook ordering or exactly-once delivery
+- [ ] Hand-maintained specs that drift · contract tests asserting entire responses · no can-i-deploy gate

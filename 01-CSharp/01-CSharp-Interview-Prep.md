@@ -1,759 +1,1299 @@
-# Module 1 — C# Advanced: CLR, JIT, Garbage Collector & Memory Management
+# C# — Complete Interview Prep (All Topics, One File)
 
 > Domain: C# | Level: Beginner → Expert | Prerequisite: none (assumes 10+ YOE baseline)
-> Companion modules to revisit later: `Async/Await Internals`, `Span<T>/Memory<T> & Low-Allocation Code`, `Generics & Variance`
+> **Quick-prep edition** (consolidated 2026-10-03). This one file replaces the 13 former C# modules. The full originals are in git: `git show ebb2d5c:01-CSharp/<file>.md`
+> Each topic has: **Key concepts → Code example → Most common interview questions with answers.**
+
+| # | Topic | # | Topic |
+|---|---|---|---|
+| 1 | Language fundamentals & type system | 10 | Records, pattern matching & immutability |
+| 2 | OOP in C# | 11 | Exceptions |
+| 3 | CLR, JIT, GC & memory | 12 | Collections & BCL |
+| 4 | async/await & Tasks | 13 | Disposal & nullable reference types |
+| 5 | Threading & concurrency | 14 | Reflection, attributes & source generators |
+| 6 | Span, Memory & low allocation | 15 | Strings, encoding & globalization |
+| 7 | Delegates, events, lambdas & closures | 16 | C# version features (7 → 14), C# 12 in detail |
+| 8 | LINQ | 17 | Top 40 rapid-fire questions |
+| 9 | Generics & variance | 18 | Mistakes checklist |
 
 ---
 
-## 1. Topic Description
+## 1. Language Fundamentals & Type System
 
-### Definition
+**Key concepts**
+- **Value types** (`int`, `decimal`, `bool`, `DateTime`, `struct`, `enum`) hold data and are **copied** on assignment. **Reference types** (`class`, `string`, arrays, delegates, `record`) hold a reference; assignment copies the reference.
+- `string` is a reference type but **immutable** and compares by value with `==`.
+- **`const`** = compile-time constant, baked into calling assemblies (changing it requires recompiling consumers). **`readonly`** = set once at runtime (in the constructor). **`static readonly`** for runtime-computed shared values.
+- **Parameter modifiers:** `ref` (must be initialized; callee can change it), `out` (callee must assign it), `in` (read-only reference), `params` (variable arguments). Optional and named arguments.
+- **Nullable value types:** `int?` = `Nullable<int>` (`HasValue`, `Value`, `??`, `?.`, `??=`).
+- **`var`** = compile-time type inference (still statically typed). **`dynamic`** = runtime binding, no compile-time checks.
+- **Equality:** `==` (operator; reference equality for classes unless overloaded), `Equals` (virtual; value equality for structs/records), `ReferenceEquals` (always identity).
+- **Numeric types:** use **`decimal` for money** (base-10, exact); `double` for science (binary, rounding errors). `checked` throws on overflow; the default is `unchecked` (wraps around).
+- **Enums:** `[Flags]` for bit combinations; validate with `Enum.IsDefined` (any int can be cast to an enum).
+- **Tuples:** `(int Id, string Name)` = `ValueTuple` (a mutable struct), good for local multi-returns; prefer records for public APIs.
+- **Boxing:** value type → `object`/interface allocates on the heap.
 
-The **Common Language Runtime (CLR)** is .NET's managed execution engine. It loads assemblies containing **IL** (an intermediate, CPU-agnostic instruction set) plus metadata, compiles each method to native code on first call via the **JIT**, and manages object lifetime automatically through a **tracing generational garbage collector**. "Memory management" in .NET therefore means understanding three interacting systems: how the JIT produces the code that allocates, how the managed heap is physically organised, and how the collector decides when to suspend your threads to reclaim space.
-
-### Core sub-concepts
-
-- **Two-stage compilation** — Roslyn (C# → IL) and the JIT (IL → native); pre-JIT stubs and `MethodTable` slot patching.
-- **Tiered compilation, OSR, ReadyToRun, NativeAOT** — the spectrum of when compilation happens and what it costs at startup versus steady state.
-- **Managed heap layout** — gen0 / gen1 / gen2, the ephemeral segment, the **Large Object Heap** (≥ 85,000 bytes) and the **Pinned Object Heap**.
-- **Generational hypothesis and promotion** — why collection cost is proportional to *survivors*, not garbage; premature promotion.
-- **Roots and reachability** — stack slots, registers, statics, GC handles, the finalization queue; `!gcroot`-style root-path analysis.
-- **Mark–sweep–compact** — thread suspension at safe points, relocation, reference fixup; why the LOH is swept but not compacted by default.
-- **Write barriers and the card table** — the cost of storing a reference into an older-generation object.
-- **GC modes** — Workstation vs Server, background/concurrent GC, DATAS, and `GCHeapHardLimit` / container awareness.
-- **Finalization** — the single finalizer thread, the freachable queue, `IDisposable`, `GC.SuppressFinalize`.
-- **Pinning and fragmentation** — `fixed`, `GCHandle`, async I/O buffers; heap growth with a flat live set.
-- **Working set vs committed vs live set** — why process RSS and managed heap size differ.
-
-### Where it fits
-
-This is the substrate every other C# topic sits on. Allocation-shaping tools (`Span<T>`, pooling), async state machines, closures and LINQ pipelines are all just different ways of feeding or starving the allocator, so their performance claims only make sense against this model. Upward, it determines container sizing, autoscaling behaviour, latency-budget feasibility and the deployment options (JIT vs AOT) available to a service.
-
-### Why it matters at scale
-
-Getting it wrong shows up as P99 latency cliffs from stop-the-world gen2 pauses, pods `OOMKilled` while the managed heap looks small, memory that climbs until a nightly restart, and throughput that collapses well before CPU saturates. At fleet scale it is also a direct cost line: a service running at 60% memory because of buffer churn frequently runs at 35% after the allocation is fixed, which is a real reduction in instance size or count.
-
-### Common pitfalls / anti-patterns
-
-- **Treating "value types live on the stack" as a design rule** — it is an implementation detail; a `struct` field of a class is on the heap, so the expected allocation saving never materialises.
-- **Calling `GC.Collect()` to fix a memory symptom** — it forces a full blocking collection and discards the collector's tuning heuristics, usually worsening the exact pause problem it was added to fix.
-- **Leaving Server GC's heap-per-core default inside a CPU-limited container** — N heaps sized against the host's core count in a 512 MB pod produces an OOM with a mostly-empty heap.
-- **Diagnosing fragmentation as a leak** — live bytes are flat while committed bytes grow; adding "leak fixes" changes nothing because the problem is LOH or pinning-induced holes.
-- **Pooling small, short-lived objects** — converts the collector's cheapest case (dying in gen0) into its most expensive (surviving into gen2), adding write-barrier and card-scanning cost for no gain.
-- **A finalizer that blocks** — there is one finalizer thread running serially, so a single blocking finalizer roots every finalizable object behind it and grows memory with no allocation bug present.
-
-> Scope note: allocation-avoidance APIs (`Span<T>`, `Memory<T>`, `stackalloc`, `ArrayPool<T>`) belong to `03-Span-Memory-Low-Allocation`; async state-machine allocation to `02-Async-Await-Internals`; closure allocation to `04-Delegates-Events-Closures`; generic instantiation and code sharing to `06-Generics-Variance`.
-
----
-
-## 2. Beginner (10 Q&A)
-
-**Q1. Where does `Position` actually live in memory here?**
 ```csharp
+const double Pi = 3.14159;                       // compile-time
+static readonly DateTime StartedAt = DateTime.UtcNow; // runtime, once
+
+void Swap(ref int a, ref int b) => (a, b) = (b, a);
+bool TryDivide(int x, int y, out int result) { result = y == 0 ? 0 : x / y; return y != 0; }
+int Sum(params int[] xs) => xs.Sum();
+void Send(string to, string subject = "(none)", bool urgent = false) { }
+Send("a@b.com", urgent: true);                   // named + optional
+
+int? qty = null;  int safe = qty ?? 0;  qty ??= 5;
+
+decimal price = 0.1m + 0.2m;   // 0.3 exactly
+double  bad   = 0.1 + 0.2;     // 0.30000000000000004
+
+[Flags] enum Perm { None = 0, Read = 1, Write = 2, Delete = 4 }
+var p = Perm.Read | Perm.Write;  bool canWrite = p.HasFlag(Perm.Write);
+
+(int Id, string Name) GetUser() => (1, "Ana");
+var (id, name) = GetUser();                      // deconstruction
+
+checked { int x = int.MaxValue; x++; }           // OverflowException
+```
+
+**Common interview questions**
+
+**Q1. Value type vs reference type?**
+Value types contain their data and are copied on assignment; reference types contain a reference to a heap object, so two variables can point to the same object. Placement (stack/heap) depends on where the variable lives, not on the type kind.
+
+**Q2. `const` vs `readonly` vs `static readonly`?**
+`const` is fixed at compile time and copied into every assembly that uses it — changing it without recompiling consumers leaves them with the old value. `readonly` is assigned at runtime in the declaration or constructor. Use `static readonly` for shared runtime values (and for "constants" in public libraries).
+
+**Q3. `ref` vs `out` vs `in`?**
+`ref`: the caller must initialize it; the method may read and change it. `out`: the method must assign it before returning (the `TryParse` pattern). `in`: passed by reference but read-only — used to avoid copying large structs (only with `readonly struct`, or you get defensive copies).
+
+**Q4. Why `decimal` for money?**
+`double` is binary floating point and can't represent 0.1 exactly, so sums drift. `decimal` is base-10 with 28–29 significant digits — exact for currency arithmetic. It's slower, but correctness matters more. Alternatively, store integer minor units (cents).
+
+**Q5. `==` vs `Equals` vs `ReferenceEquals`?**
+For classes, `==` is reference equality unless overloaded (`string` overloads it). `Equals` is virtual and can be overridden for value semantics (records do this automatically). `ReferenceEquals` is always identity. If you override `Equals`, also override `GetHashCode` (and usually `==`).
+
+**Q6. `var` vs `dynamic` vs `object`?**
+`var` is just inference — the type is fixed at compile time. `object` is the static base type, requiring casts. `dynamic` defers member binding to runtime: no IntelliSense or compile checks, slower, and errors become `RuntimeBinderException`. Use `dynamic` only for COM/interop or truly dynamic data.
+
+**Q7. What is boxing and how do you avoid it?**
+Converting a value type to `object` or an interface allocates a heap copy; unboxing copies it back. Avoid with generics (`List<int>` instead of `ArrayList`), generic interfaces like `IEquatable<T>`, and not passing structs as `object`.
+
+**Q8. Is `string` a value type?**
+No — it's an immutable reference type that *behaves* like a value: `==` compares contents, and every "modification" creates a new string.
+
+---
+
+## 2. OOP in C#
+
+**Key concepts**
+- **Access modifiers:** `public`, `private` (default for members), `protected`, `internal` (default for top-level types — same assembly), `protected internal` (derived classes **or** same assembly), `private protected` (derived classes **and** same assembly), `file` (C# 11, same file).
+- **Abstract class vs interface:** an abstract class can have state, constructors and implemented members, and supports single inheritance. An interface is a contract; a class can implement many. Since C# 8 interfaces can have **default implementations**, and since C# 11 **static abstract members**.
+- **Polymorphism:** `virtual` + `override` = runtime dispatch. **`new`** *hides* a member (static dispatch based on the variable's type — usually a smell). `sealed` stops further overriding/inheritance.
+- **Static class:** no instances; for helpers and extension methods. **Static constructor:** runs once, thread-safe, before first use.
+- **Extension methods:** static methods in a static class with `this T` → look like instance methods (how LINQ works).
+- **Properties** (get/set/init, auto-properties, computed), **indexers**, **operator overloading**, **implicit/explicit conversions**.
+- **Constructor chaining:** `: this(...)` and `: base(...)`. Object/collection initializers.
+- **`partial`** classes and methods (used by source generators). **Nested types.**
+- **Composition over inheritance:** prefer injecting collaborators over deep hierarchies.
+- **Explicit interface implementation:** for name clashes or hiding members.
+
+```csharp
+public abstract class Account(string id)                  // primary constructor (C# 12)
+{
+    public string Id { get; } = id;
+    public decimal Balance { get; protected set; }
+    public abstract decimal MonthlyFee { get; }            // must override
+    public virtual void Deposit(decimal amt)
+    {
+        if (amt <= 0) throw new ArgumentOutOfRangeException(nameof(amt));
+        Balance += amt;
+    }
+}
+
+public sealed class SavingsAccount(string id) : Account(id)
+{
+    public override decimal MonthlyFee => 0m;
+    public override void Deposit(decimal amt) { base.Deposit(amt); /* add interest rules */ }
+}
+
+public interface INotifier
+{
+    Task SendAsync(string msg);
+    Task SendUrgentAsync(string msg) => SendAsync("[URGENT] " + msg);   // default implementation (C# 8)
+}
+
+public static class MoneyExtensions
+{
+    public static string ToCurrency(this decimal amount, string ccy) => $"{amount:N2} {ccy}";
+}
+var text = 125.5m.ToCurrency("USD");
+
+public readonly struct Money(decimal amount, string ccy)
+{
+    public decimal Amount { get; } = amount;
+    public string Currency { get; } = ccy;
+    public static Money operator +(Money a, Money b) =>
+        a.Currency == b.Currency ? new(a.Amount + b.Amount, a.Currency)
+                                 : throw new InvalidOperationException("Currency mismatch");
+}
+
+// virtual vs new
+class Base { public virtual string A() => "Base.A"; public string B() => "Base.B"; }
+class Derived : Base { public override string A() => "Derived.A"; public new string B() => "Derived.B"; }
+Base x = new Derived();
+Console.WriteLine(x.A()); // Derived.A  (polymorphic)
+Console.WriteLine(x.B()); // Base.B     (hidden, static dispatch)
+```
+
+**Common interview questions**
+
+**Q1. Abstract class or interface?**
+Interface for a capability or contract that unrelated types can implement (`IPaymentGateway`), especially across assemblies and for DI and testing. Abstract class when related types share state and implementation and you want to enforce a template (Template Method). Default interface methods narrow the gap but can't hold instance state.
+
+**Q2. `override` vs `new`?**
+`override` replaces a virtual member, so the call resolves at runtime on the object's actual type. `new` hides the base member; which one runs depends on the *variable's* compile-time type — a source of surprising bugs.
+
+**Q3. What is `sealed`, and why seal by default?**
+A sealed class can't be inherited (a sealed override can't be overridden further). It prevents unintended extension, lets the JIT devirtualize calls, and keeps your public API safe to change. Many teams seal classes by default.
+
+**Q4. `protected internal` vs `private protected`?**
+`protected internal` = accessible from derived classes **OR** anywhere in the same assembly (wider). `private protected` = derived classes **AND** in the same assembly (narrower).
+
+**Q5. How do extension methods work? Limitations?**
+The compiler rewrites `x.Method()` into `StaticClass.Method(x)`. They can't access private members, can't override instance methods (instance methods win), and resolve statically. Good for fluent APIs and adding behaviour to types you don't own.
+
+**Q6. What does a static constructor guarantee?**
+It runs exactly once per type, thread-safe, before the first instance is created or a static member is accessed. If it throws, the type is unusable for the process lifetime (`TypeInitializationException`).
+
+**Q7. Explain the four pillars with a C# example.**
+Encapsulation: `Balance` has a protected setter, changed only through `Deposit`. Abstraction: `Account` exposes `MonthlyFee` without the details. Inheritance: `SavingsAccount : Account`. Polymorphism: `account.Deposit()` runs the subclass override.
+
+**Q8. Composition vs inheritance?**
+Inheritance is an "is-a" relationship with tight coupling — base-class changes ripple down (fragile base class). Composition is "has-a": build behaviour by injecting collaborators (strategy, decorator). It's more flexible and testable. Use inheritance only for true, stable is-a hierarchies.
+
+**Q9. Can an interface have fields or constructors?**
+No instance fields or constructors. It can have static fields and members, default method implementations (C# 8), and static abstract/virtual members (C# 11).
+
+---
+
+## 3. CLR, JIT, GC & Memory
+
+**Key concepts**
+- C# → Roslyn → **IL + metadata** → **JIT** → native code, per method on first call.
+- **Tiered JIT:** Tier 0 (fast compile) → Tier 1 (optimized, Dynamic PGO) after ~30 calls. **OSR** optimizes long loops mid-run. **ReadyToRun** = precompiled for startup. **NativeAOT** = no JIT, millisecond startup, no `Reflection.Emit`.
+- **Heap:** Gen0 → Gen1 → Gen2; **LOH** for objects **≥ 85,000 bytes** (collected with Gen2, not compacted by default); **POH** for pinned objects.
+- **GC cost scales with survivors, not garbage.** Allocation = a pointer bump.
+- **Roots:** stack/registers, statics, GC handles, finalization queue.
+- **Write barrier + card table:** let Gen0 GCs avoid scanning all of Gen2.
+- **Modes:** Server GC (one heap per core, throughput, ASP.NET Core default) vs Workstation; background GC; **DATAS** (.NET 8) for containers; `GCHeapHardLimit`.
+- **Finalizers:** a single thread; objects survive an extra GC; use `IDisposable`/`SafeHandle`.
+- **Process memory ≠ managed heap** (JIT code, thread stacks, native memory, fragmentation).
+- Tools: `dotnet-counters`, `dotnet-trace`, `dotnet-gcdump`, `dotnet-dump`.
+
+```csharp
+// LOH churn → pool big buffers
+byte[] buf = ArrayPool<byte>.Shared.Rent(100_000);
+try { /* use buf */ } finally { ArrayPool<byte>.Shared.Return(buf); }
+
+// Where does a struct live?
 struct Point { public int X, Y; }
-class Player { public Point Position; }
-var p = new Player();
+class Player { public Point Pos; }      // Pos lives on the heap, inside Player
+void M() { Point p = new(); }           // p lives on the stack
+
+// GC info
+Console.WriteLine(GC.CollectionCount(0));
+Console.WriteLine(GC.GetGCMemoryInfo().HeapSizeBytes);
 ```
-**A:** On the heap, inside the `Player` object. "Value types go on the stack" is a rule of thumb about locals, not a rule of the language — a struct lives wherever its storage lives. Same for a struct captured in a closure or held across an `await`: it ends up on the heap. This matters because people reach for `struct` expecting to avoid an allocation and get nothing when it's a field of a class.
-*Follow-up: What if `Point` had a `string` field — does that change how the GC scans `Player`?*
 
-**Q2. What's wrong with this?**
-```csharp
-public IActionResult Process(Order o) {
-    var result = _engine.Run(o);
-    GC.Collect();
-    return Ok(result);
-}
-```
-**A:** It forces a full blocking collection on every request. You pause all threads, throw away the collector's tuning heuristics, and make whatever latency problem prompted it measurably worse. `GC.Collect()` has a couple of legitimate uses — a batch job that just dropped a huge graph and is about to go idle, a benchmark baseline — and none of them are in a request path.
-*Follow-up: Someone added it because memory was climbing. What should they have looked at instead?*
+**Common interview questions**
 
-**Q3. Does setting a variable to null make the object collectable?**
-**A:** Not by itself — it's one less reference, but the object is collectable when nothing reachable from a root points at it. Roots are live stack frames and registers, statics, GC handles, and the finalization queue. In practice, nulling a local is usually pointless because the JIT already knows the local is dead. What actually keeps objects alive is a root you forgot: a static dictionary, an event subscription, a captured `this`.
-*Follow-up: Can an object be collected while a method that declared it is still running?*
+**Q1. How does the .NET GC work?**
+A generational, tracing, mark-and-compact collector. It suspends threads, marks everything reachable from roots, compacts survivors, and promotes them to the next generation. Most objects die in Gen0, which is cheap because only survivors are touched. Background GC marks Gen2 concurrently to reduce pauses.
 
-**Q4. Why is a gen0 collection cheap?**
-**A:** Because the cost is in the survivors, not the garbage. Gen0 is small and contiguous; the collector marks what's live, compacts it, and resets the allocation pointer. Dead objects cost nothing — they're not touched. Typically only a few percent of gen0 survives. The counterintuitive consequence: allocating lots of short-lived objects is cheap, and allocating objects that *survive* is what actually costs you.
-*Follow-up: So what's "premature promotion" and why should I care?*
+**Q2. What is the LOH and why does it matter?**
+Objects ≥ 85,000 bytes go straight to the Large Object Heap. It's collected only with Gen2 and not compacted by default, so per-request large buffers cause frequent Gen2 GCs and fragmentation. Pool them (`ArrayPool`, `RecyclableMemoryStream`).
 
-**Q5. This runs in a loop on a hot path. What's the problem?**
-```csharp
-var buffer = new byte[100_000];
-```
-**A:** 100,000 bytes is over the 85,000-byte threshold, so every one of those goes on the Large Object Heap. The LOH is only collected with gen2, and by default it's swept rather than compacted — so you get gen2 collections far more often than you should, plus fragmentation as differently-sized buffers leave holes. Pool the buffer instead of allocating per iteration.
-*Follow-up: LOH is 3 GB with 400 MB live. Would you turn on LOH compaction?*
+**Q3. Does setting a variable to `null` free memory?**
+Not directly. An object becomes collectable when no root references it; the JIT already knows when a local is dead. Real leaks come from forgotten roots: static collections, event subscriptions, caches.
 
-**Q6. Review this.**
-```csharp
-class FileCache : IDisposable {
-    private FileStream _fs;
-    public void Dispose() => _fs?.Dispose();
-    ~FileCache() { _fs?.Dispose(); }
-}
-```
-**A:** Two problems. The finalizer shouldn't touch `_fs` at all — by the time it runs, that `FileStream` may already have been finalized, so you're calling into a disposed object. And `Dispose` doesn't call `GC.SuppressFinalize(this)`, so even correctly-disposed instances stay on the finalization queue, survive an extra collection and get promoted. This type owns a *managed* disposable, not an unmanaged handle, so it shouldn't have a finalizer at all.
-*Follow-up: When would a finalizer be justified, and what would you use instead?*
+**Q4. Memory keeps growing until a restart. How do you investigate?**
+Take two `dotnet-gcdump` snapshots hours apart and diff by type count. A leak shows a growing type with a stable root path. Fragmentation shows flat live bytes but growing committed memory (LOH, pinning). Check the finalizer thread if the finalization queue is huge.
 
-**Q7. Workstation GC or Server GC?**
-**A:** Server GC gives you a heap and a collector thread per core and collects in parallel — much better allocation throughput, and it's the ASP.NET Core default. Workstation is one heap, collects on the allocating thread, uses much less memory. The decision is per workload, not per organisation: Server GC in a 512 MB container with a 1-CPU limit is how you get an OOM with a mostly-empty heap, because it sizes heaps against cores.
-*Follow-up: You're in a 1-CPU, 512 MB pod. What do you actually configure?*
+**Q5. A pod is OOMKilled at 1 GB with a 300 MB heap. Why?**
+The container limit counts all process memory: Server GC heaps sized for host cores, thread stacks, native libraries, and committed-but-free segments. Use DATAS or `GCHeapHardLimit`, and compare RSS with GC committed bytes.
 
-**Q8. Ops says the process is using 4 GB. Your memory profiler shows a 900 MB managed heap. Who's wrong?**
-**A:** Neither. Managed heap is one component of working set. The rest is native: JIT code heaps, thread stacks at 1 MB reserved each, native buffers from libraries and drivers, memory-mapped assemblies, and heap segments the GC has freed logically but kept committed for reuse. Fragmentation widens it further. First diagnostic step is deciding whether you're chasing managed bytes, native bytes, or committed-but-unused — three different problems, three different fixes.
-*Follow-up: On Linux, what would you look at to split those three apart?*
+**Q6. Server vs Workstation GC?**
+Server: a heap and GC thread per core, higher throughput, more memory — the default for ASP.NET Core. Workstation: one heap, smaller footprint — for desktop apps, sidecars and small jobs. In small containers, Server GC needs DATAS or a heap limit.
 
-**Q9. How many allocations here?**
-```csharp
-object o = 42;
-int i = (int)o;
-```
-**A:** One — boxing the `int` puts a heap object with the value in it. The unbox is a type check plus a copy, no allocation. It's trivial once; it matters when it's in a loop or a hot path, which is exactly what `List<int>` versus the old `ArrayList` was about: one boxes every element and scatters them across the heap, the other stores them inline in an `int[]`.
-*Follow-up: Where does boxing sneak in without an explicit cast?*
+**Q7. Why is `GC.Collect()` usually wrong?**
+It forces a blocking full collection, promotes objects early, and disrupts the GC's self-tuning. It's only legitimate off the request path (a batch job going idle, benchmarks).
 
-**Q10. What actually happens during a collection?**
-**A:** Threads are suspended at safe points, the collector marks by walking the object graph from roots, then reclaims dead space — and in the compacting generations, relocates survivors and fixes up every reference to them. Compaction is why allocation is just a pointer bump instead of a free-list search, and it's also why pinning hurts. Survivors get promoted. Background GC does most of the gen2 marking concurrently, so the stop-the-world part is much shorter — but never zero.
-*Follow-up: What's a safe point, and what happens if a thread is in a loop that has none?*
+**Q8. ReadyToRun vs NativeAOT?**
+R2R precompiles but keeps the JIT (hot methods still re-JIT to Tier 1) — faster startup, full compatibility. NativeAOT removes the JIT and runtime codegen — the fastest startup and smallest memory, but reflection-heavy code needs source generators.
+
+**Q9. What are the hidden allocations in C#?**
+Boxing, closures (display classes), lambdas capturing state, async state machines that suspend, LINQ iterators and delegates, `params` arrays, string concatenation, and `foreach` over an interface (a boxed enumerator).
 
 ---
 
-## 3. Intermediate (10 Q&A)
+## 4. async/await & Tasks
 
-**Q1. Memory climbs over 48 hours and a nightly restart "fixes" it. Where do you start?**
-**A:** Two heap snapshots a few hours apart under steady load, then diff them. A real retention leak shows a type whose instance count grows monotonically with a consistent root path — `!gcroot` names it. Fragmentation looks different: live bytes flat, committed heap growing, free space scattered, usually in the LOH. An oversized cache looks like a leak but the root path ends in something you deliberately wrote. What I wouldn't do is open the "largest objects" view — that tells you what's big, not what's retained by mistake.
-*Follow-up: The diff shows a million strings rooted in a `ConcurrentDictionary`. Bug or working cache?*
+**Key concepts**
+- The compiler turns an `async` method into a **state machine**. `await` on an incomplete task **registers a continuation and returns** — the thread goes back to the pool. Pending I/O uses no thread.
+- Async = **scalability/throughput**, not speed for one request. **Parallelism** (`Task.Run`, `Parallel`) is a different thing.
+- **Sync-over-async** (`.Result`, `.Wait()`, `GetAwaiter().GetResult()`): deadlock where there's a `SynchronizationContext` (UI, classic ASP.NET); **thread-pool starvation** in ASP.NET Core.
+- **`ConfigureAwait(false)`**: don't resume on the captured SynchronizationContext — use in libraries. It **doesn't** stop `ExecutionContext` (`AsyncLocal`, culture, `Activity`) from flowing.
+- **`Task` vs `ValueTask`:** `ValueTask` only for hot paths that usually complete synchronously; await it **once**.
+- **`async void`** only for event handlers (exceptions crash the process).
+- **Composition:** `Task.WhenAll` (await throws the first exception; all are in `.Exception`), `Task.WhenAny` (cancel the losers), `.WaitAsync(timeout)`.
+- **Cancellation:** pass `CancellationToken` everywhere; `CancellationTokenSource.CancelAfter`; linked tokens.
+- **`TaskCompletionSource`** with `RunContinuationsAsynchronously`.
+- **`IAsyncEnumerable<T>`** + `await foreach`; **`Channel<T>`** (bounded) for producer/consumer.
 
-**Q2. Gen2 collections went from once a minute to once every three seconds after a release. No obvious memory growth. What happened?**
-**A:** Premature promotion — objects that used to die in gen0 now survive and accumulate until gen2 pressure forces a full collection. Usual causes: something is held slightly longer, an object graph is now reachable from a longer-lived scope, or allocation sizes crossed the LOH threshold. Changing a DI registration from scoped to singleton does this instantly. I'd compare gen0/gen1/gen2 counts and promoted bytes across the release rather than total memory — the ratio is the signal, the total is noise.
-*Follow-up: How would you catch a scoped-to-singleton change in review?*
-
-**Q3. Every deploy, P99 is bad for the first minute, then settles. Why, and what do you do about it?**
-**A:** Tiered compilation. Methods start at tier 0 — compiles fast, produces slow code — and only get re-jitted at tier 1 after roughly thirty calls plus a delay. Add cold caches and cold connection pools and the first thousand requests genuinely run different machine code. Options in order: don't take traffic until a warm-up completes, enable ReadyToRun so first-call code is much better, tune the tiering knobs, or go NativeAOT if the profile justifies it. Slowing the rollout hides it rather than fixing it.
-*Follow-up: ReadyToRun helps startup but can be slower at steady state. Why?*
-
-**Q4. Dump shows 40,000 objects on the finalization queue and memory climbing. Diagnosis?**
-**A:** The finalizer thread is blocked or falling behind. There's one of them and it runs finalizers serially, so a single finalizer waiting on a lock or a network call stalls everything queued behind it — and all those objects, plus everything they reference, are rooted by the queue. Look at the finalizer thread's stack in the dump; that names it immediately. Fix is finalizers that do nothing but release unmanaged handles, and actually calling `Dispose` so `SuppressFinalize` keeps things off the queue.
-*Follow-up: Why does a finalizable object survive at least two collections?*
-
-**Q5. Where does pinning come from in a typical web service, and how would you know it's your problem?**
-**A:** Mostly invisibly — buffers handed to sockets and file I/O for the duration of an async operation, plus `fixed` blocks and `GCHandle`. A pinned object can't be relocated, so the compacting collector works around it and leaves holes; one long-lived pin in the middle of the ephemeral segment does damage out of all proportion to its size. The signature is heap size growing while live bytes stay flat, with fragmentation in gen0/gen1 rather than the LOH. Pool the I/O buffers so you pin a small fixed set once.
-*Follow-up: From a dump, how do you distinguish pinning from ordinary fragmentation?*
-
-**Q6. Pod gets OOMKilled at a 1 GB limit. The dump shows a 300 MB managed heap. Explain.**
-**A:** The limit is on total RSS, not the managed heap, so you're looking at native memory or committed-but-unused pages. Candidates: Server GC committing per-core heaps sized against the host's cores rather than the cgroup limit, thread stacks from an exploded pool, native memory from a compression or crypto or database library, or LOH fragmentation inflating committed pages. I'd compare RSS against GC committed bytes over time and check the runtime is honouring the cgroup limit. "The heap is small so it isn't memory" is the trap here.
-*Follow-up: What would you set for a 1 GB, 2-core pod?*
-
-**Q7. A team wants to add object pooling to reduce GC pressure. When is that right and when does it backfire?**
-**A:** Right for large or expensive-to-construct objects where the alternative is repeated LOH allocation — big buffers, parsers, connections. It backfires on small short-lived objects: you take something that was dying free in gen0 and make it survive in gen2, adding write-barrier traffic and card scanning while removing the collector's cheapest case. Pools also bring their own bugs — objects returned while still referenced, state leaking between tenants, unbounded pools that become the leak they were meant to prevent.
-*Follow-up: When would you write your own pool instead of using `ArrayPool<T>.Shared`?*
-
-**Q8. Why is this potentially more expensive than it looks?**
 ```csharp
-// _cache is a long-lived singleton dictionary
-_cache[key] = new Result(...);
+// BAD: sync-over-async
+public IActionResult Get() => Ok(_svc.GetAsync().Result);
+
+// GOOD: async all the way, concurrent independent calls, cancellation, timeout
+public async Task<IActionResult> Get(CancellationToken ct)
+{
+    var priceTask = _pricing.GetAsync("AAPL", ct);
+    var stockTask = _inventory.GetAsync("AAPL", ct);
+    await Task.WhenAll(priceTask, stockTask).WaitAsync(TimeSpan.FromSeconds(2), ct);
+    return Ok(new { price = await priceTask, stock = await stockTask });
+}
+
+// Async stream
+public async IAsyncEnumerable<Trade> StreamTrades([EnumeratorCancellation] CancellationToken ct = default)
+{
+    await foreach (var row in _db.Trades.AsAsyncEnumerable().WithCancellation(ct))
+        yield return row;
+}
+
+// Wrap a callback API
+Task<string> ReadAsync(LegacyReader r)
+{
+    var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+    r.OnDone += s => tcs.TrySetResult(s);
+    r.OnError += e => tcs.TrySetException(e);
+    r.Begin();
+    return tcs.Task;
+}
+
+// Bounded producer/consumer
+var channel = Channel.CreateBounded<Order>(new BoundedChannelOptions(1_000) { FullMode = BoundedChannelFullMode.Wait });
+await channel.Writer.WriteAsync(order, ct);
+await foreach (var o in channel.Reader.ReadAllAsync(ct)) await ProcessAsync(o, ct);
 ```
-**A:** Storing a reference into an older-generation object goes through a write barrier, which records that gen2 now points into gen0 — the card table. Without it, every gen0 collection would have to scan all of gen2. With it, only dirtied cards get scanned. The cost is a small extra store per write plus the scanning of a graph that constantly re-points from old to new. A big long-lived cache whose values are continuously replaced pushes up gen0 pause times even though gen0 is small.
-*Follow-up: Does rebuilding the dictionary and swapping it atomically change that picture?*
 
-**Q9. Is there ever a good reason to call `GC.Collect()`?**
-**A:** Rarely, and every good reason is "I know something the collector can't". A batch job that's finished a phase, dropped hundreds of megabytes, and is about to sit idle. A benchmark harness establishing a baseline. A deliberate LOH compaction in a maintenance window. What makes those legitimate is that they're off the request path and followed by a period where a pause costs nothing. Inside request handling it's always wrong.
-*Follow-up: If you do call it, what arguments would you pass, and why does `WaitForPendingFinalizers` usually follow?*
+**Common interview questions**
 
-**Q10. What's the difference between a first-chance exception and an unhandled one, from a memory point of view?**
-**A:** Different question than most people expect — the memory angle is that exception objects and their stack traces are allocations, so a path throwing and catching thousands of times a second is burning gen0 and CPU invisibly, because none of it reaches unhandled-exception telemetry. Runtime counters for exception rate against request rate expose it. It's a common, entirely silent tax in code that uses exceptions for control flow or sits under a library that does.
-*Follow-up: How would you find which exception type dominates that rate?*
+**Q1. What happens when you `await`?**
+If the awaited task is complete, execution continues synchronously. Otherwise the state machine saves its locals, registers `MoveNext` as a continuation, and returns an incomplete task to the caller; the thread is freed. When the operation completes, a pool thread (or the captured context) resumes the method.
+
+**Q2. Why does `.Result` deadlock in WPF or classic ASP.NET but not ASP.NET Core?**
+Those hosts have a SynchronizationContext that runs continuations on one specific thread; `.Result` blocks that thread, so the continuation can never run. ASP.NET Core has no context, so there's no deadlock — but the blocked thread causes **starvation** under load.
+
+**Q3. API latency rises on every endpoint, CPU is low, thread count climbs. Diagnosis?**
+Thread-pool starvation caused by blocking calls. Confirm with `dotnet-counters` (`threadpool-queue-length` rising) and a dump showing threads in `Task.Wait`. Fix the blocking code; `ThreadPool.SetMinThreads` is only a temporary band-aid.
+
+**Q4. When should you use `ConfigureAwait(false)`?**
+In library code, to avoid capturing a UI or legacy context and the deadlocks that can cause. It's unnecessary in ASP.NET Core app code. It doesn't affect `AsyncLocal` or trace propagation.
+
+**Q5. `Task.Run` in ASP.NET Core — good or bad?**
+Bad around I/O (a thread hop for nothing) and pointless for "freeing" the request thread (it uses the same pool). Fine for genuinely CPU-bound work in UI apps, or for deliberately parallel CPU work.
+
+**Q6. `Task` vs `ValueTask`?**
+`Task` is the safe default: it can be awaited many times and stored. `ValueTask` avoids an allocation when the result is usually available synchronously, but it must be awaited exactly once and never stored; call `.AsTask()` if you need flexibility.
+
+**Q7. How do you run 100 HTTP calls concurrently without overwhelming the server?**
+`Parallel.ForEachAsync` with `MaxDegreeOfParallelism`, or a `SemaphoreSlim` limiting concurrent `Task.WhenAll` work, plus timeouts and cancellation.
+
+**Q8. Why is `async void` dangerous?**
+The caller can't await it or catch its exceptions; an unhandled exception goes to the SynchronizationContext or thread pool and usually crashes the process. Only use it for event handlers, with a try/catch inside.
+
+**Q9. How do you cancel a long-running operation?**
+Accept a `CancellationToken`, pass it to every async call, call `ct.ThrowIfCancellationRequested()` in CPU loops, and let `OperationCanceledException` propagate (don't treat it as an error). Combine with timeouts using `CancelAfter` or linked token sources.
+
+**Q10. Does async make code faster?**
+Not for one request — it adds small overhead. It makes the *system* handle far more concurrent requests with the same threads, which shows up under load.
 
 ---
 
-## 4. Expert / Architect (10 Q&A)
+## 5. Threading & Concurrency
 
-**Q1. You own a pricing service with a hard 5 ms P99 and GC pauses are blowing it. Walk me through how you'd approach it.**
-**A:** Measure the pause distribution and attribute it first — a P99 destroyed by occasional 50 ms blocking gen2s is a completely different problem from one eroded by frequent 1 ms gen0s, and they have opposite fixes. Tuning goes first because it's cheap to try: background GC, heap count, conserve-memory settings can buy an order of magnitude on the tail. Eliminating hot-path allocation is the durable fix but it's expensive engineering, so profiling has to prove the path is allocation-dominated rather than assume it. Architecture — sharding so each process holds a smaller heap, or moving the latency-critical path off the managed heap — comes last, and specifically when the *live set* is the problem, because gen2 pause scales with live objects to trace, not with allocation rate.
-*Follow-up: You decide to shard. How do you size each shard's heap, and what does that do to fleet cost?*
+**Key concepts**
+- Thread (OS thread, ~1 MB stack) vs **thread pool** vs **Task** (a unit of work scheduled on the pool).
+- **Race conditions:** check-then-act, read-modify-write (`count++` is not atomic), lost updates.
+- **Memory model:** without synchronization, reads can be cached or reordered (ARM64 exposes bugs that x64 hides). Use `lock`, `Interlocked`, `Volatile`.
+- **`lock`** (Monitor) on a **private readonly object**; .NET 9 adds the `System.Threading.Lock` type. Can't `await` inside a lock → **`SemaphoreSlim(1,1)`**.
+- **`Interlocked`**: `Increment`, `Add`, `Exchange`, `CompareExchange` (CAS).
+- Other primitives: `ReaderWriterLockSlim`, `Mutex` (cross-process), `SemaphoreSlim`, `ManualResetEventSlim`, `CountdownEvent`, `Barrier`.
+- **Deadlock** (circular wait → consistent lock ordering), **livelock**, **starvation**, **lock convoy**.
+- **Concurrent collections:** `ConcurrentDictionary` (`GetOrAdd`'s factory may run multiple times), `ConcurrentQueue`, `BlockingCollection`, `Channel<T>`.
+- **`Lazy<T>`** for thread-safe lazy initialization.
+- **Data parallelism:** `Parallel.For/ForEach` (CPU), `Parallel.ForEachAsync` (I/O), PLINQ.
+- **Thread-local state:** `[ThreadStatic]`/`ThreadLocal<T>` don't flow across `await` → `AsyncLocal<T>`.
+- **False sharing:** adjacent per-thread counters on one cache line.
 
-**Q2. How would you set GC configuration policy across a hundred services?**
-**A:** Publish a default and a rule for deviating rather than a mandate. Default for request-serving services is Server GC with background collection and an explicit heap hard limit derived from the container limit; default for sidecars, jobs and CLI tools is Workstation, because heap-per-core on a tiny container is pure waste. Deviating needs evidence — a measured pause problem or an unusual live-set-to-allocation ratio — recorded in an ADR so the reasoning outlives the engineer. I'd also evaluate DATAS for variable-load services since it adapts heap count instead of committing per-core up front, but roll it per service tier with measurement, not as a fleet-wide flag flip.
-*Follow-up: Who owns that policy — platform or each team — and what stops it rotting?*
+```csharp
+// Race and fix
+int counter = 0;
+Parallel.For(0, 1000, _ => counter++);                  // WRONG: lost updates
+Parallel.For(0, 1000, _ => Interlocked.Increment(ref counter)); // correct
 
-**Q3. Make the case for or against NativeAOT across your estate.**
-**A:** It removes JIT and tiering entirely: startup in milliseconds, much smaller footprint, no runtime dependency — genuinely transformative for serverless, CLI tools, anything scaling to zero. The costs are structural rather than incremental: no runtime code generation, so reflection-heavy serialisation, dynamic proxies, EF Core's query pipeline and most interception-based DI either break or need source-generator replacements. So: adopt where startup dominates cost, and treat migrating a large reflection-heavy service as a multi-quarter project justified by measured numbers rather than a benchmark chart. The real organisational risk is a half-finished migration leaving two build models to maintain forever.
-*Follow-up: For a function-style workload, what would you measure to prove it paid for itself?*
+// lock on a private object
+private readonly object _sync = new();
+private decimal _balance;
+public void Withdraw(decimal amt)
+{
+    lock (_sync)
+    {
+        if (_balance < amt) throw new InvalidOperationException("Insufficient funds");
+        _balance -= amt;                                // check + act atomically
+    }
+}
 
-**Q4. Finance wants a 30% cut in fleet memory. How do you approach it without causing an incident?**
-**A:** The GC expands its budget to fill available space, so a service "using 3 GB" may run fine at 1.5 GB with a higher collection rate and slightly more CPU. Method: establish each service's actual *live set* under peak load, set a heap hard limit above it with headroom, and watch the trade as collection frequency and CPU rise while memory falls. Per service tier, behind a canary, with explicit rollback triggers on pause-time and CPU SLOs — never a global limit change. The thing to say upward is that this converts a memory cost into a CPU cost, so the saving is only real where CPU headroom exists.
-*Follow-up: Which services would you exclude up front, and on what evidence?*
+// Async-compatible lock
+private readonly SemaphoreSlim _gate = new(1, 1);
+public async Task RefreshTokenAsync(CancellationToken ct)
+{
+    await _gate.WaitAsync(ct);
+    try { _token = await _auth.GetTokenAsync(ct); }
+    finally { _gate.Release(); }
+}
 
-**Q5. You're migrating a large .NET Framework service to .NET 8. What runtime behaviour would you plan for specifically?**
-**A:** GC and JIT behaviour differ enough to invalidate existing tuning — defaults change, segment sizing differs, background GC behaves differently, and configuration moves from `app.config`'s `gcServer` to `runtimeconfig.json` and environment variables, so silently losing an old setting is a classic surprise. Tiered compilation is on by default, so warm-up profiles change even where steady state improves. The JIT is much better at inlining, devirtualisation and struct promotion, which means real gains but also that micro-optimisations written against the old JIT may now be pessimisations. I'd shadow production traffic and compare GC counters and full latency distributions, not averages, and treat every existing perf hack as a hypothesis to re-verify.
-*Follow-up: Throughput improves 30% but P99 gets worse. First hypothesis?*
+// GetOrAdd + Lazy so the expensive factory runs once
+private readonly ConcurrentDictionary<string, Lazy<Task<FxRate>>> _rates = new();
+public Task<FxRate> GetRate(string pair) =>
+    _rates.GetOrAdd(pair, p => new Lazy<Task<FxRate>>(() => LoadRateAsync(p))).Value;
 
-**Q6. Multi-tenant service, one tenant's heavy requests cause GC pauses that hurt everyone. What do you do?**
-**A:** This is a blast-radius problem, not a GC problem — the collector is process-wide, so rate limits and quotas reduce the *rate* but can't stop one allocation burst from triggering a collection that stops every tenant's threads. The durable answers are process- or pod-level isolation: cell-based partitioning with a tenant mapped to a cell, or dedicated capacity for the heaviest tenants, so the pause radius equals the isolation boundary. In-process mitigations still matter as defence in depth — bounding per-request allocation, streaming large payloads rather than buffering, rejecting oversized requests at the edge. I'd frame it to stakeholders as choosing a blast radius and paying for it in infrastructure, because that's the actual trade.
-*Follow-up: How do you decide which tenants justify dedicated cells, and stop that list growing forever?*
+// Lock-free CAS update
+static void AddMax(ref int target, int value)
+{
+    int current;
+    do { current = target; if (value <= current) return; }
+    while (Interlocked.CompareExchange(ref target, value, current) != current);
+}
+```
 
-**Q7. How do you stop allocation regressions reaching production across many teams?**
-**A:** Automate it, because no review process catches allocation regressions reliably. BenchmarkDotNet with `MemoryDiagnoser` on genuinely hot paths, run in CI against a committed baseline with a failure threshold on allocated-bytes-per-operation. GC counters exported from every service with alerts on rate-of-change rather than absolute values. Load tests asserting on memory trajectory rather than peak. The organisational half matters more than the tooling: the gates belong in the shared pipeline template so teams inherit them, and alerts must page the owning team, or a central performance group becomes the bottleneck for everyone's regressions.
-*Follow-up: Microbenchmark gates are notoriously noisy in CI. What stops them being disabled within a quarter?*
+**Common interview questions**
 
-**Q8. What GC telemetry would you standardise, and what would you alert on?**
-**A:** Emit gen0/1/2 counts, pause-duration distribution, allocation rate, promoted bytes, committed versus live, LOH size, time-in-GC — all as rates and distributions, since absolute memory is the least informative. Alert on gen2 collection *rate* rising, on P99 pause exceeding the service's share of its latency budget, and on committed-versus-live divergence, which is the fragmentation signature. Deliberately don't alert on working set crossing a threshold — it fires on healthy services and trains people to ignore the channel. The point of standardising is that during an incident you want "is this GC?" answered in seconds from a shared dashboard, not by attaching a profiler.
-*Follow-up: A service shows 8% time-in-GC. Problem or not?*
+**Q1. Thread vs Task?**
+A thread is an OS resource with its own stack. A Task is a promise of a result, usually scheduled on the shared thread pool, and composable with `await`, `WhenAll` and continuations. Prefer Tasks; create dedicated threads only for long-running blocking work (`TaskCreationOptions.LongRunning`).
 
-**Q9. When would you conclude a component shouldn't use the managed heap at all?**
-**A:** When the live set is both large and long-lived, because gen2 pause cost scales with live objects to trace — a 40 GB in-memory index of small objects is pathological for a tracing collector no matter how you tune it. Alternatives: off-heap in native memory or memory-mapped files behind a thin managed accessor, restructuring as large arrays of value types (few objects, many bytes, cheap to trace), or moving it out of process. I'd try the value-type-array restructuring first because it keeps the code managed and safe while cutting object count by orders of magnitude, and treat true off-heap as a last resort since it reintroduces manual lifetime management and the entire bug class the CLR exists to eliminate.
-*Follow-up: You go off-heap anyway. What safety mechanisms do you insist on before it ships?*
+**Q2. What's a race condition? Give an example and a fix.**
+The result depends on timing between threads. `count++` from several threads loses updates because read-modify-write isn't atomic. Fix: `Interlocked.Increment`, or a `lock` around the whole check-and-act sequence.
 
-**Q10. A runtime patch upgrade correlates with a latency regression. How do you handle it, and how do you de-risk runtime upgrades generally?**
-**A:** Establish attribution before accepting the correlation — "it started after the upgrade" is frequently a coincident config or traffic change, so compare GC counters, tiering behaviour and latency distributions on identical traffic. Runtime upgrades do legitimately change JIT codegen and GC heuristics, so a genuine regression is plausible and worth reducing to a minimal reproduction to take upstream. Structurally: pin runtime versions explicitly in images, stage upgrades through a canary tier with performance gates rather than letting them ride along with OS patching, and keep a rollback that doesn't require a rebuild. The governance point is that the runtime is a production-impacting dependency and deserves the same change management as any library — in a regulated environment that's an audit requirement, not a preference.
-*Follow-up: Canary shows no regression, production does. What differs, and how do you make the canary representative?*
+**Q3. How do deadlocks happen and how do you prevent them?**
+Thread A holds lock 1 and waits for lock 2; thread B holds 2 and waits for 1. Prevent with a consistent global lock order, short critical sections, no calls to external code while holding a lock, `Monitor.TryEnter` with a timeout, and no sync-over-async.
+
+**Q4. Why not `lock(this)` or `lock("key")`?**
+Those objects are publicly reachable (strings are interned), so unrelated code can lock on the same object and deadlock you. Lock on a private readonly object.
+
+**Q5. How do you lock in async code?**
+`lock` can't contain `await`. Use `SemaphoreSlim(1,1)` with `WaitAsync`, releasing in `finally`.
+
+**Q6. Is `ConcurrentDictionary` fully thread-safe?**
+Individual operations are, but compound logic (`if (!ContainsKey) Add`) isn't — use `TryAdd`, `GetOrAdd` or `AddOrUpdate`. `GetOrAdd`'s factory can run several times concurrently; wrap expensive or side-effecting work in `Lazy<T>`.
+
+**Q7. What does `volatile` do?**
+It ensures reads and writes aren't cached in registers or reordered across it (acquire/release semantics), so a flag written by one thread is seen by another. It does **not** make `x++` atomic. Prefer `Volatile.Read/Write`, `Interlocked` or locks.
+
+**Q8. `Parallel.ForEach` vs `Task.WhenAll`?**
+`Parallel.ForEach` partitions CPU-bound work across cores. `Task.WhenAll` (or `Parallel.ForEachAsync`) runs I/O-bound async operations concurrently. Using `Parallel.ForEach` for I/O blocks pool threads.
+
+**Q9. `ThreadLocal` vs `AsyncLocal`?**
+`ThreadLocal`/`[ThreadStatic]` is per physical thread — after `await` you may be on a different thread and see the wrong value. `AsyncLocal` flows with the logical async call chain.
 
 ---
 
-## 5. Reference Material
+## 6. Span, Memory & Low Allocation
 
-> Retained from the original module: deep-dive internals, diagrams, production examples, exercises, system/low-level design, debugging walkthroughs and the Principal Engineer perspective.
+**Key concepts**
+- **`Span<T>`/`ReadOnlySpan<T>`** = a view (reference + length) over contiguous memory (array, stack, string, native). Zero-copy slicing. It's a **`ref struct`**: no class fields, no boxing, no lambda capture, **can't cross `await`/`yield`**.
+- **`Memory<T>`** = heap-storable; call `.Span` for synchronous work. `IMemoryOwner<T>` expresses ownership.
+- **`stackalloc`** only with a **small constant bound** (untrusted size → stack overflow → process crash).
+- **`ArrayPool<T>`:** `Rent(n)` returns **at least** n elements; return in `finally`; clear sensitive data; never use a buffer after returning it.
+- **`readonly struct` + `in`** avoids copies; `in` on a non-readonly struct causes defensive copies.
+- **`System.IO.Pipelines`** + `ReadOnlySequence<T>` for high-throughput parsing (Kestrel uses this).
+- **UTF-8 APIs:** `Utf8Formatter`, `TryFormat`, `u8` literals, `string.Create`, `SearchValues<T>`.
+- Always measure with BenchmarkDotNet `[MemoryDiagnoser]`; optimize hot paths only.
 
-### 1. Fundamentals
-
-#### What is the CLR?
-The **Common Language Runtime (CLR)** is the managed execution engine of.NET. When you compile C#, the compiler (`Roslyn`) does **not** produce native machine code — it produces **IL (Intermediate Language / MSIL)** plus metadata, packaged into an assembly (DLL/EXE). The CLR is the program that:
-
-1. Loads assemblies and reads IL + metadata.
-2. **JIT-compiles** IL into native machine code, method-by-method, on first call.
-3. Manages memory automatically via the **Garbage Collector (GC)**.
-4. Enforces type safety, security boundaries, and exception handling.
-5. Provides services: threading (via the OS + CLR thread pool), reflection, interop (P/Invoke, COM), assembly loading, and structured exception handling (SEH-based).
-
-#### Why does it exist?
-Before managed runtimes, C/C++ developers manually managed memory (`malloc`/`free`, `new`/`delete`) — a massive source of bugs (use-after-free, double-free, buffer overruns, memory leaks). The CLR trades a small amount of raw performance and determinism for:
-- **Memory safety** (no dangling pointers, automatic reclamation).
-- **Type safety** (no arbitrary pointer casting without explicit `unsafe`).
-- **Portability** — IL is CPU-agnostic; the JIT targets x64, x86, ARM64, etc. (this is *how*.NET is cross-platform via CoreCLR).
-- **Productivity** — automatic memory management removes an entire bug class from day-to-day development.
-
-#### When does this matter?
-Every single C# program uses the CLR — you cannot opt out. But **understanding it deeply matters most when**:
-- Diagnosing production incidents: high CPU, GC pauses, memory leaks, OOM.
-- Writing high-throughput/low-latency code (trading systems, real-time APIs, game servers).
-- Making architecture decisions: server vs workstation GC, container memory limits, object pooling strategies.
-- Interviewing for Staff/Principal roles — this is the #1 "separates seniors from principals" topic in C# interviews because it requires connecting language semantics → runtime behavior → OS behavior.
-
-#### How does it work (30,000-ft view)?
-
-```
- C# Source (.cs)
- │ Roslyn compiler (csc)
- ▼
- IL + Metadata (.dll/.exe) ──── this is what gets shipped
- │ Assembly Loader (CLR)
- ▼
- Loaded into AppDomain/AssemblyLoadContext
- │ JIT Compiler (on first call per method)
- ▼
- Native machine code (cached in memory for process lifetime)
- │ CPU executes
- ▼
- Objects allocated on Managed Heap ── GC reclaims unreachable ones
-```
-
-Key mental model for interviews: **"IL is compiled twice."** Once ahead-of-time by Roslyn (C# → IL, this is what NuGet ships), and once at runtime by the JIT (IL → native), unless you use AOT compilation (NativeAOT, ReadyToRun) to shift work earlier.
-
-### 2. Deep Dive
-
-#### 2.1 CLR Execution Pipeline in Detail
-
-1. **Assembly loading**: The CLR's loader reads the PE (Portable Executable) header, finds the CLR metadata header, and loads type metadata lazily. Types are NOT fully loaded until first use (lazy type loading via `MethodTable` construction).
-2. **Method invocation & stubs**: Every method starts with a *pre-JIT stub* in its `MethodTable` slot. First call → stub triggers JIT → native code address is patched into the slot → subsequent calls jump straight to native code. This is why the **first call to any method is slower** ("JIT warm-up").
-3. **Type system internals**: Every object on the heap has an **object header** (in x64: 8 bytes **SyncBlockIndex** + 8 bytes **MethodTable pointer** = 16 bytes overhead per object before your fields even start). The `MethodTable` holds the vtable for virtual dispatch, type info, and static fields.
-
-#### 2.2 JIT Compiler Internals
-
-.NET (Core 3.0+, and every version through.NET 8/9) uses **Tiered Compilation** by default:
-
-- **Tier 0 (Quick JIT)**: Compiles fast, with minimal optimization, no loop optimization, so the app starts responding quickly. Includes on-stub-entry **call counting**.
-- **Tier 1 (Optimized/Full JIT)**: After a method is called ~30 times (default threshold), it's re-JIT'd with full optimizations: inlining, loop cloning, devirtualization, register allocation, vectorization.
-- **Tier 1 with PGO (Dynamic Profile-Guided Optimization,.NET 8+ default on)**: Tier 0 instruments branches/types actually seen at runtime (e.g., which concrete type flows through an interface call), then Tier 1 recompiles using *actual* runtime profile data — enabling aggressive **speculative devirtualization** and inlining that static analysis couldn't safely do.
-- **OSR (On-Stack Replacement,.NET 7+)**: Long-running loops inside a Tier-0 method can be upgraded to optimized code *mid-execution*, without waiting for the method to return and be re-called. Solves the classic "hot loop in Main never gets optimized" problem.
-- **ReadyToRun (R2R)**: Precompiles IL to native at publish time (`dotnet publish -p:PublishReadyToRun=true`) so the JIT can skip Tier-0 compilation for those methods at startup — trades disk size and (slightly) peak-throughput for faster startup. Framework assemblies ship as R2R.
-- **NativeAOT**: No JIT at all at runtime — fully native binary, no CLR loading step, smallest/fastest startup, but no runtime codegen (no `System.Reflection.Emit`, limited reflection, no dynamic loading).
-
-```mermaid
-flowchart LR
- A[IL Method Body] -->|first call| B[Tier 0: Quick JIT]
- B -->|instrumented calls counted<br/>+ PGO profile data| C{Call count > threshold?}
- C -->|No| B
- C -->|Yes| D[Tier 1: Optimizing JIT<br/>uses PGO profile]
- D --> E[Native code cached for process lifetime]
- B -.->|long-running loop detected| F[OSR: patch running frame<br/>to optimized code mid-loop]
-```
-
-**Interview-critical fact**: JIT'd code is **not persisted** — every process start re-JITs (unless R2R/AOT). This is why serverless/Lambda cold starts are painful for.NET without AOT.
-
-#### 2.3 Memory Layout — Stack vs Heap
-
-- **Stack**: Per-thread, LIFO, fixed size (default 1MB on Windows), stores value-type locals, method call frames, return addresses. Extremely fast (pointer bump), automatically reclaimed when a frame pops. **`stackalloc`** lets you explicitly allocate on the stack.
-- **Managed Heap**: Where reference types (`class`, arrays, delegates, closures, boxed value types, strings) live. Divided into generations for GC efficiency.
-
-**Value types vs reference types — the actual rule** (commonly mis-stated): *"Value types are NOT always on the stack."* A value type lives wherever its **container** lives:
-- Local variable/parameter of value type → stack (if not captured by a closure/iterator, and JIT doesn't otherwise need to move it to heap).
-- Value type as a field of a class → lives on the heap, embedded inline in the containing object.
-- Value type boxed (assigned to `object`/interface) → heap-allocated wrapper.
-- Value type captured by a lambda closure or used in an `async` method → heap (part of the compiler-generated closure/state machine class).
-
-```mermaid
-graph TD
- subgraph Stack [Thread Stack - per thread]
- S1["int x = 5"]
- S2["Point p (struct, local)"]
- S3["ref to Customer c ──┐"]
- end
- subgraph Heap [Managed Heap]
- H1["Customer object<br/>[SyncBlk|MethodTable|fields]"]
- H2["struct Point embedded<br/>inside a class field"]
- H3["Boxed int (object o = 5)"]
- end
- S3 --> H1
-```
-
-#### 2.4 Garbage Collector Internals — the deepest interview area
-
-**Generational hypothesis**: most objects die young..NET GC exploits this with 3 generations on the **SOH (Small Object Heap)**:
-
-- **Gen 0**: Newly allocated objects. Small (few hundred KB–few MB), collected very frequently, very fast (usually <1ms).
-- **Gen 1**: Survivors of one Gen 0 collection. Acts as a buffer between short-lived and long-lived.
-- **Gen 2**: Long-lived objects (caches, singletons, static references). Collecting Gen 2 is expensive — it also implies collecting Gen 0/1 and, for a **full/blocking GC**, walking the whole graph.
-- **LOH (Large Object Heap)**: Objects ≥ 85,000 bytes (arrays, big strings) go directly here. LOH is **not compacted by default** (fragmentation risk) — collected only during Gen 2 GCs. You can opt into compaction via `GCSettings.LargeObjectHeapCompactionMode`.
-- **POH (Pinned Object Heap,.NET 5+)**: Objects pinned for interop (`fixed`, `GCHandle.Alloc(..., GCHandleType.Pinned)`) go here so pinning doesn't fragment/block compaction of the regular SOH.
-
-**Allocation**: A bump-pointer allocator on Gen 0 — allocation is just incrementing a pointer (as fast as `stackalloc` in the common case) until the Gen 0 budget is exhausted, which triggers a collection.
-
-**Collection algorithm**: Mark-and-Compact (aka Mark-Sweep-Compact):
-1. **Mark**: Starting from *roots* (static fields, thread stacks, CPU registers, GC handles, finalization queue) walk the object graph, marking everything reachable.
-2. **Sweep/Plan**: Determine which unreached objects can be reclaimed.
-3. **Compact**: Slide surviving objects together to eliminate fragmentation and restore a fast bump-pointer allocation state. (Gen 2 compaction is more expensive and not always done every collection.)
-4. **Update references**: Every root and every reference field pointing to a moved object must be updated — this is why GC needs to briefly suspend threads (or use write-barrier tricks for background GC).
-
-**GC Modes** (huge interview topic):
-| Mode | Use case | Behavior |
-|---|---|---|
-| **Workstation GC** | Client apps, desktop, low core-count | Single heap, optimized for low latency over throughput |
-| **Server GC** | ASP.NET Core, high-throughput backend services | One heap + one dedicated GC thread **per core**, optimized for throughput, higher memory use |
-| **Concurrent/Background GC** (default on) | Both modes | Gen 2 marking happens concurrently with app threads running ("background GC") to reduce pause times |
-| **Sustained Low Latency (SustainedLowLatency)** | Trading systems, real-time | Avoids full blocking Gen 2 GCs as much as possible |
-| **DATAS (Dynamic Adaptation To Application Sizes,.NET 8+)** | Server GC in containers | Dynamically scales heap count/size instead of always using core-count heaps — huge win for many small containerized services that used to over-provision memory |
-
-**Write barriers & the Card Table**: When a Gen 2 object is mutated to point to a Gen 0/1 object, the GC needs to know (since it doesn't re-scan all of Gen 2 during a Gen 0 collection). The JIT emits a **write barrier** after every reference-field assignment that marks a byte in the **card table** corresponding to that memory region "dirty." Gen 0 collections then only need to scan dirty cards in Gen 2 as extra roots, instead of the whole Gen 2 heap. This is why "storing a reference to a young object inside an old, hot object" is a subtle performance cost — not free, though usually tiny.
-
-**Finalization**: `~Finalizer` objects aren't collected immediately when unreachable — they're moved to a **freachable queue**, processed by a dedicated **finalizer thread**, and only actually reclaimed on the *next* GC after their finalizer runs. This means finalizable objects survive at least one extra GC generation-bump — a classic hidden cost. This is exactly why `IDisposable` + `Dispose` (deterministic cleanup) is preferred, with finalizers only as a safety net for unmanaged resources.
-
-```mermaid
-sequenceDiagram
- participant App as App Thread
- participant GC as GC
- participant Fin as Finalizer Thread
- App->>App: new FileStream (has finalizer)
- Note over App: object becomes unreachable
- GC->>GC: Gen collection: object unreachable but finalizable
- GC->>Fin: move to freachable queue (object survives!)
- Fin->>Fin: runs Finalize eventually
- Note over GC: Object now truly unreachable
- GC->>GC: NEXT collection reclaims memory
-```
-
-#### 2.5 Threading Model
-- The CLR **ThreadPool** is a managed pool of worker threads used by `Task`, `async`/`await` continuations, timers, and I/O completion ports. It uses a **hill-climbing algorithm** to adjust thread count and has a "starvation avoidance" heuristic that injects new threads slowly (roughly 1/sec) if all threads are busy — a classic cause of the **thread pool starvation** production incident.
-- GC in Server mode uses dedicated GC threads *pinned* to logical cores, separate from the ThreadPool.
-- JIT compilation itself can occur on a background thread with tiered compilation (`TieredCompilation` + `TC_QuickJitForLoops`), so Tier 0→Tier 1 promotion doesn't block the calling thread.
-
-#### 2.6 Hidden Costs Checklist (what Principal Engineers are expected to know cold)
-- Boxing a value type: heap allocation + copy, every single time.
-- `params object[]` overloads box every value-type argument.
-- Closures over loop variables/locals allocate a compiler-generated class on the heap.
-- `async` methods compile to a state machine **struct or class** — if any `await` isn't hit synchronously, it's often promoted to heap (class) allocation.
-- LINQ over value-type collections (`IEnumerable<T>` via `yield`) allocates iterator state machines + boxes the enumerator if used via non-generic interfaces.
-- String concatenation in a loop: O(n²) copies; use `StringBuilder`.
-- `virtual`/interface calls prevent inlining unless devirtualized by PGO.
-- Object header overhead: 16 bytes/object (x64) — matters a lot when you have millions of small objects.
-
-### 3. Visual Architecture
-
-#### CLR High-Level Component Diagram
-
-```mermaid
-graph TB
- subgraph Process
- subgraph CLR["CLR / CoreCLR Host"]
- Loader[Assembly Loader]
- TypeSys[Type System / MethodTables]
- JIT[JIT Compiler<br/>Tier0 / Tier1 / PGO / OSR]
- GC[Garbage Collector<br/>SOH Gen0/1/2, LOH, POH]
- TP[ThreadPool]
- EH[Exception Handling]
- Sec[Security / Sandboxing]
- end
- Heap[(Managed Heap)]
- Stacks[(Thread Stacks)]
- end
- IL[IL + Metadata Assembly] --> Loader
- Loader --> TypeSys --> JIT
- JIT --> Native[Native Code Cache]
- Native --> CPU[(CPU)]
- GC <--> Heap
- TP --> Stacks
-```
-
-#### GC Heap Layout (ASCII)
-
-```
-Small Object Heap (SOH)                        Large Object Heap (LOH)  Pinned Object Heap (POH)
-┌───────────┬────────────┬─────────────────┐   ┌────────────────────┐   ┌────────────────────┐
-│ Gen 0     │ Gen 1      │ Gen 2           │   │ Objects >= 85,000B │   │ fixed / GCHandle   │
-│ (nursery) │ (buffer)   │ (long-lived)    │   │ not compacted by   │   │ .Pinned objects    │
-│ freq. GC  │ occasional │ rare, expensive │   │ default            │   │                    │
-└───────────┴────────────┴─────────────────┘   └────────────────────┘   └────────────────────┘
- ~fast <1ms   ~1-10ms      ~10-100ms+                                      never moved
-```
-
-### 4. Production Example
-
-#### Scenario: High-throughput Order Processing API (ASP.NET Core,.NET 8, Kubernetes)
-
-**Problem**: A payments API serving ~8,000 req/s across 12 pods started showing p99 latency spikes of 400–800ms every ~15 seconds, correlated with CPU sawtooth patterns in Grafana.
-
-**Investigation**:
-- `dotnet-counters` showed `Gen 2 GC Count`, `% Time in GC` spiking to 25%+ during the latency spikes.
-- `dotnet-gcdump` + `dotnet-trace` revealed large numbers of `byte[]` arrays >85KB from a JSON deserialization path using `MemoryStream` buffering full request/response bodies — landing on the **LOH**, fragmenting it, forcing frequent Gen 2/full GCs.
-- Root cause: a middleware buffered the entire response into a `MemoryStream` for audit logging before writing to the client, for every request, and payloads were often 100–200KB (over the 85K LOH threshold).
-
-**Architecture fix**:
-- Replaced `MemoryStream` buffering with `RecyclableMemoryStreamManager` (Microsoft's pooled stream implementation) to reuse LOH-sized buffers instead of allocating new ones per-request.
-- Switched Kestrel/ASP.NET Core to **Server GC** with **DATAS** enabled (`DOTNET_GCHeapHardLimit` tuned to the pod's memory `limits`, `GCHeapCount` left to DATAS) instead of static heap-count-per-core (which had over-provisioned memory across 12 pods with 4 vCPU requests each).
-- Added `Server.MaxRequestBodySize` guard + streamed audit logging asynchronously instead of buffering.
-
-**Trade-offs**: Pooling buffers reduces GC pressure but risks holding memory longer than strictly needed (pool doesn't shrink instantly) — accepted because pod memory limits were set with headroom, and it's a net win over LOH fragmentation and stop-the-world pauses.
-
-**Lessons learned**:
-1. Any per-request allocation ≥ 85KB is a red flag — assume LOH and design around pooling (`ArrayPool<byte>`, `RecyclableMemoryStreamManager`).
-2. `% Time in GC` above ~10-15% sustained is an actionable signal, not noise.
-3. Server GC's default "heap count = core count" is wrong for many small pods — DATAS (.NET 8+) or explicit `GCHeapCount` tuning is mandatory in Kubernetes.
-4. Buffering entire payloads "just for logging" is an anti-pattern that principal-level review should catch before merge.
-
-### 11. Coding Exercises
-
-#### Easy — Detect boxing in a code snippet & fix it
-**Problem**: Given this method, identify and eliminate the boxing allocation.
 ```csharp
-void PrintAll(object[] items) // called with PrintAll(new object[]{1,2,3})
+// Parse without allocating substrings
+static (string Ccy, decimal Amount) Parse(ReadOnlySpan<char> s)      // "USD:125.50"
 {
-    foreach (var item in items) Console.WriteLine(item);
+    int i = s.IndexOf(':');
+    return (s[..i].ToString(), decimal.Parse(s[(i + 1)..], CultureInfo.InvariantCulture));
 }
-```
-**Solution**:
-```csharp
-void PrintAll<T>(T[] items)
+
+// Safe stackalloc/pool pattern
+static void Process(int size)
 {
-    foreach (var item in items) Console.WriteLine(item);
+    const int StackLimit = 256;
+    byte[]? rented = null;
+    Span<byte> buffer = size <= StackLimit
+        ? stackalloc byte[StackLimit]
+        : (rented = ArrayPool<byte>.Shared.Rent(size));
+    try { buffer = buffer[..size]; /* work */ }
+    finally { if (rented is not null) ArrayPool<byte>.Shared.Return(rented, clearArray: true); }
 }
-// call: PrintAll(new int[]{1,2,3}); // no boxing, JIT specializes for int
-```
-**Time complexity**: O(n) either way. **Space**: Original boxes each `int` → n heap allocations; generic version → 0 heap allocations for the array elements.
-**Optimized**: Already optimal; for `IEnumerable<T>` sources use `Span<T>`-based iteration if data is contiguous, to also avoid enumerator allocation.
 
-#### Medium — Implement a bounded object pool (mimic `ObjectPool<T>`)
-**Problem**: Implement a thread-safe pool of reusable `StringBuilder` instances, capped at N, to reduce GC pressure in a hot logging path.
-```csharp
-public sealed class SimpleObjectPool<T> where T: class
-{
-    private readonly ConcurrentBag<T> _items = new;
-    private readonly Func<T> _factory;
-    private readonly int _maxSize;
-    private int _count;
-
-    public SimpleObjectPool(Func<T> factory, int maxSize)
-    {
-        _factory = factory;
-        _maxSize = maxSize;
-    }
-
-    public T Rent => _items.TryTake(out var item)? item: _factory;
-
-    public void Return(T item)
-    {
-        if (Interlocked.Increment(ref _count) <= _maxSize)
-            _items.Add(item);
-        else
-            Interlocked.Decrement(ref _count);
-    }
-}
-```
-**Time complexity**: O(1) amortized rent/return (ConcurrentBag uses thread-local lists). **Space**: O(maxSize) steady-state.
-**Optimized**: Use `Microsoft.Extensions.ObjectPool.DefaultObjectPool<T>` in production (battle-tested, includes `IResettable` support) rather than hand-rolling — this exercise is for understanding the mechanism.
-
-#### Hard — Diagnose and fix a Gen 2/LOH-heavy allocation pattern
-**Problem**: This method is called per-request in a hot API and is suspected of causing LOH fragmentation. Fix it.
-```csharp
-public byte[] SerializeAndCompress(MyDto dto)
-{
-    using var ms = new MemoryStream; // grows internal buffer via doubling, can exceed 85K
-    JsonSerializer.Serialize(ms, dto);
-    return Compress(ms.ToArray); // ToArray = another full copy allocation
-}
-```
-**Solution**:
-```csharp
-public async Task WriteCompressedAsync(MyDto dto, Stream destination, RecyclableMemoryStreamManager mgr)
-{
-    using var ms = mgr.GetStream; // pooled, reused buffers, avoids ad-hoc LOH allocations
-    await JsonSerializer.SerializeAsync(ms, dto);
-    ms.Position = 0;
-    using var gzip = new GZipStream(destination, CompressionLevel.Fastest, leaveOpen: true);
-    await ms.CopyToAsync(gzip); // streams directly, no intermediate byte[] copy at all
-}
-```
-**Time complexity**: Same O(n) in payload size. **Space**: Original: up to 2–3x payload size in transient allocations (`MemoryStream` internal buffer growth + `ToArray` copy + compressed output array), frequently landing on LOH. Optimized: pooled buffer reuse via `RecyclableMemoryStreamManager` + streaming compression avoids the extra full-array copies and LOH churn entirely.
-**Optimized further**: If payload sizes are highly variable and often small, consider `ArrayPool<byte>.Shared.Rent`/`Return` directly for the rare cases where you truly need a `byte[]`, sized to actual need via `RecyclableMemoryStream.GetBuffer`/`TryGetBuffer`.
-
-#### Expert — Implement a low-allocation ring buffer log sink using `Span<T>` and pre-allocated arrays
-**Problem**: Implement a fixed-capacity, allocation-free (post-warm-up) circular buffer that stores fixed-width log entries and can be scanned without allocating.
-```csharp
-public sealed class RingLogBuffer
-{
-    private readonly byte[] _buffer; // single pre-allocated backing array
-    private readonly int _entrySize;
-    private readonly int _capacity;
-    private int _writeIndex;
-    private int _count;
-    private readonly object _lock = new;
-
-    public RingLogBuffer(int entrySize, int capacity)
-    {
-        _entrySize = entrySize;
-        _capacity = capacity;
-        _buffer = new byte[entrySize * capacity]; // one allocation, ever
-    }
-
-    public void Write(ReadOnlySpan<byte> entry)
-    {
-        if (entry.Length > _entrySize) throw new ArgumentException("entry too large");
-        lock (_lock)
-        {
-            var offset = _writeIndex * _entrySize;
-            var dest = _buffer.AsSpan(offset, _entrySize);
-            dest.Clear;
-            entry.CopyTo(dest);
-            _writeIndex = (_writeIndex + 1) % _capacity;
-            _count = Math.Min(_count + 1, _capacity);
-        }
-    }
-
-    // Caller-provided callback avoids allocating an IEnumerable/array on every scan
-    public void ScanNewestFirst(SpanAction<byte> onEntry)
-    {
-        lock (_lock)
-        {
-            for (int i = 0; i < _count; i++)
-            {
-                int idx = (_writeIndex - 1 - i + _capacity) % _capacity;
-                onEntry(_buffer.AsSpan(idx * _entrySize, _entrySize));
-            }
-        }
-    }
-}
-public delegate void SpanAction<T>(Span<T> span);
-```
-**Time complexity**: O(1) write, O(n) full scan (n = current count). **Space**: O(entrySize × capacity), allocated exactly once — steady-state zero GC allocation for both write and scan paths (no boxing, no per-call array/iterator allocation).
-**Discussion points for interview**: Why `Span<byte>` instead of `byte[]` in the API (avoids forcing callers to allocate/copy); why a single backing array beats an array-of-arrays (cache locality + one GC-tracked object instead of `capacity` objects); the lock is a simplification — a lock-free SPSC ring buffer (`Interlocked` CAS on indices) would be the natural "make it even better" follow-up for a truly single-producer/single-consumer scenario.
-
-### 12. System Design
-
-*(Applied narrowly here — full System Design gets its own dedicated module later. This shows how GC/memory reasoning feeds a design decision.)*
-
-**Scenario**: Design the memory/runtime configuration strategy for a **real-time bidding (RTB) ad service** requiring p99 < 10ms, 50,000 req/s per node.
-
-- **Functional**: Accept bid request → score against in-memory model/cache → return bid response within strict SLA.
-- **Non-functional**: p99 < 10ms (GC pauses are a direct SLA threat), high throughput, horizontally scalable, must degrade gracefully (drop/timeout bids rather than violate SLA).
-- **Architecture**: Stateless.NET services behind a load balancer; hot data (pricing models, targeting rules) held in-process as read-only, pre-built immutable structures (avoid mutation → avoid write barriers/card-table churn on hot objects); Server GC with `SustainedLowLatency`, tuned `GCHeapHardLimit`; `ArrayPool`/object pooling for per-request scratch buffers; ReadyToRun compiled to avoid JIT warm-up cost at deploy/scale-out time (critical since RTB traffic can burst instantly on new pod start).
-- **Database/Caching**: Reference/model data pulled from Redis on a slow refresh cycle into new immutable snapshots (swap-in via a single reference update, old snapshot naturally GC'd once unreferenced) rather than mutating shared in-process state under load.
-- **Messaging**: Async, fire-and-forget telemetry/logging (never block the bid-response hot path on I/O) — logs batched and flushed off the hot path to avoid triggering LOH allocations mid-request.
-- **Scaling**: Horizontal (stateless pods), each independently GC-tuned; canary new pods with a synthetic warm-up traffic ramp to avoid serving live SLA-bound traffic during JIT/Tier-1 promotion warm-up.
-- **Failure handling**: Circuit breaker + strict per-request timeout budget that accounts for expected p99.9 GC pause as part of the budget, not on top of it.
-- **Monitoring**: `dotnet-counters`/APM GC dashboards as a first-class SLA input, alerting directly on `% Time in GC` and Gen 2 frequency, not just on end-to-end latency (so GC-caused regressions are caught before they threaten SLA).
-- **Trade-offs**: Immutable snapshot-swap model data costs 2x memory during refresh (old + new both briefly alive) — accepted because refresh is infrequent and predictable, versus the alternative (in-place mutation) which risks partial-update races and unpredictable write-barrier/lock overhead on the hottest read path in the system.
-
-### 13. Low-Level Design
-
-**Scenario**: Design a small, thread-safe, generic **object pool with reset-on-return** (the actual shape of `Microsoft.Extensions.ObjectPool`), demonstrating SOLID + concurrency reasoning.
-
-#### Class Diagram
-```mermaid
-classDiagram
- class ObjectPool~T~ {
- <<abstract>>
- +Get T
- +Return(T item) void
- }
- class DefaultObjectPool~T~ {
- -ConcurrentQueue~T~ _items
- -IPooledObjectPolicy~T~ _policy
- -int _maxSize
- +Get T
- +Return(T item) void
- }
- class IPooledObjectPolicy~T~ {
- <<interface>>
- +Create T
- +Return(T item) bool
- }
- class StringBuilderPooledPolicy {
- +Create StringBuilder
- +Return(StringBuilder item) bool
- }
- ObjectPool~T~ <|-- DefaultObjectPool~T~
- DefaultObjectPool~T~ o--> IPooledObjectPolicy~T~
- IPooledObjectPolicy~T~ <|.. StringBuilderPooledPolicy
+// Format into a span, no string allocation
+Span<char> dest = stackalloc char[32];
+if (123.45m.TryFormat(dest, out int written, "F2", CultureInfo.InvariantCulture))
+    Console.Out.Write(dest[..written]);
 ```
 
-#### Sequence Diagram — Rent/Return under contention
-```mermaid
-sequenceDiagram
- participant Caller
- participant Pool as DefaultObjectPool
- participant Policy as IPooledObjectPolicy
- Caller->>Pool: Get
- alt item available in queue
- Pool->>Pool: dequeue item
- else queue empty
- Pool->>Policy: Create
- Policy-->>Pool: new T
- end
- Pool-->>Caller: T instance
- Caller->>Caller: use instance
- Caller->>Pool: Return(item)
- Pool->>Policy: Return(item) -- reset/validate
- alt policy approves & under capacity
- Pool->>Pool: enqueue item
- else rejected or over capacity
- Pool->>Pool: drop (GC reclaims normally)
- end
-```
+**Common interview questions**
 
-#### Design Patterns applied
-- **Strategy pattern** (`IPooledObjectPolicy<T>`) — decouples *how to create/reset* an object from the pool's *storage/concurrency* mechanics.
-- **Template-ish extensibility**: `ObjectPool<T>` abstract base allows swapping implementations (e.g., a `NoOpObjectPool<T>` for testing that always creates new instances, no pooling — Liskov-substitutable).
+**Q1. What is `Span<T>` and why does it exist?**
+A stack-only view over memory that lets you slice and process arrays, strings and stack or native memory without copying or allocating, with bounds checks. Used for parsers, serializers, and to cut GC pressure on hot paths.
 
-#### SOLID
-- **S**: `DefaultObjectPool<T>` only manages storage/concurrency; policy owns creation/reset logic.
-- **O**: New object types supported by writing a new `IPooledObjectPolicy<T>`, no change to the pool class.
-- **L**: Any `IPooledObjectPolicy<T>` implementation must honor the `Return` contract (return `true` only if the object is truly safe to reuse) — violating this (e.g., always returning `true` without resetting) breaks correctness for all consumers.
-- **I**: `IPooledObjectPolicy<T>` is a minimal 2-method interface — no fat interface forcing unrelated methods.
-- **D**: `DefaultObjectPool<T>` depends on the `IPooledObjectPolicy<T>` abstraction, not a concrete policy.
+**Q2. Why can't `Span<T>` be used in async methods or as a class field?**
+It's a `ref struct` that may point to stack memory. Async locals move to a heap state machine, and class fields live on the heap — both could outlive the stack frame. Use `Memory<T>` instead.
 
-#### Extensibility & Thread Safety
-- `ConcurrentQueue<T>` gives lock-free multi-producer/multi-consumer semantics for rent/return.
-- Capacity tracked via `Interlocked` counter (as in the coding exercise above) to bound memory without a broad lock.
-- Extensible to a **per-core striped pool** (like `Microsoft.Extensions.ObjectPool`'s actual fast-path design: one fixed "fast slot" per pool instance plus a shared bag) to reduce contention further under heavy multi-core load — worth mentioning in an interview as the "next level" optimization.
+**Q3. `Span<T>` vs `Memory<T>`?**
+`Span` is stack-only and the fastest; `Memory` can be stored, passed across `await`, and captured in lambdas — convert to `Span` when doing the actual work.
 
-### 14. Production Debugging
+**Q4. What can go wrong with `ArrayPool`?**
+Forgetting to return a buffer (leak), using it after returning it (another request sees your data — a security issue in multi-tenant systems), trusting `array.Length` (it can be larger than requested), and not clearing sensitive data.
 
-#### Incident: GC pauses causing p99 latency spikes (Gen 2 / Background GC)
-- **Symptoms**: Periodic latency spikes, CPU sawtooth, correlates with `Gen 2 GC Count` in `dotnet-counters`.
-- **Investigation**: `dotnet-trace collect --providers Microsoft-Windows-DotNETRuntime` → analyze in PerfView/speedscope for `GC/SuspendEEStart`–`GC/RestartEEStop` spans; `dotnet-counters monitor --process-id <pid>` live for `% Time in GC`, `Gen 2 Size`.
-- **Tools**: `dotnet-counters`, `dotnet-trace`, `dotnet-gcdump`, PerfView (Windows), `dotnet-dump` for post-mortem heap analysis.
-- **Root cause (typical)**: Unbounded/oversized caches promoted to Gen 2, or LOH churn from oversized buffers.
-- **Fix**: Bound caches, pool large buffers, tune GC mode/heap limits, add SLA-aware liveness probe timeouts.
-- **Prevention**: GC counters as first-class dashboard/alerting; load-test with production-representative payload sizes before ship.
+**Q5. Why is `stackalloc` with a user-supplied length dangerous?**
+A large value overflows the stack, and `StackOverflowException` can't be caught — the process dies. Always cap it with a constant and fall back to `ArrayPool`.
 
-#### Incident: Memory leak (steadily growing working set, eventual OOMKill)
-- **Symptoms**: RSS grows monotonically over days/weeks, never plateaus, eventually OOMKilled and restarted (masking the leak as "occasional restarts").
-- **Investigation**: Two `dotnet-gcdump` snapshots hours apart under similar load; diff by type count; follow the dump's "paths to root" for the top growing type.
-- **Tools**: `dotnet-gcdump collect`, `dotnet-gcdump report`/analyze in a GC heap viewer (e.g., `PerfView`, Visual Studio's Diagnostic Tools, JetBrains dotMemory).
-- **Root cause (typical)**: Static event handler subscriptions never unsubscribed (classic "lapsed listener" leak — the publisher indirectly keeps every subscriber alive forever), or an `AsyncLocal`/`ThreadStatic` accidentally rooting large objects.
-- **Fix**: Unsubscribe in `Dispose`; use `WeakReference`/weak event patterns for long-lived publisher → short-lived subscriber relationships; audit static/singleton fields for anything collection-like without bounds.
-- **Prevention**: Static analysis rule (Roslyn analyzer) flagging `+=` event subscriptions in classes implementing `IDisposable` without a corresponding `-=` in `Dispose`.
-
-#### Incident: Thread pool starvation (cascading latency under load)
-- **Symptoms**: Latency degrades non-linearly as load increases; `ThreadPool Queue Length` counter climbs; CPU is *not* maxed (threads are blocked, not computing).
-- **Investigation**: `dotnet-counters` → `ThreadPool Thread Count`, `ThreadPool Queue Length`, `ThreadPool Completed Work Item Count` rate; `dotnet-dump analyze` → `clrthreads`/`dumpstack` to find threads blocked in `.Wait`/`.Result`.
-- **Root cause (typical)**: Sync-over-async (`.Result`/`.Wait` on async APIs) inside a hot path, blocking pool threads that are also needed to run the very continuations being waited on.
-- **Fix**: `async` all the way down; if a sync boundary is unavoidable (e.g., legacy sync interface), isolate it to a dedicated thread, not the shared pool.
-- **Prevention**: Analyzer rules banning `.Result`/`.Wait` in library/app code except in explicitly reviewed entry points (e.g., `Main`).
-
-#### Incident: High CPU dominated by JIT / re-JIT churn
-- **Symptoms**: CPU spike concentrated right after deploys/scale-out events, settling after a minute or two.
-- **Investigation**: `dotnet-trace` CPU sampling shows time in `clrjit.dll`/JIT-related frames during the spike window.
-- **Root cause**: Cold-start JIT warm-up (Tier 0 → Tier 1 promotion) happening simultaneously across many methods right as a new pod starts taking live traffic.
-- **Fix**: ReadyToRun publish to precompile hot framework/app code; synthetic warm-up traffic before adding a new pod to the live load balancer pool; consider NativeAOT if reflection/DI usage allows.
-- **Prevention**: Include a warm-up phase in the deployment pipeline/readiness probe, not just "process started."
-
-### 15. Architecture Decision
-
-**Decision**: Choosing a GC/runtime strategy for a new containerized.NET 8 microservice fleet.
-
-| Option | Advantages | Disadvantages | Cost | Complexity | Maintainability | Performance | Scalability | Ops Overhead |
-|---|---|---|---|---|---|---|---|---|
-| **A. Server GC + DATAS (default-ish,.NET 8+)** | Good throughput, memory-adaptive, minimal manual tuning | Slightly less predictable than fixed limits on very noisy neighbors | Low | Low | High | High (throughput) | High | Low |
-| **B. Server GC + explicit `GCHeapHardLimit`/`GCHeapCount`** | Fully deterministic, auditable, best for capacity planning | Requires manual re-tuning if pod sizing changes | Medium (engineering time) | Medium | Medium (config drift risk) | High | High | Medium |
-| **C. Workstation + Concurrent GC** | Lower memory footprint per pod, simpler mental model | Lower throughput ceiling under high core counts | Low | Low | High | Medium | Medium | Low |
-| **D. NativeAOT** | Fastest cold start, smallest footprint, no JIT warm-up variance | Reflection/trimming constraints, newer/less battle-tested for complex DI-heavy apps | Medium-High (migration effort) | High initially | Medium (until ecosystem matures) | High (steady-state) + best cold-start | High | Medium (new tooling/debugging patterns) |
-
-**Recommendation**: **Option A (Server GC + DATAS)** as the fleet-wide default for standard ASP.NET Core services on.NET 8+, with **Option B** as an explicit override for services with unusual, well-understood memory profiles (e.g., known large in-memory caches), and **Option D (NativeAOT)** tracked as a forward-looking migration for latency/cold-start-sensitive services (Functions, Lambda) once the team validates trimming compatibility. Rationale: DATAS directly solves the historical "Server GC over-commits memory in small containers" problem with near-zero manual tuning, matching the "low ops overhead, high maintainability" bar expected for a fleet of many services maintained by rotating teams — deterministic manual tuning (Option B) is reserved for the minority of services where its precision is actually needed, not applied blanket-wide (avoiding unnecessary maintainability cost).
-
-### 16. Enterprise Case Study
-
-**Inspired by**: Large-scale.NET backend services at companies like **Stack Overflow**, **Bing**, and **Azure** itself (all public case studies/talks on.NET GC tuning at scale).
-
-- **Architecture**: High-traffic web tier (Stack Overflow historically ran a small number of very powerful servers, not thousands of small pods) — a useful contrast to the Kubernetes-many-small-pods model: fewer, larger processes mean Server GC's per-core heap model is a *natural* fit with no DATAS-style small-container correction needed.
-- **Challenges**: At extreme scale, even "rare" full/blocking GCs matter — publicly discussed techniques include minimizing allocations aggressively in hot paths (heavy use of caching pre-rendered content, avoiding LINQ/closures in the hottest code, careful string handling) rather than relying purely on GC tuning — i.e., **the cheapest GC pause is the one that never has to happen because you allocated less**.
-- **Scaling lesson**: There's no universal "right" GC config — it's a function of deployment topology (few large machines vs many small containers), which is exactly why DATAS (many-small-container problem) shipped years *after* Server GC's original core-count-based design (few-large-machine assumption) — the runtime itself had to evolve as the industry's deployment shape shifted from big boxes to Kubernetes-style density.
-- **Lesson for principal engineers**: Runtime defaults encode assumptions about *how* you deploy. Never adopt a default blindly — understand what deployment shape it was designed for, and verify your shape matches (or override it, as with DATAS vs pre-DATAS Server GC in containers).
-
-### 17. Principal Engineer Perspective
-
-- **Business impact**: GC/memory tuning decisions translate directly into cloud cost (over-provisioned memory limits from Server GC's naive heap-count-per-core model literally cost real money at fleet scale) and customer-facing SLA risk (p99 latency from GC pauses). A Principal Engineer frames these conversations in dollars and SLA risk, not just "this is more correct."
-- **Engineering trade-offs**: Every GC/memory decision is throughput-vs-latency-vs-memory — there is no free lunch. The job is picking the right point on that triangle *per workload*, not applying one config everywhere.
-- **Technical leadership**: Push teams toward measurement-driven tuning (counters, BenchmarkDotNet, load tests) over folklore ("just call GC.Collect", "just enable Server GC"). Build shared tooling/dashboards so every team doesn't reinvent GC diagnostics from scratch.
-- **Cross-team communication**: Translate "we changed `GCHeapHardLimitPercent`" into terms SRE/infra/finance stakeholders care about: pod density per node, cost per replica, incident-risk reduction.
-- **Architecture governance**: Require ADRs for non-default runtime configuration; require GC counters on every service dashboard as a release-readiness gate, not an afterthought added during an incident.
-- **Cost optimization**: DATAS-style memory-adaptive defaults directly reduce over-provisioning — a Principal Engineer proactively evaluates runtime upgrades (.NET N → N+1) for exactly this kind of "free" cost win, not just for new language features.
-- **Risk analysis**: A "15% throughput win" from an aggressive GC mode change is only a win if it doesn't introduce tail-latency or OOM risk under peak/adversarial load — always demand worst-case, not just average-case, evidence.
-- **Long-term maintainability**: Non-default settings need documentation (why, and the measured evidence that justified it) so a future engineer doesn't "helpfully" revert a deliberate, hard-won tuning decision during an unrelated cleanup.
-
-### 18. Revision
-
-#### Key Takeaways
-- IL is JIT-compiled at runtime (Tier 0 → Tier 1, with PGO/OSR in modern.NET); R2R/NativeAOT shift this work earlier.
-- Generational GC (Gen 0/1/2 + LOH + POH) exploits "most objects die young"; write barriers + card tables make ephemeral collections cheap even with a large Gen 2.
-- Value vs reference type placement depends on the *container*, not a blanket "structs=stack" rule.
-- Boxing, closures, async state machines, and LINQ are common hidden-allocation sources.
-- Server GC = throughput (per-core heaps); Workstation = latency/footprint; DATAS (.NET 8+) fixes Server GC's container over-commit problem.
-- `IDisposable`/`using` for determinism; finalizers are a costly safety net, not a primary cleanup mechanism.
-- Diagnosis toolchain: `dotnet-counters` (live metrics), `dotnet-trace` (ETW timeline), `dotnet-gcdump` (heap snapshots/diffs), `dotnet-dump` (post-mortem).
-
-#### Interview Cheatsheet
-- LOH threshold: **85,000 bytes**.
-- Object header (x64): **16 bytes** (SyncBlockIndex + MethodTable ptr).
-- Default Tier 0→1 promotion threshold: **~30 calls**.
-- Thread pool growth heuristic: **~1 thread/sec** when starved.
-- Server GC = 1 heap + GC thread **per core**; DATAS makes this adaptive (.NET 8+).
-
-#### Things Interviewers Love
-- Connecting language feature → IL/runtime behavior → OS/hardware effect (full stack reasoning).
-- Citing specific counters/tools, not just "I'd profile it."
-- Acknowledging trade-offs explicitly instead of presenting one "correct" answer.
-
-#### Things Interviewers Hate
-- "Structs are always on the stack, always fast."
-- "Just call `GC.Collect`" as a fix.
-- Reciting generations without explaining *why* they exist (the hypothesis).
-- Treating GC tuning as a one-size-fits-all default rather than workload-dependent.
-
-#### Common Traps
-- Confusing AppDomain-era isolation model with modern `AssemblyLoadContext`/container-based isolation.
-- Assuming `ValueTask` is always strictly better than `Task` (it has stricter usage rules — misuse is a real bug source).
-- Assuming Concurrent/Background GC means "fully non-blocking" (it still has brief blocking phases).
-
-#### Revision Notes
-Re-read (GC internals) and the Expert interview Q&A block before any Staff/Principal loop — this is the single highest-density section for "separates senior from principal" signal in C#/.NET interviews.
+**Q6. Should we rewrite our service with spans everywhere?**
+No. Profile first; apply spans only to proven hot paths (parsing, serialization). Spans make code harder to read and maintain — a 3× gain on 1% of request time is not worth it.
 
 ---
 
-**Next**: Type "Next" to proceed to Module 2 (topic to be selected from `01-CSharp` — e.g., Async/Await Internals, or move to `02-DotNet-AspNetCore`).
+## 7. Delegates, Events, Lambdas & Closures
+
+**Key concepts**
+- **Delegate** = a type-safe function reference (target + method). Built-ins: `Action<...>` (no return), `Func<..., TResult>`, `Predicate<T>`.
+- **Multicast:** `+=` combines handlers; invoking returns the **last** result; one throwing handler stops the rest.
+- **`event`** = a delegate that outsiders can only `+=`/`-=` (they can't invoke or overwrite it). Standard signature: `EventHandler<TEventArgs>`.
+- **Lambdas** compile to methods; **closures** capture **variables (not values)** in a heap "display class".
+- **Loop capture:** `foreach` creates a new variable per iteration (C# 5+); a `for` loop shares one variable.
+- **Memory leak:** the publisher holds references to subscribers → unsubscribe (`-=`) in `Dispose`, use weak events, or avoid long-lived publishers.
+- `-=` with a *new* lambda removes nothing (different instance).
+- **`static` lambdas** (C# 9) can't capture → no hidden allocations.
+- Alternatives to events: callbacks, `IObservable<T>` (Rx), a mediator, channels.
+
+```csharp
+Func<decimal, decimal> addTax = amt => amt * 1.2m;
+Action<string> log = Console.WriteLine;
+Predicate<int> isEven = n => n % 2 == 0;
+
+// Event pattern
+public class OrderBook
+{
+    public event EventHandler<TradeEventArgs>? TradeExecuted;
+    protected virtual void OnTrade(TradeEventArgs e) => TradeExecuted?.Invoke(this, e); // thread-safe snapshot
+}
+public record TradeEventArgs(string Symbol, decimal Price);
+
+// Raising safely so one bad handler doesn't stop the others
+foreach (EventHandler<TradeEventArgs> h in (TradeExecuted?.GetInvocationList() ?? []).Cast<EventHandler<TradeEventArgs>>())
+{
+    try { h(this, args); } catch (Exception ex) { _log.LogError(ex, "Handler failed"); }
+}
+
+// Closure capture
+var actions = new List<Action>();
+for (int i = 0; i < 3; i++) actions.Add(() => Console.Write(i));      // 3 3 3
+for (int i = 0; i < 3; i++) { int copy = i; actions.Add(() => Console.Write(copy)); } // 0 1 2
+
+// Unsubscribe correctly
+EventHandler<TradeEventArgs> handler = (s, e) => Console.WriteLine(e.Price);
+book.TradeExecuted += handler;
+book.TradeExecuted -= handler;           // works: same instance
+```
+
+**Common interview questions**
+
+**Q1. Delegate vs event?**
+A delegate is a type holding method references. An event wraps a delegate field so external code can only subscribe or unsubscribe — it can't invoke the event or wipe out other subscribers with `=`.
+
+**Q2. `Func` vs `Action` vs `Predicate`?**
+`Func` returns a value (the last type parameter), `Action` returns void, `Predicate<T>` is `Func<T,bool>` (older APIs).
+
+**Q3. What is a closure and what's the classic bug?**
+A lambda that captures outer variables; the compiler hoists them into a heap object shared by reference. In a `for` loop, all lambdas share one `i` and see its final value. Copy it into a local inside the loop (or use `foreach`).
+
+**Q4. How do events cause memory leaks?**
+The publisher's invocation list references each subscriber. If a long-lived publisher (a static or singleton) has short-lived subscribers that never unsubscribe, they're never collected. Unsubscribe in `Dispose`, or use weak references.
+
+**Q5. What happens if one event handler throws?**
+The remaining handlers in the multicast list don't run, and the exception propagates to the raiser. Iterate `GetInvocationList()` with try/catch per handler when isolation matters.
+
+**Q6. Why can't you unsubscribe with `-= () => Foo()`?**
+Each lambda expression creates a new delegate instance (or a different one), so removal finds no match. Store the delegate in a variable or use a named method.
+
+**Q7. How do you make event raising thread-safe?**
+`Handler?.Invoke(...)` copies the delegate reference first, avoiding a null race; delegates are immutable, so `+=`/`-=` replace them atomically (field-like events use `Interlocked.CompareExchange`).
+
+---
+
+## 8. LINQ
+
+**Key concepts**
+- **Deferred execution:** most operators build a pipeline that runs when enumerated (`foreach`, `ToList`, `Count`, `First`…). **Enumerating twice runs it twice** (including DB queries).
+- **Streaming** (`Where`, `Select`, `Take`, `Skip`) vs **buffering** (`OrderBy`, `GroupBy`, `Distinct`, `Reverse`, `ToList`).
+- **`IEnumerable<T>`** = in-memory delegates (LINQ to Objects). **`IQueryable<T>`** = expression trees translated by a provider (EF Core → SQL). `AsEnumerable()` / `ToList()` switch to client-side evaluation.
+- **Element operators:** `First` (throws if empty), `FirstOrDefault`, `Single` (throws if not exactly one — enforces uniqueness), `SingleOrDefault`, `Last`, `ElementAt`.
+- `Any()` short-circuits; `Count() > 0` may scan everything.
+- **Joins:** `Join`, `GroupJoin` (left join with `DefaultIfEmpty`), `SelectMany` (flatten). **Set ops:** `Distinct`, `Union`, `Intersect`, `Except`, `DistinctBy`/`MaxBy`/`Chunk` (.NET 6+).
+- **`yield return`** builds iterators (validation runs lazily → use a wrapper for eager checks).
+- **Query syntax** compiles to method syntax.
+- Allocations: one iterator and delegate per operator, plus closures. Avoid LINQ in ultra-hot loops if profiling says so.
+
+```csharp
+var orders = new List<Order> { /* ... */ };
+
+// Filtering, projection, ordering, paging
+var top = orders.Where(o => o.Status == "Paid")
+                .OrderByDescending(o => o.Total)
+                .Select(o => new { o.Id, o.Total })
+                .Take(10)
+                .ToList();                                   // executes here
+
+// Grouping + aggregation
+var byCustomer = orders.GroupBy(o => o.CustomerId)
+    .Select(g => new { CustomerId = g.Key, Count = g.Count(), Revenue = g.Sum(o => o.Total) });
+
+// Left join
+var report = from c in customers
+             join o in orders on c.Id equals o.CustomerId into co
+             from o in co.DefaultIfEmpty()
+             select new { c.Name, OrderId = o?.Id };
+
+// Flatten
+var allLines = orders.SelectMany(o => o.Lines);
+
+// .NET 6+ helpers
+var biggest = orders.MaxBy(o => o.Total);
+var batches = orders.Chunk(100);
+var unique  = orders.DistinctBy(o => o.CustomerId);
+
+// Deferred-execution trap
+IEnumerable<Order> paid = orders.Where(o => o.Status == "Paid");
+orders.Add(new Order { Status = "Paid" });
+Console.WriteLine(paid.Count());                           // includes the new one
+
+// Custom operator with eager validation
+public static IEnumerable<T> WhereNotNull<T>(this IEnumerable<T?> src) where T : class
+{
+    ArgumentNullException.ThrowIfNull(src);
+    return Iterate(src);
+    static IEnumerable<T> Iterate(IEnumerable<T?> s) { foreach (var x in s) if (x is not null) yield return x; }
+}
+```
+
+**Common interview questions**
+
+**Q1. What is deferred execution?**
+The query is a recipe; it runs only when enumerated, and every enumeration runs it again against the current data. Materialize with `ToList()` when you need a stable snapshot or will enumerate it several times.
+
+**Q2. `IEnumerable` vs `IQueryable`?**
+`IEnumerable` executes C# delegates in memory. `IQueryable` holds expression trees that a provider translates (e.g., to SQL), so filters run in the database. Calling `AsEnumerable()` or `ToList()` too early pulls every row into memory.
+
+**Q3. `First` vs `FirstOrDefault` vs `Single`?**
+`First` takes the first match and throws if there's none. `FirstOrDefault` returns default instead. `Single` throws if there are zero **or more than one** — use it when uniqueness is an invariant (lookup by unique key). In SQL, `Single` fetches `TOP 2` to check.
+
+**Q4. `Any()` vs `Count() > 0`?**
+`Any()` stops at the first element (`EXISTS` in SQL); `Count()` enumerates everything (`COUNT(*)`). Use `Any()`.
+
+**Q5. Streaming vs buffering operators — why does it matter?**
+Streaming operators yield items one at a time (low memory, quick first result). Buffering ones (`OrderBy`, `GroupBy`) must read the whole source first — on huge or infinite sequences they cost memory or never finish.
+
+**Q6. How do you do a left join in LINQ?**
+`GroupJoin` + `SelectMany` + `DefaultIfEmpty()` (query syntax: `join ... into g from x in g.DefaultIfEmpty()`). .NET 10 adds a `LeftJoin` operator.
+
+**Q7. Should a repository return `IQueryable`?**
+Usually not: it leaks the persistence technology, lets callers build untranslatable queries, and may be enumerated after the DbContext is disposed. Return materialized lists or specific query methods.
+
+**Q8. How does `yield return` work?**
+The compiler builds an iterator state machine; each `MoveNext()` runs the code to the next `yield`. Nothing runs until enumeration — including argument validation, so validate in a non-iterator wrapper.
+
+---
+
+## 9. Generics & Variance
+
+**Key concepts**
+- Generics give type safety and code reuse without boxing. .NET generics are **reified** (the type is known at runtime), unlike Java's type erasure.
+- JIT: each **value-type** instantiation gets its own native code; **reference types** share one implementation.
+- **Constraints:** `where T : class | struct | new() | notnull | unmanaged | BaseClass | IInterface`, and `allows ref struct` (C# 13).
+- **Variance** (interfaces and delegates only, reference types only):
+  - **Covariance `out T`** — T only returned: `IEnumerable<string>` → `IEnumerable<object>`.
+  - **Contravariance `in T`** — T only consumed: `Action<object>` → `Action<string>`, `IComparer<in T>`.
+  - **Invariant:** `List<T>`, `IList<T>` (T is both input and output).
+- **Array covariance is unsafe** (`object[] a = new string[1]; a[0] = 1;` → runtime exception).
+- **`default(T)`**, **generic methods** with type inference, **static abstract interface members** → generic math (`INumber<T>`).
+- **Open generics** in DI: `typeof(IRepository<>)`.
+
+```csharp
+public interface IRepository<T> where T : class, IEntity
+{
+    Task<T?> GetAsync(Guid id, CancellationToken ct);
+    Task AddAsync(T entity, CancellationToken ct);
+}
+
+public static T Max<T>(T a, T b) where T : IComparable<T> => a.CompareTo(b) >= 0 ? a : b;
+int m = Max(3, 7);                                // inferred, no boxing
+
+// Variance
+IEnumerable<string> names = ["a", "b"];
+IEnumerable<object> objects = names;              // covariance (out)
+Action<object> printAny = o => Console.WriteLine(o);
+Action<string> printString = printAny;            // contravariance (in)
+
+public interface IProducer<out T> { T Produce(); }
+public interface IConsumer<in T>  { void Consume(T item); }
+
+// Generic math (C# 11)
+static T SumAll<T>(IEnumerable<T> values) where T : INumber<T>
+{
+    T total = T.Zero;
+    foreach (var v in values) total += v;
+    return total;
+}
+decimal d = SumAll([1.5m, 2.5m]);                 // 4.0
+```
+
+**Common interview questions**
+
+**Q1. Why use generics?**
+Compile-time type safety, no casts, no boxing for value types, and one reusable implementation (collections, repositories, `Result<T>`).
+
+**Q2. Explain covariance and contravariance.**
+Covariance (`out`) lets you use a more derived type where a base type is expected for *outputs*: `IEnumerable<string>` as `IEnumerable<object>`. Contravariance (`in`) lets you use a more general type for *inputs*: an `IComparer<object>` can compare strings. It's only safe in one direction, which is why `List<T>` is invariant.
+
+**Q3. Why can't `List<string>` be assigned to `List<object>`?**
+You could then add an `int` through the `List<object>` reference into a list of strings. `IEnumerable<object>` works because it's read-only (covariant).
+
+**Q4. Why isn't `IEnumerable<int>` covariant to `IEnumerable<object>`?**
+Variance only works for reference types; turning ints into objects needs boxing each element, which a reference conversion can't do.
+
+**Q5. What do constraints give you?**
+Members you can call on `T` (an interface constraint lets you call `CompareTo`), `new T()` with `new()`, null checks with `class`, and better codegen (struct + interface constraint avoids boxing). Adding a constraint to a public API later is a breaking change.
+
+**Q6. How do C# generics differ from Java and C++?**
+Java erases types at runtime (no `typeof(T)`, boxing for primitives). C++ templates generate code at compile time per type. C# reifies generics at runtime: real type information, specialized code for value types, and shared code for reference types.
+
+**Q7. What are static abstract interface members?**
+Interfaces can require static members (operators, `Zero`, `Parse`), enabling generic algorithms over numbers (`INumber<T>`) and factory patterns without reflection.
+
+---
+
+## 10. Records, Pattern Matching & Immutability
+
+**Key concepts**
+- **`record` (class):** reference type with **value equality**, `ToString`, `Deconstruct`, and `with` cloning. **`record struct`**, **`readonly record struct`** for value types.
+- **`with` is a shallow copy** — nested mutable objects are shared.
+- **`init`** = settable only during initialization; **`required`** (C# 11) = must be set. `init` doesn't make a `List<T>` immutable.
+- **Records for:** DTOs, value objects, events, messages. **Not for:** EF entities (identity-based, mutable, change-tracked).
+- A record containing a collection compares that collection **by reference** → custom `Equals`, or `ImmutableArray` with care.
+- **Immutable collections:** `ImmutableList`, `ImmutableArray` (builder for bulk creation), `FrozenDictionary`. `IReadOnlyList` is only a read-only *view*.
+- **Patterns:** type, constant, relational (`> 5`), logical (`and`/`or`/`not`), property (`{ Status: "Paid" }`), positional, `var`, list/slice (`[1, .., var last]`), `is not null`.
+- **`switch` expressions** with exhaustiveness checking; avoid a catch-all `_` for closed hierarchies so new cases cause warnings.
+
+```csharp
+public record Money(decimal Amount, string Currency);
+public readonly record struct Point(int X, int Y);
+
+public record Customer
+{
+    public required string Id { get; init; }
+    public required string Name { get; init; }
+    public ImmutableList<string> Tags { get; init; } = [];
+}
+
+var m1 = new Money(10, "USD");
+var m2 = new Money(10, "USD");
+Console.WriteLine(m1 == m2);                       // True (value equality)
+var m3 = m1 with { Amount = 20 };                  // non-destructive mutation
+var (amount, ccy) = m3;                            // deconstruct
+
+// Pattern matching
+string Classify(object o) => o switch
+{
+    null                               => "null",
+    int n when n < 0                   => "negative int",
+    int and (0 or 1)                   => "zero/one",
+    Money { Currency: "USD", Amount: > 1_000 } => "large USD",
+    Money(var a, _) when a == 0        => "zero money",
+    string { Length: 0 }               => "empty string",
+    int[] and [var first, .., var last] => $"array {first}..{last}",
+    _                                  => "other"
+};
+
+if (payment is { Status: PaymentStatus.Failed, RetryCount: < 3 } p) Retry(p);
+
+// Closed hierarchy, exhaustive switch
+public abstract record PaymentResult;
+public sealed record Approved(string AuthCode) : PaymentResult;
+public sealed record Declined(string Reason) : PaymentResult;
+string Describe(PaymentResult r) => r switch
+{
+    Approved a => $"OK {a.AuthCode}",
+    Declined d => $"Declined: {d.Reason}",
+    _ => throw new UnreachableException()
+};
+```
+
+**Common interview questions**
+
+**Q1. Record vs class vs struct?**
+A class has identity and reference equality — use it for entities and services. A record has value equality and immutability helpers — use it for DTOs, value objects and events. A struct is a value type (copied) — use it for small, short-lived values; `readonly record struct` is great for small value objects like `Money` or `Point`.
+
+**Q2. Is a record immutable?**
+Positional records get `init`-only properties, so they're shallowly immutable — but properties can be declared mutable, and referenced objects (lists) can still change. `with` copies references, not deep contents.
+
+**Q3. Why not use records as EF Core entities?**
+Entities have identity: two rows with equal values are still different entities. Value equality breaks change tracking, `HashSet` membership and navigation fix-up, and `with` creates untracked copies.
+
+**Q4. What does `with` actually do?**
+It calls a compiler-generated copy constructor (memberwise shallow copy), then applies the `init` assignments.
+
+**Q5. What's new in pattern matching across recent C# versions?**
+C# 7 type patterns; C# 8 property, positional and `switch` expressions; C# 9 relational and logical (`and`, `or`, `not`); C# 10 extended property patterns (`{ Address.City: "X" }`); C# 11 list and slice patterns.
+
+**Q6. `IReadOnlyList<T>` vs `ImmutableList<T>`?**
+`IReadOnlyList` just hides the mutating methods — the underlying list can still change through another reference. `ImmutableList` guarantees no one can change it; "modifications" return new instances. `ImmutableArray` has fast reads but copies on every change (use a builder for bulk construction).
+
+**Q7. Why avoid the `_` discard arm in a switch over a closed hierarchy?**
+It silences the compiler's exhaustiveness warning, so when someone adds a new subtype it silently falls into the default branch instead of failing to compile or warning.
+
+---
+
+## 11. Exceptions
+
+**Key concepts**
+- **`throw;`** preserves the stack trace; **`throw ex;`** resets it. Wrap with an inner exception: `throw new PaymentException("context", ex)`.
+- **Exception filters** `catch (X ex) when (cond)` run *before* unwinding (good for logging and conditional handling).
+- **`finally`** always runs — except on process kill, `StackOverflowException` or `Environment.FailFast`.
+- **Cost:** try blocks are free; *throwing* is expensive (stack capture). Don't use exceptions for control flow → `TryParse`, result types, validation responses.
+- **Don't catch** `OutOfMemoryException` or `StackOverflowException`; treat `OperationCanceledException` as cancellation, not an error.
+- **`AggregateException`** (from `.Wait()`/`.Result`, `Parallel`); `await` unwraps the first exception.
+- **`ExceptionDispatchInfo.Capture(ex).Throw()`** rethrows on another thread with the original stack.
+- **Custom exceptions:** a few meaningful types, structured properties, sealed; inherit from `Exception`.
+- **Boundaries:** translate exceptions centrally (middleware → ProblemDetails); never leak stack traces; log once.
+- **Retry:** only transient failures, and only on idempotent operations.
+
+```csharp
+public sealed class InsufficientFundsException(string accountId, decimal shortfall)
+    : Exception($"Account {accountId} is short by {shortfall}")
+{
+    public string AccountId { get; } = accountId;
+    public decimal Shortfall { get; } = shortfall;
+}
+
+try
+{
+    await _gateway.ChargeAsync(request, ct);
+}
+catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.ServiceUnavailable)
+{
+    _log.LogWarning(ex, "Gateway unavailable for {PaymentId}", request.Id);
+    throw new PaymentTransientException(request.Id, ex);          // wrap, keep inner
+}
+catch (OperationCanceledException) when (ct.IsCancellationRequested)
+{
+    throw;                                                         // cancellation, not failure
+}
+
+// Result type instead of exceptions for expected failures
+public readonly record struct Result<T>(T? Value, string? Error)
+{
+    public bool IsSuccess => Error is null;
+    public static Result<T> Ok(T v) => new(v, null);
+    public static Result<T> Fail(string e) => new(default, e);
+}
+
+if (!decimal.TryParse(input, CultureInfo.InvariantCulture, out var amount))
+    return Result<decimal>.Fail("Invalid amount");
+```
+
+**Common interview questions**
+
+**Q1. `throw` vs `throw ex`?**
+`throw;` rethrows the same exception with its original stack trace. `throw ex;` restarts the stack trace at that line, losing where the error actually happened.
+
+**Q2. When should you create custom exceptions?**
+When callers need to catch and handle a specific condition differently (`InsufficientFundsException` → 422), or you need structured data on it. Don't build deep taxonomies nobody catches.
+
+**Q3. What are exception filters good for?**
+Catching only under certain conditions (`when (ex.StatusCode == 503)`) without unwinding the stack, and logging (`when (Log(ex))` returning false) while keeping the original stack for the real handler.
+
+**Q4. Exceptions vs result types?**
+Exceptions for unexpected, exceptional failures (DB down, bugs). Result types or validation for expected outcomes (invalid input, insufficient funds in a hot path) — they're cheaper and make the outcome explicit in the signature.
+
+**Q5. What's wrong with `catch (Exception) { log; }` and continuing?**
+It hides failures: the caller thinks it succeeded and corrupt or partial state spreads. Catch only what you can handle; otherwise let it bubble to a boundary that logs once and returns an error.
+
+**Q6. How are exceptions handled with async and `Task.WhenAll`?**
+The exception is stored on the Task and rethrown at `await` with its original stack. With `WhenAll`, `await` throws the first one; inspect `task.Exception.InnerExceptions` for all. `.Result`/`.Wait()` wrap them in `AggregateException`.
+
+**Q7. Does `finally` always run?**
+For normal returns, exceptions and `break`/`continue`, yes. Not if the process is killed, on `StackOverflowException`, or on `Environment.FailFast` — so never rely on `finally` for cross-process guarantees (use leases and timeouts).
+
+**Q8. How do you return errors from an API?**
+Global exception handling (`UseExceptionHandler` + `IExceptionHandler`) maps exceptions to RFC 9457 ProblemDetails with the right status code and a trace ID. Never expose stack traces or SQL.
+
+---
+
+## 12. Collections & BCL
+
+| Type | Lookup | Add/Insert | Notes |
+|---|---|---|---|
+| `T[]` | O(1) by index | fixed size | fastest, contiguous |
+| `List<T>` | O(1) index, O(n) `Contains` | O(1) amortized append, O(n) insert | grows by doubling → pre-size |
+| `Dictionary<K,V>` | O(1) average | O(1) average | needs good `GetHashCode`; order not guaranteed |
+| `HashSet<T>` | O(1) | O(1) | uniqueness, set operations |
+| `SortedDictionary<K,V>` | O(log n) | O(log n) | red-black tree |
+| `SortedList<K,V>` | O(log n) | O(n) | arrays, less memory |
+| `Queue<T>` / `Stack<T>` | O(1) peek | O(1) | FIFO / LIFO |
+| `PriorityQueue<T,P>` (.NET 6) | O(1) peek | O(log n) | heap |
+| `LinkedList<T>` | O(n) | O(1) at a known node | poor cache locality; rarely best |
+| `ConcurrentDictionary` | O(1) | O(1) | thread-safe |
+| `ImmutableArray/List` | fast / O(log n) | copy / O(log n) | thread-safe by immutability |
+| `FrozenDictionary/Set` (.NET 8) | fastest | build once | read-heavy lookup tables |
+
+**Key concepts**
+- **Interfaces:** `IEnumerable<T>` (iterate), `ICollection<T>` (count/add), `IList<T>` (index), `IReadOnlyList<T>`, `IDictionary`, `ISet`. Expose the narrowest one that communicates intent.
+- **`Equals`/`GetHashCode` contract:** equal objects must have equal hashes; don't mutate fields that affect the hash while the object is a key.
+- **O(n²) traps:** `List.Contains` inside a loop → use a `HashSet`; `string +=` in a loop.
+- Modifying a collection during `foreach` → `InvalidOperationException`.
+- **Pre-size** when the count is known (`new List<T>(n)`, `new Dictionary<K,V>(n)`).
+- Use **`StringComparer.OrdinalIgnoreCase`** for string keys.
+- `List`/`Dictionary` are **not** thread-safe, even with one writer.
+
+```csharp
+// O(n*m) → O(n+m)
+var blocked = new HashSet<string>(blockedIds, StringComparer.OrdinalIgnoreCase);
+var allowed = payments.Where(p => !blocked.Contains(p.AccountId)).ToList();
+
+// Group into a dictionary
+Dictionary<string, List<Trade>> bySymbol = trades
+    .GroupBy(t => t.Symbol)
+    .ToDictionary(g => g.Key, g => g.ToList());
+
+// TryGetValue (one lookup) instead of ContainsKey + indexer (two)
+if (prices.TryGetValue("AAPL", out var px)) Console.WriteLine(px);
+
+// Update-or-add with CollectionsMarshal (no double lookup)
+ref int count = ref CollectionsMarshal.GetValueRefOrAddDefault(counts, "AAPL", out _);
+count++;
+
+// Priority queue (min-heap)
+var pq = new PriorityQueue<string, int>();
+pq.Enqueue("low", 5); pq.Enqueue("urgent", 1);
+Console.WriteLine(pq.Dequeue());                  // urgent
+
+// Proper key type
+public readonly record struct AccountKey(string Bank, string Number);   // value equality + hash
+```
+
+**Common interview questions**
+
+**Q1. How does `Dictionary` work internally?**
+An array of buckets plus an array of entries. The key's `GetHashCode` picks a bucket, collisions are chained, and `Equals` confirms the match. It resizes (to roughly double, a prime size) when full. Lookups are O(1) average, O(n) worst case with bad hashes.
+
+**Q2. Why must you override `GetHashCode` when overriding `Equals`?**
+Hash-based collections find the bucket by hash first. Two "equal" objects with different hashes land in different buckets, so `Contains` and lookups fail.
+
+**Q3. `List<T>` vs `LinkedList<T>`?**
+`List` is a contiguous array — cache-friendly, O(1) indexing, amortized O(1) append. `LinkedList` gives O(1) insertion at a known node, but every node is a separate allocation with poor locality. `List` wins in practice almost always.
+
+**Q4. `IEnumerable` vs `ICollection` vs `IList` vs `IReadOnlyList` — what should a method return?**
+Return what callers need and what you can honour: `IReadOnlyList<T>` for a materialized, indexable result; `IEnumerable<T>` for streaming or lazy data (document whether it's re-enumerable); avoid returning mutable `List<T>` from a public API.
+
+**Q5. How do you remove items while iterating?**
+Use `list.RemoveAll(predicate)`, iterate backwards with a `for` loop, or build a new list. `foreach` + `Remove` throws.
+
+**Q6. What is `FrozenDictionary`?**
+A .NET 8 dictionary optimized at creation time for very fast reads on data that never changes (configuration, lookup tables). Construction is slower.
+
+**Q7. `SortedDictionary` vs `SortedList`?**
+Both keep keys sorted. `SortedDictionary` is a tree (O(log n) inserts). `SortedList` uses arrays (O(n) inserts, less memory, faster indexed access) — better when it's built once and read often.
+
+---
+
+## 13. Disposal & Nullable Reference Types
+
+**Key concepts**
+- The **GC frees memory**; **`Dispose` releases other resources** (connections, file handles, sockets, timers, subscriptions).
+- `using` statement or declaration → `Dispose` in a hidden `finally`. **`await using`** for `IAsyncDisposable` (flushing, network cleanup).
+- **Dispose pattern:** `Dispose()` + `Dispose(bool disposing)` + `GC.SuppressFinalize(this)` — only when there's a finalizer. Prefer **`SafeHandle`** over writing finalizers.
+- `Dispose` must be **idempotent** and must **not throw**.
+- **Ownership:** whoever creates it disposes it. The DI container disposes what it creates (but not `AddSingleton(instance)`).
+- Classic leaks: `new HttpClient()` per call (sockets), undisposed `CancellationTokenSource`/registrations, timers, event subscriptions.
+- **Nullable reference types (NRT):** `string` (not null) vs `string?` (maybe null); compiler flow analysis gives warnings. The `!` operator is an unchecked "trust me".
+- **Attributes:** `[NotNullWhen(true)]`, `[MaybeNull]`, `[NotNull]`, `[MemberNotNull]`, `[AllowNull]`.
+- NRT is compile-time only: deserialization, EF and reflection can still produce nulls → validate at boundaries.
+- **Migration:** enable per project or file (`#nullable enable`), treat warnings as errors for new code.
+
+```csharp
+// using declaration + async disposal
+await using var conn = new SqlConnection(cs);
+await conn.OpenAsync(ct);
+using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+cts.CancelAfter(TimeSpan.FromSeconds(5));
+
+// Proper IDisposable for a class wrapping disposables (no finalizer needed)
+public sealed class ReportWriter : IDisposable
+{
+    private readonly StreamWriter _writer;
+    private bool _disposed;
+    public ReportWriter(string path) => _writer = new StreamWriter(path);
+    public void Write(string line)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _writer.WriteLine(line);
+    }
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _writer.Dispose();
+        _disposed = true;
+    }
+}
+
+// Nullable reference types
+#nullable enable
+public string GetDisplayName(Customer? c) => c?.Name ?? "Unknown";
+
+public bool TryFind(int id, [NotNullWhen(true)] out Customer? customer)
+{
+    customer = _db.Customers.Find(id);
+    return customer is not null;
+}
+if (TryFind(42, out var cust)) Console.WriteLine(cust.Name);   // no warning: compiler knows it's non-null
+
+ArgumentNullException.ThrowIfNull(request);
+ArgumentException.ThrowIfNullOrWhiteSpace(request.AccountId);
+```
+
+**Common interview questions**
+
+**Q1. Dispose vs finalizer?**
+`Dispose` is deterministic cleanup called by your code (`using`). A finalizer is a non-deterministic safety net run by the GC's finalizer thread for unmanaged resources — it makes objects live longer. Implement a finalizer only for raw native handles, and preferably use `SafeHandle` instead.
+
+**Q2. Does `Dispose` free memory?**
+No. It releases resources; the object's memory is reclaimed later by the GC once it's unreachable.
+
+**Q3. What is `IAsyncDisposable` for?**
+Cleanup that needs I/O (flushing buffers, closing network streams, committing) without blocking a thread. Use `await using`.
+
+**Q4. Who should dispose an injected dependency?**
+Not the consumer — the container that created it does, at the end of its scope. Disposing an injected object breaks other users of it.
+
+**Q5. What do nullable reference types actually guarantee?**
+Nothing at runtime — they're compile-time annotations plus flow analysis warnings. Deserializers, ORMs, reflection and unannotated libraries can still give you nulls, so validate inputs at boundaries.
+
+**Q6. When is the `!` (null-forgiving) operator acceptable?**
+Rarely: when you know something the compiler can't (e.g., after a framework guarantees initialization). Overuse turns warnings into runtime `NullReferenceException`s. Prefer attributes like `[MemberNotNull]` or restructuring.
+
+**Q7. How do you introduce NRT into a large legacy codebase?**
+Enable it project by project (or `#nullable enable` per file), start with leaf and shared libraries, annotate public APIs first, fail the build on new warnings in migrated projects, and track the remaining warning count.
+
+---
+
+## 14. Reflection, Attributes & Source Generators
+
+**Key concepts**
+- **Reflection** inspects metadata at runtime (`Type`, `PropertyInfo`, `MethodInfo`). Lookups allocate and `Invoke` is **orders of magnitude slower** than a direct call → **cache** results and compile them to delegates (`Expression.Compile`, `CreateDelegate`).
+- **Attributes** are metadata only — they do nothing until some code reads them (`[Required]` works because the validator reads it).
+- `typeof(T)` (compile-time type) vs `obj.GetType()` (runtime type).
+- **`Activator.CreateInstance`, `MakeGenericType`, `Reflection.Emit`, assembly scanning** → slow startup, and they break **trimming/NativeAOT**.
+- **Source generators** (`IIncrementalGenerator`) generate code at compile time: fast, AOT-safe, debuggable. Built-ins: `System.Text.Json` (`JsonSerializerContext`), `[LoggerMessage]`, `[GeneratedRegex]`, `[LibraryImport]`, configuration binding, minimal API request delegates.
+- **Roslyn analyzers** enforce rules at build time (e.g., ban `.Result`).
+- **`dynamic`** = runtime binding via the DLR; avoid in business logic.
+- **`AssemblyLoadContext`** (collectible) for plugins.
+- Preference order: plain code → generics → source generators → cached reflection/expression trees → `Emit`.
+
+```csharp
+// Custom attribute + reading it
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class SensitiveAttribute : Attribute { }
+
+public record Card([property: Sensitive] string Number, string Holder);
+
+static string Mask(object o) => string.Join(", ",
+    o.GetType().GetProperties().Select(p =>
+        $"{p.Name}={(p.IsDefined(typeof(SensitiveAttribute)) ? "****" : p.GetValue(o))}"));
+
+// Cache a compiled getter (fast) instead of PropertyInfo.GetValue each call
+static class Getter<T>
+{
+    private static readonly ConcurrentDictionary<string, Func<T, object?>> Cache = new();
+    public static Func<T, object?> For(string name) => Cache.GetOrAdd(name, n =>
+    {
+        var p = Expression.Parameter(typeof(T));
+        return Expression.Lambda<Func<T, object?>>(Expression.Convert(Expression.Property(p, n), typeof(object)), p).Compile();
+    });
+}
+
+// Source generators (AOT-friendly)
+[JsonSerializable(typeof(Order))]
+internal partial class AppJsonContext : JsonSerializerContext { }
+string json = JsonSerializer.Serialize(order, AppJsonContext.Default.Order);
+
+public static partial class Log
+{
+    [LoggerMessage(EventId = 1001, Level = LogLevel.Information, Message = "Payment {PaymentId} settled")]
+    public static partial void PaymentSettled(ILogger logger, Guid paymentId);
+}
+
+public static partial class Validators
+{
+    [GeneratedRegex(@"^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$")]
+    public static partial Regex Iban();
+}
+```
+
+**Common interview questions**
+
+**Q1. Why is reflection slow, and how do you speed it up?**
+Every lookup searches metadata and allocates; `Invoke` adds argument boxing, validation and security checks. Cache `PropertyInfo`/`MethodInfo` once, convert them to compiled delegates, or replace reflection with source generators.
+
+**Q2. What are attributes, and do they "do" anything?**
+They're declarative metadata stored in the assembly. They do nothing unless a framework or your code reads them via reflection or a source generator.
+
+**Q3. What are source generators, and why do they matter for NativeAOT?**
+Compiler plugins that inspect your code and emit new C# during the build. They replace runtime reflection and dynamic code generation (which AOT and trimming can't support) with plain, statically analyzable code — and they're faster at startup.
+
+**Q4. `typeof` vs `GetType()` vs `is`?**
+`typeof(X)` is the compile-time type object. `obj.GetType()` is the exact runtime type. `obj is X` checks compatibility, including derived types and interfaces.
+
+**Q5. When is `dynamic` legitimate?**
+COM/Office interop, interacting with dynamic languages, or rare truly schema-less scenarios. It isn't a substitute for interfaces or generics.
+
+**Q6. How would you build a plugin system?**
+Define contracts in a shared assembly, load plugins into a collectible `AssemblyLoadContext` (for isolation and unloading), discover them via an attribute or interface scan at startup (cached), and version the contract carefully.
+
+---
+
+## 15. Strings, Encoding & Globalization
+
+**Key concepts**
+- Strings are **immutable UTF-16**; `Length` counts UTF-16 code units (emoji and some scripts count as 2). Use `StringInfo` for user-perceived characters.
+- Concatenating in a loop is O(n²) → `StringBuilder`, `string.Join`, `string.Create`. Small fixed concatenations with `+` or interpolation are fine.
+- **Interning:** literals are interned; `string.Intern` on runtime data is a permanent leak.
+- **Comparison:** `==` is ordinal, but `StartsWith`, `EndsWith`, `IndexOf(string)`, `Compare` and `OrderBy` default to the **current culture**. For identifiers, keys and protocol values use `StringComparison.Ordinal` / `OrdinalIgnoreCase`.
+- **`ToLower()`/`ToUpper()` for comparison** is a bug (Turkish `I` → `ı`) and allocates.
+- Parse and format machine data with **`CultureInfo.InvariantCulture`**; show users their culture. Use ISO-8601 dates.
+- **Unicode normalization** (NFC) before comparing or deduplicating user input.
+- **Encoding:** UTF-8 everywhere; `new UTF8Encoding(false)` (no BOM); `Encoding.UTF8.GetString` silently replaces invalid bytes. Database byte limits ≠ character counts.
+- **Interpolated string handlers** let loggers and `StringBuilder.Append($"...")` avoid formatting when unused.
+- `InvariantGlobalization` mode in containers changes culture behaviour (no ICU).
+
+```csharp
+// Correct comparisons
+bool same = string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+bool isApi = path.StartsWith("/api", StringComparison.Ordinal);
+var dict = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+// Culture-safe parsing/formatting
+decimal amt = decimal.Parse("1234.56", NumberStyles.Number, CultureInfo.InvariantCulture);
+string csv = amt.ToString(CultureInfo.InvariantCulture);        // "1234.56" everywhere
+string ui  = amt.ToString("C", new CultureInfo("de-DE"));       // "1.234,56 €"
+DateTimeOffset ts = DateTimeOffset.Parse("2026-10-03T10:15:00Z", CultureInfo.InvariantCulture);
+
+// Building strings
+var sb = new StringBuilder(capacity: 1024);
+foreach (var t in trades) sb.Append(t.Id).Append(',').Append(t.Price).AppendLine();
+string joined = string.Join(",", ids);
+
+// Unicode
+string nfc = input.Normalize(NormalizationForm.FormC);
+int userChars = new StringInfo("👍🏽ok").LengthInTextElements;   // 3, while Length is 6
+
+// UTF-8 literal and raw string literal (C# 11)
+ReadOnlySpan<byte> header = "Idempotency-Key"u8;
+string json = """
+    { "id": 1, "currency": "USD" }
+    """;
+```
+
+**Common interview questions**
+
+**Q1. Why are strings immutable, and what does that mean for performance?**
+Immutability makes them thread-safe, safe as dictionary keys, and internable. But every modification allocates a new string, so loops of `+=` are O(n²) → use `StringBuilder`.
+
+**Q2. `StringBuilder` vs concatenation vs interpolation?**
+For a few pieces, `+` or interpolation (the compiler uses `string.Concat` or efficient handlers). For loops or unknown counts, `StringBuilder`. For joining collections, `string.Join`.
+
+**Q3. Why is `ToLower()` a bad way to compare strings?**
+It's culture-sensitive (the Turkish-I problem breaks logins and lookups) and allocates new strings. Use `string.Equals(a, b, StringComparison.OrdinalIgnoreCase)`.
+
+**Q4. Ordinal vs culture-sensitive comparison — when?**
+Ordinal (byte/char-wise, fast, predictable) for identifiers, keys, file paths, headers and protocol tokens. Culture-sensitive for sorting and displaying text to humans.
+
+**Q5. A decimal parses correctly on a dev machine but wrongly in a container. Why?**
+Different current culture (`1,5` vs `1.5`) or invariant-globalization mode. Always parse machine data with `CultureInfo.InvariantCulture`.
+
+**Q6. What is string interning?**
+A runtime pool so identical literal strings share one instance. `string.Intern` adds runtime strings permanently (never collected) — don't use it for user data.
+
+**Q7. Why might `string.Length` be wrong for validation?**
+It counts UTF-16 code units, not visible characters, and not bytes. Emoji count as 2+; a UTF-8 database column limited in bytes can reject a string that passed a `Length` check.
+
+---
+
+## 16. C# Version Features (7 → 14), C# 12 in Detail
+
+| Version (.NET) | Headline features |
+|---|---|
+| **C# 7.x** (Framework/Core 2) | tuples, deconstruction, `out var`, local functions, pattern matching (`is`), `ref` returns, `Span<T>` support, `in` parameters |
+| **C# 8** (.NET Core 3) | **nullable reference types**, async streams, `switch` expressions, default interface methods, ranges `^1`/`..`, `using` declarations, `??=` |
+| **C# 9** (.NET 5) | **records**, `init`, top-level statements, relational/logical patterns, target-typed `new()`, static lambdas |
+| **C# 10** (.NET 6) | global usings, file-scoped namespaces, `record struct`, extended property patterns, const interpolated strings |
+| **C# 11** (.NET 7) | **`required` members**, raw string literals `"""`, list patterns, generic math (static abstract members), `file` types, UTF-8 `u8` literals |
+| **C# 12** (.NET 8) | **primary constructors** for classes, **collection expressions**, default lambda params, alias any type, inline arrays, `ref readonly` params, `[Experimental]` |
+| **C# 13** (.NET 9) | `params` collections, new `Lock` type, `\e` escape, `^` in object initializers, `ref`/`unsafe` in iterators and async, `allows ref struct`, partial properties |
+| **C# 14** (.NET 10) | extension members (`extension` blocks, extension properties), `field` keyword, null-conditional assignment `a?.B = x`, implicit span conversions, `nameof(List<>)`, partial constructors/events, user-defined compound assignment |
+
+**C# 12 examples**
+```csharp
+// 1. Primary constructors (classes/structs) — parameters are captured, not properties
+public class PaymentService(IPaymentGateway gateway, ILogger<PaymentService> logger)
+{
+    public async Task PayAsync(Payment p, CancellationToken ct)
+    {
+        logger.LogInformation("Paying {Id}", p.Id);
+        await gateway.ChargeAsync(p, ct);
+    }
+}
+
+// 2. Collection expressions + spread
+int[] a = [1, 2, 3];
+List<int> b = [..a, 4, 5];
+ReadOnlySpan<string> empty = [];
+
+// 3. Default lambda parameters
+var greet = (string name = "guest") => $"Hello {name}";
+greet();                                   // "Hello guest"
+
+// 4. Alias any type
+using Point = (int X, int Y);
+using Amounts = System.Collections.Generic.List<decimal>;
+Point origin = (0, 0);
+
+// 5. Inline arrays (fixed-size buffer in a struct)
+[System.Runtime.CompilerServices.InlineArray(8)]
+public struct Buffer8 { private int _element0; }
+var buf = new Buffer8(); buf[0] = 42;
+
+// 6. ref readonly parameters
+static double Length(ref readonly Vector3 v) => Math.Sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z);
+
+// 7. Experimental APIs
+[System.Diagnostics.CodeAnalysis.Experimental("PAY001")]
+public void NewSettlementApi() { }         // callers get an error unless they suppress PAY001
+```
+
+**C# 13/14 examples**
+```csharp
+// C# 13: params collections + Lock
+void LogAll(params ReadOnlySpan<string> messages) { foreach (var m in messages) Console.WriteLine(m); }
+private readonly Lock _lock = new();
+lock (_lock) { /* uses Lock.EnterScope(), faster than Monitor */ }
+
+// C# 14: field keyword, null-conditional assignment, extension members
+public string Name { get => field; set => field = value?.Trim() ?? throw new ArgumentNullException(nameof(value)); }
+customer?.Address = newAddress;            // assigns only if customer is not null
+
+public static class MoneyExt
+{
+    extension(decimal amount)
+    {
+        public bool IsPositive => amount > 0;                 // extension property
+        public string AsUsd() => amount.ToString("C", CultureInfo.GetCultureInfo("en-US"));
+    }
+}
+```
+
+**Common interview questions**
+
+**Q1. What are primary constructors and what's the trap?**
+Constructor parameters declared on the class itself (C# 12) and available throughout the body — less DI boilerplate. In classes (unlike records) they aren't properties and aren't readonly; they're captured into hidden mutable fields. Assign to a `readonly` field if immutability matters.
+
+**Q2. What are collection expressions?**
+`[1, 2, 3]` and spread `[..a, ..b]` syntax that works for arrays, lists, spans and any type with a collection builder — one uniform, allocation-optimized syntax.
+
+**Q3. Which recent features matter most for production code?**
+Nullable reference types (fewer NREs), records and `required` (safer models), pattern matching (clearer logic), primary constructors and collection expressions (less boilerplate), and generic math and spans (performance).
+
+---
+
+## 17. Top 40 Rapid-Fire Questions
+
+1. **Value vs reference type?** Copy of data vs copy of a reference.
+2. **Struct on the stack?** Only as an uncaptured local; it's on the heap inside a class.
+3. **Boxing?** Value → object = heap allocation.
+4. **`const` vs `readonly`?** Compile-time (baked in) vs runtime, set once.
+5. **`ref`/`out`/`in`?** Read-write / must assign / read-only by reference.
+6. **`decimal` vs `double`?** Exact base-10 for money vs binary floating point.
+7. **`==` vs `Equals`?** Operator (reference for classes) vs virtual value equality.
+8. **Abstract class vs interface?** Shared state and implementation vs a contract; multiple interfaces.
+9. **`override` vs `new`?** Runtime polymorphism vs member hiding.
+10. **`sealed`?** No inheritance; enables devirtualization.
+11. **Extension method?** A static method called with instance syntax.
+12. **Static constructor?** Runs once, thread-safe, before first use.
+13. **GC generations?** Gen0/1/2 + LOH (≥ 85 KB) + POH.
+14. **Why is Gen0 cheap?** Cost is proportional to survivors.
+15. **`Dispose` vs finalizer?** Deterministic vs a GC-driven safety net.
+16. **`using`?** `Dispose` in a `finally`; `await using` for async.
+17. **What does `await` do?** Registers a continuation, frees the thread.
+18. **Sync-over-async?** Deadlock (SyncContext) or starvation (ASP.NET Core).
+19. **`ConfigureAwait(false)`?** Libraries; doesn't stop AsyncLocal.
+20. **`Task` vs `ValueTask`?** Default vs sync-mostly hot path, awaited once.
+21. **`async void`?** Event handlers only.
+22. **Thread-safe counter?** `Interlocked.Increment`.
+23. **Lock with await?** `SemaphoreSlim.WaitAsync`.
+24. **`GetOrAdd` gotcha?** The factory may run more than once → `Lazy<T>`.
+25. **Deadlock prevention?** Consistent lock order, short locks, no sync-over-async.
+26. **`Span<T>`?** A zero-copy stack-only view; can't cross await.
+27. **Delegate vs event?** Function reference vs restricted subscription.
+28. **Closure bug?** A `for` loop variable captured by reference.
+29. **Event leak?** Publisher holds the subscriber → unsubscribe.
+30. **Deferred execution?** The query runs on enumeration — every time.
+31. **`IEnumerable` vs `IQueryable`?** In-memory vs translated expression tree.
+32. **`First` vs `Single`?** First match vs exactly one (enforces uniqueness).
+33. **`Any()` vs `Count()`?** Short-circuit vs full count.
+34. **Covariance/contravariance?** `out` (outputs) / `in` (inputs).
+35. **Record?** Value equality, `with`, deconstruct; DTOs and value objects.
+36. **`throw` vs `throw ex`?** Preserve vs reset the stack trace.
+37. **`Equals` without `GetHashCode`?** Breaks dictionaries and sets.
+38. **Reflection performance?** Cache it, compile delegates, or use source generators.
+39. **String comparison?** Ordinal/OrdinalIgnoreCase for keys; never `ToLower()`.
+40. **C# 12 headline features?** Primary constructors, collection expressions, default lambda params, alias any type, inline arrays.
+
+**Principal-level questions to prepare**
+- *How do you enforce async and threading correctness across 30 teams?* Analyzers in the shared build (ban `.Result`/`async void`, CS4014 as an error), a suppression baseline for legacy code, thread-pool metrics on standard dashboards, and real incident write-ups to explain the *why*.
+- *Should we adopt NativeAOT?* For serverless, CLI tools and scale-to-zero, yes. For large reflection-heavy services, only with measured benefit and a planned source-generator migration.
+- *Finance wants 30% less memory across the fleet?* Measure each service's live set, set heap limits with headroom, roll out per tier behind canaries with rollback triggers on GC pause time and CPU — and explain that it trades memory for CPU.
+- *A team wants spans and pooling everywhere for performance?* Profile first; contain low-level code to proven hot paths behind clean APIs; add BenchmarkDotNet gates; protect readability as the scarcer resource.
+
+---
+
+## 18. Mistakes Checklist (say why each is wrong)
+- [ ] `double` for money · `==` on reference types expecting value equality · `const` in public libraries
+- [ ] `new` hiding instead of `override` · deep inheritance instead of composition · unsealed classes by default
+- [ ] `GC.Collect()` as a fix · new ≥ 85 KB buffers per request · pooling tiny objects · finalizers on managed-only classes
+- [ ] `.Result`/`.Wait()` · `async void` · `Task.Run` around I/O · unused `CancellationToken` · unbounded channels
+- [ ] `lock(this)` · `await` inside a lock · check-then-act on concurrent collections · `count++` across threads
+- [ ] `stackalloc` sized by user input · using a pooled buffer after `Return`
+- [ ] closure over a `for` variable · `-=` with a new lambda · never unsubscribing events
+- [ ] enumerating a query twice · `Count() > 0` · repository returning `IQueryable` · early `ToList()`
+- [ ] records as EF entities · `with` as a deep copy · `_` catch-all hiding new cases
+- [ ] `throw ex;` · swallowing exceptions · exceptions for validation · treating cancellation as an error
+- [ ] `Equals` without `GetHashCode` · mutable dictionary keys · `List.Contains` in a loop · `LinkedList` "for speed"
+- [ ] `new HttpClient()` per call · disposing injected services · `!` to silence nullability warnings
+- [ ] uncached reflection on hot paths · assembly scanning blocking AOT · `dynamic` instead of interfaces
+- [ ] `ToLower()` comparisons · parsing without `InvariantCulture` · `string +=` in loops · `string.Intern` on user data

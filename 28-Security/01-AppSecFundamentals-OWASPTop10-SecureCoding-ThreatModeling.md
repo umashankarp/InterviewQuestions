@@ -1,6 +1,6 @@
 # Module 97 — Security: AppSec Fundamentals — OWASP Top 10, Secure Coding & Threat Modeling
 
-> Domain: Security | Level: Beginner → Expert | Prerequisite: [[../02-DotNet-AspNetCore/04-Authentication-Authorization-Deep-Dive]] (authentication/authorization mechanics this module generalizes into the full OWASP threat landscape), [[../03-REST-APIs/02-API-Security-Rate-Limiting]] (API-specific security patterns this module broadens), [[../25-DevOps/04-DevSecOps-PolicyAsCode-PlatformEngineering]] (shift-left SAST/SCA scanning this module's secure-SDLC and threat-modeling practices feed into upstream of); connects forward to the dedicated [[../40-IAM]] and [[../41-OAuth2-OIDC-JWT-PKCE]] modules for deep identity-protocol coverage, which this module deliberately does not duplicate
+> Domain: Security | Level: Beginner → Expert | Prerequisite: [[../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep]] (authentication/authorization mechanics this module generalizes into the full OWASP threat landscape), [[../03-REST-APIs/01-REST-APIs-Interview-Prep]] (API-specific security patterns this module broadens), [[../25-DevOps/04-DevSecOps-PolicyAsCode-PlatformEngineering]] (shift-left SAST/SCA scanning this module's secure-SDLC and threat-modeling practices feed into upstream of); connects forward to the dedicated [[../40-IAM]] and [[../41-OAuth2-OIDC-JWT-PKCE]] modules for deep identity-protocol coverage, which this module deliberately does not duplicate
 
 ---
 

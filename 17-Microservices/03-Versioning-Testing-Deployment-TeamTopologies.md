@@ -1,6 +1,6 @@
 # Module 51 — Microservices: Versioning & Schema Evolution, Testing Strategies, Deployment Patterns & Team Topologies
 
-> Domain: Microservices | Level: Intermediate → Expert | Prerequisite: [[01-Decomposition-Communication-Strangler-Fig]], [[02-Resilience-Observability-Sidecar-Patterns]], [[../03-REST-APIs/03-API-Documentation-Contract-Testing]] (consumer-driven contracts, extended here), [[../10-SOLID/01-SOLID-Principles-Deep-Dive]] (OCP, reapplied to API evolution)
+> Domain: Microservices | Level: Intermediate → Expert | Prerequisite: [[01-Decomposition-Communication-Strangler-Fig]], [[02-Resilience-Observability-Sidecar-Patterns]], [[../03-REST-APIs/01-REST-APIs-Interview-Prep]] (consumer-driven contracts, extended here), [[../10-SOLID/01-SOLID-Principles-Deep-Dive]] (OCP, reapplied to API evolution)
 > This module closes the remaining Principal-Engineer-level gaps in the microservices domain: how independently-deployed services stay compatible as they evolve (versioning), how you gain confidence in a change without a full integration environment (testing strategy), how you actually ship a change safely to production (deployment patterns), and how team structure itself shapes — and is shaped by — service boundaries (Conway's Law / Team Topologies).
 
 ---

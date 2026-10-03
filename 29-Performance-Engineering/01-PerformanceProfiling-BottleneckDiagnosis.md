@@ -1,6 +1,6 @@
 # Module 101 — Performance Engineering: Performance Profiling & Bottleneck Diagnosis
 
-> Domain: Performance Engineering | Level: Beginner → Expert | Prerequisite: [[../01-CSharp/02-Async-Await-Internals]] (thread-pool/async internals this module's CPU/thread profiling examines), [[../04-SQL-Server]] indexing modules (query-plan-level bottleneck diagnosis), [[../27-Observability/01-ObservabilityFundamentals-MetricsLogsTraces-OpenTelemetry]] (traces/metrics as the raw signal profiling tools build on)
+> Domain: Performance Engineering | Level: Beginner → Expert | Prerequisite: [[../01-CSharp/01-CSharp-Interview-Prep]] (thread-pool/async internals this module's CPU/thread profiling examines), [[../04-SQL-Server]] indexing modules (query-plan-level bottleneck diagnosis), [[../27-Observability/01-ObservabilityFundamentals-MetricsLogsTraces-OpenTelemetry]] (traces/metrics as the raw signal profiling tools build on)
 >
 > **Format note (superseded):** This module originally shipped under the leaner, 40-Q&A-only format referenced below. Per the 2026-07-18 template-reversion decision (see `CLAUDE.md`), it has since been upgraded to the current full-template format — Fundamentals through Revision — while preserving the original 40 Q&A verbatim in §10.
 

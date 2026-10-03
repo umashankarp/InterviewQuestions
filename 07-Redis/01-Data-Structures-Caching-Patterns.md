@@ -1,6 +1,6 @@
 # Module 25 — Redis: Data Structures, Caching Patterns & Persistence
 
-> Domain: Redis | Level: Beginner → Expert | Prerequisite: [[../01-CSharp/02-Async-Await-Internals]] §Expert Q6 (distributed rate limiting), [[../02-DotNet-AspNetCore/04-Authentication-Authorization-Deep-Dive]] (stampede-resistant caching)
+> Domain: Redis | Level: Beginner → Expert | Prerequisite: [[../01-CSharp/01-CSharp-Interview-Prep]] §Expert Q6 (distributed rate limiting), [[../02-DotNet-AspNetCore/01-DotNet-AspNetCore-Interview-Prep]] (stampede-resistant caching)
 
 ---
 

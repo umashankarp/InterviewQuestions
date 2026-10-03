@@ -1,6 +1,6 @@
 # Module 29 — OOP: Encapsulation, Inheritance, Polymorphism & Composition
 
-> Domain: OOP | Level: Beginner → Expert | Prerequisite: [[../01-CSharp/06-Generics-Variance]] (variance and substitutability), [[../01-CSharp/07-Records-Pattern-Matching-Immutability]] (discriminated-union alternative to inheritance)
+> Domain: OOP | Level: Beginner → Expert | Prerequisite: [[../01-CSharp/01-CSharp-Interview-Prep]] (variance and substitutability), [[../01-CSharp/01-CSharp-Interview-Prep]] (discriminated-union alternative to inheritance)
 
 ---
 
