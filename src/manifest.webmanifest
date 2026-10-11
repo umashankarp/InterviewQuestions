@@ -1,0 +1,11 @@
+{
+  "name": "Interview Prep Hub",
+  "short_name": "IQ Prep",
+  "description": "Lead / Principal / Full-Stack interview preparation",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#4f46e5",
+  "icons": [{ "src": "assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
